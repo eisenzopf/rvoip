@@ -58,8 +58,8 @@ The project is organized into the following crates:
 - [x] UDP transport for SIP messages
   - Async transport layer
   - Event-driven message handling
-- [ ] Basic RTP packet handling
-- [ ] G.711 codec implementation
+- [x] Basic RTP packet handling
+- [x] G.711 codec implementation
 - [ ] Simple call session management
 - [ ] Minimal REST API
 

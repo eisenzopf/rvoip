@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use rtp_core::RtpSession;
+use rvoip_rtp_core::RtpSession;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     info!("Starting RTP loopback test");
     
     // Create sender RTP session
-    let sender_config = rtp_core::session::RtpSessionConfig {
+    let sender_config = rvoip_rtp_core::session::RtpSessionConfig {
         local_addr: args.sender_addr,
         remote_addr: Some(args.receiver_addr),
         payload_type: args.payload_type,
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
     info!("Sender actual bound address: {}", sender_actual_addr);
     
     // Create receiver RTP session
-    let receiver_config = rtp_core::session::RtpSessionConfig {
+    let receiver_config = rvoip_rtp_core::session::RtpSessionConfig {
         local_addr: args.receiver_addr,
         remote_addr: Some(sender_actual_addr), // Use the actual bound address
         payload_type: args.payload_type,

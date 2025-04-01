@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use rtp_core::rtcp::{RtcpPacket, RtcpSenderReport, RtcpReportBlock, NtpTimestamp};
-use rtp_core::{RtpSession, RtpSsrc};
+use rvoip_rtp_core::rtcp::{RtcpPacket, RtcpSenderReport, RtcpReportBlock, NtpTimestamp};
+use rvoip_rtp_core::{RtpSession, RtpSsrc};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -31,7 +31,7 @@ pub async fn run_rtcp_example() -> Result<()> {
     let byte_count = Arc::new(AtomicU32::new(0));
     
     // Create sender RTP session
-    let sender_config = rtp_core::session::RtpSessionConfig {
+    let sender_config = rvoip_rtp_core::session::RtpSessionConfig {
         local_addr: sender_addr,
         remote_addr: Some(receiver_addr),
         ssrc: Some(sender_ssrc),
@@ -48,7 +48,7 @@ pub async fn run_rtcp_example() -> Result<()> {
     info!("Sender created and bound to {}", sender_addr);
     
     // Create receiver RTP session
-    let receiver_config = rtp_core::session::RtpSessionConfig {
+    let receiver_config = rvoip_rtp_core::session::RtpSessionConfig {
         local_addr: receiver_addr,
         remote_addr: Some(sender_addr),
         ssrc: Some(receiver_ssrc),

@@ -7,8 +7,8 @@ description = "Example demonstrating G.711 codec over RTP"
 # Use workspace dependencies
 [dependencies]
 # Core crates
-rtp-core = { path = "../../crates/rtp-core" }
-media-core = { path = "../../crates/media-core" }
+rvoip-rtp-core = { path = "../../crates/rtp-core" }
+rvoip-media-core = { path = "../../crates/media-core" }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

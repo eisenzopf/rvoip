@@ -6,7 +6,7 @@ authors = ["RVOIP Team"]
 description = "Example of RTP packet loopback using rtp-core"
 
 [dependencies]
-rtp-core = { path = "../../crates/rtp-core" }
+rvoip-rtp-core = { path = "../../crates/rtp-core" }
 tokio = { version = "1.28", features = ["full"] }
 bytes = "1.4"
 tracing = "0.1"

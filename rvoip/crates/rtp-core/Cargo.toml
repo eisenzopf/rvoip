@@ -1,5 +1,5 @@
 [package]
-name = "rtp-core"
+name = "rvoip-rtp-core"
 version = "0.1.0"
 edition = "2021"
 description = "RTP packet encoding/decoding, RTCP support for rvoip"

@@ -7,9 +7,9 @@ use tokio::net::UdpSocket;
 use tokio::time::sleep;
 use tracing::{debug, info, warn, error};
 
-use rtp_core::{RtpPacket, RtpSession, RtpSessionConfig, RtpTimestamp};
-use media_core::codec::{Codec, G711Codec, G711Variant};
-use media_core::{AudioBuffer, AudioFormat, SampleRate};
+use rvoip_rtp_core::{RtpPacket, RtpSession, RtpSessionConfig, RtpTimestamp};
+use rvoip_media_core::codec::{Codec, G711Codec, G711Variant};
+use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate};
 
 /// Generate a simple tone as a PCM audio buffer
 fn generate_tone(frequency: f32, duration_ms: u32, sample_rate: u32) -> AudioBuffer {

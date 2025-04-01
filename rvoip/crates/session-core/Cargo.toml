@@ -1,0 +1,38 @@
+[package]
+name = "rvoip-session-core"
+version = "0.1.0"
+edition = "2021"
+description = "Call session management for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Our own crates
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-media-core = { path = "../media-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+dashmap = "5.5"
+parking_lot = "0.12"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true } 
