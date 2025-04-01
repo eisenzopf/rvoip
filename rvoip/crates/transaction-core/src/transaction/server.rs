@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
 
 use rvoip_sip_core::{Message, Method, Request, Response, StatusCode};

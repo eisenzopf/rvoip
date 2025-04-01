@@ -1,8 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use rvoip_sip_core::{Message, Method, Request, Response};
-use rvoip_sip_transport::Transport;
+use rvoip_sip_core::{Message, Request, Response};
 
 pub mod client;
 pub mod server;

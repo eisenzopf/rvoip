@@ -8,15 +8,11 @@ pub mod transaction;
 #[doc(hidden)]
 pub mod transaction_manager {
     // Re-export from manager
-    pub use crate::manager::*;
 }
 mod utils;
 mod manager;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
 use rvoip_sip_core::{Message, Request, Response, StatusCode};
 use rvoip_sip_transport::Transport;
 use async_trait::async_trait;
