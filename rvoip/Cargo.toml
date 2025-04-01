@@ -11,7 +11,9 @@ resolver = "2"
 members = [
     "crates/sip-core",
     "crates/sip-transport",
+    "crates/transaction-core",
     "examples/simple-softswitch",
+    "examples/sip-message-test",
 ]
 
 [workspace.dependencies]

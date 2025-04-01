@@ -45,9 +45,19 @@ The project is organized into the following crates:
 ### Phase 1: Core Foundations
 
 - [x] Project structure setup
-- [ ] SIP message parser/serializer (INVITE, 200 OK, ACK, BYE, REGISTER, OPTIONS)
-- [ ] Basic SIP transaction state machine
-- [ ] UDP transport for SIP messages
+- [x] SIP message parser/serializer
+  - Full RFC 3261 message types and parsing
+  - Support for all standard methods (INVITE, ACK, BYE, CANCEL, REGISTER, OPTIONS)
+  - Extension methods (SUBSCRIBE, NOTIFY, UPDATE, REFER, INFO, MESSAGE, PRACK, PUBLISH)
+  - Complete status code definitions (1xx-6xx)
+  - Header parsing and serialization
+- [x] Basic SIP transaction state machine
+  - Client/server transaction management
+  - INVITE and non-INVITE transaction types
+  - Timer-based retransmission handling
+- [x] UDP transport for SIP messages
+  - Async transport layer
+  - Event-driven message handling
 - [ ] Basic RTP packet handling
 - [ ] G.711 codec implementation
 - [ ] Simple call session management

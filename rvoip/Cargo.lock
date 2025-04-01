@@ -524,6 +524,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-sip-message-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "rvoip-sip-core",
+ "rvoip-sip-transport",
+ "rvoip-transaction-core",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rvoip-sip-transport"
 version = "0.1.0"
 dependencies = [
@@ -535,6 +551,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rvoip-transaction-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "rand",
+ "rvoip-sip-core",
+ "rvoip-sip-transport",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

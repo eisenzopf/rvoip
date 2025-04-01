@@ -1,0 +1,31 @@
+[package]
+name = "rvoip-transaction-core"
+version = "0.1.0"
+edition = "2021"
+description = "SIP transaction state machine for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Our own crates
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-sip-transport = { path = "../sip-transport" }
+
+# Async runtime
+tokio = { workspace = true, features = ["time"] }
+async-trait = { version = "0.1" }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+uuid = { workspace = true }
+rand = "0.8"
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true } 

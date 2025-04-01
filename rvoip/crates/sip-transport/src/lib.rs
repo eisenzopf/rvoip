@@ -4,14 +4,19 @@
 //! UDP, TCP, TLS, and WebSocket transports.
 
 mod error;
-mod transport;
+pub mod transport;
 mod udp;
 
 pub use error::{Error, Result};
 pub use transport::{Transport, TransportEvent};
 pub use udp::UdpTransport;
 
-/// Re-export of common types and functions
+/// Simplified bind function for UdpTransport
+pub async fn bind_udp(addr: std::net::SocketAddr) -> Result<(UdpTransport, tokio::sync::mpsc::Receiver<TransportEvent>)> {
+    UdpTransport::bind(addr, None).await
+}
+
+/// Re-export of common types for easier use
 pub mod prelude {
-    pub use super::{Error, Result, Transport, TransportEvent, UdpTransport};
+    pub use super::{Error, Result, Transport, TransportEvent, UdpTransport, bind_udp};
 } 
