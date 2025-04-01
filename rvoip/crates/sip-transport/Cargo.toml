@@ -1,0 +1,28 @@
+[package]
+name = "rvoip-sip-transport"
+version = "0.1.0"
+edition = "2021"
+description = "SIP transport layer implementation for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Our own crates
+rvoip-sip-core = { path = "../sip-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["net", "sync", "io-util", "time"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+bytes = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true } 

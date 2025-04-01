@@ -1,0 +1,37 @@
+[workspace]
+name = "rvoip"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVOIP Team"]
+description = "A modern pure-Rust VoIP stack"
+repository = "https://github.com/rudelessventures/rvoip"
+license = "MIT OR Apache-2.0"
+resolver = "2"
+
+members = [
+    "crates/sip-core",
+    "crates/sip-transport",
+    "examples/simple-softswitch",
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+# Utilities
+bytes = { version = "1.5", features = ["serde"] }
+uuid = { version = "1.7", features = ["v4", "serde"] }
+# HTTP/API
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+# Testing
+proptest = "1.4" 

@@ -1,0 +1,27 @@
+[package]
+name = "rvoip-sip-core"
+version = "0.1.0"
+edition = "2021"
+description = "SIP protocol implementation for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+# Utilities
+bytes = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+# Parsing
+nom = "7.1"
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true } 

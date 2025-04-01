@@ -1,0 +1,21 @@
+[package]
+name = "rvoip-simple-softswitch"
+version = "0.1.0"
+edition = "2021"
+description = "A simple SIP softswitch example using the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core rvoip crates
+rvoip-sip-core = { path = "../../crates/sip-core" }
+rvoip-sip-transport = { path = "../../crates/sip-transport" }
+
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0" 
