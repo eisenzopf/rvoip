@@ -40,6 +40,16 @@ pub enum HeaderName {
     Supported,
     /// User-Agent: Product information
     UserAgent,
+    /// Event: Event package for SUBSCRIBE/NOTIFY
+    Event,
+    /// Subscription-State: State of subscription in NOTIFY
+    SubscriptionState,
+    /// Refer-To: Target URI in REFER
+    ReferTo,
+    /// Referred-By: Identity of referrer in REFER
+    ReferredBy,
+    /// RAck: Acknowledge receipt of a reliable provisional response
+    RAck,
     /// Custom header name
     Other(String),
 }
@@ -64,6 +74,11 @@ impl HeaderName {
             HeaderName::Route => "Route",
             HeaderName::Supported => "Supported",
             HeaderName::UserAgent => "User-Agent",
+            HeaderName::Event => "Event",
+            HeaderName::SubscriptionState => "Subscription-State",
+            HeaderName::ReferTo => "Refer-To",
+            HeaderName::ReferredBy => "Referred-By",
+            HeaderName::RAck => "RAck",
             HeaderName::Other(s) => s,
         }
     }
@@ -96,6 +111,11 @@ impl FromStr for HeaderName {
             "route" => Ok(HeaderName::Route),
             "supported" | "k" => Ok(HeaderName::Supported),
             "user-agent" => Ok(HeaderName::UserAgent),
+            "event" | "o" => Ok(HeaderName::Event),
+            "subscription-state" => Ok(HeaderName::SubscriptionState),
+            "refer-to" | "r" => Ok(HeaderName::ReferTo),
+            "referred-by" | "b" => Ok(HeaderName::ReferredBy),
+            "rack" => Ok(HeaderName::RAck),
             _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
             _ => Err(Error::InvalidHeader("Empty header name".to_string())),
         }

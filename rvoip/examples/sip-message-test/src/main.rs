@@ -1,19 +1,38 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use rvoip_sip_core::{
-    Header, HeaderName, HeaderValue, Message, Method, Request, Response, StatusCode, Uri, Version,
+    Header, HeaderName, Message, Method, Request, Response, StatusCode, Uri,
 };
 use rvoip_sip_transport::{
     bind_udp, Transport, TransportEvent,
 };
 use rvoip_transaction_core::{
-    new_transaction_manager, ClientTransactionHandle, ServerTransactionHandle, TransactionManagerExt,
+    new_transaction_manager, TransactionManagerExt,
     TransactionOptions,
 };
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
-use tokio::{sync::mpsc, time::sleep};
-use tracing::{debug, error, info, warn};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, time::Duration};
+use tokio::time::sleep;
+use tracing::{debug, error, info};
 use uuid::Uuid;
+
+// Helper function to extract branch ID from Via header
+fn extract_branch(request: &Request) -> Option<String> {
+    request.headers.iter()
+        .find(|h| h.name == HeaderName::Via)
+        .and_then(|h| h.value.as_text())
+        .and_then(|via| {
+            // Parse the branch parameter from the Via header
+            if let Some(branch_idx) = via.find("branch=") {
+                let branch_start = branch_idx + "branch=".len();
+                let branch_end = via[branch_start..].find(';')
+                    .map(|end| branch_start + end)
+                    .unwrap_or(via.len());
+                Some(via[branch_start..branch_end].to_string())
+            } else {
+                None
+            }
+        })
+}
 
 async fn run_client(
     local_addr: SocketAddr,
@@ -167,6 +186,158 @@ async fn run_client(
     let update_result = update_tx.wait_for_final_response().await;
     info!("📊 UPDATE transaction complete: status={}", update_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
+    // Test CANCEL transaction
+    info!("🔄 Testing CANCEL transaction...");
+    // First send an INVITE that we'll cancel
+    let invite_to_cancel = create_request(Method::Invite, "sip:carol@example.com", remote_addr);
+    info!("📤 SENDING: INVITE sip:carol@example.com (to be cancelled)");
+    log_headers(&invite_to_cancel.headers);
+    
+    // Extract information from the INVITE to match in the CANCEL
+    let invite_branch = extract_branch(&invite_to_cancel).unwrap_or_else(|| "unknown".to_string());
+    let invite_call_id = invite_to_cancel.call_id().unwrap_or("unknown").to_string();
+    let invite_from = invite_to_cancel.from().unwrap_or("unknown").to_string();
+    let invite_to = invite_to_cancel.to().unwrap_or("unknown").to_string();
+    
+    // Send the INVITE
+    let invite_message = Message::Request(invite_to_cancel);
+    transport.send_message(invite_message, remote_addr).await?;
+    sleep(Duration::from_millis(200)).await; // Wait briefly before cancelling
+    
+    // Create and send the CANCEL
+    let cancel_request = create_request(Method::Cancel, "sip:carol@example.com", remote_addr)
+        // Match the INVITE's headers for proper cancellation
+        .with_header(Header::text(
+            HeaderName::Via,
+            format!("SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK-{}", invite_branch),
+        ))
+        .with_header(Header::text(HeaderName::CallId, invite_call_id))
+        .with_header(Header::text(HeaderName::From, invite_from))
+        .with_header(Header::text(HeaderName::To, invite_to));
+    
+    info!("📤 SENDING: CANCEL sip:carol@example.com");
+    log_headers(&cancel_request.headers);
+    let cancel_tx = transaction_manager
+        .create_client_transaction(cancel_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let cancel_result = cancel_tx.wait_for_final_response().await;
+    info!("📊 CANCEL transaction complete: status={}", cancel_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
+    // Test NOTIFY transaction
+    info!("🔄 Testing NOTIFY transaction...");
+    let notify_request = create_request(Method::Notify, "sip:bob@example.com", remote_addr)
+        .with_header(Header::text(
+            HeaderName::Event,
+            "presence"
+        ))
+        .with_header(Header::text(
+            HeaderName::SubscriptionState,
+            "active;expires=3600"
+        ));
+    
+    info!("📤 SENDING: NOTIFY sip:bob@example.com");
+    log_headers(&notify_request.headers);
+    info!("   📋 Event: presence");
+    info!("   📋 Subscription-State: active;expires=3600");
+    
+    let notify_tx = transaction_manager
+        .create_client_transaction(notify_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let notify_result = notify_tx.wait_for_final_response().await;
+    info!("📊 NOTIFY transaction complete: status={}", notify_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
+    // Test REFER transaction
+    info!("🔄 Testing REFER transaction...");
+    let refer_request = create_request(Method::Refer, "sip:bob@example.com", remote_addr)
+        .with_header(Header::text(
+            HeaderName::ReferTo,
+            "sip:carol@example.com"
+        ))
+        .with_header(Header::text(
+            HeaderName::ReferredBy,
+            "sip:alice@example.com"
+        ));
+    
+    info!("📤 SENDING: REFER sip:bob@example.com");
+    log_headers(&refer_request.headers);
+    info!("   📋 Refer-To: sip:carol@example.com");
+    info!("   📋 Referred-By: sip:alice@example.com");
+    
+    let refer_tx = transaction_manager
+        .create_client_transaction(refer_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let refer_result = refer_tx.wait_for_final_response().await;
+    info!("📊 REFER transaction complete: status={}", refer_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
+    // Test INFO transaction
+    info!("🔄 Testing INFO transaction...");
+    let info_request = create_request(Method::Info, "sip:bob@example.com", remote_addr)
+        .with_header(Header::text(
+            HeaderName::ContentType,
+            "application/dtmf-relay"
+        ))
+        .with_body(Bytes::from("Signal=5\nDuration=160"));
+    
+    info!("📤 SENDING: INFO sip:bob@example.com");
+    log_headers(&info_request.headers);
+    info!("   📋 Content-Type: application/dtmf-relay");
+    info!("   Body: Signal=5\nDuration=160");
+    
+    let info_tx = transaction_manager
+        .create_client_transaction(info_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let info_result = info_tx.wait_for_final_response().await;
+    info!("📊 INFO transaction complete: status={}", info_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
+    // Test PRACK transaction
+    info!("🔄 Testing PRACK transaction...");
+    let prack_request = create_request(Method::Prack, "sip:bob@example.com", remote_addr)
+        .with_header(Header::text(
+            HeaderName::RAck,
+            "1 101 INVITE"
+        ));
+    
+    info!("📤 SENDING: PRACK sip:bob@example.com");
+    log_headers(&prack_request.headers);
+    info!("   📋 RAck: 1 101 INVITE");
+    
+    let prack_tx = transaction_manager
+        .create_client_transaction(prack_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let prack_result = prack_tx.wait_for_final_response().await;
+    info!("📊 PRACK transaction complete: status={}", prack_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
+    // Test PUBLISH transaction
+    info!("🔄 Testing PUBLISH transaction...");
+    let publish_request = create_request(Method::Publish, "sip:presence.example.com", remote_addr)
+        .with_header(Header::text(
+            HeaderName::Event,
+            "presence"
+        ))
+        .with_header(Header::text(
+            HeaderName::ContentType,
+            "application/pidf+xml"
+        ))
+        .with_body(Bytes::from("<presence entity=\"sip:alice@example.com\"><tuple id=\"1\"><status><basic>open</basic></status></tuple></presence>"));
+    
+    info!("📤 SENDING: PUBLISH sip:presence.example.com");
+    log_headers(&publish_request.headers);
+    info!("   📋 Event: presence");
+    info!("   📋 Content-Type: application/pidf+xml");
+    info!("   Body: <presence entity=\"sip:alice@example.com\"><tuple id=\"1\"><status><basic>open</basic></status></tuple></presence>");
+    
+    let publish_tx = transaction_manager
+        .create_client_transaction(publish_request, transport.clone(), remote_addr)
+        .await?;
+    
+    let publish_result = publish_tx.wait_for_final_response().await;
+    info!("📊 PUBLISH transaction complete: status={}", publish_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
+    
     info!("✅ All SIP message type tests completed!");
     
     // Wait a bit before exiting
@@ -194,7 +365,7 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
     info!("SIP server listening on {}", local_addr);
     while let Some(event) = transport_events.recv().await {
         match event {
-            TransportEvent::MessageReceived { source, message, destination } => {
+            TransportEvent::MessageReceived { source, message, destination: _ } => {
                 info!("Received message from {}: {:?}", source, message);
                 
                 // Log more detailed message information
@@ -347,7 +518,7 @@ fn create_request(method: Method, target_uri: &str, _remote_addr: SocketAddr) ->
     Request::new(method.clone(), uri)
         .with_header(Header::text(
             HeaderName::Via,
-            format!("SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{}", Uuid::new_v4().simple()),
+            format!("SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK-{}", Uuid::new_v4().simple()),
         ))
         .with_header(Header::text(
             HeaderName::From,
@@ -362,7 +533,7 @@ fn create_request(method: Method, target_uri: &str, _remote_addr: SocketAddr) ->
         .with_header(Header::text(HeaderName::MaxForwards, "70"))
         .with_header(Header::text(
             HeaderName::Contact,
-            "sip:alice@127.0.0.1:5060",
+            "sip:alice@127.0.0.1:5062",
         ))
         .with_header(Header::integer(HeaderName::ContentLength, 0))
 }
@@ -395,7 +566,7 @@ fn create_ack_request(response: &Response, target_uri: &str, _remote_addr: Socke
     Request::new(Method::Ack, uri)
         .with_header(Header::text(
             HeaderName::Via,
-            format!("SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{}", Uuid::new_v4().simple()),
+            format!("SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK-{}", Uuid::new_v4().simple()),
         ))
         .with_header(Header::text(HeaderName::From, from))
         .with_header(Header::text(HeaderName::To, to))
@@ -417,7 +588,7 @@ fn create_response(
     Response::new(status)
         .with_header(Header::text(
             HeaderName::Via,
-            "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-123456;received=127.0.0.1",
+            "SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK-123456;received=127.0.0.1",
         ))
         .with_header(Header::text(HeaderName::From, from))
         .with_header(Header::text(HeaderName::To, to))
