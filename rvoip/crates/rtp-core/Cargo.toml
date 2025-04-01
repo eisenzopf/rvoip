@@ -10,6 +10,7 @@ bytes = "1.4"
 thiserror = "1.0"
 tokio = { version = "1.28", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = "0.3"
 bitvec = "1.0"
 rand = "0.8"
 

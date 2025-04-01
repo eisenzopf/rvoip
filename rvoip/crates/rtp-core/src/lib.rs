@@ -36,16 +36,30 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use packet::RtpHeader;
+    use packet::{RtpHeader, hex_dump};
+    use tracing::{debug, info};
+
+    // Set up a simple test logger
+    fn init_test_logging() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    }
 
     #[test]
     fn test_rtp_header_serialize_parse() {
+        init_test_logging();
+        
         // Create a simple RTP header
         let original_header = RtpHeader::new(96, 1000, 0x12345678, 0xabcdef01);
+        debug!("Original header: PT={}", original_header.payload_type);
         
         // Serialize the header
         let mut buf = bytes::BytesMut::with_capacity(12);
         original_header.serialize(&mut buf).unwrap();
+        
+        // Debug serialized buffer
+        debug!("Serialized header bytes: [{}]", hex_dump(&buf));
         
         // Convert to bytes
         let buf = buf.freeze();
@@ -53,10 +67,11 @@ mod tests {
         // Parse the header back
         let mut reader = buf.clone();
         let parsed_header = RtpHeader::parse(&mut reader).unwrap();
+        debug!("Parsed header: PT={}", parsed_header.payload_type);
         
         // Verify fields
         assert_eq!(parsed_header.version, 2);
-        assert_eq!(parsed_header.payload_type, 96);
+        assert_eq!(parsed_header.payload_type, 96, "Payload type mismatch: expected 96, got {}", parsed_header.payload_type);
         assert_eq!(parsed_header.sequence_number, 1000);
         assert_eq!(parsed_header.timestamp, 0x12345678);
         assert_eq!(parsed_header.ssrc, 0xabcdef01);
@@ -120,24 +135,103 @@ mod tests {
     
     #[test]
     fn test_rtp_header_with_extension() {
+        init_test_logging();
+        
         // Create header with extension
         let mut header = RtpHeader::new(96, 1000, 0x12345678, 0xabcdef01);
         header.extension = true;
         header.extension_id = Some(0x1234);
         header.extension_data = Some(Bytes::from_static(b"extension data"));
+        debug!("Original header with extension: ext={}, ext_id={:?}, ext_data_len={:?}", 
+              header.extension, header.extension_id, 
+              header.extension_data.as_ref().map(|d| d.len()));
         
         // Serialize the header
-        let mut buf = bytes::BytesMut::with_capacity(32);
+        let mut buf = bytes::BytesMut::with_capacity(40);
         header.serialize(&mut buf).unwrap();
+        debug!("Serialized extension header (size={}): [{}]", buf.len(), hex_dump(&buf));
         
-        // Parse it back
+        // Directly check if extension bit is correctly set in serialized data
+        let first_byte = buf[0];
+        debug!("First byte: 0x{:02x}, extension bit set: {}", 
+               first_byte, ((first_byte >> 3) & 0x01) == 1);
+        
+        // Manually parse first byte to make sure our bit positions are correct
+        let version = (first_byte >> 6) & 0x03;
+        let padding = ((first_byte >> 2) & 0x01) == 1;
+        let extension = ((first_byte >> 3) & 0x01) == 1;
+        let cc = first_byte & 0x0F;
+        debug!("Manual parse of first byte 0x{:02x}: V={}, P={}, X={}, CC={}",
+               first_byte, version, padding, extension, cc);
+        
+        // Parse it back with our parser
         let mut reader = buf.freeze();
-        let parsed_header = RtpHeader::parse(&mut reader).unwrap();
+        debug!("Buffer size for parsing: {}", reader.len());
+        
+        let parse_result = RtpHeader::parse(&mut reader);
+        if let Err(ref e) = parse_result {
+            debug!("Parse error: {:?}", e);
+        }
+        
+        let parsed_header = parse_result.unwrap();
+        debug!("Remaining bytes after parse: {}", reader.len());
         
         // Verify fields
         assert_eq!(parsed_header.extension, true);
         assert_eq!(parsed_header.extension_id, Some(0x1234));
         assert!(parsed_header.extension_data.is_some());
         assert_eq!(parsed_header.extension_data.unwrap(), Bytes::from_static(b"extension data"));
+    }
+    
+    #[test]
+    fn test_parse_real_world_packet() {
+        init_test_logging();
+        
+        // This is the hex data from a typical RTP packet:
+        // First byte: 0x80 = Version 2, no padding, no extension, 0 CSRCs
+        // Second byte: 0x00 = No marker, PT 0 (PCMU/G.711)
+        let packet_data = [
+            0x80, 0x00, 0xfd, 0x70, 0x00, 0x00, 0x00, 0x00, 
+            0x00, 0x00, 0x00, 0x00, 0x54, 0x65, 0x73, 0x74
+        ];
+        
+        debug!("Test packet data: [{}]", hex_dump(&packet_data));
+        
+        // Try to parse the RTP header directly first
+        let mut buf = Bytes::copy_from_slice(&packet_data);
+        let header_result = packet::RtpHeader::parse(&mut buf);
+        
+        if let Err(ref e) = header_result {
+            debug!("RTP header parse failed: {:?}", e);
+        } else {
+            debug!("RTP header parse succeeded, remaining bytes: {}", buf.len());
+        }
+        
+        assert!(header_result.is_ok(), "Failed to parse RTP header: {:?}", header_result.err());
+        
+        // Now try to parse the full packet
+        let packet_result = RtpPacket::parse(&packet_data);
+        
+        if let Err(ref e) = packet_result {
+            debug!("RTP packet parse failed: {:?}", e);
+        } else {
+            debug!("RTP packet parse succeeded");
+        }
+        
+        assert!(packet_result.is_ok(), "Failed to parse RTP packet: {:?}", packet_result.err());
+        
+        let parsed = packet_result.unwrap();
+        
+        // Verify header fields based on the hex data
+        assert_eq!(parsed.header.version, 2); // 0x80 -> version 2
+        assert_eq!(parsed.header.payload_type, 0); // 0x00 -> PT 0
+        assert_eq!(parsed.header.cc, 0); // 0x80 -> 0 CSRCs
+        assert_eq!(parsed.header.sequence_number, 0xfd70); // Sequence from bytes 2-3
+        assert_eq!(parsed.header.timestamp, 0); // Timestamp from bytes 4-7
+        assert_eq!(parsed.header.ssrc, 0); // SSRC from bytes 8-11
+        
+        // The payload should be "Test"
+        assert_eq!(parsed.payload.len(), 4);
+        assert_eq!(parsed.payload.as_ref(), &b"Test"[..]);
     }
 } 

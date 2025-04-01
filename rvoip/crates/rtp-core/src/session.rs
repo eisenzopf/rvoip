@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{error, warn};
+use tracing::{error, warn, debug};
 
 use crate::error::Error;
-use crate::packet::{RtpHeader, RtpPacket};
+use crate::packet::{RtpHeader, RtpPacket, RTP_MIN_HEADER_SIZE};
 use crate::{Result, RtpSequenceNumber, RtpSsrc, RtpTimestamp, DEFAULT_MAX_PACKET_SIZE};
 
 /// Default size for the jitter buffer (packets)
@@ -266,6 +266,16 @@ impl RtpSession {
         // Create UDP socket
         let socket = UdpSocket::bind(config.local_addr).await
             .map_err(|e| Error::IoError(e))?;
+        
+        // Connect socket to remote address if provided
+        // This will help validate that packets are sent/received from the expected address
+        if let Some(remote_addr) = config.remote_addr {
+            socket.connect(remote_addr).await
+                .map_err(|e| Error::IoError(e))?;
+            
+            debug!("Socket connected to remote address: {}", remote_addr);
+        }
+        
         let socket = Arc::new(socket);
         
         // Create event channels
@@ -301,39 +311,44 @@ impl RtpSession {
     
     /// Send an RTP packet with payload
     pub async fn send_packet(&mut self, timestamp: RtpTimestamp, payload: Bytes, marker: bool) -> Result<()> {
-        if let Some(remote_addr) = self.config.remote_addr {
-            // Create RTP header
-            let mut header = RtpHeader::new(
-                self.config.payload_type,
-                self.sequence_number,
-                timestamp,
-                self.config.ssrc.unwrap_or(0),
-            );
-            header.marker = marker;
-            
-            // Create RTP packet
-            let packet = RtpPacket::new(header, payload);
-            
-            // Serialize packet
-            let data = packet.serialize()?;
-            
-            // Send packet
+        // Create RTP header
+        let mut header = RtpHeader::new(
+            self.config.payload_type,
+            self.sequence_number,
+            timestamp,
+            self.config.ssrc.unwrap_or(0),
+        );
+        header.marker = marker;
+        
+        // Create RTP packet
+        let packet = RtpPacket::new(header, payload);
+        
+        // Serialize packet
+        let data = packet.serialize()?;
+        
+        // Send packet using the appropriate method (connected or unconnected socket)
+        if self.socket.peer_addr().is_ok() {
+            // Socket is connected, use send()
+            self.socket.send(&data).await
+                .map_err(|e| Error::IoError(e))?;
+        } else if let Some(remote_addr) = self.config.remote_addr {
+            // Socket is not connected, use send_to() with the remote address
             self.socket.send_to(&data, remote_addr).await
                 .map_err(|e| Error::IoError(e))?;
-            
-            // Update sequence number
-            self.sequence_number = self.sequence_number.wrapping_add(1);
-            
-            // Update stats
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.packets_sent += 1;
-                stats.bytes_sent += data.len() as u64;
-            }
-            
-            Ok(())
         } else {
-            Err(Error::SessionError("Remote address not set".to_string()))
+            return Err(Error::SessionError("Remote address not set".to_string()));
         }
+        
+        // Update sequence number
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+        
+        // Update stats
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.packets_sent += 1;
+            stats.bytes_sent += data.len() as u64;
+        }
+        
+        Ok(())
     }
     
     /// Receive an RTP packet (blocks until a packet is available)
@@ -380,11 +395,44 @@ impl RtpSession {
             let mut buf = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
             
             loop {
-                match socket.recv_from(&mut buf).await {
-                    Ok((len, _addr)) => {
+                let result = if socket.peer_addr().is_ok() {
+                    // Socket is connected, use recv()
+                    socket.recv(&mut buf).await.map(|len| (len, socket.peer_addr().unwrap()))
+                } else {
+                    // Socket is not connected, use recv_from()
+                    socket.recv_from(&mut buf).await
+                };
+                
+                match result {
+                    Ok((len, addr)) => {
+                        debug!("Received {} bytes from {}", len, addr);
+                        
+                        // Make sure we have enough data for a valid RTP packet
+                        if len < RTP_MIN_HEADER_SIZE {
+                            error!("Received data too small for RTP packet: {} bytes, min header size is {}", 
+                                  len, RTP_MIN_HEADER_SIZE);
+                            
+                            if len > 0 {
+                                let prefix = if len > 16 { 16 } else { len };
+                                let hex_data = hex_dump(&buf[..prefix]);
+                                error!("Invalid packet data prefix: {}", hex_data);
+                            }
+                            
+                            continue;
+                        }
+                    
+                        // Ensure we only use the actual received bytes
+                        let packet_data = &buf[..len];
+                        
                         // Process received packet
-                        match RtpPacket::parse(&buf[..len]) {
+                        match RtpPacket::parse(packet_data) {
                             Ok(packet) => {
+                                debug!("Successfully parsed RTP packet: seq={}, ts={}, pt={}, len={}",
+                                      packet.header.sequence_number, 
+                                      packet.header.timestamp,
+                                      packet.header.payload_type,
+                                      packet.payload.len());
+                                
                                 // Update stats
                                 if let Ok(mut stats) = stats.lock() {
                                     stats.packets_received += 1;
@@ -393,8 +441,8 @@ impl RtpSession {
                                 
                                 // Check if packet payload type matches expected
                                 if packet.header.payload_type != payload_type {
-                                    warn!("Received packet with unexpected payload type: {}", 
-                                          packet.header.payload_type);
+                                    warn!("Received packet with unexpected payload type: {}, expected: {}", 
+                                          packet.header.payload_type, payload_type);
                                     continue;
                                 }
                                 
@@ -420,7 +468,15 @@ impl RtpSession {
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to parse RTP packet: {}", e);
+                                error!("Failed to parse RTP packet ({} bytes): {}", len, e);
+                                
+                                // Log more details about the packet for debugging
+                                if len > 0 {
+                                    let prefix = if len > 16 { 16 } else { len };
+                                    let hex_data = hex_dump(&packet_data[..prefix]);
+                                    error!("Packet data prefix: {}", hex_data);
+                                }
+                                
                                 if event_tx.send(RtpSessionEvent::Error(e)).await.is_err() {
                                     error!("Failed to send RTP error event, channel closed");
                                     break;
@@ -467,4 +523,16 @@ fn calculate_seq_diff(a: u16, b: u16) -> i32 {
 /// Calculate difference between two timestamps, accounting for wrapping
 fn timestamp_diff(a: u32, b: u32) -> u32 {
     a.wrapping_sub(b)
+}
+
+/// Utility function to generate a hex dump of data for debugging
+fn hex_dump(data: &[u8]) -> String {
+    let mut output = String::new();
+    for (i, byte) in data.iter().enumerate() {
+        if i > 0 {
+            output.push(' ');
+        }
+        output.push_str(&format!("{:02x}", byte));
+    }
+    output
 } 

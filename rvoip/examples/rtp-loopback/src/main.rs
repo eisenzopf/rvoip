@@ -5,7 +5,8 @@ use rtp_core::RtpSession;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, error};
+use tracing::{info, error, debug, Level};
+use tracing_subscriber::FmtSubscriber;
 
 // Include RTCP example module
 mod rtcp_example;
@@ -40,15 +41,21 @@ struct Args {
     /// Run RTCP example instead of basic loopback
     #[arg(long)]
     rtcp: bool,
+    
+    /// Enable verbose debug logging
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
-    
-    // Parse command-line arguments
+    // Initialize logging with appropriate level
     let args = Args::parse();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(if args.verbose { Level::DEBUG } else { Level::INFO })
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set global default subscriber");
     
     if args.rtcp {
         // Run RTCP example
@@ -73,11 +80,13 @@ async fn main() -> Result<()> {
         .context("Failed to create sender RTP session")?;
     
     info!("Sender created and bound to {}", args.sender_addr);
+    let sender_actual_addr = sender.local_addr()?;
+    info!("Sender actual bound address: {}", sender_actual_addr);
     
     // Create receiver RTP session
     let receiver_config = rtp_core::session::RtpSessionConfig {
         local_addr: args.receiver_addr,
-        remote_addr: Some(args.sender_addr),
+        remote_addr: Some(sender_actual_addr), // Use the actual bound address
         payload_type: args.payload_type,
         ..Default::default()
     };
@@ -87,15 +96,27 @@ async fn main() -> Result<()> {
         .context("Failed to create receiver RTP session")?;
     
     info!("Receiver created and bound to {}", args.receiver_addr);
+    let receiver_actual_addr = receiver.local_addr()?;
+    info!("Receiver actual bound address: {}", receiver_actual_addr);
+    
+    // Update sender's remote address to the actual receiver address
+    sender.set_remote_addr(receiver_actual_addr);
+    info!("Updated sender to send to: {}", receiver_actual_addr);
+    
+    // Give sockets time to properly set up
+    debug!("Waiting for sockets to stabilize...");
+    sleep(Duration::from_millis(250)).await;
     
     // Start receiver task
+    let verbose = args.verbose;
+    let count = args.count;
     let receiver_handle = tokio::spawn(async move {
         info!("Receiver task started, waiting for packets...");
         
         // Keep track of received packets
         let mut received_count = 0;
         
-        while received_count < args.count {
+        while received_count < count {
             match receiver.receive_packet().await {
                 Ok(packet) => {
                     received_count += 1;
@@ -104,11 +125,12 @@ async fn main() -> Result<()> {
                     let payload_str = String::from_utf8_lossy(&packet.payload);
                     
                     info!(
-                        "Received packet {}/{}: seq={}, ts={}, payload={}",
+                        "Received packet {}/{}: seq={}, ts={}, len={}, payload={}",
                         received_count,
-                        args.count,
+                        count,
                         packet.header.sequence_number,
                         packet.header.timestamp,
+                        packet.payload.len(),
                         payload_str
                     );
                 }
@@ -124,7 +146,7 @@ async fn main() -> Result<()> {
     });
     
     // Give receiver time to start
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(250)).await;
     
     // Send test packets
     info!("Starting to send {} packets", args.count);
@@ -132,31 +154,52 @@ async fn main() -> Result<()> {
     for i in 0..args.count {
         // Create payload with packet number
         let payload_data = format!("Test packet {}", i);
+        
+        if verbose {
+            debug!("Creating payload: '{}' ({} bytes)", payload_data, payload_data.len());
+        }
+        
         let payload = Bytes::from(payload_data);
         
         // Use packet number as timestamp for simplicity
         let timestamp = i * 160; // Assuming G.711 with 20ms packets (8000 Hz * 0.02s = 160 samples)
         
         // Send packet
-        sender.send_packet(timestamp, payload, i == 0)
-            .await
-            .context(format!("Failed to send packet {}", i))?;
-        
-        info!("Sent packet {}/{}: ts={}", i+1, args.count, timestamp);
+        match sender.send_packet(timestamp, payload, i == 0).await {
+            Ok(_) => {
+                info!("Sent packet {}/{}: ts={}", i+1, args.count, timestamp);
+            }
+            Err(e) => {
+                error!("Failed to send packet {}: {}", i, e);
+                break;
+            }
+        }
         
         // Wait before sending the next packet
         sleep(Duration::from_millis(args.interval)).await;
     }
     
     // Wait for receiver to process all packets
-    let received_count = receiver_handle.await??;
-    
-    // Print stats
-    let sender_stats = sender.get_stats();
-    info!("Sender stats: sent={} packets", sender_stats.packets_sent);
-    
-    info!("Test completed successfully: sent={}, received={} packets", 
-          args.count, received_count);
+    match receiver_handle.await {
+        Ok(result) => {
+            match result {
+                Ok(received_count) => {
+                    // Print stats
+                    let sender_stats = sender.get_stats();
+                    info!("Sender stats: sent={} packets", sender_stats.packets_sent);
+                    
+                    info!("Test completed successfully: sent={}, received={} packets", 
+                          args.count, received_count);
+                }
+                Err(e) => {
+                    error!("Receiver task returned an error: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to join receiver task: {}", e);
+        }
+    }
     
     Ok(())
 } 
