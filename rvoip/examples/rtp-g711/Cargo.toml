@@ -1,0 +1,29 @@
+ [package]
+name = "rtp-g711"
+version = "0.1.0"
+edition = "2021"
+description = "Example demonstrating G.711 codec over RTP"
+
+# Use workspace dependencies
+[dependencies]
+# Core crates
+rtp-core = { path = "../../crates/rtp-core" }
+media-core = { path = "../../crates/media-core" }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Bytes handling
+bytes = "1.5"
+
+[[bin]]
+name = "rtp-g711"
+path = "src/main.rs" 

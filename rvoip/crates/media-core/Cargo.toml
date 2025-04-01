@@ -1,0 +1,28 @@
+[package]
+name = "media-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core media handling functionality for the RVOIP project"
+
+[dependencies]
+# Use the rtp-core crate from our workspace
+rtp-core = { path = "../rtp-core" }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Bytes handling
+bytes = "1.5"
+
+# CLI argument parsing for the demo binary
+clap = { version = "4.4", features = ["derive"] }
+
+# Test utilities
+[dev-dependencies] 
