@@ -40,8 +40,17 @@ async fn run_client(
                 TransportEvent::MessageReceived { source, message, destination } => {
                     debug!("Received message from {}: {:?}", source, message);
                     
-                    // We don't have a real handle_incoming, so just log the message
-                    info!("Processing message: {:?}", message);
+                    // Log more detailed message information
+                    match &message {
+                        Message::Request(req) => {
+                            info!("📥 REQUEST: {} {}", req.method, req.uri);
+                            log_headers(&req.headers);
+                        },
+                        Message::Response(resp) => {
+                            info!("📥 RESPONSE: {} {}", resp.status.as_u16(), resp.reason_phrase());
+                            log_headers(&resp.headers);
+                        }
+                    }
                 }
                 TransportEvent::Error { error } => {
                     error!("Transport error: {}", error);
@@ -58,90 +67,107 @@ async fn run_client(
     info!("Starting SIP message type tests...");
     
     // Test INVITE transaction
-    info!("Testing INVITE transaction...");
+    info!("🔄 Testing INVITE transaction...");
     let invite_request = create_request(Method::Invite, "sip:bob@example.com", remote_addr);
+    info!("📤 SENDING: INVITE sip:bob@example.com");
+    log_headers(&invite_request.headers);
+    
     let invite_tx = transaction_manager
         .create_client_transaction(invite_request, transport.clone(), remote_addr)
         .await?;
     
     // Wait for the transaction to complete or timeout
     let invite_result = invite_tx.wait_for_final_response().await;
-    info!("INVITE result: {:?}", invite_result);
+    info!("📊 INVITE transaction complete: status={}", invite_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
     if let Ok(response) = invite_result {
         if response.status.is_success() {
             // Send ACK
             let ack_request = create_ack_request(&response, "sip:bob@example.com", remote_addr);
+            info!("📤 Sending ACK");
+            log_headers(&ack_request.headers);
             transport.send_message(ack_request.into(), remote_addr).await?;
-            info!("Sent ACK");
             
             // Wait a bit and then send BYE
             sleep(Duration::from_secs(1)).await;
             
             // Test BYE transaction
-            info!("Testing BYE transaction...");
+            info!("🔄 Testing BYE transaction...");
             let bye_request = create_request(Method::Bye, "sip:bob@example.com", remote_addr);
+            info!("📤 SENDING: BYE sip:bob@example.com");
+            log_headers(&bye_request.headers);
             let bye_tx = transaction_manager
                 .create_client_transaction(bye_request, transport.clone(), remote_addr)
                 .await?;
             
             let bye_result = bye_tx.wait_for_final_response().await;
-            info!("BYE result: {:?}", bye_result);
+            info!("📊 BYE transaction complete: status={}", bye_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
         }
     }
     
     // Test REGISTER transaction
-    info!("Testing REGISTER transaction...");
+    info!("🔄 Testing REGISTER transaction...");
     let register_request = create_request(Method::Register, "sip:registrar.example.com", remote_addr);
+    info!("📤 SENDING: REGISTER sip:registrar.example.com");
+    log_headers(&register_request.headers);
     let register_tx = transaction_manager
         .create_client_transaction(register_request, transport.clone(), remote_addr)
         .await?;
     
     let register_result = register_tx.wait_for_final_response().await;
-    info!("REGISTER result: {:?}", register_result);
+    info!("📊 REGISTER transaction complete: status={}", register_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
     // Test OPTIONS transaction
-    info!("Testing OPTIONS transaction...");
+    info!("🔄 Testing OPTIONS transaction...");
     let options_request = create_request(Method::Options, "sip:bob@example.com", remote_addr);
+    info!("📤 SENDING: OPTIONS sip:bob@example.com");
+    log_headers(&options_request.headers);
     let options_tx = transaction_manager
         .create_client_transaction(options_request, transport.clone(), remote_addr)
         .await?;
     
     let options_result = options_tx.wait_for_final_response().await;
-    info!("OPTIONS result: {:?}", options_result);
+    info!("📊 OPTIONS transaction complete: status={}", options_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
     // Test SUBSCRIBE transaction
-    info!("Testing SUBSCRIBE transaction...");
+    info!("🔄 Testing SUBSCRIBE transaction...");
     let subscribe_request = create_request(Method::Subscribe, "sip:bob@example.com", remote_addr);
+    info!("📤 SENDING: SUBSCRIBE sip:bob@example.com");
+    log_headers(&subscribe_request.headers);
     let subscribe_tx = transaction_manager
         .create_client_transaction(subscribe_request, transport.clone(), remote_addr)
         .await?;
     
     let subscribe_result = subscribe_tx.wait_for_final_response().await;
-    info!("SUBSCRIBE result: {:?}", subscribe_result);
+    info!("📊 SUBSCRIBE transaction complete: status={}", subscribe_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
     // Test MESSAGE transaction
-    info!("Testing MESSAGE transaction...");
+    info!("🔄 Testing MESSAGE transaction...");
     let message_request = create_request(Method::Message, "sip:bob@example.com", remote_addr)
         .with_body(Bytes::from("Hello, this is a SIP MESSAGE test"));
+    info!("📤 SENDING: MESSAGE sip:bob@example.com");
+    log_headers(&message_request.headers);
+    info!("   Body: Hello, this is a SIP MESSAGE test");
     let message_tx = transaction_manager
         .create_client_transaction(message_request, transport.clone(), remote_addr)
         .await?;
     
     let message_result = message_tx.wait_for_final_response().await;
-    info!("MESSAGE result: {:?}", message_result);
+    info!("📊 MESSAGE transaction complete: status={}", message_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
     // Test UPDATE transaction
-    info!("Testing UPDATE transaction...");
+    info!("🔄 Testing UPDATE transaction...");
     let update_request = create_request(Method::Update, "sip:bob@example.com", remote_addr);
+    info!("📤 SENDING: UPDATE sip:bob@example.com");
+    log_headers(&update_request.headers);
     let update_tx = transaction_manager
         .create_client_transaction(update_request, transport.clone(), remote_addr)
         .await?;
     
     let update_result = update_tx.wait_for_final_response().await;
-    info!("UPDATE result: {:?}", update_result);
+    info!("📊 UPDATE transaction complete: status={}", update_result.as_ref().map(|r| r.status.as_u16()).unwrap_or(0));
     
-    info!("All SIP message type tests completed!");
+    info!("✅ All SIP message type tests completed!");
     
     // Wait a bit before exiting
     sleep(Duration::from_secs(2)).await;
@@ -171,6 +197,18 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
             TransportEvent::MessageReceived { source, message, destination } => {
                 info!("Received message from {}: {:?}", source, message);
                 
+                // Log more detailed message information
+                match &message {
+                    Message::Request(req) => {
+                        info!("📥 REQUEST: {} {}", req.method, req.uri);
+                        log_headers(&req.headers);
+                    },
+                    Message::Response(resp) => {
+                        info!("📥 RESPONSE: {} {}", resp.status.as_u16(), resp.reason_phrase());
+                        log_headers(&resp.headers);
+                    }
+                }
+                
                 // Process based on message type
                 if let Some(request) = message.as_request() {
                     let method = request.method.clone();
@@ -187,7 +225,7 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                     
                     match method {
                         Method::Invite => {
-                            info!("Processing INVITE request");
+                            info!("🔄 Processing INVITE request");
                             
                             // Create a server transaction for the INVITE
                             let server_tx = transaction_manager
@@ -201,7 +239,9 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                                 &from,
                                 &to,
                             );
-                            server_tx.send_provisional_response(trying).await?;
+                            info!("📤 Sending 100 Trying");
+                            log_headers(&trying.headers);
+                            server_tx.send_provisional_response(trying.clone()).await?;
                             
                             // Simulate some processing delay (ringing)
                             sleep(Duration::from_millis(500)).await;
@@ -213,7 +253,9 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                                 &from,
                                 &to,
                             );
-                            server_tx.send_provisional_response(ringing).await?;
+                            info!("📤 Sending 180 Ringing");
+                            log_headers(&ringing.headers);
+                            server_tx.send_provisional_response(ringing.clone()).await?;
                             
                             // Simulate call being answered
                             sleep(Duration::from_millis(1000)).await;
@@ -225,16 +267,18 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                                 &from, 
                                 &to,
                             );
-                            server_tx.send_final_response(ok).await?;
+                            info!("📤 Sending 200 OK for INVITE");
+                            log_headers(&ok.headers);
+                            server_tx.send_final_response(ok.clone()).await?;
                             
-                            info!("INVITE processed successfully");
+                            info!("✅ INVITE processed successfully - call established");
                         }
                         Method::Ack => {
                             // ACK doesn't need a response, but log it
                             info!("Received ACK for dialog {}", call_id);
                         }
                         Method::Bye => {
-                            info!("Processing BYE request for dialog {}", call_id);
+                            info!("🔄 Processing BYE request for dialog {}", call_id);
                             
                             // Create a server transaction for the BYE
                             let server_tx = transaction_manager
@@ -248,15 +292,17 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                                 &from,
                                 &to,
                             );
-                            server_tx.send_final_response(ok).await?;
+                            info!("📤 Sending 200 OK for BYE");
+                            log_headers(&ok.headers);
+                            server_tx.send_final_response(ok.clone()).await?;
                             
                             // Remove call from active calls
                             active_calls.remove(&call_id);
-                            info!("Call {} ended", call_id);
+                            info!("✅ Call {} ended", call_id);
                         }
                         // Handle all other methods with a 200 OK
                         _ => {
-                            info!("Processing {} request", method);
+                            info!("🔄 Processing {} request", method);
                             
                             // Create a server transaction for the request
                             let server_tx = transaction_manager
@@ -270,9 +316,11 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
                                 &from,
                                 &to,
                             );
-                            server_tx.send_final_response(ok).await?;
+                            info!("📤 Sending 200 OK for {}", method);
+                            log_headers(&ok.headers);
+                            server_tx.send_final_response(ok.clone()).await?;
                             
-                            info!("{} processed successfully", method);
+                            info!("✅ {} processed successfully", method);
                         }
                     }
                 }
@@ -291,6 +339,7 @@ async fn run_server(local_addr: SocketAddr) -> Result<()> {
 }
 
 fn create_request(method: Method, target_uri: &str, _remote_addr: SocketAddr) -> Request {
+    info!("🔨 Creating {} request to {}", method, target_uri);
     let uri = Uri::from_str(target_uri).expect("Invalid URI");
     let call_id = format!("{}@example.com", Uuid::new_v4());
     let from_tag = format!("from-{}", Uuid::new_v4().simple());
@@ -381,10 +430,25 @@ fn create_response(
         .with_header(Header::integer(HeaderName::ContentLength, 0))
 }
 
+// Add a helper function to log headers
+fn log_headers(headers: &[Header]) {
+    for header in headers {
+        match header.name {
+            HeaderName::Via | HeaderName::From | HeaderName::To | 
+            HeaderName::CallId | HeaderName::CSeq => {
+                debug!("  📋 {}: {}", header.name, header.value);
+            },
+            _ => {}
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with more detailed output
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
     
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
