@@ -12,8 +12,10 @@ members = [
     "crates/sip-core",
     "crates/sip-transport",
     "crates/transaction-core",
+    "crates/rtp-core",
     "examples/simple-softswitch",
     "examples/sip-message-test",
+    "examples/rtp-loopback",
 ]
 
 [workspace.dependencies]
