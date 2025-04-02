@@ -86,41 +86,37 @@ impl JitterBuffer {
             return true;
         }
 
-        // Check if the packet is too old
-        if let Some(first_packet) = self.packets.front() {
-            let time_diff = timestamp_diff(header.timestamp, first_packet.1);
-            let time_ms = (time_diff as u64 * 1000) / self.clock_rate as u64;
-            
-            if time_ms > self.max_age_ms as u64 {
+        // Check for duplicate packet (already in buffer)
+        for (seq, _, _) in &self.packets {
+            if *seq == header.sequence_number {
+                // Duplicate packet, discard
                 return false;
             }
         }
         
         // Handle sequence wrapping
-        let seq_diff_val = calculate_seq_diff(header.sequence_number, self.expected_seq.unwrap());
+        let expected = self.expected_seq.unwrap();
+        let seq_diff_val = calculate_seq_diff(header.sequence_number, expected);
         
-        // If packet is too old (negative seq_diff), discard it
-        if seq_diff_val < 0 && seq_diff_val.abs() > (self.size as i32) {
+        // If the packet is very old, discard it
+        if seq_diff_val < -(self.size as i32 / 2) {
             return false;
         }
         
-        // If packet is too far in the future, we might have lost too many packets
-        if seq_diff_val > (self.size as i32) {
+        // If the packet is very new (far in the future), it might indicate packet loss
+        // In this case, we accept it and adjust our expected sequence
+        if seq_diff_val > (self.size as i32 / 2) {
+            // Major jump in sequence - possible reset or significant packet loss
             self.expected_seq = Some(header.sequence_number.wrapping_add(1));
             self.packets.clear();
             self.packets.push_back((header.sequence_number, header.timestamp, payload));
             return true;
         }
         
-        // Insert packet in sorted order
+        // Insert packet in sorted order by sequence number
         let mut inserted = false;
         for i in 0..self.packets.len() {
             let curr_seq = self.packets[i].0;
-            
-            // Check for duplicate
-            if curr_seq == header.sequence_number {
-                return false;
-            }
             
             // If found insert position (current packet has higher sequence)
             if calculate_seq_diff(curr_seq, header.sequence_number) > 0 {
@@ -135,9 +131,14 @@ impl JitterBuffer {
             self.packets.push_back((header.sequence_number, header.timestamp, payload));
         }
         
-        // Enforce maximum size
-        if self.packets.len() > self.size {
+        // If we've exceeded buffer size, remove the oldest packet
+        while self.packets.len() > self.size {
             self.packets.pop_front();
+        }
+        
+        // Update expected sequence if this is the next packet we're expecting
+        if header.sequence_number == expected {
+            self.expected_seq = Some(header.sequence_number.wrapping_add(1));
         }
         
         true
@@ -278,8 +279,8 @@ impl RtpSession {
         
         let socket = Arc::new(socket);
         
-        // Create event channels
-        let (event_tx, event_rx) = mpsc::channel(100);
+        // Create event channels with sufficient capacity to avoid dropping packets
+        let (event_tx, event_rx) = mpsc::channel(1000);
         
         // Create jitter buffer if enabled
         let jitter_buffer = if config.enable_jitter_buffer {

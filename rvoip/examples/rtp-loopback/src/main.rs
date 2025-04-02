@@ -88,6 +88,8 @@ async fn main() -> Result<()> {
         local_addr: args.receiver_addr,
         remote_addr: Some(sender_actual_addr), // Use the actual bound address
         payload_type: args.payload_type,
+        jitter_buffer_size: Some(100),         // Increased buffer size
+        max_packet_age_ms: Some(1000),         // Allow packets to be up to 1 second old
         ..Default::default()
     };
     
@@ -116,26 +118,50 @@ async fn main() -> Result<()> {
         // Keep track of received packets
         let mut received_count = 0;
         
+        // Add a timeout for receiving all packets
+        let timeout_duration = Duration::from_millis(args.interval * count as u64 * 2 + 1000);
+        let timeout = tokio::time::sleep(timeout_duration);
+        tokio::pin!(timeout);
+        
         while received_count < count {
-            match receiver.receive_packet().await {
-                Ok(packet) => {
-                    received_count += 1;
-                    
-                    // Convert payload to string
-                    let payload_str = String::from_utf8_lossy(&packet.payload);
-                    
-                    info!(
-                        "Received packet {}/{}: seq={}, ts={}, len={}, payload={}",
-                        received_count,
-                        count,
-                        packet.header.sequence_number,
-                        packet.header.timestamp,
-                        packet.payload.len(),
-                        payload_str
-                    );
+            tokio::select! {
+                packet_result = receiver.receive_packet() => {
+                    match packet_result {
+                        Ok(packet) => {
+                            received_count += 1;
+                            
+                            // Convert payload to string
+                            let payload_str = String::from_utf8_lossy(&packet.payload);
+                            
+                            info!(
+                                "Received packet {}/{}: seq={}, ts={}, len={}, payload={}",
+                                received_count,
+                                count,
+                                packet.header.sequence_number,
+                                packet.header.timestamp,
+                                packet.payload.len(),
+                                payload_str
+                            );
+                        }
+                        Err(e) => {
+                            error!("Error receiving packet: {}", e);
+                            break;
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Error receiving packet: {}", e);
+                _ = &mut timeout => {
+                    if received_count < count {
+                        info!("Receiver timeout after waiting for {} ms", timeout_duration.as_millis());
+                        info!("Missing {} packets out of {} (received {})", 
+                             count - received_count, count, received_count);
+                        
+                        // Get receiver stats to help diagnose issues
+                        let stats = receiver.get_stats();
+                        info!("Receiver stats: received={}, lost={}, duplicated={}, out_of_order={}, discarded={}",
+                             stats.packets_received, stats.packets_lost, 
+                             stats.packets_duplicated, stats.packets_out_of_order,
+                             stats.packets_discarded_by_jitter);
+                    }
                     break;
                 }
             }
