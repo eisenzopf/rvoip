@@ -286,8 +286,14 @@ impl Registry {
     
     /// Lookup a SIP URI to find where to route it
     pub fn lookup(&self, uri: &Uri) -> Option<Registration> {
-        let user_part = uri.user.as_ref()?;
-        let host_part = uri.host.as_ref()?;
+        // Check if user exists
+        let user_part = match &uri.user {
+            Some(user) => user,
+            None => return None,
+        };
+        
+        // Check if host exists - host is always present in Uri
+        let host_part = &uri.host;
         
         // Try exact match first (user@host)
         let aor = format!("{}@{}", user_part, host_part);

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 use async_trait::async_trait;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
-use tracing::{debug, info, warn, error};
+use tracing::warn;
 
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri, Header, HeaderName};
 use rvoip_session_core::Session;
 
 use crate::errors::Error;
@@ -172,7 +171,7 @@ impl PolicyEngine {
     /// Check if a request is authenticated
     fn is_authenticated(&self, request: &Request) -> bool {
         // Check for Authorization header
-        if let Some(auth_header) = request.header(&rvoip_sip_core::HeaderName::Authorization) {
+        if let Some(_auth_header) = request.header(&rvoip_sip_core::HeaderName::Authorization) {
             // TODO: Implement proper authentication checking
             // For now, we just check if the header exists
             return true;
@@ -235,20 +234,20 @@ impl PolicyEnforcer for PolicyEngine {
         Ok(PolicyDecision::Allow)
     }
     
-    async fn decide_new_session(&self, session: &Session) -> Result<PolicyDecision, Error> {
+    async fn decide_new_session(&self, _session: &Session) -> Result<PolicyDecision, Error> {
         // Most session policy would be enforced at the INVITE level
         Ok(PolicyDecision::Allow)
     }
     
-    async fn challenge_request(&self, request: &Request) -> Result<Response, Error> {
+    async fn challenge_request(&self, _request: &Request) -> Result<Response, Error> {
         let mut response = Response::new(StatusCode::Unauthorized);
         
         // Add WWW-Authenticate header
         let realm = "rvoip";
         let nonce = uuid::Uuid::new_v4().to_string();
         let auth_value = format!("Digest realm=\"{}\", nonce=\"{}\"", realm, nonce);
-        response.headers.push(rvoip_sip_core::Header::text(
-            rvoip_sip_core::HeaderName::WwwAuthenticate,
+        response.headers.push(Header::text(
+            HeaderName::WwwAuthenticate,
             auth_value
         ));
         

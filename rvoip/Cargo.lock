@@ -700,6 +700,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-call-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "parking_lot",
+ "rvoip-media-core",
+ "rvoip-rtp-core",
+ "rvoip-session-core",
+ "rvoip-sip-core",
+ "rvoip-sip-transport",
+ "rvoip-transaction-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rvoip-media-core"
 version = "0.1.0"
 dependencies = [
@@ -894,6 +918,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9e9e0b4211b72e7b8b6e85c807d36c212bdb33ea8587f7569562a84df5465b1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "simple-call-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rvoip-call-engine",
+ "rvoip-media-core",
+ "rvoip-rtp-core",
+ "rvoip-session-core",
+ "rvoip-sip-core",
+ "rvoip-sip-transport",
+ "rvoip-transaction-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

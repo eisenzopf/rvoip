@@ -15,11 +15,13 @@ members = [
     "crates/rtp-core",
     "crates/media-core",
     "crates/session-core",
+    "crates/call-engine",
     "examples/simple-softswitch",
     "examples/sip-message-test",
     "examples/rtp-loopback",
     "examples/rtp-g711",
     "examples/simple-session",
+    "examples/simple-call-engine",
 ]
 
 [workspace.dependencies]

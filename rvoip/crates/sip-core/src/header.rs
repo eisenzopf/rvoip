@@ -50,6 +50,8 @@ pub enum HeaderName {
     ReferredBy,
     /// RAck: Acknowledge receipt of a reliable provisional response
     RAck,
+    /// WWW-Authenticate: Challenge for authentication
+    WwwAuthenticate,
     /// Custom header name
     Other(String),
 }
@@ -79,6 +81,7 @@ impl HeaderName {
             HeaderName::ReferTo => "Refer-To",
             HeaderName::ReferredBy => "Referred-By",
             HeaderName::RAck => "RAck",
+            HeaderName::WwwAuthenticate => "WWW-Authenticate",
             HeaderName::Other(s) => s,
         }
     }
@@ -116,6 +119,7 @@ impl FromStr for HeaderName {
             "refer-to" | "r" => Ok(HeaderName::ReferTo),
             "referred-by" | "b" => Ok(HeaderName::ReferredBy),
             "rack" => Ok(HeaderName::RAck),
+            "www-authenticate" => Ok(HeaderName::WwwAuthenticate),
             _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
             _ => Err(Error::InvalidHeader("Empty header name".to_string())),
         }

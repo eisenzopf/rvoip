@@ -139,10 +139,9 @@ impl Router {
         }
         
         // Check domain routes if we have a host
-        if let Some(host) = &uri.host {
-            if let Some(domain_routes) = self.domain_routes.get(host) {
-                routes.extend(domain_routes.clone());
-            }
+        let host = &uri.host;
+        if let Some(domain_routes) = self.domain_routes.get(host) {
+            routes.extend(domain_routes.clone());
         }
         
         if routes.is_empty() {

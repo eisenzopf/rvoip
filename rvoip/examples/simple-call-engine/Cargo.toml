@@ -1,0 +1,23 @@
+[package]
+name = "simple-call-engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "simple-call-engine"
+path = "main.rs"
+
+[dependencies]
+rvoip-call-engine = { path = "../../crates/call-engine" }
+rvoip-sip-core = { path = "../../crates/sip-core" }
+rvoip-transaction-core = { path = "../../crates/transaction-core" }
+rvoip-session-core = { path = "../../crates/session-core" }
+rvoip-sip-transport = { path = "../../crates/sip-transport" }
+rvoip-media-core = { path = "../../crates/media-core" }
+rvoip-rtp-core = { path = "../../crates/rtp-core" }
+
+tokio = { version = "1.25", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.3", features = ["derive"] } 
