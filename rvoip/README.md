@@ -60,7 +60,10 @@ The project is organized into the following crates:
   - Event-driven message handling
 - [x] Basic RTP packet handling
 - [x] G.711 codec implementation
-- [ ] Simple call session management
+- [x] Simple call session management
+  - Session state machine
+  - Dialog management
+  - Basic media integration
 - [ ] Minimal REST API
 
 ### Phase 2: Softswitch Capabilities
