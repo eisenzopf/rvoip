@@ -578,6 +578,11 @@ impl TransactionManager {
         )
     }
     
+    /// Get the transport
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+    
     /// Shutdown the transaction manager
     pub async fn shutdown(&self) {
         // Set running flag to false

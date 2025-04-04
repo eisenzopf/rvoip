@@ -22,6 +22,7 @@ members = [
     "examples/rtp-g711",
     "examples/simple-session",
     "examples/simple-call-engine",
+    "examples/sip-test-client",
 ]
 
 [workspace.dependencies]

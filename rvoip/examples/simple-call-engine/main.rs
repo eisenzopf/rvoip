@@ -11,6 +11,8 @@ use rvoip_call_engine::CallEngine;
 use rvoip_call_engine::engine::CallEngineConfig;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
 use rvoip_sip_transport::UdpTransport;
+use rvoip_sip_core;
+use rvoip_call_engine::policy::PolicyEngine;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -26,6 +28,10 @@ struct Args {
     /// Local domain name
     #[arg(short, long, default_value = "rvoip.local")]
     domain: String,
+
+    /// Disable authentication (for testing)
+    #[arg(short, long)]
+    no_auth: bool,
 }
 
 /// Handles SIGINT (Ctrl+C) for graceful shutdown
@@ -53,6 +59,7 @@ async fn main() -> Result<()> {
     info!("SIP address: {}", sip_addr);
     info!("Media address: {}", media_addr);
     info!("Domain: {}", args.domain);
+    info!("Authentication: {}", if args.no_auth { "disabled" } else { "enabled" });
     
     // Create UDP transport (with default buffer size)
     let (udp_transport, transport_rx) = UdpTransport::bind(sip_addr, None).await
@@ -85,19 +92,34 @@ async fn main() -> Result<()> {
         max_sessions: 100,
         cleanup_interval: Duration::from_secs(30),
     };
-    
-    let call_engine = Arc::new(CallEngine::new(
+
+    // Create the policy engine with auth disabled if requested
+    let policy_engine = if args.no_auth {
+        info!("Creating policy engine with authentication disabled");
+        let mut policy = PolicyEngine::new();
+        policy.set_auth_required(rvoip_sip_core::Method::Register, false);
+        policy.set_auth_required(rvoip_sip_core::Method::Invite, false);
+        policy.set_auth_required(rvoip_sip_core::Method::Subscribe, false);
+        Some(policy)
+    } else {
+        None
+    };
+
+    // Create the call engine with the policy engine
+    let call_engine = Arc::new(CallEngine::new_with_policy(
         engine_config,
         arc_transaction_manager.clone(),
+        policy_engine,
     ));
-    
+
     // Initialize the engine
     call_engine.initialize().await
         .context("Failed to initialize call engine")?;
-    
+
     info!("Call engine initialized");
     
     // Handle transaction events
+    let call_engine_clone = call_engine.clone();
     let transaction_handle = tokio::spawn(async move {
         debug!("Starting transaction event handler");
         
@@ -115,6 +137,25 @@ async fn main() -> Result<()> {
                 },
                 TransactionEvent::UnmatchedMessage { message, source } => {
                     debug!("Unmatched message from {}: {:?}", source, message);
+                    
+                    // Process unmatched message through call engine
+                    if let rvoip_sip_core::Message::Request(request) = message {
+                        match call_engine_clone.handle_request(request, source).await {
+                            Ok(response) => {
+                                // Send the response back through the transport
+                                debug!("Sending direct response: {:?}", response);
+                                let message = rvoip_sip_core::Message::Response(response);
+                                if let Err(e) = call_engine_clone.transaction_manager().transport().send_message(message, source).await {
+                                    error!("Failed to send response: {}", e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Error handling request: {}", e);
+                            }
+                        }
+                    } else {
+                        debug!("Ignoring unmatched response message");
+                    }
                 },
                 TransactionEvent::Error { error, transaction_id } => {
                     error!("Transaction error: {}, id: {:?}", error, transaction_id);

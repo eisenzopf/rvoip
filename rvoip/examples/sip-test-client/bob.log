@@ -1,0 +1,488 @@
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.authors
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.description
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.edition
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.license
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.name
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.repository
+warning: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/Cargo.toml: unused manifest key: workspace.version
+warning: unused import: `std::fmt`
+ --> crates/sip-core/src/error.rs:1:5
+  |
+1 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::collections::HashMap`
+ --> crates/sip-core/src/message.rs:1:5
+  |
+1 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HeaderValue`
+ --> crates/sip-core/src/message.rs:9:41
+  |
+9 | use crate::header::{Header, HeaderName, HeaderValue};
+  |                                         ^^^^^^^^^^^
+
+warning: `rvoip-sip-core` (lib) generated 3 warnings (run `cargo fix --lib -p rvoip-sip-core` to apply 3 suggestions)
+warning: unused import: `bitvec::prelude`
+ --> crates/rtp-core/src/packet.rs:2:5
+  |
+2 | use bitvec::prelude::*;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: constant `RTP_PADDING_FLAG` is never used
+  --> crates/rtp-core/src/packet.rs:13:11
+   |
+13 | pub const RTP_PADDING_FLAG: usize = 5;
+   |           ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `RTP_EXTENSION_FLAG` is never used
+  --> crates/rtp-core/src/packet.rs:16:11
+   |
+16 | pub const RTP_EXTENSION_FLAG: usize = 4;
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `RTP_CC_OFFSET` is never used
+  --> crates/rtp-core/src/packet.rs:19:11
+   |
+19 | pub const RTP_CC_OFFSET: usize = 4;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `RTP_CC_MASK` is never used
+  --> crates/rtp-core/src/packet.rs:20:11
+   |
+20 | pub const RTP_CC_MASK: u8 = 0x0F;
+   |           ^^^^^^^^^^^
+
+warning: constant `RTP_MARKER_FLAG` is never used
+  --> crates/rtp-core/src/packet.rs:23:11
+   |
+23 | pub const RTP_MARKER_FLAG: usize = 7;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `RTP_PT_OFFSET` is never used
+  --> crates/rtp-core/src/packet.rs:26:11
+   |
+26 | pub const RTP_PT_OFFSET: usize = 1;
+   |           ^^^^^^^^^^^^^
+
+warning: fields `max_age_ms` and `clock_rate` are never read
+  --> crates/rtp-core/src/session.rs:56:5
+   |
+51 | struct JitterBuffer {
+   |        ------------ fields in this struct
+...
+56 |     max_age_ms: u32,
+   |     ^^^^^^^^^^
+...
+65 |     clock_rate: u32,
+   |     ^^^^^^^^^^
+   |
+   = note: `JitterBuffer` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `get_next_packet`, `has_packets`, and `clear` are never used
+   --> crates/rtp-core/src/session.rs:148:8
+    |
+68  | impl JitterBuffer {
+    | ----------------- methods in this implementation
+...
+148 |     fn get_next_packet(&mut self) -> Option<(RtpSequenceNumber, RtpTimestamp, Bytes)> {
+    |        ^^^^^^^^^^^^^^^
+...
+167 |     fn has_packets(&self) -> bool {
+    |        ^^^^^^^^^^^
+...
+172 |     fn clear(&mut self) {
+    |        ^^^^^
+
+warning: function `timestamp_diff` is never used
+   --> crates/rtp-core/src/session.rs:525:4
+    |
+525 | fn timestamp_diff(a: u32, b: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> crates/sip-transport/src/transport.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `bytes::BytesMut`
+ --> crates/sip-transport/src/udp.rs:6:5
+  |
+6 | use bytes::BytesMut;
+  |     ^^^^^^^^^^^^^^^
+
+warning: `rvoip-rtp-core` (lib) generated 10 warnings
+warning: `rvoip-sip-transport` (lib) generated 2 warnings (run `cargo fix --lib -p rvoip-sip-transport` to apply 2 suggestions)
+warning: unused import: `std::pin::Pin`
+ --> crates/transaction-core/src/manager.rs:5:5
+  |
+5 | use std::pin::Pin;
+  |     ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `parse_message`
+  --> crates/transaction-core/src/manager.rs:11:58
+   |
+11 | use rvoip_sip_core::{Message, Method, Request, Response, parse_message};
+   |                                                          ^^^^^^^^^^^^^
+
+warning: unused import: `crate::utils`
+  --> crates/transaction-core/src/manager.rs:20:5
+   |
+20 | use crate::utils;
+   |     ^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates/transaction-core/src/manager.rs:455:13
+    |
+455 |         let mut transaction = ClientInviteTransaction::new(
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/transaction-core/src/manager.rs:490:13
+    |
+490 |         let mut transaction = ClientNonInviteTransaction::new(
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: struct `DummyTransport` is never constructed
+  --> crates/transaction-core/src/lib.rs:72:8
+   |
+72 | struct DummyTransport {}
+   |        ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `timer_b` is never read
+  --> crates/transaction-core/src/transaction/client.rs:39:5
+   |
+23 | pub struct ClientInviteTransaction {
+   |            ----------------------- field in this struct
+...
+39 |     timer_b: Duration,
+   |     ^^^^^^^
+   |
+   = note: `ClientInviteTransaction` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timer_f` is never read
+   --> crates/transaction-core/src/transaction/client.rs:422:5
+    |
+406 | pub struct ClientNonInviteTransaction {
+    |            -------------------------- field in this struct
+...
+422 |     timer_f: Duration,
+    |     ^^^^^^^
+    |
+    = note: `ClientNonInviteTransaction` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timer_h` is never read
+  --> crates/transaction-core/src/transaction/server.rs:39:5
+   |
+23 | pub struct ServerInviteTransaction {
+   |            ----------------------- field in this struct
+...
+39 |     timer_h: Duration,
+   |     ^^^^^^^
+   |
+   = note: `ServerInviteTransaction` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `generate_branch` is never used
+ --> crates/transaction-core/src/utils.rs:6:8
+  |
+6 | pub fn generate_branch() -> String {
+  |        ^^^^^^^^^^^^^^^
+
+warning: function `create_response` is never used
+  --> crates/transaction-core/src/utils.rs:57:8
+   |
+57 | pub fn create_response(request: &Request, status: StatusCode) -> Response {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `create_trying_response` is never used
+  --> crates/transaction-core/src/utils.rs:80:8
+   |
+80 | pub fn create_trying_response(request: &Request) -> Response {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_ringing_response` is never used
+  --> crates/transaction-core/src/utils.rs:85:8
+   |
+85 | pub fn create_ringing_response(request: &Request) -> Response {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_ok_response` is never used
+  --> crates/transaction-core/src/utils.rs:90:8
+   |
+90 | pub fn create_ok_response(request: &Request) -> Response {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `TransactionTimer` is never constructed
+  --> crates/transaction-core/src/manager.rs:63:8
+   |
+63 | struct TransactionTimer {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: type alias `BoxedTransaction` is never used
+  --> crates/transaction-core/src/manager.rs:70:6
+   |
+70 | type BoxedTransaction = Box<dyn Transaction + Send + Sync>;
+   |      ^^^^^^^^^^^^^^^^
+
+warning: `rvoip-transaction-core` (lib) generated 16 warnings (run `cargo fix --lib -p rvoip-transaction-core` to apply 5 suggestions)
+warning: unused import: `Mutex`
+ --> crates/session-core/src/session.rs:6:27
+  |
+6 | use tokio::sync::{RwLock, Mutex};
+  |                           ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `error` and `info`
+ --> crates/session-core/src/session.rs:8:22
+  |
+8 | use tracing::{debug, info, warn, error};
+  |                      ^^^^        ^^^^^
+
+warning: unused import: `RtpPacket`
+ --> crates/session-core/src/media.rs:6:52
+  |
+6 | use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpPacket};
+  |                                                    ^^^^^^^^^
+
+warning: unused imports: `AudioFormat` and `SampleRate`
+ --> crates/session-core/src/media.rs:8:18
+  |
+8 |     AudioBuffer, AudioFormat, SampleRate,
+  |                  ^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+ --> crates/session-core/src/events.rs:4:5
+  |
+4 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:313:35
+    |
+313 |     async fn handle_invite(&self, request: Request) -> Result<Response> {
+    |                                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/session-core/src/session.rs:315:13
+    |
+315 |         let mut response = Response::new(StatusCode::Ok);
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:337:32
+    |
+337 |     async fn handle_ack(&self, request: Request) -> Result<Response> {
+    |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:363:32
+    |
+363 |     async fn handle_bye(&self, request: Request) -> Result<Response> {
+    |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:403:35
+    |
+403 |     async fn handle_update(&self, request: Request) -> Result<Response> {
+    |                                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:410:33
+    |
+410 |     async fn handle_info(&self, request: Request) -> Result<Response> {
+    |                                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:419:36
+    |
+419 |     async fn handle_message(&self, request: Request) -> Result<Response> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:428:34
+    |
+428 |     async fn handle_refer(&self, request: Request) -> Result<Response> {
+    |                                  ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:437:35
+    |
+437 |     async fn handle_notify(&self, request: Request) -> Result<Response> {
+    |                                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:446:36
+    |
+446 |     async fn handle_options(&self, request: Request) -> Result<Response> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `request`
+   --> crates/session-core/src/session.rs:732:49
+    |
+732 |     pub async fn create_incoming_session(&self, request: Request) -> Result<Arc<Session>> {
+    |                                                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: field `direction` is never read
+   --> crates/session-core/src/session.rs:143:5
+    |
+135 | pub struct Session {
+    |            ------- field in this struct
+...
+143 |     direction: SessionDirection,
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `audio_rx` is never read
+  --> crates/session-core/src/media.rs:80:5
+   |
+66 | pub struct MediaStream {
+   |            ----------- field in this struct
+...
+80 |     audio_rx: Mutex<mpsc::Receiver<AudioBuffer>>,
+   |     ^^^^^^^^
+
+warning: `rvoip-session-core` (lib) generated 18 warnings (run `cargo fix --lib -p rvoip-session-core` to apply 6 suggestions)
+warning: unused import: `std::time::Duration`
+ --> examples/sip-test-client/src/user_agent.rs:3:5
+  |
+3 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `anyhow`
+ --> examples/sip-test-client/src/user_agent.rs:5:31
+  |
+5 | use anyhow::{Result, Context, anyhow};
+  |                               ^^^^^^
+
+warning: field `domain` is never read
+  --> examples/sip-test-client/src/user_agent.rs:33:5
+   |
+25 | pub struct UserAgent {
+   |            --------- field in this struct
+...
+33 |     domain: String,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: method `new_branch` is never used
+  --> examples/sip-test-client/src/user_agent.rs:77:8
+   |
+42 | impl UserAgent {
+   | -------------- method in this implementation
+...
+77 |     fn new_branch(&self) -> String {
+   |        ^^^^^^^^^^
+
+warning: `sip-test-client` (bin "sip-test-client") generated 4 warnings (run `cargo fix --bin "sip-test-client"` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/sip-test-client --mode ua --username bob --local-addr '127.0.0.1:5071'`
+[2m2025-04-04T08:00:40.351897Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Starting SIP test client
+[2m2025-04-04T08:00:40.352009Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Local address: 127.0.0.1:5071
+[2m2025-04-04T08:00:40.352021Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Server address: 127.0.0.1:5060
+[2m2025-04-04T08:00:40.352030Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Username: bob
+[2m2025-04-04T08:00:40.352039Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Domain: rvoip.local
+[2m2025-04-04T08:00:40.352047Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Mode: ua
+[2m2025-04-04T08:00:40.352055Z[0m [32m INFO[0m [2msip_test_client[0m[2m:[0m Running in user agent mode
+[2m2025-04-04T08:00:40.352184Z[0m [32m INFO[0m [2mrvoip_sip_transport::udp[0m[2m:[0m SIP UDP transport bound to 127.0.0.1:5071
+[2m2025-04-04T08:00:40.352266Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m User agent UDP transport bound to 127.0.0.1:5071
+[2m2025-04-04T08:00:40.352559Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m User agent bob initialized
+[2m2025-04-04T08:00:40.352614Z[0m [34mDEBUG[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Starting transaction message loop
+[2m2025-04-04T08:00:40.352657Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m User agent bob started, waiting for requests on 127.0.0.1:5071...
+[2m2025-04-04T08:00:40.352677Z[0m [34mDEBUG[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Starting transaction timer loop
+[2m2025-04-04T08:00:43.372717Z[0m [35mTRACE[0m [2mrvoip_sip_transport::udp[0m[2m:[0m Received packet from 127.0.0.1:5070: b"INVITE sip:bob@rvoip.local SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d\r\nMax-Forwards: 70\r\nFrom: <sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b\r\nTo: <sip:bob@rvoip.local>\r\nCall-ID: alice-024b73e7-cd88-4927-9a32-320b485a0217\r\nCSeq: 1 INVITE\r\nContact: <sip:alice@127.0.0.1:5070>\r\nUser-Agent: RVOIP-Test-Client/0.1.0\r\nContent-Type: application/sdp\r\nContent-Length: 139\r\n\r\nv=0\r\no=alice 123456 789012 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
+[2m2025-04-04T08:00:43.373094Z[0m [34mDEBUG[0m [2mrvoip_sip_transport::udp[0m[2m:[0m Received SIP message from 127.0.0.1:5070: INVITE sip:bob@rvoip.local SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d
+Max-Forwards: 70
+From: <sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b
+To: <sip:bob@rvoip.local>
+Call-ID: alice-024b73e7-cd88-4927-9a32-320b485a0217
+CSeq: 1 INVITE
+Contact: <sip:alice@127.0.0.1:5070>
+User-Agent: RVOIP-Test-Client/0.1.0
+Content-Type: application/sdp
+Content-Length: 139
+
+v=0
+o=alice 123456 789012 IN IP4 127.0.0.1
+s=Call
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+
+[2m2025-04-04T08:00:43.373394Z[0m [34mDEBUG[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Received message from 127.0.0.1:5070: Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: "rvoip.local", port: None, parameters: {}, headers: {} }, version: Version { major: 2, minor: 0 }, headers: [Header { name: Via, value: Text("SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d") }, Header { name: MaxForwards, value: Integer(70) }, Header { name: From, value: Text("<sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b") }, Header { name: To, value: Text("<sip:bob@rvoip.local>") }, Header { name: CallId, value: Text("alice-024b73e7-cd88-4927-9a32-320b485a0217") }, Header { name: CSeq, value: Text("1 INVITE") }, Header { name: Contact, value: Text("<sip:alice@127.0.0.1:5070>") }, Header { name: UserAgent, value: Text("RVOIP-Test-Client/0.1.0") }, Header { name: ContentType, value: Text("application/sdp") }, Header { name: ContentLength, value: Integer(139) }], body: b"v=0\r\no=alice 123456 789012 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv" })
+[2m2025-04-04T08:00:43.373519Z[0m [34mDEBUG[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Creating new server transaction for INVITE request
+[2m2025-04-04T08:00:43.373595Z[0m [34mDEBUG[0m [2mrvoip_transaction_core::manager[0m[2m:[0m [ist_z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d] Created new server transaction
+[2m2025-04-04T08:00:43.373688Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Transaction created: ist_z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d
+[2m2025-04-04T08:00:43.373770Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Received INVITE request from 127.0.0.1:5070
+[2m2025-04-04T08:00:43.373807Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Request details: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: "rvoip.local", port: None, parameters: {}, headers: {} }, version: Version { major: 2, minor: 0 }, headers: [Header { name: Via, value: Text("SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d") }, Header { name: MaxForwards, value: Integer(70) }, Header { name: From, value: Text("<sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b") }, Header { name: To, value: Text("<sip:bob@rvoip.local>") }, Header { name: CallId, value: Text("alice-024b73e7-cd88-4927-9a32-320b485a0217") }, Header { name: CSeq, value: Text("1 INVITE") }, Header { name: Contact, value: Text("<sip:alice@127.0.0.1:5070>") }, Header { name: UserAgent, value: Text("RVOIP-Test-Client/0.1.0") }, Header { name: ContentType, value: Text("application/sdp") }, Header { name: ContentLength, value: Integer(139) }], body: b"v=0\r\no=alice 123456 789012 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv" }
+[2m2025-04-04T08:00:43.373899Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m From: <sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b
+[2m2025-04-04T08:00:43.373921Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m To: <sip:bob@rvoip.local>
+[2m2025-04-04T08:00:43.373942Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Call-ID: alice-024b73e7-cd88-4927-9a32-320b485a0217
+[2m2025-04-04T08:00:43.373960Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Received INVITE request, sending 200 OK
+[2m2025-04-04T08:00:43.373995Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Processing INVITE for call alice-024b73e7-cd88-4927-9a32-320b485a0217
+[2m2025-04-04T08:00:43.374016Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Adding common headers to response
+[2m2025-04-04T08:00:43.374036Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Added Via header: Text("SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d")
+[2m2025-04-04T08:00:43.374055Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Added From header: Text("<sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b")
+[2m2025-04-04T08:00:43.374072Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Added To header: Text("<sip:bob@rvoip.local>")
+[2m2025-04-04T08:00:43.374091Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Added Call-ID header: Text("alice-024b73e7-cd88-4927-9a32-320b485a0217")
+[2m2025-04-04T08:00:43.374109Z[0m [34mDEBUG[0m [2msip_test_client::user_agent[0m[2m:[0m Added CSeq header: Text("1 INVITE")
+[2m2025-04-04T08:00:43.374127Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Added 6 common headers to response
+[2m2025-04-04T08:00:43.374143Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Adding To header with tag: tag-20b24cc7-438b-4267-a1d0-d6b0d8af6918
+[2m2025-04-04T08:00:43.374177Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Created OK response for INVITE with 10 headers
+[2m2025-04-04T08:00:43.374202Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Sending 200 OK response
+[2m2025-04-04T08:00:43.374338Z[0m [35mTRACE[0m [2mrvoip_sip_transport::udp[0m[2m:[0m Sent SIP message to 127.0.0.1:5070: SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-47743cfe-1465-49fe-9408-c82b6367a26d
+From: <sip:alice@rvoip.local>;tag=tag-7eb01892-1236-4c8b-8d7f-11e348bf422b
+To: <sip:bob@rvoip.local>
+Call-ID: alice-024b73e7-cd88-4927-9a32-320b485a0217
+CSeq: 1 INVITE
+User-Agent: RVOIP-Test-UA/0.1.0
+To: <sip:bob@rvoip.local>;tag=tag-20b24cc7-438b-4267-a1d0-d6b0d8af6918
+Contact: <sip:bob@127.0.0.1:5071>
+Content-Type: application/sdp
+Content-Length: 137
+
+v=0
+o=bob 654321 210987 IN IP4 127.0.0.1
+s=Call
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+
+[2m2025-04-04T08:00:43.374373Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Response sent successfully
+[2m2025-04-04T08:01:29.031578Z[0m [32m INFO[0m [2msip_test_client::user_agent[0m[2m:[0m Shutting down user agent...

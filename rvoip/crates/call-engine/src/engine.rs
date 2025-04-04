@@ -123,6 +123,53 @@ impl CallEngine {
         }
     }
     
+    /// Create a new call engine with a custom policy engine
+    pub fn new_with_policy(
+        config: CallEngineConfig,
+        transaction_manager: Arc<TransactionManager>,
+        custom_policy: Option<PolicyEngine>,
+    ) -> Self {
+        let event_bus = EventBus::new(1000); // Capacity for 1000 events
+        let registry = Arc::new(Registry::new());
+        
+        // Use the provided policy engine or create a default one
+        let policy = match custom_policy {
+            Some(p) => Arc::new(p),
+            None => Arc::new(PolicyEngine::new()),
+        };
+        
+        let session_config = SessionConfig {
+            local_signaling_addr: config.local_signaling_addr,
+            local_media_addr: config.local_media_addr,
+            display_name: None,
+            user_agent: config.user_agent.clone(),
+            max_duration: 0,
+            supported_codecs: vec![
+                AudioCodecType::PCMU,
+                AudioCodecType::PCMA,
+            ],
+        };
+        
+        // Changed order of parameters to match SessionManager::new
+        let session_manager = Arc::new(SessionManager::new(
+            transaction_manager.clone(),
+            session_config,
+            event_bus.clone()
+        ));
+        
+        let router = RwLock::new(Router::new(registry.clone()));
+        
+        Self {
+            config,
+            session_manager,
+            transaction_manager,
+            router,
+            policy,
+            registry,
+            event_bus,
+        }
+    }
+    
     /// Initialize the call engine
     pub async fn initialize(&self) -> Result<(), Error> {
         // Start session cleanup task
@@ -467,8 +514,13 @@ impl CallEngine {
     }
     
     /// Get policy engine
-    pub fn policy(&self) -> Arc<PolicyEngine> {
-        self.policy.clone()
+    pub fn policy(&self) -> &Arc<PolicyEngine> {
+        &self.policy
+    }
+    
+    /// Set a new policy engine
+    pub fn set_policy(&mut self, policy: Arc<PolicyEngine>) {
+        self.policy = policy;
     }
     
     /// Get event bus
