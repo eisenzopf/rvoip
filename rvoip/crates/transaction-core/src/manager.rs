@@ -81,6 +81,8 @@ pub struct TransactionManager {
     server_transactions: Arc<Mutex<HashMap<String, BoxedServerTransaction>>>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
+    /// Additional event senders for subscribers
+    event_subscribers: Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     /// Transport event receiver
     transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
     /// Is the manager running
@@ -102,6 +104,7 @@ impl TransactionManager {
             client_transactions: Arc::new(Mutex::new(HashMap::new())),
             server_transactions: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
+            event_subscribers: Arc::new(Mutex::new(Vec::new())),
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             running: Arc::new(Mutex::new(true)),
         };
@@ -121,6 +124,7 @@ impl TransactionManager {
         let server_transactions = self.server_transactions.clone();
         let events_tx = self.events_tx.clone();
         let transport_rx = self.transport_rx.clone();
+        let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
         
         tokio::spawn(async move {
@@ -151,7 +155,8 @@ impl TransactionManager {
                                     destination,
                                     &transport,
                                     &server_transactions,
-                                    &events_tx
+                                    &events_tx,
+                                    &event_subscribers
                                 ).await.is_err() {
                                     error!("Failed to process request from {}", source);
                                 }
@@ -162,7 +167,8 @@ impl TransactionManager {
                                     response, 
                                     source, 
                                     &client_transactions,
-                                    &events_tx
+                                    &events_tx,
+                                    &event_subscribers
                                 ).await.is_err() {
                                     error!("Failed to process response from {}", source);
                                 }
@@ -173,12 +179,28 @@ impl TransactionManager {
                         warn!("Transport error: {}", error);
                         
                         // Forward error to application
-                        if let Err(e) = events_tx.send(TransactionEvent::Error {
+                        let event = TransactionEvent::Error {
                             error: error.clone(),
                             transaction_id: None,
-                        }).await {
+                        };
+                        
+                        // Send to primary channel
+                        if let Err(e) = events_tx.send(event.clone()).await {
                             error!("Failed to send error event: {}", e);
                         }
+                        
+                        // Send to all subscribers
+                        let mut subscribers = event_subscribers.lock().await.clone();
+                        subscribers.retain(|tx| !tx.is_closed());
+                        
+                        for tx in &subscribers {
+                            if let Err(e) = tx.send(event.clone()).await {
+                                error!("Failed to send error event to subscriber: {}", e);
+                            }
+                        }
+                        
+                        // Update the subscribers list
+                        *event_subscribers.lock().await = subscribers;
                     },
                     TransportEvent::Closed => {
                         info!("Transport closed");
@@ -215,7 +237,7 @@ impl TransactionManager {
                     
                     // Find transactions with expired timers
                     for (id, tx) in client_txs.iter_mut() {
-                        if let Some(duration) = tx.timeout_duration() {
+                        if let Some(_duration) = tx.timeout_duration() {
                             // Fire timer event
                             match tx.on_timeout().await {
                                 Ok(Some(message)) => {
@@ -271,7 +293,7 @@ impl TransactionManager {
                     
                     // Find transactions with expired timers
                     for (id, tx) in server_txs.iter_mut() {
-                        if let Some(duration) = tx.timeout_duration() {
+                        if let Some(_duration) = tx.timeout_duration() {
                             // Fire timer event
                             if let Err(e) = tx.on_timeout().await {
                                 error!("Error in server transaction timeout: {}", e);
@@ -320,6 +342,7 @@ impl TransactionManager {
         transport: &Arc<dyn Transport>,
         server_transactions: &Arc<Mutex<HashMap<String, BoxedServerTransaction>>>,
         events_tx: &mpsc::Sender<TransactionEvent>,
+        event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     ) -> Result<()> {
         // Check for existing transaction
         let mut transactions = server_transactions.lock().await;
@@ -385,15 +408,31 @@ impl TransactionManager {
         transactions.insert(transaction_id.clone(), tx);
         
         // Notify of transaction creation
-        events_tx.send(TransactionEvent::TransactionCreated {
+        let created_event = TransactionEvent::TransactionCreated {
             transaction_id: transaction_id.clone(),
-        }).await?;
+        };
+        
+        // Send to primary channel
+        events_tx.send(created_event.clone()).await?;
+        
+        // Send to subscribers
+        for tx in &*event_subscribers.lock().await {
+            tx.send(created_event.clone()).await.ok(); // Ignore errors
+        }
         
         // Forward message to application for processing
-        events_tx.send(TransactionEvent::UnmatchedMessage {
+        let unmatched_event = TransactionEvent::UnmatchedMessage {
             message: message.clone(),
             source,
-        }).await?;
+        };
+        
+        // Send to primary channel
+        events_tx.send(unmatched_event.clone()).await?;
+        
+        // Send to subscribers
+        for tx in &*event_subscribers.lock().await {
+            tx.send(unmatched_event.clone()).await.ok(); // Ignore errors
+        }
         
         Ok(())
     }
@@ -405,6 +444,7 @@ impl TransactionManager {
         source: SocketAddr,
         client_transactions: &Arc<Mutex<HashMap<String, BoxedClientTransaction>>>,
         events_tx: &mpsc::Sender<TransactionEvent>,
+        event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     ) -> Result<()> {
         // Try to match with existing transaction
         let mut transactions = client_transactions.lock().await;
@@ -414,13 +454,25 @@ impl TransactionManager {
                 debug!("[{}] Found matching client transaction", tx.id());
                 tx.process_message(message.clone()).await?;
                 
-                // Special handling for completed transactions
-                if tx.is_completed() {
-                    // Forward completion event with final response
-                    events_tx.send(TransactionEvent::TransactionCompleted {
+                // For any final response, emit the completion event
+                // This ensures the application is always notified of responses
+                if response.status.is_success() || response.status.is_error() {
+                    debug!("[{}] Got final response ({}), emitting TransactionCompleted event", 
+                           tx.id(), response.status);
+                    
+                    // Create completion event
+                    let completed_event = TransactionEvent::TransactionCompleted {
                         transaction_id: tx.id().to_string(),
-                        response: tx.last_response().cloned(),
-                    }).await?;
+                        response: Some(response.clone()),
+                    };
+                    
+                    // Send to primary channel
+                    events_tx.send(completed_event.clone()).await?;
+                    
+                    // Send to subscribers
+                    for tx in &*event_subscribers.lock().await {
+                        tx.send(completed_event.clone()).await.ok(); // Ignore errors
+                    }
                 }
                 
                 // Message was handled by existing transaction
@@ -594,5 +646,23 @@ impl TransactionManager {
         self.server_transactions.lock().await.clear();
         
         debug!("Transaction manager shutdown");
+    }
+    
+    /// Subscribe to transaction events
+    /// Returns a new receiver that will receive a copy of all transaction events
+    pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
+        // Create a new channel for events
+        let (tx, rx) = mpsc::channel(100);
+        
+        // Add the sender to our list of subscribers
+        tokio::spawn({
+            let event_subscribers = self.event_subscribers.clone();
+            let tx = tx.clone();
+            async move {
+                event_subscribers.lock().await.push(tx);
+            }
+        });
+        
+        rx
     }
 } 

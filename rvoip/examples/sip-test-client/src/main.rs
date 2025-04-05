@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::signal::ctrl_c;
 use tracing::{info, debug, error, warn};
 use uuid::Uuid;
+use bytes::Bytes;
 
 // Rust converts "-" to "_" when importing crates
 use rvoip_sip_core as _;
@@ -30,13 +31,15 @@ mod user_agent;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Operating mode. Use:
+    /// - 'ua' to run as a User Agent that listens for incoming calls
+    /// - 'call' to make an outgoing call to a target
+    #[arg(short, long, default_value = "ua")]
+    mode: String,
+    
     /// Local address to bind to
     #[arg(short, long, default_value = "127.0.0.1:5070")]
     local_addr: String,
-    
-    /// Server address to send requests to
-    #[arg(short, long, default_value = "127.0.0.1:5060")]
-    server_addr: String,
     
     /// Client username
     #[arg(short, long, default_value = "alice")]
@@ -46,11 +49,12 @@ struct Args {
     #[arg(short, long, default_value = "rvoip.local")]
     domain: String,
     
-    /// Test mode (register, call, ua)
-    #[arg(short, long, default_value = "register")]
-    mode: String,
+    /// Remote address to send requests to (only needed in 'call' mode)
+    #[arg(short, long, default_value = "127.0.0.1:5060")]
+    server_addr: String,
     
-    /// Target URI for call mode
+    /// Target URI for call mode (only needed in 'call' mode)
+    /// Example: sip:bob@rvoip.local
     #[arg(short, long)]
     target_uri: Option<String>,
 }
@@ -72,7 +76,7 @@ struct SipClient {
     /// Transaction manager
     transaction_manager: Arc<TransactionManager>,
     
-    /// Events channel
+    /// Events channel receiver
     events_rx: mpsc::Receiver<TransactionEvent>,
     
     /// Call-ID for this session
@@ -86,23 +90,28 @@ struct SipClient {
     
     /// Pending transaction responses
     pending_responses: Arc<tokio::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Response>>>>,
+    
+    /// Is the event processor running
+    event_processor_running: Arc<tokio::sync::Mutex<bool>>,
 }
 
-// We'll implement Clone by cloning everything except the events_rx
 impl Clone for SipClient {
     fn clone(&self) -> Self {
+        // Use the new subscribe method to get a new events_rx
+        let events_rx = self.transaction_manager.subscribe();
+        
         Self {
             local_addr: self.local_addr,
             server_addr: self.server_addr,
             username: self.username.clone(),
             domain: self.domain.clone(),
             transaction_manager: self.transaction_manager.clone(),
-            // Create an empty channel for the clone - the original will handle events
-            events_rx: mpsc::channel(1).1,
+            events_rx,
             call_id: self.call_id.clone(),
             tag: self.tag.clone(),
             cseq: self.cseq,
             pending_responses: self.pending_responses.clone(),
+            event_processor_running: self.event_processor_running.clone(),
         }
     }
 }
@@ -153,6 +162,7 @@ impl SipClient {
             tag,
             cseq: 1,
             pending_responses,
+            event_processor_running: Arc::new(tokio::sync::Mutex::new(true)),
         })
     }
     
@@ -161,55 +171,39 @@ impl SipClient {
         format!("z9hG4bK-{}", Uuid::new_v4())
     }
     
-    /// Create a basic SIP request
-    fn create_request(&mut self, method: Method, request_uri: Uri) -> Request {
-        // Clone the URI first since we'll use it multiple times
-        let uri_clone = request_uri.clone();
-        let mut request = Request::new(method.clone(), request_uri);
+    /// Create a new request
+    fn create_request(&self, method: Method, uri: Uri) -> Request {
+        let method_clone = method.clone();
+        let mut request = Request::new(method, uri.clone());
         
-        // Add Via header
-        let via_value = format!("SIP/2.0/UDP {};branch={}", self.local_addr, self.new_branch());
+        // Add Via header with branch parameter
+        let branch = format!("z9hG4bK-{}", Uuid::new_v4());
+        let via_value = format!("SIP/2.0/UDP {};branch={}", self.local_addr, branch);
         request.headers.push(Header::text(HeaderName::Via, via_value));
         
         // Add Max-Forwards
-        request.headers.push(Header::text(HeaderName::MaxForwards, "70"));
+        request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
         
-        // Add From header
-        let from_value = format!("<sip:{}@{}>", self.username, self.domain);
-        let from_value_with_tag = format!("{};tag={}", from_value, self.tag);
-        request.headers.push(Header::text(HeaderName::From, from_value_with_tag));
+        // Add From header with tag
+        let from_value = format!("<sip:{}@{}>;tag={}", self.username, self.domain, self.tag);
+        request.headers.push(Header::text(HeaderName::From, from_value));
         
-        // Add To header (no tag for initial requests)
-        let to_value = if method == Method::Register {
-            // For REGISTER, To = From (no tag)
-            from_value
-        } else {
-            // For other methods, To = target URI
-            format!("<{}>", uri_clone)
-        };
+        // Add To header
+        let to_value = format!("<{}>", uri);
         request.headers.push(Header::text(HeaderName::To, to_value));
         
         // Add Call-ID
-        request.headers.push(Header::text(HeaderName::CallId, &self.call_id));
+        request.headers.push(Header::text(HeaderName::CallId, self.call_id.clone()));
         
         // Add CSeq
-        request.headers.push(Header::text(
-            HeaderName::CSeq, 
-            format!("{} {}", self.cseq, method)
-        ));
+        request.headers.push(Header::text(HeaderName::CSeq, format!("{} {}", self.cseq, method_clone)));
         
-        // Increment CSeq for next request
-        self.cseq += 1;
-        
-        // Add Contact header with local address
+        // Add Contact
         let contact_value = format!("<sip:{}@{}>", self.username, self.local_addr);
         request.headers.push(Header::text(HeaderName::Contact, contact_value));
         
         // Add User-Agent
-        request.headers.push(Header::text(
-            HeaderName::UserAgent,
-            "RVOIP-Test-Client/0.1.0"
-        ));
+        request.headers.push(Header::text(HeaderName::UserAgent, "RVOIP-Test-Client/0.1.0"));
         
         request
     }
@@ -401,106 +395,41 @@ impl SipClient {
         Ok(())
     }
     
-    /// Send a request and wait for the response
-    async fn send_request(&self, request: Request) -> Result<Response> {
-        // Create a copy of the request details for matching the response
-        let method = request.method.clone();
-        let call_id = request.call_id().unwrap_or_default();
-        
-        info!("Sending {} request to {} with Call-ID: {}", method, self.server_addr, call_id);
-        
-        // Create a channel for this specific request
-        let (response_tx, response_rx) = oneshot::channel::<Response>();
-        
-        // Clone everything needed for the task
-        let transaction_manager = self.transaction_manager.clone();
-        let server_addr = self.server_addr;
-        let pending_responses = self.pending_responses.clone();
-        
-        // Create the transaction based on method type
-        let transaction_id = if method == Method::Invite {
-            transaction_manager.create_client_invite_transaction(
-                request.clone(),
-                server_addr,
-            ).await.context("Failed to create client INVITE transaction")?
-        } else {
-            transaction_manager.create_client_non_invite_transaction(
-                request.clone(),
-                server_addr,
-            ).await.context("Failed to create client non-INVITE transaction")?
-        };
-        
-        info!("Created transaction: {}", transaction_id);
-        debug!("Adding transaction {} to pending_responses", transaction_id);
-        
-        // Store the response channel with the transaction ID as the key
-        {
-            let mut pending = pending_responses.lock().await;
-            pending.insert(transaction_id.clone(), response_tx);
-            debug!("Current pending transactions: {:?}", pending.keys().collect::<Vec<_>>());
-        }
-        
-        // Clone transaction ID for later use outside the task
-        let transaction_id_for_timeout = transaction_id.clone();
-        let pending_responses_for_timeout = pending_responses.clone();
-        
-        // Start a task to send the request
-        let send_task = tokio::spawn(async move {
-            // Send the request through the transaction manager
-            if let Err(e) = transaction_manager.send_request(&transaction_id).await {
-                error!("Failed to send request: {}", e);
-                // Remove the channel on error
-                pending_responses.lock().await.remove(&transaction_id);
-                return;
-            }
-            
-            info!("Request sent through transaction: {}", transaction_id);
-        });
-        
-        // Wait for the task to complete
-        if let Err(e) = send_task.await {
-            error!("Error in send task: {}", e);
-        }
-        
-        // Wait for the response with a timeout
-        let response = match tokio::time::timeout(Duration::from_secs(10), response_rx).await {
-            Ok(result) => {
-                match result {
-                    Ok(response) => response,
-                    Err(_) => {
-                        warn!("Response channel was closed");
-                        let mut resp = Response::new(StatusCode::RequestTimeout);
-                        resp.headers.push(Header::text(HeaderName::CallId, call_id));
-                        resp.headers.push(Header::text(HeaderName::CSeq, format!("1 {}", method)));
-                        resp
-                    }
-                }
-            },
-            Err(_) => {
-                // Timeout occurred
-                warn!("Timeout waiting for response to {}", method);
-                // Clean up the channel on timeout
-                pending_responses_for_timeout.lock().await.remove(&transaction_id_for_timeout);
-                
-                let mut resp = Response::new(StatusCode::RequestTimeout);
-                resp.headers.push(Header::text(HeaderName::CallId, call_id));
-                resp.headers.push(Header::text(HeaderName::CSeq, format!("1 {}", method)));
-                resp
-            }
-        };
-        
-        info!("Received {} response for {}", response.status, method);
-        
-        Ok(response)
-    }
-    
     /// Process transaction events
     async fn process_events(&mut self) -> Result<()> {
         info!("Starting event processing for SIP client on {}", self.local_addr);
         debug!("Pending response channels map initialized, will track transaction completions");
         
-        while let Some(event) = self.events_rx.recv().await {
-            // Debug print all events
+        // Set the event processor as running
+        *self.event_processor_running.lock().await = true;
+        
+        // Process events from our channel
+        info!("Listening for transaction events...");
+        loop {
+            // Check if we're asked to stop
+            if !*self.event_processor_running.lock().await {
+                info!("Event processor stopping due to external request");
+                break;
+            }
+            
+            // Wait for the next event with a timeout to allow checking if we should stop
+            let event = tokio::select! {
+                event = self.events_rx.recv() => {
+                    match event {
+                        Some(e) => e,
+                        None => {
+                            // Channel closed, but this shouldn't happen unless TransactionManager is dropped
+                            warn!("Transaction event channel closed, stopping event processor");
+                            break;
+                        }
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Timeout - just check running state again
+                    continue;
+                }
+            };
+            
             debug!("Received transaction event: {:?}", event);
             
             match event {
@@ -508,7 +437,7 @@ impl SipClient {
                     debug!("Transaction created: {}", transaction_id);
                 },
                 TransactionEvent::TransactionCompleted { transaction_id, response } => {
-                    info!("Transaction completed: {} with response: {:?}", 
+                    warn!("Transaction completed: {} with response: {:?}", 
                           transaction_id, response.as_ref().map(|r| r.status));
                     
                     // Dump contents of pending_responses
@@ -516,18 +445,34 @@ impl SipClient {
                     let pending_keys = pending.keys().cloned().collect::<Vec<_>>();
                     debug!("Current pending transactions: {:?}", pending_keys);
                     
-                    if let Some(resp) = response.clone() {
-                        info!("Transaction completed: {}, response: {:?}", transaction_id, resp.status);
+                    if let Some(resp) = response {
+                        warn!("Delivering response for transaction {}, status: {}", 
+                             transaction_id, resp.status);
                         
                         // Check if we have a pending channel for this transaction
                         if let Some(tx) = pending.remove(&transaction_id) {
-                            info!("Found channel for transaction {}, sending response", transaction_id);
-                            let _ = tx.send(resp);
+                            warn!("Found channel for transaction {}, sending response", transaction_id);
+                            match tx.send(resp) {
+                                Ok(_) => debug!("Response sent to waiting request handler"),
+                                Err(e) => error!("Failed to send response: {:?}", e),
+                            }
                         } else {
-                            debug!("No channel found for transaction {}", transaction_id);
+                            warn!("No waiting channel found for transaction: {}", transaction_id);
                         }
                     } else {
-                        info!("Transaction completed: {}, no response", transaction_id);
+                        warn!("Transaction {} completed with no response", transaction_id);
+                        
+                        // Check if we have a pending channel for this transaction
+                        if let Some(tx) = pending.remove(&transaction_id) {
+                            let mut timeout_response = Response::new(StatusCode::RequestTimeout);
+                            timeout_response.headers.push(Header::text(HeaderName::CallId, self.call_id.clone()));
+                            timeout_response.headers.push(Header::text(HeaderName::CSeq, format!("{} {}", self.cseq, Method::Invite)));
+                            
+                            warn!("Sending timeout response for transaction {}", transaction_id);
+                            if let Err(e) = tx.send(timeout_response) {
+                                error!("Failed to send timeout response: {:?}", e);
+                            }
+                        }
                     }
                 },
                 TransactionEvent::TransactionTerminated { transaction_id } => {
@@ -561,18 +506,15 @@ impl SipClient {
                         Message::Response(response) => {
                             info!("Received unmatched response: {} from {}", response.status, source);
                             
-                            // Extract important headers for debugging
-                            let call_id = response.header(&HeaderName::CallId)
-                                .and_then(|h| h.value.as_text())
-                                .unwrap_or("unknown");
-                            let from = response.header(&HeaderName::From)
-                                .and_then(|h| h.value.as_text())
-                                .unwrap_or("unknown");
-                            let to = response.header(&HeaderName::To)
-                                .and_then(|h| h.value.as_text())
-                                .unwrap_or("unknown");
+                            // This could be a late response where transaction was already removed
+                            // Check if we can find a matching channel based on headers
+                            if let Some(call_id) = response.header(&HeaderName::CallId)
+                                .and_then(|h| h.value.as_text()) {
                                 
-                            info!("Response details - Call-ID: {}, From: {}, To: {}", call_id, from, to);
+                                // For now we just log; in a real client we would try to match
+                                // this response to an ongoing dialog
+                                info!("Unmatched response for Call-ID: {}", call_id);
+                            }
                         }
                     }
                 },
@@ -588,6 +530,10 @@ impl SipClient {
                 },
             }
         }
+        
+        // Set the event processor as not running
+        *self.event_processor_running.lock().await = false;
+        info!("Event processor stopped");
         
         Ok(())
     }
@@ -800,6 +746,87 @@ impl SipClient {
         info!("Connectivity test completed");
         Ok(())
     }
+
+    /// Send a request and wait for the response
+    async fn send_request(&self, request: Request) -> Result<Response> {
+        // Create a copy of the request details for matching the response
+        let method = request.method.clone();
+        let call_id = request.call_id().unwrap_or_default();
+        
+        info!("Sending {} request to {} with Call-ID: {}", method, self.server_addr, call_id);
+        
+        // Create a channel for this specific request
+        let (response_tx, response_rx) = oneshot::channel::<Response>();
+        
+        // Create transaction based on the method
+        let transaction_id = if method == Method::Invite {
+            self.transaction_manager.create_client_invite_transaction(
+                request.clone(),
+                self.server_addr,
+            ).await.context("Failed to create INVITE transaction")?
+        } else {
+            self.transaction_manager.create_client_non_invite_transaction(
+                request.clone(),
+                self.server_addr,
+            ).await.context("Failed to create non-INVITE transaction")?
+        };
+        
+        // Store the response channel
+        {
+            let mut pending = self.pending_responses.lock().await;
+            debug!("Adding transaction {} to pending_responses", transaction_id);
+            pending.insert(transaction_id.clone(), response_tx);
+            
+            // Debug print pending transactions
+            let pending_keys = pending.keys().cloned().collect::<Vec<_>>();
+            debug!("Current pending transactions: {:?}", pending_keys);
+        }
+        
+        // Send the request
+        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
+            error!("Failed to send request through transaction: {}", e);
+            return Err(anyhow!("Failed to send request: {}", e));
+        }
+        
+        info!("Request sent through transaction: {}", transaction_id);
+        
+        // Wait for the response with a timeout
+        // Increase timeout from 10s to 30s to avoid racing with event processor
+        let timeout = tokio::time::sleep(Duration::from_secs(30));
+        
+        tokio::select! {
+            response = response_rx => {
+                match response {
+                    Ok(resp) => {
+                        info!("Received response to {} request: {}", method, resp.status);
+                        Ok(resp)
+                    },
+                    Err(e) => {
+                        error!("Response channel error: {}", e);
+                        Err(anyhow!("Response channel error: {}", e))
+                    }
+                }
+            },
+            _ = timeout => {
+                warn!("Timeout waiting for response to {}", method);
+                
+                // Attempt to remove the pending sender on timeout
+                {
+                    let mut pending = self.pending_responses.lock().await;
+                    if pending.remove(&transaction_id).is_some() {
+                        debug!("Removed pending response sender for {} due to timeout", transaction_id);
+                    }
+                }
+                
+                // Create a timeout response
+                let mut timeout_response = Response::new(StatusCode::RequestTimeout);
+                timeout_response.headers.push(Header::text(HeaderName::CallId, call_id));
+                timeout_response.headers.push(Header::text(HeaderName::CSeq, format!("{} {}", self.cseq, method)));
+                
+                Ok(timeout_response)
+            }
+        }
+    }
 }
 
 /// Helper to parse authentication parameters from WWW-Authenticate header
@@ -821,6 +848,9 @@ async fn run_client(args: Args) -> Result<()> {
     let server_addr: SocketAddr = args.server_addr.parse()
         .context("Invalid server address format")?;
     
+    // Get values we'll need multiple times
+    let username = args.username.clone();
+    
     // Create SIP client
     let mut client = SipClient::new(
         local_addr,
@@ -830,44 +860,116 @@ async fn run_client(args: Args) -> Result<()> {
     ).await?;
     
     // Start event processing in background
-    let mut client_clone = client.clone();
-    let event_handle = tokio::spawn(async move {
-        client_clone.process_events().await
+    let event_processor_running = client.event_processor_running.clone();
+    let client_for_events = client.clone();
+    let event_task = tokio::spawn(async move {
+        let mut client = client_for_events;
+        if let Err(e) = client.process_events().await {
+            error!("Event processing error: {}", e);
+        }
+        *event_processor_running.lock().await = false;
     });
     
-    // Wait a moment for event processing to start
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Parse the target URI
+    let target_uri = args.target_uri.as_deref().unwrap_or("sip:bob@rvoip.local");
+    info!("Calling target: {}", target_uri);
     
-    // Test network connectivity
-    info!("Testing network connectivity...");
-    if let Err(e) = client.test_connectivity().await {
-        warn!("Network connectivity test failed: {}", e);
-        info!("The client may not be able to receive messages. Continuing anyway...");
-    }
+    // Create INVITE request
+    let mut request = client.create_request(Method::Invite, target_uri.parse()?);
     
-    // Run the requested test mode
-    match args.mode.as_str() {
-        "register" => {
-            client.register().await?;
-        },
-        "call" => {
-            if let Some(target_uri) = args.target_uri {
-                client.make_call(&target_uri).await?;
+    // Add SDP to the request
+    let sdp = format!(
+        "v=0\r\n\
+         o={} 123456 789012 IN IP4 {}\r\n\
+         s=Call\r\n\
+         c=IN IP4 {}\r\n\
+         t=0 0\r\n\
+         m=audio 10000 RTP/AVP 0\r\n\
+         a=rtpmap:0 PCMU/8000\r\n\
+         a=sendrecv",
+        username,
+        local_addr.ip(),
+        local_addr.ip()
+    );
+    
+    // Convert the SDP body to Bytes
+    request.body = Bytes::from(sdp);
+    
+    request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
+    request.headers.push(Header::integer(HeaderName::ContentLength, request.body.len() as i64));
+    
+    // Send the request and wait for the response
+    match client.send_request(request).await {
+        Ok(response) => {
+            if response.status == StatusCode::Ok {
+                info!("Call established: {}", response.status);
+                
+                // Extract the To header with tag from the response
+                let to_header = response.headers.iter()
+                    .find(|h| h.name == HeaderName::To)
+                    .ok_or_else(|| anyhow!("Missing To header in 200 OK"))?;
+                
+                let to_text = to_header.value.as_text()
+                    .ok_or_else(|| anyhow!("Invalid To header format"))?;
+                
+                // Send ACK to complete the three-way handshake
+                info!("Sending ACK to acknowledge 200 OK");
+                let mut ack_request = client.create_request(Method::Ack, target_uri.parse()?);
+                
+                // For ACK after 2xx to INVITE, use the same CSeq number but method ACK
+                ack_request.headers.iter_mut()
+                    .find(|h| h.name == HeaderName::CSeq)
+                    .map(|h| h.value = HeaderValue::Text(format!("{} ACK", client.cseq - 1)));
+                
+                // Use the To header with tag from the 200 OK
+                ack_request.headers.iter_mut()
+                    .find(|h| h.name == HeaderName::To)
+                    .map(|h| h.value = HeaderValue::Text(to_text.to_string()));
+                
+                // Add Content-Length: 0
+                ack_request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+                
+                // Send ACK directly (ACK is end-to-end for 2xx responses)
+                info!("Sending ACK to {}", client.server_addr);
+                let message = Message::Request(ack_request);
+                client.transaction_manager.transport().send_message(message, client.server_addr).await
+                    .context("Failed to send ACK")?;
+                
+                // Wait for Ctrl+C to terminate the call
+                info!("Call established! Press Ctrl+C to end the call");
+                ctrl_c().await.context("Failed to listen for Ctrl+C")?;
+                
+                info!("Terminating call by sending BYE");
+                
+                // Send BYE to terminate the call
+                let mut bye_request = client.create_request(Method::Bye, target_uri.parse()?);
+                
+                // Use the To header with tag from the 200 OK
+                bye_request.headers.iter_mut()
+                    .find(|h| h.name == HeaderName::To)
+                    .map(|h| h.value = HeaderValue::Text(to_text.to_string()));
+                
+                // Add Content-Length: 0
+                bye_request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+                
+                // Send BYE and wait for response
+                let bye_response = client.send_request(bye_request).await?;
+                if bye_response.status == StatusCode::Ok {
+                    info!("Call ended successfully");
+                } else {
+                    warn!("Unexpected response to BYE: {}", bye_response.status);
+                }
             } else {
-                return Err(anyhow!("Target URI is required for call mode"));
+                warn!("Call failed: {}", response);
             }
         },
-        _ => {
-            return Err(anyhow!("Unknown test mode: {}", args.mode));
+        Err(e) => {
+            error!("Failed to send INVITE: {}", e);
         }
     }
     
-    // Wait for shutdown signal
-    info!("Press Ctrl+C to exit");
-    ctrl_c().await.context("Failed to listen for ctrl+c signal")?;
-    
-    // Cancel event processing
-    event_handle.abort();
+    // Stop the event processing task
+    event_task.abort();
     
     Ok(())
 }
