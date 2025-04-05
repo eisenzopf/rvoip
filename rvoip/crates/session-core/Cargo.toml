@@ -25,6 +25,7 @@ bytes = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 dashmap = "5.5"
 parking_lot = "0.12"
+rand = "0.8"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

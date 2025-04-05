@@ -2,16 +2,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Result, Context};
 use tokio::signal::ctrl_c;
 use tracing::{info, debug, error, warn};
 use uuid::Uuid;
+use bytes::Bytes;
 
 // Rust converts "-" to "_" when importing crates
 use rvoip_sip_core as _;
 use rvoip_sip_transport as _;
 use rvoip_transaction_core as _;
 use rvoip_session_core as _;
+// Add RTP, media core, and session core imports
+use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpTimestamp, RtpPacket};
+use rvoip_rtp_core::session::RtpSessionEvent;
+use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate};
+use rvoip_media_core::codec::{G711Codec, G711Variant, Codec};
+use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
 
 // Now import the specific types
 use rvoip_sip_core::{
@@ -20,6 +27,33 @@ use rvoip_sip_core::{
 };
 use rvoip_sip_transport::UdpTransport;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+
+// Struct to track active calls
+#[derive(Default)]
+struct ActiveCalls {
+    calls: tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+impl ActiveCalls {
+    async fn add(&self, call_id: String, handle: tokio::task::JoinHandle<()>) {
+        let mut calls = self.calls.lock().await;
+        calls.insert(call_id, handle);
+    }
+    
+    async fn remove(&self, call_id: &str) {
+        let mut calls = self.calls.lock().await;
+        if let Some(handle) = calls.remove(call_id) {
+            handle.abort();
+        }
+    }
+    
+    async fn terminate_all(&self) {
+        let mut calls = self.calls.lock().await;
+        for (_, handle) in calls.drain() {
+            handle.abort();
+        }
+    }
+}
 
 /// Simple user agent that can respond to SIP requests
 pub struct UserAgent {
@@ -37,6 +71,9 @@ pub struct UserAgent {
     
     /// Event receiver
     events_rx: tokio::sync::mpsc::Receiver<TransactionEvent>,
+    
+    /// Active calls
+    active_calls: Arc<ActiveCalls>,
 }
 
 impl UserAgent {
@@ -70,6 +107,7 @@ impl UserAgent {
             domain,
             transaction_manager: Arc::new(transaction_manager),
             events_rx,
+            active_calls: Arc::new(ActiveCalls::default()),
         })
     }
     
@@ -178,7 +216,7 @@ impl UserAgent {
     }
     
     /// Handle an INVITE request
-    async fn handle_invite(&self, request: Request, _source: SocketAddr) -> Result<Option<Response>> {
+    async fn handle_invite(&self, request: Request, source: SocketAddr) -> Result<Option<Response>> {
         // Extract Call-ID for tracking
         let call_id = request.call_id().unwrap_or("unknown");
         
@@ -186,6 +224,22 @@ impl UserAgent {
         let tag = format!("tag-{}", Uuid::new_v4());
         
         info!("Processing INVITE for call {}", call_id);
+        
+        // Extract remote RTP port from SDP
+        let remote_rtp_port = if !request.body.is_empty() {
+            extract_rtp_port_from_sdp(&request.body)
+        } else {
+            None
+        };
+        
+        if remote_rtp_port.is_none() {
+            warn!("Could not extract RTP port from INVITE SDP");
+        } else {
+            info!("Remote endpoint RTP port is {}", remote_rtp_port.unwrap());
+        }
+        
+        // Define our RTP port - Bob uses port 10002 for RTP
+        let local_rtp_port = 10002;
         
         // Create 200 OK response
         let mut response = Response::new(StatusCode::Ok);
@@ -208,18 +262,14 @@ impl UserAgent {
         let contact = format!("<sip:{}@{}>", self.username, self.local_addr);
         response.headers.push(Header::text(HeaderName::Contact, contact));
         
-        // Add SDP content
-        let sdp = format!(
-            "v=0\r\n\
-             o={} 654321 210987 IN IP4 {}\r\n\
-             s=Call\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio 10001 RTP/AVP 0\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=sendrecv\r\n",
-            self.username, self.local_addr.ip(), self.local_addr.ip()
+        // Create SDP answer using the abstraction
+        let sdp = SessionDescription::new_audio_call(
+            &self.username,
+            self.local_addr.ip(),
+            local_rtp_port
         );
+        
+        let sdp_str = sdp.to_string();
         
         // Add Content-Type
         response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
@@ -227,13 +277,123 @@ impl UserAgent {
         // Add Content-Length
         response.headers.push(Header::text(
             HeaderName::ContentLength, 
-            sdp.len().to_string()
+            sdp_str.len().to_string()
         ));
         
         // Add SDP body
-        response.body = sdp.into();
+        response.body = sdp_str.into();
         
         info!("Created OK response for INVITE with {} headers", response.headers.len());
+        
+        // If we have a remote RTP port, set up the RTP session
+        if let Some(remote_port) = remote_rtp_port {
+            let remote_ip = source.ip();
+            let remote_rtp_addr = SocketAddr::new(remote_ip, remote_port);
+            info!("Setting up RTP session with remote endpoint at {}", remote_rtp_addr);
+            
+            // Setup RTP session
+            let rtp_config = RtpSessionConfig {
+                local_addr: format!("{}:{}", self.local_addr.ip(), local_rtp_port).parse()?,
+                remote_addr: Some(remote_rtp_addr),
+                payload_type: 0, // PCMU
+                clock_rate: 8000,
+                ..Default::default()
+            };
+            
+            // Create the RTP session
+            match RtpSession::new(rtp_config).await {
+                Ok(mut rtp_session) => {
+                    info!("RTP session established on port {}", local_rtp_port);
+                    
+                    // Create channel for packet communication
+                    let (packet_tx, mut packet_rx) = tokio::sync::mpsc::channel::<RtpPacket>(100);
+                    
+                    // Clone call id for the task
+                    let call_id_clone = call_id.to_string();
+                    
+                    // Clone active calls reference
+                    let active_calls = self.active_calls.clone();
+                    
+                    // Start RTP handling task
+                    let handle = tokio::spawn(async move {
+                        // Create G.711 codec for sending
+                        let send_codec = G711Codec::new(G711Variant::PCMU);
+                        let sample_interval = Duration::from_millis(20); // 20ms packets
+                        let samples_per_packet = 160; // 20ms of 8kHz audio
+                        
+                        // Generate a different tone (880 Hz) to distinguish from caller
+                        let test_tone = generate_sine_wave(880.0, samples_per_packet);
+                        let audio_format = AudioFormat::mono_16bit(SampleRate::Rate8000);
+                        
+                        // Start a separate task for receiving
+                        let recv_codec = G711Codec::new(G711Variant::PCMU);
+                        let _recv_task = tokio::spawn(async move {
+                            while let Some(packet) = packet_rx.recv().await {
+                                info!("Received RTP packet: seq={}, ts={}, len={}",
+                                    packet.header.sequence_number,
+                                    packet.header.timestamp,
+                                    packet.payload.len());
+                                
+                                // Decode audio
+                                match recv_codec.decode(&packet.payload) {
+                                    Ok(audio_buffer) => {
+                                        // In a real application, you would play this audio
+                                        debug!("Decoded audio: {} samples", audio_buffer.samples());
+                                        
+                                        // Here you would typically send to an audio output device
+                                        // play_audio(&audio_buffer);
+                                    },
+                                    Err(e) => error!("Failed to decode audio: {}", e),
+                                }
+                            }
+                        });
+                        
+                        // Main task handles sending and forwards received packets
+                        let mut timestamp: RtpTimestamp = 0;
+                        loop {
+                            // Create audio buffer with the test tone
+                            let audio_buffer = AudioBuffer::new(Bytes::from(test_tone.clone()), audio_format);
+                            
+                            // Encode and send
+                            match send_codec.encode(&audio_buffer) {
+                                Ok(encoded) => {
+                                    if let Err(e) = rtp_session.send_packet(timestamp, encoded, false).await {
+                                        error!("Failed to send RTP packet: {}", e);
+                                    } else {
+                                        debug!("Sent RTP packet");
+                                    }
+                                },
+                                Err(e) => error!("Failed to encode audio: {}", e),
+                            }
+                            
+                            // Check for received packets
+                            while let Ok(packet) = rtp_session.receive_packet().await {
+                                // Forward to receiver task
+                                if packet_tx.send(packet).await.is_err() {
+                                    error!("Failed to forward RTP packet to receiver task");
+                                    break;
+                                }
+                            }
+                            
+                            timestamp = timestamp.wrapping_add(samples_per_packet as u32);
+                            tokio::time::sleep(sample_interval).await;
+                        }
+                        
+                        // This code won't be reached but Rust needs it
+                        #[allow(unreachable_code)]
+                        {
+                            let _ = rtp_session.close().await;
+                        }
+                    });
+                    
+                    // Store the handle so we can terminate it when the call ends
+                    active_calls.add(call_id_clone, handle).await;
+                },
+                Err(e) => {
+                    error!("Failed to create RTP session: {}", e);
+                }
+            }
+        }
         
         Ok(Some(response))
     }
@@ -244,6 +404,9 @@ impl UserAgent {
         let call_id = request.call_id().unwrap_or("unknown");
         
         info!("Processing BYE for call {}", call_id);
+        
+        // Terminate the RTP session for this call
+        self.active_calls.remove(call_id).await;
         
         // Create 200 OK response
         let mut response = Response::new(StatusCode::Ok);
@@ -319,6 +482,7 @@ pub async fn run_user_agent(addr: &str, username: &str, domain: &str) -> Result<
     ).await?;
     
     // Process requests in background
+    let active_calls = user_agent.active_calls.clone();
     let handle = tokio::spawn(async move {
         if let Err(e) = user_agent.process_requests().await {
             error!("Error processing requests: {}", e);
@@ -329,8 +493,29 @@ pub async fn run_user_agent(addr: &str, username: &str, domain: &str) -> Result<
     ctrl_c().await.context("Failed to listen for ctrl+c signal")?;
     info!("Shutting down user agent...");
     
+    // Terminate all active calls
+    active_calls.terminate_all().await;
+    
     // Cancel the handle
     handle.abort();
     
     Ok(())
+}
+
+/// Generate a simple sine wave for testing
+fn generate_sine_wave(frequency: f32, num_samples: usize) -> Vec<u8> {
+    let mut pcm_data = Vec::with_capacity(num_samples * 2); // 16-bit samples = 2 bytes each
+    let sample_rate = 8000.0; // 8kHz
+    
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate;
+        let amplitude = 0.5; // 50% volume
+        let value = (amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin() * 32767.0) as i16;
+        
+        // Convert i16 to bytes (little endian)
+        pcm_data.push((value & 0xFF) as u8);
+        pcm_data.push(((value >> 8) & 0xFF) as u8);
+    }
+    
+    pcm_data
 } 

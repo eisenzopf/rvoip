@@ -11,6 +11,9 @@ rvoip-sip-core = { path = "../../crates/sip-core" }
 rvoip-sip-transport = { path = "../../crates/sip-transport" }
 rvoip-transaction-core = { path = "../../crates/transaction-core" }
 rvoip-session-core = { path = "../../crates/session-core" }
+# Add RTP and media support
+rvoip-rtp-core = { path = "../../crates/rtp-core" }
+rvoip-media-core = { path = "../../crates/media-core" }
 
 # Async runtime and utilities
 tokio = { version = "1.29", features = ["full"] }

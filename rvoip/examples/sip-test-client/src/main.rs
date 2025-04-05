@@ -15,6 +15,11 @@ use rvoip_sip_core as _;
 use rvoip_sip_transport as _;
 use rvoip_transaction_core as _;
 use rvoip_session_core as _;
+// Add RTP, media core, and session core imports
+use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpTimestamp, RtpPacket};
+use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate};
+use rvoip_media_core::codec::{G711Codec, G711Variant, Codec};
+use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
 
 // Now import the specific types we need
 use rvoip_sip_core::{
@@ -304,30 +309,24 @@ impl SipClient {
         // Create INVITE request
         let mut request = self.create_request(Method::Invite, request_uri.clone());
         
-        // Add SDP content
-        let sdp = format!(
-            "v=0\r\n\
-             o={} 123456 789012 IN IP4 {}\r\n\
-             s=Call\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio 10000 RTP/AVP 0\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=sendrecv\r\n",
-            self.username, self.local_addr.ip(), self.local_addr.ip()
+        // Define RTP ports - use single port for RTP
+        let local_rtp_port = 10000;   // Alice uses port 10000 for RTP
+        
+        // Use the SessionDescription abstraction to create SDP
+        let sdp = SessionDescription::new_audio_call(
+            &self.username,
+            self.local_addr.ip(),
+            local_rtp_port
         );
         
-        // Add Content-Type
+        // Convert the SDP to a string
+        let sdp_str = sdp.to_string();
+        
+        // Convert the SDP body to Bytes
+        request.body = Bytes::from(sdp_str);
+        
         request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
-        
-        // Add Content-Length
-        request.headers.push(Header::text(
-            HeaderName::ContentLength, 
-            sdp.len().to_string()
-        ));
-        
-        // Add SDP body
-        request.body = sdp.into();
+        request.headers.push(Header::integer(HeaderName::ContentLength, request.body.len() as i64));
         
         // Send INVITE and wait for response
         info!("Sending INVITE");
@@ -343,6 +342,17 @@ impl SipClient {
             
             let to_text = to_header.value.as_text()
                 .ok_or_else(|| anyhow!("Invalid To header format"))?;
+            
+            // Extract remote RTP port from SDP in response
+            let remote_rtp_port = extract_rtp_port_from_sdp(&invite_response.body)
+                .ok_or_else(|| anyhow!("Could not extract RTP port from SDP"))?;
+            
+            info!("Remote RTP port is {}", remote_rtp_port);
+            
+            // Get remote IP address from server address
+            let remote_ip = self.server_addr.ip();
+            let remote_rtp_addr = SocketAddr::new(remote_ip, remote_rtp_port);
+            info!("Will send RTP audio to {}", remote_rtp_addr);
             
             // Create ACK request
             let mut ack_request = self.create_request(Method::Ack, request_uri.clone());
@@ -365,8 +375,108 @@ impl SipClient {
             self.transaction_manager.transport().send_message(message, self.server_addr).await
                 .context("Failed to send ACK")?;
             
-            // Wait a bit before hanging up
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            // Setup RTP session - use the port we advertised
+            let rtp_config = RtpSessionConfig {
+                local_addr: format!("{}:{}", self.local_addr.ip(), local_rtp_port).parse()?,
+                remote_addr: Some(remote_rtp_addr),
+                payload_type: 0, // PCMU
+                clock_rate: 8000, // 8kHz
+                ..Default::default()
+            };
+            
+            // Create RTP session
+            let mut rtp_session = RtpSession::new(rtp_config).await?;
+            info!("RTP session established on port {}", local_rtp_port);
+            
+            // Create G.711 codec
+            let codec = G711Codec::new(G711Variant::PCMU);
+            
+            // Create an mpsc channel to communicate between the tasks
+            let (packet_tx, mut packet_rx) = tokio::sync::mpsc::channel::<RtpPacket>(100);
+            
+            // Start a thread for sending audio
+            let send_codec = codec.clone();
+            let remote_addr = remote_rtp_addr.clone();
+            let send_handle = tokio::spawn(async move {
+                // Take ownership of the RTP session
+                let mut send_session = rtp_session;
+                let mut timestamp: RtpTimestamp = 0;
+                let sample_interval = Duration::from_millis(20); // 20ms packets
+                let samples_per_packet = 160; // 20ms of 8kHz audio
+                
+                loop {
+                    // Generate audio (440 Hz tone)
+                    let pcm_data = generate_sine_wave(440.0, samples_per_packet);
+                    
+                    // Create audio buffer
+                    let audio_format = AudioFormat::mono_16bit(SampleRate::Rate8000);
+                    let audio_buffer = AudioBuffer::new(Bytes::from(pcm_data), audio_format);
+                    
+                    // Encode and send
+                    match send_codec.encode(&audio_buffer) {
+                        Ok(encoded) => {
+                            if let Err(e) = send_session.send_packet(timestamp, encoded, false).await {
+                                error!("Failed to send RTP packet: {}", e);
+                            } else {
+                                debug!("Sent RTP packet to {}", remote_addr);
+                            }
+                        },
+                        Err(e) => error!("Failed to encode audio: {}", e),
+                    }
+                    
+                    // Process any received packets
+                    while let Ok(packet) = send_session.receive_packet().await {
+                        // Forward the packet to the receiver task
+                        if packet_tx.send(packet).await.is_err() {
+                            error!("Failed to forward RTP packet to receiver task");
+                            break;
+                        }
+                    }
+                    
+                    timestamp = timestamp.wrapping_add(samples_per_packet as u32);
+                    tokio::time::sleep(sample_interval).await;
+                }
+            });
+            
+            // Start a thread for receiving audio
+            let recv_codec = G711Codec::new(G711Variant::PCMU);
+            let recv_handle = tokio::spawn(async move {
+                loop {
+                    // Get packets from the channel
+                    match packet_rx.recv().await {
+                        Some(packet) => {
+                            info!("Received RTP packet: seq={}, ts={}, len={}",
+                                 packet.header.sequence_number,
+                                 packet.header.timestamp,
+                                 packet.payload.len());
+                            
+                            // Decode the audio
+                            match recv_codec.decode(&packet.payload) {
+                                Ok(audio_buffer) => {
+                                    // In a real application, you would play this audio
+                                    debug!("Decoded audio: {} samples", audio_buffer.samples());
+                                },
+                                Err(e) => error!("Failed to decode audio: {}", e),
+                            }
+                        },
+                        None => {
+                            error!("Receiver channel closed");
+                            break;
+                        }
+                    }
+                }
+            });
+            
+            // Wait for user to end call
+            info!("Audio transmission established, press Ctrl+C to end call");
+            match tokio::time::timeout(Duration::from_secs(60), ctrl_c()).await {
+                Ok(_) => info!("User requested call end"),
+                Err(_) => info!("Call timeout reached"),
+            }
+            
+            // Stop audio tasks
+            send_handle.abort();
+            recv_handle.abort();
             
             // Send BYE to hang up
             info!("Hanging up, sending BYE");
@@ -594,18 +704,14 @@ impl SipClient {
                 
                 // Add SDP content if the request had an SDP body
                 if !request.body.is_empty() {
-                    // Create a simple SDP answer
-                    let sdp = format!(
-                        "v=0\r\n\
-                         o={} 123456 789012 IN IP4 {}\r\n\
-                         s=Call\r\n\
-                         c=IN IP4 {}\r\n\
-                         t=0 0\r\n\
-                         m=audio 10000 RTP/AVP 0\r\n\
-                         a=rtpmap:0 PCMU/8000\r\n\
-                         a=sendrecv\r\n",
-                        self.username, self.local_addr.ip(), self.local_addr.ip()
+                    // Create a simple SDP answer using the abstraction
+                    let sdp = SessionDescription::new_audio_call(
+                        &self.username,
+                        self.local_addr.ip(),
+                        10000
                     );
+                    
+                    let sdp_str = sdp.to_string();
                     
                     // Add Content-Type
                     response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
@@ -613,11 +719,11 @@ impl SipClient {
                     // Add Content-Length
                     response.headers.push(Header::text(
                         HeaderName::ContentLength, 
-                        sdp.len().to_string()
+                        sdp_str.len().to_string()
                     ));
                     
                     // Add SDP body
-                    response.body = sdp.into();
+                    response.body = sdp_str.into();
                 } else {
                     // No SDP body
                     response.headers.push(Header::text(HeaderName::ContentLength, "0"));
@@ -839,6 +945,24 @@ fn parse_auth_param(header: &str, param: &str) -> Option<String> {
     Some(header[start..(start + end)].to_string())
 }
 
+/// Generate a simple sine wave for testing
+fn generate_sine_wave(frequency: f32, num_samples: usize) -> Vec<u8> {
+    let mut pcm_data = Vec::with_capacity(num_samples * 2); // 16-bit samples = 2 bytes each
+    let sample_rate = 8000.0; // 8kHz
+    
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate;
+        let amplitude = 0.5; // 50% volume
+        let value = (amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin() * 32767.0) as i16;
+        
+        // Convert i16 to bytes (little endian)
+        pcm_data.push((value & 0xFF) as u8);
+        pcm_data.push(((value >> 8) & 0xFF) as u8);
+    }
+    
+    pcm_data
+}
+
 /// Run the SIP test client
 async fn run_client(args: Args) -> Result<()> {
     // Parse socket addresses
@@ -852,7 +976,7 @@ async fn run_client(args: Args) -> Result<()> {
     let username = args.username.clone();
     
     // Create SIP client
-    let mut client = SipClient::new(
+    let client = SipClient::new(
         local_addr,
         server_addr,
         args.username,
@@ -877,23 +1001,21 @@ async fn run_client(args: Args) -> Result<()> {
     // Create INVITE request
     let mut request = client.create_request(Method::Invite, target_uri.parse()?);
     
-    // Add SDP to the request
-    let sdp = format!(
-        "v=0\r\n\
-         o={} 123456 789012 IN IP4 {}\r\n\
-         s=Call\r\n\
-         c=IN IP4 {}\r\n\
-         t=0 0\r\n\
-         m=audio 10000 RTP/AVP 0\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=sendrecv",
-        username,
+    // Define RTP ports - use single port for RTP
+    let local_rtp_port = 10000;   // Alice uses port 10000 for RTP
+    
+    // Use the SessionDescription abstraction to create SDP
+    let sdp = SessionDescription::new_audio_call(
+        &username,
         local_addr.ip(),
-        local_addr.ip()
+        local_rtp_port
     );
     
+    // Convert the SDP to a string
+    let sdp_str = sdp.to_string();
+    
     // Convert the SDP body to Bytes
-    request.body = Bytes::from(sdp);
+    request.body = Bytes::from(sdp_str);
     
     request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
     request.headers.push(Header::integer(HeaderName::ContentLength, request.body.len() as i64));
@@ -911,6 +1033,109 @@ async fn run_client(args: Args) -> Result<()> {
                 
                 let to_text = to_header.value.as_text()
                     .ok_or_else(|| anyhow!("Invalid To header format"))?;
+                
+                // Extract remote RTP port from SDP in response
+                let remote_rtp_port = extract_rtp_port_from_sdp(&response.body)
+                    .ok_or_else(|| anyhow!("Could not extract RTP port from SDP"))?;
+                
+                info!("Remote RTP port is {}", remote_rtp_port);
+                
+                // Get remote IP address
+                let remote_ip = server_addr.ip();
+                let remote_rtp_addr = SocketAddr::new(remote_ip, remote_rtp_port);
+                info!("Will send RTP audio to {}", remote_rtp_addr);
+
+                // Setup RTP session BEFORE sending ACK - this is critical for proper connectivity
+                let rtp_config = RtpSessionConfig {
+                    local_addr: format!("{}:{}", local_addr.ip(), local_rtp_port).parse()?,
+                    remote_addr: Some(remote_rtp_addr),
+                    payload_type: 0, // PCMU
+                    clock_rate: 8000, // 8kHz
+                    ..Default::default()
+                };
+                
+                // Create RTP session
+                let mut rtp_session = RtpSession::new(rtp_config).await?;
+                info!("RTP session established on port {}", local_rtp_port);
+                
+                // Create G.711 codec
+                let codec = G711Codec::new(G711Variant::PCMU);
+                
+                // Create an mpsc channel to communicate between the tasks
+                let (packet_tx, mut packet_rx) = tokio::sync::mpsc::channel::<RtpPacket>(100);
+                
+                // Start a thread for sending audio
+                let send_codec = codec.clone();
+                let remote_addr = remote_rtp_addr.clone();
+                let send_handle = tokio::spawn(async move {
+                    // Take ownership of the RTP session
+                    let mut send_session = rtp_session;
+                    let mut timestamp: RtpTimestamp = 0;
+                    let sample_interval = Duration::from_millis(20); // 20ms packets
+                    let samples_per_packet = 160; // 20ms of 8kHz audio
+                    
+                    loop {
+                        // Generate audio (440 Hz tone)
+                        let pcm_data = generate_sine_wave(440.0, samples_per_packet);
+                        
+                        // Create audio buffer
+                        let audio_format = AudioFormat::mono_16bit(SampleRate::Rate8000);
+                        let audio_buffer = AudioBuffer::new(Bytes::from(pcm_data), audio_format);
+                        
+                        // Encode and send
+                        match send_codec.encode(&audio_buffer) {
+                            Ok(encoded) => {
+                                if let Err(e) = send_session.send_packet(timestamp, encoded, false).await {
+                                    error!("Failed to send RTP packet: {}", e);
+                                } else {
+                                    debug!("Sent RTP packet to {}", remote_addr);
+                                }
+                            },
+                            Err(e) => error!("Failed to encode audio: {}", e),
+                        }
+                        
+                        // Process any received packets
+                        while let Ok(packet) = send_session.receive_packet().await {
+                            // Forward the packet to the receiver task
+                            if packet_tx.send(packet).await.is_err() {
+                                error!("Failed to forward RTP packet to receiver task");
+                                break;
+                            }
+                        }
+                        
+                        timestamp = timestamp.wrapping_add(samples_per_packet as u32);
+                        tokio::time::sleep(sample_interval).await;
+                    }
+                });
+                
+                // Start a thread for receiving audio
+                let recv_codec = G711Codec::new(G711Variant::PCMU);
+                let recv_handle = tokio::spawn(async move {
+                    loop {
+                        // Get packets from the channel
+                        match packet_rx.recv().await {
+                            Some(packet) => {
+                                info!("Received RTP packet: seq={}, ts={}, len={}",
+                                     packet.header.sequence_number,
+                                     packet.header.timestamp,
+                                     packet.payload.len());
+                                
+                                // Decode the audio
+                                match recv_codec.decode(&packet.payload) {
+                                    Ok(audio_buffer) => {
+                                        // In a real application, you would play this audio
+                                        debug!("Decoded audio: {} samples", audio_buffer.samples());
+                                    },
+                                    Err(e) => error!("Failed to decode audio: {}", e),
+                                }
+                            },
+                            None => {
+                                error!("Receiver channel closed");
+                                break;
+                            }
+                        }
+                    }
+                });
                 
                 // Send ACK to complete the three-way handshake
                 info!("Sending ACK to acknowledge 200 OK");
@@ -938,6 +1163,10 @@ async fn run_client(args: Args) -> Result<()> {
                 // Wait for Ctrl+C to terminate the call
                 info!("Call established! Press Ctrl+C to end the call");
                 ctrl_c().await.context("Failed to listen for Ctrl+C")?;
+                
+                // Stop audio tasks
+                send_handle.abort();
+                recv_handle.abort();
                 
                 info!("Terminating call by sending BYE");
                 
