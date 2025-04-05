@@ -1,0 +1,33 @@
+[package]
+name = "rvoip-sip-client"
+version = "0.1.0"
+edition = "2021"
+description = "A client library for the RVOIP SIP stack"
+authors = ["rvoip team"]
+repository = "https://github.com/rudeless/rvoip"
+license = "MIT"
+
+[dependencies]
+# Core crates
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-session-core = { path = "../session-core" }
+rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-media-core = { path = "../media-core" }
+rvoip-call-engine = { path = "../call-engine" }
+
+# Async runtime and utilities
+tokio = { version = "1.29", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+uuid = { version = "1.4", features = ["v4"] }
+async-trait = "0.1"
+bytes = "1.4"
+md5 = "0.7"
+futures = "0.3"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+clap = { version = "4.3", features = ["derive"] } 

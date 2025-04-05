@@ -16,6 +16,7 @@ members = [
     "crates/media-core",
     "crates/session-core",
     "crates/call-engine",
+    "crates/sip-client",
     "examples/simple-softswitch",
     "examples/sip-message-test",
     "examples/rtp-loopback",
