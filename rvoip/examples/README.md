@@ -9,6 +9,7 @@ This directory contains examples demonstrating various features of the RVOIP lib
 - [rtp-g711](#rtp-g711) - G.711 codec implementation with RTP
 - [sip-message-test](#sip-message-test) - Test for SIP message types and transactions
 - [simple-softswitch](#simple-softswitch) - Basic softswitch implementation
+- [sip-test-client](#sip-test-client) - SIP client with audio RTP support
 
 ## Running the Examples
 
@@ -143,6 +144,50 @@ View available options:
 cd rvoip/examples/simple-softswitch
 cargo run -- --help
 ```
+
+### sip-test-client
+
+A practical SIP client implementation that demonstrates SIP signaling and RTP media exchange. It can function in two modes: as a user agent (UA) that receives calls or as a caller that initiates calls.
+
+#### Running as a User Agent (receiver):
+
+```bash
+cd rvoip/examples/sip-test-client
+cargo run -- --mode ua --username bob --local-addr 127.0.0.1:5071
+```
+
+#### Running as a Caller:
+
+```bash
+cd rvoip/examples/sip-test-client
+cargo run -- --mode call --username alice --local-addr 127.0.0.1:5070 --server-addr 127.0.0.1:5071 --target-uri sip:bob@rvoip.local
+```
+
+#### Running a complete demo with two clients:
+
+The example includes a shell script to start both sides of the call:
+
+```bash
+cd rvoip/examples/sip-test-client
+./simple_demo.sh
+```
+
+#### Features demonstrated:
+
+- Complete SIP signaling flow (INVITE, 200 OK, ACK, BYE)
+- Session Description Protocol (SDP) negotiation
+- RTP audio streaming with G.711 PCMU codec
+- DTMF generation using sine wave
+- Complete call lifecycle management
+
+#### Available Options:
+
+- `--mode <MODE>`: Operating mode (`ua` for User Agent or `call` for outgoing calls)
+- `--local-addr <ADDR>`: Local address to bind to (default: 127.0.0.1:5070)
+- `--username <NAME>`: Client username (default: alice)
+- `--domain <DOMAIN>`: Server domain (default: rvoip.local)
+- `--server-addr <ADDR>`: Remote address to send requests to (default: 127.0.0.1:5060)
+- `--target-uri <URI>`: Target URI for call mode (e.g., sip:bob@rvoip.local)
 
 ## Building the Examples
 
