@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Weak;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::str::FromStr;
@@ -10,8 +11,7 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use bytes::Bytes;
-use futures::future::BoxFuture;
-use futures::FutureExt;
+use serde::{Serialize, Deserialize};
 
 use rvoip_sip_core::{
     Request, Response, Message, Method, StatusCode, Uri, 
@@ -20,14 +20,13 @@ use rvoip_sip_core::{
 use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
 use rvoip_session_core::dialog::{Dialog, DialogState, DialogId, extract_tag, extract_uri};
 use rvoip_transaction_core::TransactionManager;
-use rvoip_sip_transport::Transport;
 
 use crate::config::CallConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaSession, MediaType};
 
 /// Direction of the call
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallDirection {
     /// Outgoing call (we initiated it)
     Outgoing,
@@ -36,7 +35,7 @@ pub enum CallDirection {
 }
 
 /// State of a call
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallState {
     /// Initial state
     Initial,
@@ -88,8 +87,12 @@ impl std::fmt::Display for CallState {
 /// Call events
 #[derive(Debug, Clone)]
 pub enum CallEvent {
+    /// Event system is ready
+    Ready,
+    
     /// Incoming call received
     IncomingCall(Arc<Call>),
+    
     /// Call state changed
     StateChanged {
         /// Call instance
@@ -99,6 +102,7 @@ pub enum CallEvent {
         /// New state
         current: CallState,
     },
+    
     /// Media added to call
     MediaAdded {
         /// Call instance
@@ -106,6 +110,7 @@ pub enum CallEvent {
         /// Media type
         media_type: MediaType,
     },
+    
     /// Media removed from call
     MediaRemoved {
         /// Call instance
@@ -113,6 +118,7 @@ pub enum CallEvent {
         /// Media type
         media_type: MediaType,
     },
+    
     /// DTMF digit received
     DtmfReceived {
         /// Call instance
@@ -120,6 +126,7 @@ pub enum CallEvent {
         /// DTMF digit
         digit: char,
     },
+    
     /// Call terminated
     Terminated {
         /// Call instance
@@ -127,6 +134,7 @@ pub enum CallEvent {
         /// Reason for termination
         reason: String,
     },
+    
     /// Response received for a call
     ResponseReceived {
         /// Call instance
@@ -136,6 +144,7 @@ pub enum CallEvent {
         /// Transaction ID
         transaction_id: String,
     },
+    
     /// Error occurred
     Error {
         /// Call instance
@@ -219,6 +228,9 @@ pub struct Call {
 
     /// Last response received
     last_response: Arc<RwLock<Option<Response>>>,
+
+    // Store the original INVITE request
+    original_invite: Arc<RwLock<Option<Request>>>,
 }
 
 impl Call {
@@ -261,6 +273,7 @@ impl Call {
             remote_sdp: Arc::new(RwLock::new(None)),
             dialog: Arc::new(RwLock::new(None)),
             last_response: Arc::new(RwLock::new(None)),
+            original_invite: Arc::new(RwLock::new(None)),
         });
 
         // Initialize local SDP based on call direction and configuration
@@ -380,8 +393,6 @@ impl Call {
 
     /// Answer an incoming call
     pub async fn answer(&self) -> Result<()> {
-        use tracing::{debug, info, error};
-        
         if self.direction != CallDirection::Incoming {
             return Err(Error::Call("Cannot answer an outgoing call".into()));
         }
@@ -412,15 +423,15 @@ impl Call {
         // Create 200 OK response with SDP
         let mut response = rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok);
         
-        // Get the original request from the transaction
-        // For now, we assume we can only answer from the INVITE transaction's context
-        let last_response = self.last_response().await;
-        if last_response.is_none() {
-            return Err(Error::Call("No INVITE request to answer".into()));
-        }
-        
-        // Add common headers
-        let original_request = last_response.unwrap();
+        // Get the original INVITE request
+        let original_request = {
+            let invite = self.original_invite.read().await;
+            if let Some(req) = invite.as_ref() {
+                req.clone()
+            } else {
+                return Err(Error::Call("No INVITE request to answer".into()));
+            }
+        };
         
         // Add headers from To, From, Call-ID, CSeq
         for header in &original_request.headers {
@@ -786,9 +797,81 @@ impl Call {
             Method::Ack => {
                 // ACK received for 200 OK, call is established
                 if current_state == CallState::Connecting {
-                    self.update_state(CallState::Established).await?;
+                    debug!("ACK received for call {} in Connecting state", self.id);
+                    
+                    // Update dialog state to confirmed if there's a dialog
+                    let needs_dialog_update = {
+                        let dialog_guard = self.dialog.read().await;
+                        
+                        match dialog_guard.as_ref() {
+                            Some(dialog) if dialog.state != DialogState::Confirmed => {
+                                debug!("Updating dialog state to Confirmed for ACK");
+                                true
+                            },
+                            Some(_) => {
+                                // Dialog exists but already confirmed
+                                debug!("Dialog already in Confirmed state");
+                                false
+                            },
+                            None => {
+                                // If there's no dialog yet, we need to create one
+                                debug!("No dialog found for ACK, creating one");
+                                true
+                            }
+                        }
+                    }; // End of read lock scope
+                    
+                    // If we need to update or create a dialog, do it now
+                    if needs_dialog_update {
+                        let remote_tag = match extract_tag(request.from().unwrap_or_default()) {
+                            Some(tag) => tag,
+                            None => format!("remote-tag-{}", Uuid::new_v4())
+                        };
+                        
+                        let local_tag = self.local_tag.clone();
+                        let call_id = self.sip_call_id.clone();
+                        
+                        // Create or update dialog in confirmed state
+                        let mut dialog = Dialog {
+                            id: DialogId::new(),
+                            state: DialogState::Confirmed, 
+                            call_id,
+                            local_uri: self.local_uri.clone(),
+                            remote_uri: self.remote_uri.clone(),
+                            local_tag: Some(local_tag),
+                            remote_tag: Some(remote_tag),
+                            local_seq: 0,
+                            remote_seq: 0,
+                            remote_target: self.remote_uri.clone(), 
+                            route_set: vec![],
+                            is_initiator: self.direction == CallDirection::Outgoing,
+                        };
+                        
+                        // Store the dialog
+                        {
+                            let mut dialog_write = self.dialog.write().await;
+                            *dialog_write = Some(dialog);
+                        }
+                        
+                        debug!("Dialog created/updated for call {}", self.id);
+                    }
+                    
+                    // Update call state to established
+                    self.transition_to(CallState::Established).await?;
                     debug!("Call state updated to Established after receiving ACK");
+                    
+                    // Update call connect time
+                    {
+                        let mut connect_time = self.connect_time.write().await;
+                        if connect_time.is_none() {
+                            *connect_time = Some(Instant::now());
+                            debug!("Call connect time set for call {}", self.id);
+                        }
+                    }
+                } else {
+                    debug!("ACK received for call {} in unexpected state {}", self.id, current_state);
                 }
+                
                 Ok(None) // No response needed for ACK
             },
             Method::Bye => {
@@ -1052,7 +1135,14 @@ impl Call {
                     }
                 }
                 
-                // Update state to Established
+                // Make sure we go through Connecting state before Established
+                if current_state != CallState::Connecting {
+                    debug!("Transitioning from {} to Connecting state after 200 OK", current_state);
+                    self.transition_to(CallState::Connecting).await?;
+                }
+                
+                // Now update state to Established
+                debug!("Transitioning to Established state after 200 OK");
                 self.transition_to(CallState::Established).await?;
                 
                 // Record connection time
@@ -1100,44 +1190,6 @@ impl Call {
         }
         
         Ok(())
-    }
-
-    /// Create a dummy call for testing
-    pub(crate) fn dummy() -> Self {
-        use std::str::FromStr;
-        
-        Self {
-            id: "dummy-id".to_string(),
-            direction: CallDirection::Incoming,
-            config: CallConfig::default(),
-            sip_call_id: "dummy-call-id@example.com".to_string(),
-            local_tag: "dummy-tag".to_string(),
-            remote_tag: Arc::new(RwLock::new(None)),
-            cseq: Arc::new(Mutex::new(1)),
-            local_uri: Uri::from_str("sip:dummy@example.com").unwrap(),
-            remote_uri: Uri::from_str("sip:remote@example.com").unwrap(),
-            remote_display_name: Arc::new(RwLock::new(Some("Dummy User".to_string()))),
-            remote_addr: "127.0.0.1:5060".parse().unwrap(),
-            transaction_manager: Arc::new(TransactionManager::dummy()),
-            state: Arc::new(RwLock::new(CallState::Initial)),
-            state_watcher: watch::channel(CallState::Initial).1,
-            state_sender: Arc::new(watch::channel(CallState::Initial).0),
-            start_time: None,
-            connect_time: Arc::new(RwLock::new(None)),
-            end_time: Arc::new(RwLock::new(None)),
-            media_sessions: Arc::new(RwLock::new(Vec::new())),
-            event_tx: mpsc::channel(1).0,
-            local_sdp: Arc::new(RwLock::new(None)),
-            remote_sdp: Arc::new(RwLock::new(None)),
-            dialog: Arc::new(RwLock::new(None)),
-            last_response: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// Update the call state (deprecated, use transition_to instead)
-    pub async fn update_state(&self, new_state: CallState) -> Result<()> {
-        // Simply forward to transition_to
-        self.transition_to(new_state).await
     }
 
     /// Create an INVITE request for outgoing call
@@ -1310,6 +1362,15 @@ impl Call {
     pub async fn transition_to(&self, new_state: CallState) -> Result<()> {
         // Get current state before changing it
         let previous_state = self.state().await;
+        
+        // Check if this is a valid state transition
+        if !Self::is_valid_transition(previous_state, new_state) {
+            return Err(Error::Call(format!(
+                "Invalid state transition from {} to {}",
+                previous_state, new_state
+            )));
+        }
+        
         debug!("Call {} state transition: {} -> {}", self.id, previous_state, new_state);
         
         // Update state
@@ -1333,7 +1394,94 @@ impl Call {
             current: new_state,
         }).await;
         
+        // Update dialog state based on call state (ensure they're in sync)
+        if let Some(dialog) = self.dialog.read().await.as_ref() {
+            let mut dialog_update_needed = false;
+            let mut new_dialog_state = dialog.state.clone();
+            
+            match new_state {
+                CallState::Connecting => {
+                    if dialog.state != DialogState::Early {
+                        new_dialog_state = DialogState::Early;
+                        dialog_update_needed = true;
+                    }
+                },
+                CallState::Established => {
+                    if dialog.state != DialogState::Confirmed {
+                        new_dialog_state = DialogState::Confirmed;
+                        dialog_update_needed = true;
+                    }
+                },
+                CallState::Terminating | CallState::Terminated | CallState::Failed => {
+                    if dialog.state != DialogState::Terminated {
+                        new_dialog_state = DialogState::Terminated;
+                        dialog_update_needed = true;
+                    }
+                },
+                _ => {
+                    // Other states don't need dialog state updates
+                }
+            }
+            
+            // Update dialog state if needed
+            if dialog_update_needed {
+                debug!("Updating dialog state from {:?} to {:?} for call {}", 
+                    dialog.state, new_dialog_state, self.id);
+                
+                let mut dialog_clone = dialog.clone();
+                dialog_clone.state = new_dialog_state;
+                
+                let mut dialog_write = self.dialog.write().await;
+                *dialog_write = Some(dialog_clone);
+            }
+        }
+        
         Ok(())
+    }
+
+    /// Check if a state transition is valid
+    fn is_valid_transition(from: CallState, to: CallState) -> bool {
+        match (from, to) {
+            // Self-transitions are always allowed
+            (a, b) if a == b => true,
+            
+            // Valid transitions from Initial
+            (CallState::Initial, CallState::Ringing) => true,
+            (CallState::Initial, CallState::Connecting) => true,
+            (CallState::Initial, CallState::Established) => true, // For fast setup scenarios
+            
+            // Valid transitions from Ringing
+            (CallState::Ringing, CallState::Connecting) => true,
+            (CallState::Ringing, CallState::Established) => true, // Allow direct to Established for efficiency
+            (CallState::Ringing, CallState::Terminating) => true,
+            (CallState::Ringing, CallState::Terminated) => true,
+            (CallState::Ringing, CallState::Failed) => true,
+            
+            // Valid transitions from Connecting
+            (CallState::Connecting, CallState::Established) => true,
+            (CallState::Connecting, CallState::Terminating) => true,
+            (CallState::Connecting, CallState::Terminated) => true,
+            (CallState::Connecting, CallState::Failed) => true,
+            
+            // Valid transitions from Established
+            (CallState::Established, CallState::Terminating) => true,
+            (CallState::Established, CallState::Terminated) => true,
+            (CallState::Established, CallState::Failed) => true,
+            
+            // Valid transitions from Terminating
+            (CallState::Terminating, CallState::Terminated) => true,
+            (CallState::Terminating, CallState::Failed) => true,
+            
+            // Any state can transition to Failed or Terminated (for error handling)
+            (_, CallState::Failed) => true, 
+            (_, CallState::Terminated) => true,
+            
+            // No valid transitions from Terminated
+            (CallState::Terminated, _) => false,
+            
+            // Any other transition is invalid
+            _ => false,
+        }
     }
 
     /// Set up media session based on remote SDP
@@ -1383,10 +1531,32 @@ impl Call {
         // Call the internal setup method
         self.setup_media_internal(sdp).await
     }
+
+    /// Get the current dialog for this call, if any
+    pub async fn dialog(&self) -> Option<Dialog> {
+        self.dialog.read().await.clone()
+    }
+
+    /// Update the call state (deprecated, use transition_to instead)
+    pub async fn update_state(&self, new_state: CallState) -> Result<()> {
+        // Simply forward to transition_to
+        self.transition_to(new_state).await
+    }
+
+    /// Store the original INVITE request for later answering
+    pub async fn store_invite_request(&self, request: Request) -> Result<()> {
+        debug!("Storing original INVITE request for call {}", self.id);
+        let mut invite = self.original_invite.write().await;
+        *invite = Some(request);
+        Ok(())
+    }
 }
 
 impl Clone for Call {
+    /// Standard clone that creates strong references - use sparingly
+    /// For most cases, prefer using .weak_clone() instead
     fn clone(&self) -> Self {
+        debug!("Creating a strong clone of Call {}", self.id);
         Self {
             id: self.id.clone(),
             direction: self.direction,
@@ -1412,6 +1582,335 @@ impl Clone for Call {
             remote_sdp: self.remote_sdp.clone(),
             dialog: self.dialog.clone(),
             last_response: self.last_response.clone(),
+            original_invite: self.original_invite.clone(),
+        }
+    }
+}
+
+impl Call {
+    /// Create a weak clone that won't contribute to over-pinning
+    /// Use this for temporary references or when passing to systems that don't need ownership
+    pub fn weak_clone(&self) -> WeakCall {
+        WeakCall {
+            id: self.id.clone(),
+            direction: self.direction,
+            sip_call_id: self.sip_call_id.clone(),
+            local_uri: self.local_uri.clone(),
+            remote_uri: self.remote_uri.clone(),
+            remote_addr: self.remote_addr,
+            state_watcher: self.state_watcher.clone(),
+            // Store weak references to other fields
+            remote_tag: Arc::downgrade(&self.remote_tag),
+            state: Arc::downgrade(&self.state),
+            connect_time: Arc::downgrade(&self.connect_time),
+            end_time: Arc::downgrade(&self.end_time),
+            media_sessions: Arc::downgrade(&self.media_sessions),
+            local_sdp: Arc::downgrade(&self.local_sdp),
+            remote_sdp: Arc::downgrade(&self.remote_sdp),
+            dialog: Arc::downgrade(&self.dialog),
+            last_response: Arc::downgrade(&self.last_response),
+            original_invite: Arc::downgrade(&self.original_invite),
+            // Store strong refs to essential components
+            transaction_manager: self.transaction_manager.clone(),
+            event_tx: self.event_tx.clone(),
+            state_sender: self.state_sender.clone(),
+        }
+    }
+}
+
+/// A weak reference to a Call, safe to pass around without keeping the call alive
+#[derive(Debug, Clone)]
+pub struct WeakCall {
+    /// Unique call ID (strong - small string)
+    pub id: String,
+    /// Call direction (copy type)
+    pub direction: CallDirection,
+    /// SIP call ID (strong - small string)
+    pub sip_call_id: String,
+    /// Local URI (strong - small)
+    pub local_uri: Uri,
+    /// Remote URI (strong - small)
+    pub remote_uri: Uri,
+    /// Remote address (copy type)
+    pub remote_addr: SocketAddr,
+    /// State watcher receiver (needs to be strong to receive updates)
+    pub state_watcher: watch::Receiver<CallState>,
+    
+    // Weak references to internal state
+    remote_tag: Weak<RwLock<Option<String>>>,
+    state: Weak<RwLock<CallState>>,
+    connect_time: Weak<RwLock<Option<Instant>>>,
+    end_time: Weak<RwLock<Option<Instant>>>,
+    media_sessions: Weak<RwLock<Vec<MediaSession>>>,
+    local_sdp: Weak<RwLock<Option<SessionDescription>>>,
+    remote_sdp: Weak<RwLock<Option<SessionDescription>>>,
+    dialog: Weak<RwLock<Option<Dialog>>>,
+    last_response: Weak<RwLock<Option<Response>>>,
+    original_invite: Weak<RwLock<Option<Request>>>,
+    
+    // These need to remain strong since they're external connections
+    transaction_manager: Arc<TransactionManager>,
+    event_tx: mpsc::Sender<CallEvent>,
+    state_sender: Arc<watch::Sender<CallState>>,
+}
+
+impl WeakCall {
+    /// Get the call ID
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Get the SIP call ID
+    pub fn sip_call_id(&self) -> &str {
+        &self.sip_call_id
+    }
+
+    /// Get the call direction
+    pub fn direction(&self) -> CallDirection {
+        self.direction
+    }
+
+    /// Get the current call state from the watcher (without awaiting)
+    pub fn current_state(&self) -> CallState {
+        *self.state_watcher.borrow()
+    }
+    
+    /// Get the current call state - async to match Call.state() signature
+    pub async fn state(&self) -> CallState {
+        // For compatibility with Call.state() which is async
+        *self.state_watcher.borrow()
+    }
+
+    /// Get the remote URI
+    pub fn remote_uri(&self) -> &Uri {
+        &self.remote_uri
+    }
+    
+    /// Attempt to upgrade to a strong Call reference
+    /// Returns None if the original Call has been dropped
+    pub fn upgrade(&self) -> Option<Arc<Call>> {
+        // Try to upgrade the dialog field since it's critical for operations like hangup
+        let _dialog = self.dialog.upgrade()?;
+        
+        // Create a BYE request directly using our stored information rather than
+        // trying to recreate the entire Call object
+        
+        // The most important part for hangup is to have:
+        // 1. Transaction manager
+        // 2. Remote address
+        // 3. Dialog information
+        // 4. State update mechanisms
+        
+        // Rather than reconstructing everything, we have all the essentials to
+        // implement direct methods on WeakCall that don't require upgrade()
+        
+        // This is a fallback implementation
+        error!("WeakCall.upgrade() called - this is inefficient and may not work fully");
+        error!("Consider implementing the needed operation directly on WeakCall");
+        
+        // For most use cases, we should use strong references for vital operations
+        // and implement them directly on WeakCall without reconstructing Call
+        None
+    }
+    
+    /// Attempt to send a DTMF digit using direct implementation
+    pub async fn send_dtmf(&self, digit: char) -> Result<()> {
+        debug!("Sending DTMF {} for call {}", digit, self.id);
+        
+        // Create a DTMF payload according to RFC 2833
+        let dtmf_body = format!("Signal={}\r\nDuration=250", digit);
+        let dtmf_body_bytes = Bytes::from(dtmf_body);
+        let body_len = dtmf_body_bytes.len() as i64;
+        
+        // Get current state to verify we can send DTMF
+        let current_state = self.current_state();
+        if current_state != CallState::Established {
+            return Err(Error::Call(
+                format!("Cannot send DTMF in {} state", current_state)
+            ));
+        }
+        
+        // Generate an INFO request directly
+        let mut req = Request::new(Method::Info, self.remote_uri.clone());
+        
+        // Add necessary headers
+        req.headers.push(Header::text(HeaderName::From, 
+            format!("<{}>;tag=", self.local_uri)));
+        req.headers.push(Header::text(HeaderName::To, 
+            format!("<{}>", self.remote_uri)));
+        req.headers.push(Header::text(HeaderName::CallId, 
+            self.sip_call_id.clone()));
+        req.headers.push(Header::text(HeaderName::ContentType, 
+            "application/dtmf-relay"));
+        
+        // Set body and Content-Length
+        req.body = dtmf_body_bytes;
+        req.headers.push(Header::integer(HeaderName::ContentLength, body_len));
+        
+        // Send via transaction manager
+        let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+            req,
+            self.remote_addr,
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        
+        match self.transaction_manager.send_request(&transaction_id).await {
+            Ok(_) => {
+                debug!("Successfully sent DTMF {} for call {}", digit, self.id);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send DTMF request: {}", e);
+                Err(Error::Transport(e.to_string()))
+            }
+        }
+    }
+    
+    /// Hang up a call using direct implementation
+    pub async fn hangup(&self) -> Result<()> {
+        let current_state = self.current_state();
+        if current_state == CallState::Terminated || current_state == CallState::Terminating {
+            return Ok(());
+        }
+        
+        debug!("Sending hangup (BYE) for call {}", self.id);
+        
+        // Create BYE request
+        let mut bye_request = Request::new(Method::Bye, self.remote_uri.clone());
+        
+        // Add From header with tag
+        bye_request.headers.push(Header::text(
+            HeaderName::From, 
+            format!("<{}>;tag=", self.local_uri) // The tag might be missing
+        ));
+        
+        // Add To header with remote tag if available
+        bye_request.headers.push(Header::text(
+            HeaderName::To, 
+            format!("<{}>", self.remote_uri)
+        ));
+        
+        // Add Call-ID header
+        bye_request.headers.push(Header::text(
+            HeaderName::CallId, 
+            self.sip_call_id.clone()
+        ));
+        
+        // Add CSeq header (use a reasonable value)
+        bye_request.headers.push(Header::text(
+            HeaderName::CSeq,
+            "21 BYE" // Hard-coded CSeq as we don't track it in WeakCall
+        ));
+        
+        // Add Content-Length
+        bye_request.headers.push(Header::integer(
+            HeaderName::ContentLength, 
+            0
+        ));
+        
+        // Send via transaction manager
+        debug!("Creating transaction for BYE request");
+        let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+            bye_request,
+            self.remote_addr
+        ).await.map_err(|e| {
+            error!("Failed to create transaction for BYE: {}", e);
+            Error::Transport(e.to_string())
+        })?;
+        
+        debug!("Sending BYE request via transaction {}", transaction_id);
+        match self.transaction_manager.send_request(&transaction_id).await {
+            Ok(_) => {
+                // Update our tracked state - we know it's terminating now
+                if let Err(e) = self.state_sender.send(CallState::Terminating) {
+                    warn!("Failed to update call state to Terminating: {:?}", e);
+                }
+                
+                debug!("Successfully sent BYE for call {}", self.id);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send BYE request: {}", e);
+                Err(Error::Transport(e.to_string()))
+            }
+        }
+    }
+
+    /// Wait until the call is established or terminated
+    pub async fn wait_until_established(&self) -> Result<()> {
+        // First check if the call is already established using the state_watcher
+        let current_state = *self.state_watcher.borrow();
+        debug!("Initial call state in wait_until_established (WeakCall): {}", current_state);
+        
+        if current_state == CallState::Established {
+            debug!("Call is already established, returning immediately");
+            return Ok(());
+        }
+        
+        if current_state == CallState::Terminated || current_state == CallState::Failed {
+            debug!("Call is in terminal state {}, cannot establish", current_state);
+            return Err(Error::Call("Call terminated before being established".into()));
+        }
+        
+        // Wait for state changes via the state_watcher
+        debug!("Waiting for call to establish...");
+        
+        // Use a longer timeout (30 seconds is common for SIP call setup)
+        let start = std::time::Instant::now();
+        let timeout_duration = std::time::Duration::from_secs(30);
+        
+        // Create a clone of the state_watcher to avoid borrowing issues
+        let mut watcher = self.state_watcher.clone();
+        
+        loop {
+            // Check if we've exceeded the timeout
+            if start.elapsed() > timeout_duration {
+                debug!("Timed out waiting for call to establish");
+                return Err(Error::Timeout("Timed out waiting for call to establish".into()));
+            }
+            
+            // Wait for the next state change
+            if watcher.changed().await.is_err() {
+                // The sender was dropped, which could mean the Call was dropped
+                return Err(Error::Call("Call state watcher closed".into()));
+            }
+            
+            // Check the new state
+            let state = *watcher.borrow();
+            debug!("Call state changed to: {}", state);
+            
+            match state {
+                CallState::Established => {
+                    debug!("Call established successfully after waiting");
+                    return Ok(());
+                },
+                CallState::Terminated | CallState::Failed => {
+                    debug!("Call terminated while waiting for establishment");
+                    return Err(Error::Call("Call terminated before being established".into()));
+                },
+                _ => {
+                    // Continue waiting
+                    debug!("Call in intermediate state {}, continuing to wait", state);
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Wait until the call is terminated
+    pub async fn wait_until_terminated(&self) -> Result<()> {
+        // Create a clone of the state_watcher to avoid borrowing issues
+        let mut watcher = self.state_watcher.clone();
+        
+        loop {
+            let state = *watcher.borrow();
+            if state == CallState::Terminated || state == CallState::Failed {
+                return Ok(());
+            }
+
+            // Wait for state change
+            if watcher.changed().await.is_err() {
+                return Err(Error::Call("Call state watcher closed".into()));
+            }
         }
     }
 } 

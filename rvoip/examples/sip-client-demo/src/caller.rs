@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{info, error, debug, Level};
+use tracing::{info, error, debug, Level, warn};
 use tracing_subscriber::FmtSubscriber;
 
 use rvoip_sip_client::{
@@ -104,12 +104,11 @@ async fn main() -> Result<()> {
     
     // Set up call duration timeout if specified
     let duration_task = if args.duration > 0 {
-        let call_clone = call.clone();
-        let duration_secs = args.duration;
+        let weak_call = call.weak_clone();
         Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+            tokio::time::sleep(Duration::from_secs(args.duration)).await;
             info!("Call duration reached, hanging up");
-            if let Err(e) = call_clone.hangup().await {
+            if let Err(e) = weak_call.hangup().await {
                 error!("Failed to hang up call: {}", e);
             }
         }))
@@ -119,7 +118,7 @@ async fn main() -> Result<()> {
     
     // Set up DTMF task if enabled
     let dtmf_task = if args.dtmf {
-        let call_clone = call.clone();
+        let weak_call = call.weak_clone();
         Some(tokio::spawn(async move {
             // Instead of just waiting a fixed time, actually wait for call to be established
             info!("Waiting for call to be established before sending DTMF...");
@@ -132,29 +131,20 @@ async fn main() -> Result<()> {
                     error!("Call setup timed out, will not send DTMF");
                     return;
                 }
-                result = call_clone.wait_until_established() => {
+                result = weak_call.wait_until_established() => {
                     match result {
                         Ok(_) => {
-                            info!("Call established, proceeding with DTMF sequence");
-                            // Send DTMF sequence
-                            let dtmf_sequence = "12345";
-                            for digit in dtmf_sequence.chars() {
-                                // Check call state before each DTMF tone
-                                let state = call_clone.state().await;
-                                if state != CallState::Established {
-                                    error!("Call is no longer established (state: {}), stopping DTMF sequence", state);
-                                    break;
-                                }
-                                
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                info!("Sending DTMF digit: {}", digit);
-                                if let Err(e) = call_clone.send_dtmf(digit).await {
-                                    error!("Failed to send DTMF: {}", e);
-                                }
-                            }
+                            info!("Call established successfully, proceeding with DTMF");
                         },
                         Err(e) => {
-                            error!("Call failed to establish, cannot send DTMF: {}", e);
+                            error!("Failed to establish call: {}", e);
+                            info!("Current call state: {}", weak_call.state().await);
+                            
+                            // Try to hang up the failed call
+                            warn!("Attempting to hang up the failed call");
+                            if let Err(e) = weak_call.hangup().await {
+                                error!("Failed to hang up call: {}", e);
+                            }
                         }
                     }
                 }

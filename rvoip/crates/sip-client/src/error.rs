@@ -56,6 +56,10 @@ pub enum Error {
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 
+    /// Storage errors
+    #[error("Storage error: {0}")]
+    Storage(String),
+
     /// General errors
     #[error("{0}")]
     Other(String),

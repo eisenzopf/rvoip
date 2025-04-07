@@ -67,30 +67,7 @@ impl ServerTransactionHandle {
     }
 }
 
-/// A dummy transport implementation for the simplified TransactionManager
-#[derive(Debug)]
-struct DummyTransport {}
-
-#[async_trait]
-impl Transport for DummyTransport {
-    fn local_addr(&self) -> rvoip_sip_transport::Result<SocketAddr> {
-        Ok("127.0.0.1:5060".parse().unwrap())
-    }
-    
-    async fn send_message(&self, _message: Message, _destination: SocketAddr) -> rvoip_sip_transport::Result<()> {
-        Ok(())
-    }
-    
-    async fn close(&self) -> rvoip_sip_transport::Result<()> {
-        Ok(())
-    }
-    
-    fn is_closed(&self) -> bool {
-        false
-    }
-}
-
-// Helper function to create a new transaction manager
+/// Helper function to create a new transaction manager
 pub fn new_transaction_manager(_options: TransactionOptions) -> impl TransactionManagerExt {
     // Return a simple implementation
     SimpleTransactionManager {}

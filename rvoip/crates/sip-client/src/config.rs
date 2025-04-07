@@ -33,6 +33,12 @@ pub struct ClientConfig {
 
     /// Transaction configuration
     pub transaction: TransactionConfig,
+    
+    /// Maximum number of calls to keep in history
+    pub max_call_history: Option<usize>,
+    
+    /// Whether to retain call history between restarts
+    pub persist_call_history: bool,
 }
 
 impl Default for ClientConfig {
@@ -48,6 +54,8 @@ impl Default for ClientConfig {
             transport: TransportConfig::default(),
             media: MediaConfig::default(),
             transaction: TransactionConfig::default(),
+            max_call_history: Some(100),
+            persist_call_history: false,
         }
     }
 }
@@ -115,6 +123,18 @@ impl ClientConfig {
     /// Set transaction configuration
     pub fn with_transaction(mut self, transaction: TransactionConfig) -> Self {
         self.transaction = transaction;
+        self
+    }
+
+    /// Set the maximum number of calls to keep in history
+    pub fn with_max_call_history(mut self, max: Option<usize>) -> Self {
+        self.max_call_history = max;
+        self
+    }
+    
+    /// Set whether to persist call history between restarts
+    pub fn with_persist_call_history(mut self, persist: bool) -> Self {
+        self.persist_call_history = persist;
         self
     }
 }

@@ -3,7 +3,7 @@ use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::sync::{mpsc, RwLock, Mutex, broadcast};
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn, trace};
 use uuid::Uuid;
@@ -15,11 +15,13 @@ use rvoip_sip_core::{
 use rvoip_sip_transport::UdpTransport;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
 use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
+use rvoip_session_core::dialog::DialogState;
 
 use crate::config::{ClientConfig, CallConfig};
 use crate::error::{Error, Result};
 use crate::call::{Call, CallState, CallEvent, CallDirection};
 use crate::media::MediaSession;
+use crate::call_registry::{CallRegistry, CallRecord};
 
 /// User agent for receiving SIP calls
 pub struct UserAgent {
@@ -44,11 +46,14 @@ pub struct UserAgent {
     /// Active calls
     active_calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
     
+    /// Call registry for storing call history
+    call_registry: Arc<CallRegistry>,
+    
     /// Event sender for client events
     event_tx: mpsc::Sender<CallEvent>,
     
-    /// Event receiver for client events
-    event_rx: mpsc::Receiver<CallEvent>,
+    /// Event broadcast for client events
+    event_broadcast: broadcast::Sender<CallEvent>,
     
     /// Is the UA running
     running: Arc<RwLock<bool>>,
@@ -80,8 +85,57 @@ impl UserAgent {
             Some(config.transaction.max_events),
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
-        // Create event channel (keep both sender and receiver)
-        let (event_tx, event_rx) = mpsc::channel(32);
+        // Create event channels
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (event_broadcast, _) = broadcast::channel(32);
+        
+        // Create call registry with max history size
+        let call_registry = Arc::new(CallRegistry::new(config.max_call_history.unwrap_or(100)));
+        
+        // Create a separate task to forward events from mpsc to broadcast
+        let broadcast_tx = event_broadcast.clone();
+        let registry_clone = call_registry.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                // Process event to update call registry
+                match &event {
+                    CallEvent::IncomingCall(call) => {
+                        debug!("Registering incoming call {} in registry", call.id());
+                        if let Err(e) = registry_clone.register_call(call.clone()).await {
+                            error!("Failed to register incoming call: {}", e);
+                        }
+                    },
+                    CallEvent::StateChanged { call, previous, current } => {
+                        debug!("Updating call state in registry: {} {} -> {}", call.id(), previous, current);
+                        if let Err(e) = registry_clone.update_call_state(call.id(), *previous, *current).await {
+                            error!("Failed to update call state in registry: {}", e);
+                        }
+                    },
+                    CallEvent::Terminated { call, .. } => {
+                        // Ensure termination is recorded in call history
+                        let current_state = match call.state().await {
+                            CallState::Terminated => CallState::Terminated,
+                            _ => CallState::Terminated, // Force to terminated state
+                        };
+                        
+                        if let Err(e) = registry_clone.update_call_state(
+                            call.id(), CallState::Terminating, current_state
+                        ).await {
+                            if !e.to_string().contains("not found") {
+                                error!("Failed to record call termination: {}", e);
+                            }
+                        }
+                        
+                        // Clean up old call history if needed
+                        registry_clone.cleanup_history().await;
+                    },
+                    _ => {},
+                }
+                
+                // Forward to broadcast
+                let _ = broadcast_tx.send(event);
+            }
+        });
         
         info!("SIP user agent initialized with username: {}", config.username);
         
@@ -93,8 +147,9 @@ impl UserAgent {
             transaction_manager: Arc::new(transaction_manager),
             events_rx,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
+            call_registry,
             event_tx,
-            event_rx,
+            event_broadcast,
             running: Arc::new(RwLock::new(false)),
             event_task: None,
         })
@@ -122,6 +177,7 @@ impl UserAgent {
         let running = self.running.clone();
         let event_tx = self.event_tx.clone();
         let config = self.config.clone();
+        let call_registry = self.call_registry.clone();
         
         let event_task = tokio::spawn(async move {
             debug!("SIP user agent event processing task started");
@@ -159,6 +215,7 @@ impl UserAgent {
                                     active_calls.clone(),
                                     event_tx.clone(),
                                     &config,
+                                    call_registry.clone(),
                                 ).await {
                                     error!("Error handling incoming request: {}", e);
                                 }
@@ -230,85 +287,30 @@ impl UserAgent {
         Ok(())
     }
     
-    /// Get an event stream for call events
+    /// Create an event stream for call events
     pub fn event_stream(&self) -> mpsc::Receiver<CallEvent> {
-        // Create a new forwarding channel
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(100);
         
-        // Create a clone for the first task
-        let tx1 = tx.clone();
+        // Subscribe to event broadcast
+        let mut event_rx = self.event_broadcast.subscribe();
         
+        // Forward events from the broadcast channel to the mpsc channel
+        let tx_clone = tx.clone();
         tokio::spawn(async move {
-            // Periodically send events to keep the channel active
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
-            
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        // Just a keep-alive tick
-                    },
-                    // If the channel closes, exit the task
-                    _ = tx1.closed() => break,
-                }
-                
-                // Simple poll event to keep the connection alive
-                let dummy_event = CallEvent::StateChanged {
-                    call: Arc::new(Call::dummy()),
-                    previous: CallState::Initial,
-                    current: CallState::Initial,
-                };
-                
-                if tx1.send(dummy_event).await.is_err() {
-                    break;
+            while let Ok(event) = event_rx.recv().await {
+                if let Err(_) = tx_clone.send(event).await {
+                    break; // Receiver dropped, stop forwarding events
                 }
             }
         });
         
-        // Also periodically check call states to ensure state change events are sent
-        let active_calls = self.active_calls.clone();
-        let tx2 = tx.clone();
-        
+        // Send a Ready event to initialize the stream
+        let tx1 = tx.clone();
         tokio::spawn(async move {
-            // Create a periodic timer (every 500ms)
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(100)).await;
             
-            // Keep track of last known states for each call
-            let mut last_states = HashMap::new();
-            
-            // Keep running until receiver is closed
-            while !tx2.is_closed() {
-                interval.tick().await;
-                
-                // Get all active calls
-                let calls = active_calls.read().await;
-                
-                // For each active call, check if state has changed
-                for (call_id, call) in calls.iter() {
-                    let current_state = call.state().await;
-                    let previous_state = last_states.get(call_id).copied().unwrap_or(CallState::Initial);
-                    
-                    // Only send if state changed
-                    if current_state != previous_state {
-                        info!("Call {} state changed: {} -> {}", call_id, previous_state, current_state);
-                        
-                        // Send the state change event
-                        let event = CallEvent::StateChanged {
-                            call: call.clone(),
-                            previous: previous_state,
-                            current: current_state,
-                        };
-                        
-                        if tx2.send(event).await.is_err() {
-                            break;
-                        }
-                        
-                        // Update the last known state
-                        last_states.insert(call_id.clone(), current_state);
-                    }
-                }
-                
-                // Cleanup removed calls
-                last_states.retain(|call_id, _| calls.contains_key(call_id));
+            if let Err(_) = tx1.send(CallEvent::Ready).await {
+                // Channel closed, can ignore
             }
         });
         
@@ -339,14 +341,61 @@ impl UserAgent {
         }
     }
     
+    /// Get the call registry
+    pub fn registry(&self) -> Arc<CallRegistry> {
+        self.call_registry.clone()
+    }
+    
+    /// Get call history
+    pub async fn call_history(&self) -> HashMap<String, CallRecord> {
+        self.call_registry.call_history().await
+    }
+    
     /// Get active calls
     pub async fn calls(&self) -> HashMap<String, Arc<Call>> {
-        self.active_calls.read().await.clone()
+        self.call_registry.active_calls().await
     }
     
     /// Get call by ID
     pub async fn call_by_id(&self, call_id: &str) -> Option<Arc<Call>> {
-        self.active_calls.read().await.get(call_id).cloned()
+        self.call_registry.get_active_call(call_id).await
+    }
+    
+    /// Find a call by ID in both active calls and history
+    /// 
+    /// This is a convenience method that delegates to the call registry's `find_call_by_id` method.
+    /// It returns information about the call if found, including a record of the call and
+    /// any available references to the actual call object.
+    /// 
+    /// # Parameters
+    /// * `call_id` - The ID of the call to find
+    /// 
+    /// # Returns
+    /// * `Some(CallLookupResult)` - If the call was found
+    /// * `None` - If no call with the given ID exists
+    pub async fn find_call(&self, call_id: &str) -> Option<crate::call_registry::CallLookupResult> {
+        self.call_registry.find_call_by_id(call_id).await
+    }
+    
+    /// Find a call by ID for API use, returning a serializable result
+    /// 
+    /// This is a convenience method for API endpoints that need to return serializable data.
+    /// It works like `find_call` but returns a version that can be safely serialized.
+    /// 
+    /// # Parameters
+    /// * `call_id` - The ID of the call to find
+    /// 
+    /// # Returns
+    /// * `Some(SerializableCallLookupResult)` - If the call was found
+    /// * `None` - If no call with the given ID exists
+    pub async fn find_call_for_api(&self, call_id: &str) -> Option<crate::call_registry::SerializableCallLookupResult> {
+        self.call_registry.find_call_by_id(call_id).await.map(Into::into)
+    }
+    
+    /// Create a new outgoing call (the implementation will be filled in later)
+    pub async fn create_call(&self, _remote_uri: &str) -> Result<Arc<Call>> {
+        // Placeholder for creating a new outgoing call
+        Err(Error::Call("Not implemented yet".into()))
     }
 }
 
@@ -376,6 +425,7 @@ async fn handle_incoming_request(
     active_calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
     event_tx: mpsc::Sender<CallEvent>,
     config: &ClientConfig,
+    call_registry: Arc<CallRegistry>,
 ) -> Result<()> {
     debug!("Handling incoming {} request from {}", request.method, source);
     
@@ -402,6 +452,17 @@ async fn handle_incoming_request(
             Some(uri) => uri,
             None => return Err(Error::SipProtocol("Missing From URI".into())),
         };
+
+        // Extract From tag (IMPORTANT - extract it from the header for dialog setup)
+        let from_tag = match request.headers.iter()
+            .find(|h| h.name == HeaderName::From)
+            .and_then(|h| h.value.as_text())
+            .and_then(|v| rvoip_session_core::dialog::extract_tag(v)) {
+            Some(tag) => tag,
+            None => return Err(Error::SipProtocol("Missing From tag".into())),
+        };
+
+        debug!("Extracted From tag: {}", from_tag);
 
         // Extract To URI
         let to_uri = match extract_uri_from_header(&request, HeaderName::To) {
@@ -461,6 +522,9 @@ async fn handle_incoming_request(
             event_tx.clone(),
         );
 
+        // Set the remote tag extracted from the From header
+        call.set_remote_tag(from_tag).await;
+
         // Send a ringing response
         let mut ringing_response = Response::new(StatusCode::Ringing);
         add_response_headers(&request, &mut ringing_response);
@@ -478,23 +542,37 @@ async fn handle_incoming_request(
             warn!("Failed to send 180 Ringing: {}", e);
         }
 
-        // Update call state to ringing
-        if let Err(e) = state_tx.send(CallState::Ringing)
-            .map_err(|_| Error::Call("Failed to update call state".into())) {
+        // Update call state to ringing using proper transition method
+        if let Err(e) = call.transition_to(CallState::Ringing).await {
             error!("Failed to update call state to Ringing: {}", e);
         } else {
             debug!("Call {} state updated to Ringing", call_id);
         }
 
-        // Store call
+        // Store call - important that we register the call before sending events
+        // First add to active calls
         active_calls.write().await.insert(call_id.clone(), call.clone());
 
-        // Send event
+        // Before sending the IncomingCall event, manually register with call registry to avoid race conditions
+        debug!("Registering call {} directly with registry to avoid race conditions", call_id);
+        if let Err(e) = call_registry.register_call(call.clone()).await {
+            error!("Failed to register call in registry: {}", e);
+        }
+
+        // Store the original INVITE request for later answering
+        if let Err(e) = call.store_invite_request(request.clone()).await {
+            warn!("Failed to store INVITE request: {}", e);
+        } else {
+            debug!("Stored original INVITE request for later answering");
+        }
+
+        // Send event - this will trigger registry update via event handler
         if let Err(e) = event_tx.send(CallEvent::IncomingCall(call.clone())).await
             .map_err(|_| Error::Call("Failed to send call event".into())) {
             error!("Failed to send IncomingCall event: {}", e);
         } else {
-            debug!("Sent IncomingCall event for call {}", call_id);
+            debug!("Storing weak reference to call {}", call_id);
+            let weak_call = call.weak_clone();
         }
 
         // If auto-answer is enabled, answer the call
@@ -526,78 +604,11 @@ async fn handle_incoming_request(
                 debug!("No SDP body in INVITE, skipping SDP parsing");
             }
             
-            // Extract remote RTP port from SDP
-            let remote_rtp_port = if !request.body.is_empty() {
-                extract_rtp_port_from_sdp(&request.body)
-            } else {
-                None
-            };
+            // Store the call info for later - we don't want to answer until the IncomingCall event is processed
+            // Instead of handling auto-answer here directly, let the application handle it
+            // based on the IncomingCall event and the current call state
             
-            if remote_rtp_port.is_none() {
-                warn!("Could not extract RTP port from INVITE SDP");
-                
-                // Store the failed body for troubleshooting
-                if !request.body.is_empty() {
-                    let body_text = String::from_utf8_lossy(&request.body);
-                    debug!("SDP body that failed to extract RTP port:\n{}", body_text);
-                }
-            } else {
-                info!("Remote endpoint RTP port is {}", remote_rtp_port.unwrap());
-                
-                // Create OK response
-                let mut ok_response = Response::new(StatusCode::Ok);
-                add_response_headers(&request, &mut ok_response);
-                
-                // Add To header with tag
-                ok_response.headers.push(Header::text(HeaderName::To, to_with_tag.clone()));
-                
-                // Add Contact header
-                let contact = format!("<sip:{}@{}>", config.username, config.local_addr.unwrap());
-                ok_response.headers.push(Header::text(HeaderName::Contact, contact));
-                
-                // Create SDP answer
-                let local_rtp_port = config.media.rtp_port_min;
-                let sdp = SessionDescription::new_audio_call(
-                    &config.username,
-                    config.local_addr.unwrap().ip(),
-                    local_rtp_port
-                );
-                
-                let sdp_str = sdp.to_string();
-                debug!("Created SDP answer:\n{}", sdp_str);
-                
-                // Store SDP in the call for later use
-                if let Err(e) = call.setup_local_sdp().await {
-                    warn!("Failed to set up local SDP: {}", e);
-                }
-                
-                // Add Content-Type and Content-Length
-                ok_response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
-                ok_response.headers.push(Header::text(
-                    HeaderName::ContentLength, 
-                    sdp_str.len().to_string()
-                ));
-                
-                // Add SDP body
-                ok_response.body = sdp_str.into();
-                
-                debug!("Sending 200 OK with SDP answer for call {}", call_id);
-                
-                // Update call state to connecting BEFORE sending response
-                if let Err(e) = call.update_state(CallState::Connecting).await {
-                    error!("Failed to update call state to Connecting: {}", e);
-                } else {
-                    info!("Call {} transitioned from Ringing to Connecting", call_id);
-                }
-                
-                // Send 200 OK
-                if let Err(e) = transaction_manager.transport().send_message(
-                    Message::Response(ok_response),
-                    source
-                ).await {
-                    warn!("Failed to send 200 OK: {}", e);
-                }
-            }
+            return Ok(());
         }
         
         return Ok(());
@@ -611,14 +622,26 @@ async fn handle_incoming_request(
         if request.method == Method::Ack {
             // When we receive an ACK after sending 200 OK, the call is now established
             let current_state = call.state().await;
+            info!("Received ACK for call {} in state {}", call_id, current_state);
+            
             if current_state == CallState::Connecting {
-                debug!("Received ACK for call {} in Connecting state, transitioning to Established", call_id);
+                info!("Transitioning call {} from Connecting to Established after ACK", call_id);
                 
                 // Directly update the call's state to Established
                 if let Err(e) = call.transition_to(CallState::Established).await {
                     warn!("Failed to update call state to Established: {}", e);
                 } else {
                     info!("Call {} established successfully after ACK", call_id);
+                    
+                    // Check if dialog state is properly updated
+                    if let Some(dialog) = call.dialog().await {
+                        info!("Dialog state after ACK: {}", dialog.state);
+                        if dialog.state != DialogState::Confirmed {
+                            warn!("Dialog state not updated to Confirmed after ACK!");
+                        }
+                    } else {
+                        warn!("No dialog found after ACK processing!");
+                    }
                 }
                 
                 return Ok(());

@@ -23,4 +23,8 @@ path = "src/caller.rs"
 
 [[bin]]
 name = "receiver"
-path = "src/receiver.rs" 
+path = "src/receiver.rs"
+
+[[bin]]
+name = "call_history"
+path = "src/call_history.rs" 

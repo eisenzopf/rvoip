@@ -695,24 +695,6 @@ impl TransactionManager {
         rx
     }
     
-    /// Create a dummy TransactionManager for testing
-    pub fn dummy() -> Self {
-        use crate::DummyTransport;
-        
-        let (events_tx, _) = mpsc::channel(1);
-        let (_, transport_rx) = mpsc::channel(1);
-        
-        Self {
-            transport: Arc::new(DummyTransport {}),
-            client_transactions: Arc::new(Mutex::new(HashMap::new())),
-            server_transactions: Arc::new(Mutex::new(HashMap::new())),
-            events_tx,
-            event_subscribers: Arc::new(Mutex::new(Vec::new())),
-            transport_rx: Arc::new(Mutex::new(transport_rx)),
-            running: Arc::new(Mutex::new(true)),
-        }
-    }
-    
     /// Send an ACK for a 2xx response (outside of transaction)
     pub async fn send_2xx_ack(&self, _transaction_id: &str, response: &rvoip_sip_core::Response) -> Result<()> {
         // Create a basic ACK request based on the response

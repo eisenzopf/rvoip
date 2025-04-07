@@ -52,12 +52,19 @@ EOF
 }
 
 # Ask for confirmation before starting
-echo "This will start two SIP client demo components in separate terminal windows:"
+echo "This will start three SIP client demo components in separate terminal windows:"
 echo "  1. Receiver - Listens for incoming calls on port 5071"
 echo "  2. Caller - Makes a call to the receiver from port 5070"
+echo "  3. Call History - Demonstrates call registry on port 5072"
 echo ""
 echo "Press Enter to continue, or Ctrl+C to cancel..."
 read
+
+# Start call history demo first so it can observe calls
+run_client "SIP Call History (Charlie)" "call_history" "--local-addr 127.0.0.1:5072 --username charlie --auto-answer"
+
+echo "Waiting for call history demo to start up..."
+sleep 3
 
 # Start receiver in user agent mode (listening)
 run_client "SIP Receiver (Bob)" "receiver" "--local-addr 127.0.0.1:5071 --username bob"
@@ -70,5 +77,6 @@ run_client "SIP Caller (Alice)" "caller" "--local-addr 127.0.0.1:5070 --username
 
 echo ""
 echo "Demo started! You should see a call being established."
+echo "You can also call the history demo (Charlie) at sip:charlie@rvoip.local port 5072"
 echo "The call will last for 30 seconds by default."
-echo "When you're done, close both terminal windows." 
+echo "When you're done, close all terminal windows." 

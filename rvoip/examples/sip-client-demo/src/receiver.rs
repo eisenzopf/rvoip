@@ -6,8 +6,8 @@ use tracing_subscriber::FmtSubscriber;
 use rvoip_sip_client::{
     UserAgent, ClientConfig, 
     CallEvent, Result,
+    CallState,
 };
-use rvoip_sip_client::config::{TransportConfig, MediaConfig, TransactionConfig};
 
 /// SIP Call Receiver - Listens for incoming calls
 #[derive(Parser, Debug)]
@@ -75,14 +75,23 @@ async fn main() -> Result<()> {
     // Process call events in the foreground
     while let Some(event) = call_events.recv().await {
         match event {
+            CallEvent::Ready => {
+                info!("SIP call event system ready");
+            },
             CallEvent::IncomingCall(call) => {
                 info!("Incoming call from {}", call.remote_uri());
                 
                 if args.auto_answer {
-                    info!("Auto-answering call");
-                    match call.answer().await {
-                        Ok(_) => info!("Call answered successfully"),
-                        Err(e) => error!("Failed to answer call: {}", e),
+                    // Check call state before answering
+                    let state = call.state().await;
+                    if state == CallState::Ringing {
+                        info!("Auto-answering call in Ringing state");
+                        match call.answer().await {
+                            Ok(_) => info!("Call answered successfully"),
+                            Err(e) => error!("Failed to answer call: {}", e),
+                        }
+                    } else {
+                        info!("Call already in {} state, not sending explicit answer", state);
                     }
                 } else {
                     info!("Call ringing - auto-answer is disabled");

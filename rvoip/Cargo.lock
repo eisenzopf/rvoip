@@ -898,6 +898,8 @@ dependencies = [
  "rvoip-sip-core",
  "rvoip-sip-transport",
  "rvoip-transaction-core",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
