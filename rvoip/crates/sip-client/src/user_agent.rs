@@ -235,25 +235,49 @@ impl UserAgent {
         // Create a new channel
         let (tx, rx) = mpsc::channel(32);
         
-        // We don't need this clone if we're not using it
-        // let event_tx = self.event_tx.clone();
+        // Clone only the active_calls Arc, not the entire self
+        let active_calls = self.active_calls.clone();
         
-        // Spawn task to handle incoming events
+        // Spawn task to send state updates
         tokio::spawn(async move {
-            loop {
-                // For each new event, forward it to all clients
-                // Generate a dummy state changed event every 5 seconds to keep channel open
-                if let Err(_) = tx.send(CallEvent::StateChanged {
-                    call: Arc::new(Call::dummy()), // Just a placeholder
-                    previous: CallState::Initial,
-                    current: CallState::Initial,
-                }).await {
-                    // Channel closed, stop sending
-                    break;
-                }
+            // Create a periodic timer
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            
+            // Keep running until receiver is closed
+            while !tx.is_closed() {
+                interval.tick().await;
                 
-                // Wait a bit before sending the next event
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // Get all active calls
+                let calls = active_calls.read().await;
+                
+                // If we have no active calls, send a dummy event to keep the channel alive
+                if calls.is_empty() {
+                    let test_event = CallEvent::StateChanged {
+                        call: Arc::new(Call::dummy()),
+                        previous: CallState::Initial,
+                        current: CallState::Initial,
+                    };
+                    
+                    if tx.send(test_event).await.is_err() {
+                        break;
+                    }
+                } else {
+                    // For each active call, send the current state
+                    for (_, call) in calls.iter() {
+                        let current_state = call.state().await;
+                        
+                        // Send the current state as an event
+                        let event = CallEvent::StateChanged {
+                            call: call.clone(),
+                            previous: current_state, // We don't have the previous state here, so use current
+                            current: current_state,
+                        };
+                        
+                        if tx.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             }
         });
         
@@ -330,6 +354,9 @@ async fn handle_incoming_request(
         None => return Err(Error::SipProtocol("Request missing Call-ID".into())),
     };
     
+    // Log message receipt for debugging
+    debug!("Received {} for call {}: {:?}", request.method, call_id, request);
+    
     // Check for existing call
     let calls_read = active_calls.read().await;
     let existing_call = calls_read.get(&call_id).cloned();
@@ -340,6 +367,8 @@ async fn handle_incoming_request(
         // Create temporary response to prevent retransmissions
         let mut response = Response::new(StatusCode::Trying);
         add_response_headers(&request, &mut response);
+        
+        debug!("Sending 100 Trying for new call {}", call_id);
         
         // Send 100 Trying
         if let Err(e) = transaction_manager.transport().send_message(
@@ -395,6 +424,8 @@ async fn handle_incoming_request(
         let from_uri: Uri = from_uri_str.parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid From URI: {}", e)))?;
         
+        debug!("Creating new call object for incoming call from {} to {}", from_uri, to_uri);
+        
         // Create call
         let call_config = CallConfig {
             auto_answer: config.media.rtp_enabled,
@@ -423,6 +454,8 @@ async fn handle_incoming_request(
         // Add To header with tag
         ringing_response.headers.push(Header::text(HeaderName::To, to_with_tag.clone()));
         
+        debug!("Sending 180 Ringing for call {}", call_id);
+        
         // Send 180 Ringing
         if let Err(e) = transaction_manager.transport().send_message(
             Message::Response(ringing_response),
@@ -432,18 +465,28 @@ async fn handle_incoming_request(
         }
         
         // Update call state to ringing
-        state_tx.send(CallState::Ringing)
-            .map_err(|_| Error::Call("Failed to update call state".into()))?;
+        if let Err(e) = state_tx.send(CallState::Ringing)
+            .map_err(|_| Error::Call("Failed to update call state".into())) {
+            error!("Failed to update call state to Ringing: {}", e);
+        } else {
+            debug!("Call {} state updated to Ringing", call_id);
+        }
         
         // Store call
         active_calls.write().await.insert(call_id.clone(), call.clone());
         
         // Send event
-        event_tx.send(CallEvent::IncomingCall(call.clone())).await
-            .map_err(|_| Error::Call("Failed to send call event".into()))?;
+        if let Err(e) = event_tx.send(CallEvent::IncomingCall(call.clone())).await
+            .map_err(|_| Error::Call("Failed to send call event".into())) {
+            error!("Failed to send IncomingCall event: {}", e);
+        } else {
+            debug!("Sent IncomingCall event for call {}", call_id);
+        }
         
         // If auto-answer is enabled, answer the call
         if config.media.rtp_enabled {
+            debug!("Auto-answer is enabled, proceeding to answer call {}", call_id);
+            
             // Extract remote SDP
             let remote_sdp = if !request.body.is_empty() {
                 match std::str::from_utf8(&request.body)
@@ -504,6 +547,8 @@ async fn handle_incoming_request(
                 // Add SDP body
                 ok_response.body = sdp_str.into();
                 
+                debug!("Sending 200 OK with SDP answer for call {}", call_id);
+                
                 // Send 200 OK
                 if let Err(e) = transaction_manager.transport().send_message(
                     Message::Response(ok_response),
@@ -513,8 +558,12 @@ async fn handle_incoming_request(
                 }
                 
                 // Update call state to connecting
-                state_tx.send(CallState::Connecting)
-                    .map_err(|_| Error::Call("Failed to update call state".into()))?;
+                if let Err(e) = state_tx.send(CallState::Connecting)
+                    .map_err(|_| Error::Call("Failed to update call state".into())) {
+                    error!("Failed to update call state to Connecting: {}", e);
+                } else {
+                    debug!("Call {} state updated to Connecting", call_id);
+                }
             }
         }
         
@@ -523,24 +572,33 @@ async fn handle_incoming_request(
     
     // Handle request for existing call
     if let Some(call) = existing_call {
+        debug!("Processing {} request for existing call {}", request.method, call_id);
+        
         // Handle ACK to 200 OK specially for state transition
         if request.method == Method::Ack {
             // When we receive an ACK after sending 200 OK, the call is now established
             let current_state = call.state().await;
             if current_state == CallState::Connecting {
+                debug!("Received ACK for call {} in Connecting state, transitioning to Established", call_id);
+                
                 // Directly update the call's state to Established
                 if let Err(e) = call.update_state(CallState::Established).await {
                     warn!("Failed to update call state to Established: {}", e);
                 } else {
                     debug!("Call {} state updated to Established after ACK", call_id);
                 }
+                
                 return Ok(());
+            } else {
+                debug!("Received ACK for call {} in state {}, not transitioning", call_id, current_state);
             }
         }
         
         // Let the call handle other requests
         return match call.handle_request(request).await? {
             Some(response) => {
+                debug!("Sending response {} for call {}", response.status, call_id);
+                
                 // Send response
                 transaction_manager.transport().send_message(
                     Message::Response(response),
@@ -553,10 +611,14 @@ async fn handle_incoming_request(
         };
     }
     
+    debug!("No matching call for {} request with Call-ID {}", request.method, call_id);
+    
     // No matching call, reject with 481 Call/Transaction Does Not Exist
     if request.method != Method::Ack {
         let mut response = Response::new(StatusCode::CallOrTransactionDoesNotExist);
         add_response_headers(&request, &mut response);
+        
+        debug!("Sending 481 Call/Transaction Does Not Exist for {}", call_id);
         
         // Send response
         transaction_manager.transport().send_message(

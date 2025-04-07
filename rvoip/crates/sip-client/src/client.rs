@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{mpsc, Mutex, RwLock, watch, oneshot};
+use tokio::sync::{mpsc, Mutex, RwLock, watch, oneshot, broadcast};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -103,6 +103,9 @@ pub struct SipClient {
     /// Event receiver for client events
     event_rx: mpsc::Receiver<SipClientEvent>,
     
+    /// Broadcast channel for client events
+    event_broadcast: broadcast::Sender<SipClientEvent>,
+    
     /// Active calls
     calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
     
@@ -148,6 +151,7 @@ impl SipClient {
         
         // Create event channels
         let (event_tx, event_rx) = mpsc::channel(32);
+        let (broadcast_tx, _) = broadcast::channel(32);  // Create broadcast channel
         
         info!("SIP client initialized with username: {}", config.username);
         
@@ -157,6 +161,7 @@ impl SipClient {
             transaction_events_rx,
             event_tx,
             event_rx,
+            event_broadcast: broadcast_tx,  // Add this field
             calls: Arc::new(RwLock::new(HashMap::new())),
             cseq: Arc::new(Mutex::new(1)),
             registration: Arc::new(RwLock::new(None)),
@@ -183,6 +188,17 @@ impl SipClient {
         let running = self.running.clone();
         let client_events_tx = self.event_tx.clone();
         let pending_responses = self.pending_responses.clone();
+        let broadcast_tx = self.event_broadcast.clone();
+        
+        // Create a task to forward events to broadcast channel
+        let client_events_tx_for_broadcast = self.event_tx.clone();
+        
+        // Create a transformer that broadcasts events
+        let client_events_with_broadcast = client_events_tx_for_broadcast.with_transformer(move |event: SipClientEvent| {
+            // Send a copy to broadcast channel before returning
+            let _ = broadcast_tx.send(event.clone());
+            event
+        });
         
         let event_task = tokio::spawn(async move {
             debug!("SIP client event processing task started");
@@ -614,54 +630,27 @@ impl SipClient {
         // Send INVITE request via transaction
         let response = self.send_via_transaction(request, target_addr).await?;
         
-        // Update call state based on response
+        // Update call state based on response - DO NOT USE state_tx directly
+        // Instead use the call's update_state method which will handle state validation
+        // and proper event emission
         if response.status.is_success() {
             // Call answered
-            state_tx.send(CallState::Established)
-                .map_err(|_| Error::Call("Failed to update call state".into()))?;
+            call.handle_response(response.clone()).await?;
         } else if response.status == StatusCode::Ringing || response.status == StatusCode::SessionProgress {
             // Call ringing
-            state_tx.send(CallState::Ringing)
-                .map_err(|_| Error::Call("Failed to update call state".into()))?;
+            call.handle_response(response.clone()).await?;
         } else {
-            // Call failed - update to Terminated with error status
-            state_tx.send(CallState::Terminated)
-                .map_err(|_| Error::Call("Failed to update call state".into()))?;
-            
-            // Send terminated event
-            let _ = self.event_tx.send(SipClientEvent::Call(CallEvent::Terminated {
-                call: call.clone(),
-                reason: format!("Failed with status: {}", response.status),
-            })).await;
+            // Call failed - update via the appropriate method
+            call.handle_response(response.clone()).await?;
         }
         
         Ok(call)
     }
     
     /// Get event stream for client events
-    pub fn event_stream(&self) -> mpsc::Receiver<SipClientEvent> {
-        // Create a new channel for the caller
-        let (tx, rx) = mpsc::channel(32);
-        
-        // Clone our event sender
-        let event_tx = self.event_tx.clone(); 
-        
-        // Spawn task to forward events to the new channel
-        tokio::spawn(async move {
-            // Create a separate channel to receive events
-            let (_forward_tx, mut forward_rx) = mpsc::channel(32);
-            
-            // Use event_tx directly without assigning to unused variable
-            
-            // Forward all incoming events to the user's channel
-            while let Some(event) = forward_rx.recv().await {
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
-        
-        rx
+    pub fn event_stream(&self) -> broadcast::Receiver<SipClientEvent> {
+        // Return a new receiver subscribed to the broadcast channel
+        self.event_broadcast.subscribe()
     }
     
     /// Get active calls
@@ -820,6 +809,13 @@ impl SipClient {
     async fn send_via_transaction(&self, request: Request, destination: SocketAddr) -> Result<Response> {
         let method = request.method.clone();
         
+        // Extract Call-ID to associate with the right call
+        let call_id = request.call_id()
+            .ok_or_else(|| Error::SipProtocol("Request missing Call-ID".into()))?
+            .to_string();
+            
+        debug!("Sending {} request via transaction layer for call {}", method, call_id);
+        
         // Create appropriate client transaction based on request method
         let transaction_id = if method == Method::Invite {
             // Use INVITE transaction
@@ -839,12 +835,12 @@ impl SipClient {
         self.transaction_manager.send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
+        debug!("Request sent via transaction {}", transaction_id);
+        
         // Wait for final response
         let response = match method {
             Method::Invite => {
-                // For INVITE, wait for a provisional response first
-                // TODO: Implement this logic
-                // For now, just wait for final response
+                // For INVITE, process both provisional and final responses
                 self.wait_for_transaction_response(&transaction_id).await?
             },
             _ => {
@@ -852,6 +848,15 @@ impl SipClient {
                 self.wait_for_transaction_response(&transaction_id).await?
             }
         };
+        
+        // Process the response to update call state
+        if let Some(call) = self.calls.read().await.get(&call_id).cloned() {
+            debug!("Forwarding response to call {} state machine", call_id);
+            // Process response directly to ensure immediate state update
+            if let Err(e) = call.handle_response(response.clone()).await {
+                error!("Error handling response: {}", e);
+            }
+        }
         
         Ok(response)
     }
@@ -997,6 +1002,7 @@ impl Clone for SipClient {
             transaction_events_rx,
             event_tx,
             event_rx,
+            event_broadcast: self.event_broadcast.clone(),
             calls: self.calls.clone(),
             cseq: self.cseq.clone(),
             registration: self.registration.clone(),

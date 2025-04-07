@@ -52,6 +52,10 @@ pub enum Error {
     #[error("Operation timed out: {0}")]
     Timeout(String),
 
+    /// Invalid state transitions
+    #[error("Invalid state transition: {0}")]
+    InvalidState(String),
+
     /// General errors
     #[error("{0}")]
     Other(String),

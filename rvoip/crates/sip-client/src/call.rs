@@ -15,7 +15,7 @@ use rvoip_sip_core::{
     Header, HeaderName, HeaderValue
 };
 use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
-use rvoip_session_core::dialog::{Dialog, DialogState};
+use rvoip_session_core::dialog::{Dialog, DialogState, DialogId, extract_tag};
 use rvoip_transaction_core::TransactionManager;
 
 use crate::config::CallConfig;
@@ -48,6 +48,23 @@ pub enum CallState {
     Terminating,
     /// Call is terminated
     Terminated,
+    /// Call has failed (special terminated state with error)
+    Failed,
+}
+
+/// Error type for invalid state transitions
+#[derive(Debug, Clone)]
+pub struct StateChangeError {
+    current: CallState,
+    requested: CallState,
+    message: String,
+}
+
+impl std::fmt::Display for StateChangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid state transition from {} to {}: {}", 
+            self.current, self.requested, self.message)
+    }
 }
 
 impl std::fmt::Display for CallState {
@@ -59,6 +76,7 @@ impl std::fmt::Display for CallState {
             CallState::Established => write!(f, "Established"),
             CallState::Terminating => write!(f, "Terminating"),
             CallState::Terminated => write!(f, "Terminated"),
+            CallState::Failed => write!(f, "Failed"),
         }
     }
 }
@@ -156,8 +174,11 @@ pub struct Call {
     /// Current call state
     state: Arc<RwLock<CallState>>,
 
-    /// State change watcher
+    /// State change watcher (receiver)
     state_watcher: watch::Receiver<CallState>,
+    
+    /// State change sender
+    state_sender: Arc<watch::Sender<CallState>>,
 
     /// Call start time
     start_time: Option<Instant>,
@@ -214,6 +235,7 @@ impl Call {
             transaction_manager,
             state: Arc::new(RwLock::new(CallState::Initial)),
             state_watcher: state_rx,
+            state_sender: Arc::new(state_tx.clone()),
             start_time: Some(Instant::now()),
             connect_time: None,
             end_time: None,
@@ -380,6 +402,7 @@ impl Call {
         
         if let Some(ref mut dialog) = *dialog_guard {
             // Create INFO request using dialog
+            debug!("Creating INFO request using dialog");
             let mut info_request = dialog.create_request(Method::Info);
             
             // Add Content-Type for DTMF
@@ -414,27 +437,136 @@ impl Call {
             
             Ok(())
         } else {
+            // No dialog, create an INFO request manually
+            debug!("Creating INFO request manually (no dialog)");
+            
+            let mut info_request = Request::new(Method::Info, self.remote_uri.clone());
+            
+            // Add Via header with branch parameter
+            let branch = format!("z9hG4bK-{}", Uuid::new_v4());
+            let via_value = format!(
+                "SIP/2.0/UDP {};branch={}",
+                self.local_uri.host,
+                branch
+            );
+            info_request.headers.push(Header::text(HeaderName::Via, via_value));
+            
+            // Add Max-Forwards
+            info_request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
+            
+            // Add From header with tag
+            let from_value = format!(
+                "<{}>;tag={}",
+                self.local_uri,
+                self.local_tag
+            );
+            info_request.headers.push(Header::text(HeaderName::From, from_value));
+            
+            // Add To header with remote tag if available
+            let remote_tag_value = self.remote_tag.read().await.clone();
+            let to_value = if let Some(tag) = remote_tag_value {
+                format!("<{}>;tag={}", self.remote_uri, tag)
+            } else {
+                format!("<{}>", self.remote_uri)
+            };
+            info_request.headers.push(Header::text(HeaderName::To, to_value));
+            
+            // Add Call-ID
+            info_request.headers.push(Header::text(HeaderName::CallId, self.sip_call_id.clone()));
+            
+            // Add CSeq - use the next CSeq with INFO method
+            let mut cseq = self.cseq.lock().await;
+            let current_cseq = *cseq;
+            *cseq += 1;
+            info_request.headers.push(Header::text(
+                HeaderName::CSeq,
+                format!("{} {}", current_cseq, Method::Info)
+            ));
+            
+            // Add Content-Type for DTMF
+            info_request.headers.push(Header::text(
+                HeaderName::ContentType, 
+                "application/dtmf-relay"
+            ));
+            
+            // Create DTMF payload according to RFC 2833
+            let dtmf_body = format!("Signal={}\r\nDuration=250", digit);
+            info_request.body = Bytes::from(dtmf_body);
+            
+            // Set Content-Length
+            info_request.headers.push(Header::integer(
+                HeaderName::ContentLength, 
+                info_request.body.len() as i64
+            ));
+            
             // Release the lock
             drop(dialog_guard);
-            Err(Error::Call("Cannot send DTMF: no dialog established".into()))
+            
+            // Send INFO via transaction
+            let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+                info_request,
+                self.remote_addr,
+            ).await.map_err(|e| Error::Transport(e.to_string()))?;
+            
+            self.transaction_manager.send_request(&transaction_id).await
+                .map_err(|e| Error::Transport(e.to_string()))?;
+            
+            debug!("Sent DTMF {} for call {} (no dialog)", digit, self.id);
+            
+            Ok(())
         }
     }
 
     /// Wait until the call is established or terminated
     pub async fn wait_until_established(&self) -> Result<()> {
+        // Check the actual call state directly, not the watcher
+        let current_state = self.state().await;
+        debug!("Initial call state in wait_until_established: {}", current_state);
+        
+        if current_state == CallState::Established {
+            debug!("Call is already established, returning immediately");
+            return Ok(());
+        }
+        
+        if current_state == CallState::Terminated || current_state == CallState::Failed {
+            debug!("Call is in terminal state {}, cannot establish", current_state);
+            return Err(Error::Call("Call terminated before being established".into()));
+        }
+        
+        // If we're here, the call is not yet established or terminated
+        // Wait for state changes via polling with timeout
+        debug!("Waiting for call to establish...");
+        
+        // Use a longer timeout (30 seconds is common for SIP call setup)
+        let start = std::time::Instant::now();
+        let timeout_duration = std::time::Duration::from_secs(30);
+        
         loop {
-            let state = *self.state_watcher.borrow();
+            // Check if we've exceeded the timeout
+            if start.elapsed() > timeout_duration {
+                debug!("Timed out waiting for call to establish");
+                return Err(Error::Timeout("Timed out waiting for call to establish".into()));
+            }
+            
+            // Sleep a bit between checks
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            // Check state again
+            let state = self.state().await;
+            debug!("Current call state while waiting: {}", state);
+            
             match state {
-                CallState::Established => return Ok(()),
-                CallState::Terminated => {
+                CallState::Established => {
+                    debug!("Call established successfully after waiting");
+                    return Ok(());
+                },
+                CallState::Terminated | CallState::Failed => {
+                    debug!("Call terminated while waiting for establishment");
                     return Err(Error::Call("Call terminated before being established".into()));
-                }
+                },
                 _ => {
-                    // Wait for state change
-                    let mut cloned_watcher = self.state_watcher.clone();
-                    if cloned_watcher.changed().await.is_err() {
-                        return Err(Error::Call("Call state watcher closed".into()));
-                    }
+                    // Continue waiting
+                    continue;
                 }
             }
         }
@@ -610,15 +742,54 @@ impl Call {
         debug!("Handling incoming response {} for call {}", response.status, self.id);
         
         let current_state = self.state().await;
+        debug!("Current call state before processing response: {}", current_state);
+        
+        // Add detailed logging for INVITE responses
+        let is_invite_response = if let Some(cseq_header) = response.headers.iter().find(|h| h.name == HeaderName::CSeq) {
+            if let Some(cseq_text) = cseq_header.value.as_text() {
+                cseq_text.contains("INVITE")
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
+        if is_invite_response {
+            debug!("Processing INVITE response with status {}", response.status);
+        }
+        
+        // Check if call is in a terminal state
+        if current_state == CallState::Terminated || current_state == CallState::Failed {
+            debug!("Call is already in terminal state {}, ignoring response", current_state);
+            return Ok(());
+        }
         
         // Handle based on response status and current state
         match response.status {
+            StatusCode::Trying => {
+                // 100 Trying doesn't change state, it just confirms the INVITE was received
+                debug!("Received 100 Trying, keeping state as {}", current_state);
+            },
             StatusCode::Ringing | StatusCode::SessionProgress => {
+                // Only update to Ringing if in Initial state
                 if current_state == CallState::Initial {
+                    debug!("Received provisional response {}, updating state to Ringing", response.status);
+                    
                     // Check if we should create an early dialog
                     if let Some(to_header) = response.headers.iter().find(|h| h.name == HeaderName::To) {
                         if let Some(to_text) = to_header.value.as_text() {
                             if to_text.contains(";tag=") {
+                                // Extract and save remote tag
+                                if let Some(tag_start) = to_text.find(";tag=") {
+                                    let tag = &to_text[tag_start + 5..];
+                                    debug!("Extracted remote tag from provisional response: {}", tag);
+                                    
+                                    // Store the remote tag
+                                    let mut remote_tag = self.remote_tag.write().await;
+                                    *remote_tag = Some(tag.to_string());
+                                }
+                                
                                 // This response can create an early dialog (it has a to-tag)
                                 debug!("Creating early dialog from {} response", response.status);
                                 
@@ -642,90 +813,304 @@ impl Call {
                     
                     // Update state to Ringing
                     self.update_state(CallState::Ringing).await?;
+                } else {
+                    debug!("Received provisional response {} in state {}, not changing state", 
+                           response.status, current_state);
                 }
             },
             status if status.is_success() => {
-                if current_state == CallState::Initial || current_state == CallState::Ringing {
-                    // Extract remote tag from To header
-                    if let Some(to_header) = response.headers.iter().find(|h| h.name == HeaderName::To) {
-                        if let Some(to_text) = to_header.value.as_text() {
-                            if let Some(tag_start) = to_text.find(";tag=") {
-                                let tag = &to_text[tag_start + 5..];
-                                debug!("Extracted remote tag: {}", tag);
-                                
-                                // Store the remote tag
-                                let mut remote_tag = self.remote_tag.write().await;
-                                *remote_tag = Some(tag.to_string());
-                            }
-                        }
-                    }
-                    
-                    // Handle dialog creation/updating
-                    let mut dialog_lock = self.dialog.write().await;
-                    
-                    if let Some(ref mut dialog) = *dialog_lock {
-                        // We have an early dialog, update it
-                        if dialog.state == DialogState::Early {
-                            dialog.update_from_2xx(&response);
-                            debug!("Updated early dialog to confirmed for call {}", self.id);
-                        }
-                    } else {
-                        // Create a new dialog
-                        // Create a mock request for dialog creation
-                        let mut request = Request::new(Method::Invite, self.remote_uri.clone());
-                        request.headers.push(Header::text(HeaderName::CallId, self.sip_call_id.clone()));
-                        request.headers.push(Header::text(HeaderName::From, 
-                            format!("<{}>;tag={}", self.local_uri, self.local_tag)));
-                        request.headers.push(Header::text(HeaderName::To, 
-                            format!("<{}>", self.remote_uri)));
-                        
-                        if let Some(dialog) = Dialog::from_2xx_response(&request, &response, true) {
-                            *dialog_lock = Some(dialog);
-                            debug!("Created confirmed dialog for call {}", self.id);
-                        }
-                    }
-                    
-                    drop(dialog_lock); // Release the lock
-                    
-                    // Extract remote SDP
-                    if !response.body.is_empty() {
-                        match std::str::from_utf8(&response.body)
-                            .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))
-                            .and_then(|sdp_str| SessionDescription::parse(sdp_str)
-                                .map_err(|e| Error::SipProtocol(format!("Invalid SDP: {}", e))))
-                        {
-                            Ok(sdp) => {
-                                // Store the remote SDP
-                                let mut remote_sdp = self.remote_sdp.write().await;
-                                *remote_sdp = Some(sdp);
-                                
-                                // Extract remote RTP port
-                                if let Some(port) = extract_rtp_port_from_sdp(&response.body) {
-                                    debug!("Extracted remote RTP port: {}", port);
+                debug!("Received success response {}, processing", status);
+                
+                // Process 2xx responses based on current state
+                match current_state {
+                    CallState::Initial | CallState::Ringing => {
+                        // Extract remote tag from To header
+                        if let Some(to_header) = response.headers.iter().find(|h| h.name == HeaderName::To) {
+                            if let Some(to_text) = to_header.value.as_text() {
+                                if let Some(tag_start) = to_text.find(";tag=") {
+                                    let tag = &to_text[tag_start + 5..];
+                                    debug!("Extracted remote tag: {}", tag);
+                                    
+                                    // Store the remote tag
+                                    let mut remote_tag = self.remote_tag.write().await;
+                                    *remote_tag = Some(tag.to_string());
                                 }
-                            },
-                            Err(e) => {
-                                warn!("Failed to parse SDP in response: {}", e);
                             }
                         }
-                    }
-                    
-                    // Update state to Connecting
-                    self.update_state(CallState::Connecting).await?;
-                    
-                    // Send ACK for 2xx response
-                    if let Err(e) = self.send_ack().await {
-                        error!("Failed to send ACK: {}", e);
-                    } else {
-                        // We've sent the ACK successfully, move to Established state
+                        
+                        // Handle dialog creation/updating
+                        let mut dialog_lock = self.dialog.write().await;
+                        
+                        if let Some(ref mut dialog) = *dialog_lock {
+                            // We have an early dialog, update it
+                            if dialog.state == DialogState::Early {
+                                dialog.update_from_2xx(&response);
+                                debug!("Updated early dialog to confirmed for call {}", self.id);
+                            }
+                        } else {
+                            // Create a new dialog
+                            // Create a mock request for dialog creation
+                            let mut request = Request::new(Method::Invite, self.remote_uri.clone());
+                            request.headers.push(Header::text(HeaderName::CallId, self.sip_call_id.clone()));
+                            request.headers.push(Header::text(HeaderName::From, 
+                                format!("<{}>;tag={}", self.local_uri, self.local_tag)));
+                            request.headers.push(Header::text(HeaderName::To, 
+                                format!("<{}>", self.remote_uri)));
+                            
+                            // Log the request and response headers for diagnostics
+                            debug!("Creating dialog with request headers:");
+                            for header in &request.headers {
+                                debug!("  {}: {}", header.name, header.value);
+                            }
+                            
+                            debug!("Creating dialog with response headers:");
+                            for header in &response.headers {
+                                debug!("  {}: {}", header.name, header.value);
+                            }
+                            
+                            // Extract key headers and log them
+                            let to_header = response.headers.iter().find(|h| h.name == HeaderName::To);
+                            let from_header = response.headers.iter().find(|h| h.name == HeaderName::From);
+                            let call_id_header = response.headers.iter().find(|h| h.name == HeaderName::CallId);
+                            let contact_header = response.headers.iter().find(|h| h.name == HeaderName::Contact);
+                            
+                            debug!("Key dialog headers:");
+                            debug!("  To: {:?}", to_header.map(|h| &h.value));
+                            debug!("  From: {:?}", from_header.map(|h| &h.value));
+                            debug!("  Call-ID: {:?}", call_id_header.map(|h| &h.value));
+                            debug!("  Contact: {:?}", contact_header.map(|h| &h.value));
+                            
+                            // Attempt to create dialog
+                            if let Some(dialog) = Dialog::from_2xx_response(&request, &response, true) {
+                                *dialog_lock = Some(dialog);
+                                debug!("Successfully created confirmed dialog for call {}", self.id);
+                            } else {
+                                // Try to determine why dialog creation failed
+                                let mut reason = "unknown reason".to_string();
+                                
+                                // Check status code
+                                if !matches!(response.status, StatusCode::Ok | StatusCode::Accepted) {
+                                    reason = format!("Response status is not 200 OK or 202 Accepted ({})", response.status);
+                                }
+                                // Check required headers
+                                else if to_header.is_none() {
+                                    reason = "Missing To header".to_string();
+                                }
+                                else if from_header.is_none() {
+                                    reason = "Missing From header".to_string();
+                                }
+                                else if call_id_header.is_none() {
+                                    reason = "Missing Call-ID header".to_string();
+                                }
+                                else if contact_header.is_none() {
+                                    reason = "Missing Contact header".to_string();
+                                }
+                                // Check for To tag (required for dialog)
+                                else if let Some(to) = to_header {
+                                    if let Some(to_text) = to.value.as_text() {
+                                        if !to_text.contains(";tag=") {
+                                            reason = "To header is missing tag parameter".to_string();
+                                        }
+                                    }
+                                }
+                                
+                                warn!("Failed to create dialog for call {}: {}", self.id, reason);
+                                
+                                // Make dialog creation failure non-fatal - create a basic dialog manually if needed
+                                if let (Some(to), Some(from), Some(call_id)) = (to_header, from_header, call_id_header) {
+                                    if let (Some(to_text), Some(from_text), Some(call_id_text)) = 
+                                        (to.value.as_text(), from.value.as_text(), call_id.value.as_text()) {
+                                        
+                                        debug!("Attempting to create manual dialog for call {}", self.id);
+                                        
+                                        // Extract remote tag or generate one
+                                        let remote_tag = extract_tag(to_text).unwrap_or_else(|| {
+                                            let tag = format!("generated-{}", Uuid::new_v4());
+                                            debug!("Generated remote tag: {}", tag);
+                                            tag
+                                        });
+                                        
+                                        // Extract local tag
+                                        let local_tag = extract_tag(from_text).unwrap_or_else(|| self.local_tag.clone());
+                                        
+                                        // Get contact URI for remote target (important!)
+                                        let remote_target = if let Some(contact) = contact_header {
+                                            if let Some(contact_text) = contact.value.as_text() {
+                                                if let Some(uri) = extract_uri(contact_text) {
+                                                    uri
+                                                } else {
+                                                    debug!("Failed to extract URI from Contact header, using remote URI");
+                                                    self.remote_uri.clone()
+                                                }
+                                            } else {
+                                                debug!("Contact header not in text format, using remote URI");
+                                                self.remote_uri.clone()
+                                            }
+                                        } else {
+                                            debug!("No Contact header found, using remote URI");
+                                            self.remote_uri.clone()
+                                        };
+                                        
+                                        // Set up a basic manual dialog
+                                        let manual_dialog = Dialog {
+                                            id: DialogId::new(),
+                                            state: DialogState::Confirmed,
+                                            call_id: call_id_text.to_string(),
+                                            local_uri: self.local_uri.clone(),
+                                            remote_uri: self.remote_uri.clone(),
+                                            local_tag: Some(local_tag),
+                                            remote_tag: Some(remote_tag),
+                                            local_seq: 1,
+                                            remote_seq: 0,
+                                            remote_target,
+                                            route_set: Vec::new(),
+                                            is_initiator: true,
+                                        };
+                                        
+                                        debug!("Created manual dialog for call {}", self.id);
+                                        *dialog_lock = Some(manual_dialog);
+                                    } else {
+                                        warn!("Cannot create manual dialog: headers not in text format");
+                                    }
+                                }
+                                
+                                // Whether we created a manual dialog or not, continue with the call flow
+                                drop(dialog_lock);
+                                
+                                // Extract remote SDP
+                                if !response.body.is_empty() {
+                                    debug!("Processing SDP in success response");
+                                    match std::str::from_utf8(&response.body)
+                                        .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))
+                                        .and_then(|sdp_str| SessionDescription::parse(sdp_str)
+                                            .map_err(|e| Error::SipProtocol(format!("Invalid SDP: {}", e))))
+                                    {
+                                        Ok(sdp) => {
+                                            // Store the remote SDP
+                                            let mut remote_sdp = self.remote_sdp.write().await;
+                                            *remote_sdp = Some(sdp);
+                                            
+                                            // Extract remote RTP port
+                                            if let Some(port) = extract_rtp_port_from_sdp(&response.body) {
+                                                debug!("Extracted remote RTP port: {}", port);
+                                            }
+                                        },
+                                        Err(e) => {
+                                            warn!("Failed to parse SDP in response: {}", e);
+                                        }
+                                    }
+                                }
+                                
+                                // Update state to Connecting
+                                debug!("Updating state to Connecting before sending ACK");
+                                self.update_state(CallState::Connecting).await?;
+                                
+                                // Send ACK for 2xx response
+                                debug!("Sending ACK for successful response");
+                                if let Err(e) = self.send_ack().await {
+                                    error!("Failed to send ACK: {}", e);
+                                    self.update_state(CallState::Failed).await?;
+                                    return Err(e);
+                                } else {
+                                    // We've sent the ACK successfully, move to Established state
+                                    debug!("ACK sent successfully, updating state to Established");
+                                    self.update_state(CallState::Established).await?;
+                                }
+                                
+                                // Don't return early, let the normal call flow continue
+                            }
+                        }
+                        
+                        drop(dialog_lock); // Release the lock
+                        
+                        // Extract remote SDP
+                        if !response.body.is_empty() {
+                            debug!("Processing SDP in success response");
+                            match std::str::from_utf8(&response.body)
+                                .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))
+                                .and_then(|sdp_str| SessionDescription::parse(sdp_str)
+                                    .map_err(|e| Error::SipProtocol(format!("Invalid SDP: {}", e))))
+                            {
+                                Ok(sdp) => {
+                                    // Store the remote SDP
+                                    let mut remote_sdp = self.remote_sdp.write().await;
+                                    *remote_sdp = Some(sdp);
+                                    
+                                    // Extract remote RTP port
+                                    if let Some(port) = extract_rtp_port_from_sdp(&response.body) {
+                                        debug!("Extracted remote RTP port: {}", port);
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Failed to parse SDP in response: {}", e);
+                                }
+                            }
+                        }
+                        
+                        // Update state to Connecting
+                        debug!("Updating state to Connecting before sending ACK");
+                        self.update_state(CallState::Connecting).await?;
+                        
+                        // Send ACK for 2xx response
+                        debug!("Sending ACK for successful response");
+                        if let Err(e) = self.send_ack().await {
+                            error!("Failed to send ACK: {}", e);
+                            self.update_state(CallState::Failed).await?;
+                            return Err(e);
+                        } else {
+                            // We've sent the ACK successfully, move to Established state
+                            debug!("ACK sent successfully, updating state to Established");
+                            self.update_state(CallState::Established).await?;
+                        }
+                    },
+                    CallState::Connecting => {
+                        debug!("Already in Connecting state, transitioning to Established");
+                        // Resend ACK to be safe
+                        if let Err(e) = self.send_ack().await {
+                            error!("Failed to send ACK in Connecting state: {}", e);
+                            self.update_state(CallState::Failed).await?;
+                            return Err(e);
+                        }
                         self.update_state(CallState::Established).await?;
+                    },
+                    CallState::Established => {
+                        debug!("Received success response in Established state, likely retransmission");
+                        // Resend ACK to handle retransmissions
+                        if let Err(e) = self.send_ack().await {
+                            warn!("Failed to send ACK for retransmission: {}", e);
+                            // Don't fail the call for retransmission ACK failures
+                        }
+                    },
+                    CallState::Terminating => {
+                        debug!("Received success response in Terminating state, completing termination");
+                        self.update_state(CallState::Terminated).await?;
+                    },
+                    _ => {
+                        debug!("Received success response in unexpected state {}", current_state);
                     }
                 }
             },
             _ => {
                 // Other responses (failure, etc.)
-                if current_state != CallState::Terminated {
-                    self.update_state(CallState::Terminated).await?;
+                debug!("Received non-success response {}, checking if we should terminate", response.status);
+                
+                // Check if this is a fatal error that should terminate the call
+                let is_fatal = match response.status.as_u16() {
+                    // 4xx client errors
+                    400..=499 => {
+                        // Some 4xx errors could be retried, but for simplicity we'll consider all fatal
+                        true
+                    },
+                    // 5xx server errors
+                    500..=599 => true,
+                    // 6xx global errors
+                    600..=699 => true,
+                    // Other status codes shouldn't appear in responses
+                    _ => true,
+                };
+                
+                if is_fatal {
+                    warn!("Call failed with status: {}", response.status);
                     
                     // If we have a dialog, terminate it
                     let mut dialog_lock = self.dialog.write().await;
@@ -733,6 +1118,10 @@ impl Call {
                         dialog.terminate();
                         debug!("Dialog terminated for call {}", self.id);
                     }
+                    drop(dialog_lock);
+                    
+                    // Update to Failed state (special type of terminated)
+                    self.update_state(CallState::Failed).await?;
                     
                     // Emit termination event with reason from response
                     let reason = format!("Call failed with status: {}", response.status);
@@ -740,6 +1129,9 @@ impl Call {
                         call: Arc::new(self.clone()),
                         reason,
                     }).await.map_err(|_| Error::Call("Failed to send termination event".into()))?;
+                } else {
+                    // Non-fatal response, we can continue
+                    debug!("Received non-fatal error response {}", response.status);
                 }
             }
         }
@@ -766,6 +1158,7 @@ impl Call {
             transaction_manager: Arc::new(TransactionManager::dummy()),
             state: Arc::new(RwLock::new(CallState::Initial)),
             state_watcher: watch::channel(CallState::Initial).1,
+            state_sender: Arc::new(watch::channel(CallState::Initial).0),
             start_time: None,
             connect_time: None,
             end_time: None,
@@ -782,9 +1175,27 @@ impl Call {
         let previous = {
             let mut state = self.state.write().await;
             let previous = *state;
+            
+            // Validate state transition
+            if !self.is_valid_transition(previous, new_state) {
+                debug!("Invalid state transition: {} -> {}", previous, new_state);
+                return Err(Error::InvalidState(format!(
+                    "Invalid state transition from {} to {}",
+                    previous, new_state
+                )));
+            }
+            
             *state = new_state;
             previous
         };
+        
+        // Always update the watcher to keep it in sync
+        if let Err(e) = self.state_sender.send(new_state) {
+            debug!("Failed to update state watcher: {:?}", e);
+            // Not a fatal error, continue
+        } else {
+            debug!("Updated state watcher to: {}", new_state);
+        }
         
         // Only emit event if the state actually changed
         if previous != new_state {
@@ -800,7 +1211,7 @@ impl Call {
                         debug!("Call established at {}", Instant::now().elapsed().as_secs_f32());
                     }
                 },
-                CallState::Terminated => {
+                CallState::Terminated | CallState::Failed => {
                     if self.end_time.is_none() {
                         // In a real implementation we'd update the end_time field
                         // Can't modify fields through immutable reference
@@ -820,6 +1231,54 @@ impl Call {
         }
         
         Ok(())
+    }
+    
+    /// Validate if a state transition is allowed
+    fn is_valid_transition(&self, from: CallState, to: CallState) -> bool {
+        use CallState::*;
+        
+        // Allow transition to same state (no-op)
+        if from == to {
+            return true;
+        }
+        
+        match (from, to) {
+            // Valid transitions from Initial
+            (Initial, Ringing) => true,
+            (Initial, Connecting) => true,
+            (Initial, Terminating) => true,
+            (Initial, Terminated) => true,
+            (Initial, Failed) => true,
+            
+            // Valid transitions from Ringing
+            (Ringing, Connecting) => true,
+            (Ringing, Established) => true,  // Shortcut for quick answer
+            (Ringing, Terminating) => true,
+            (Ringing, Terminated) => true,
+            (Ringing, Failed) => true,
+            
+            // Valid transitions from Connecting
+            (Connecting, Established) => true,
+            (Connecting, Terminating) => true,
+            (Connecting, Terminated) => true,
+            (Connecting, Failed) => true,
+            
+            // Valid transitions from Established
+            (Established, Terminating) => true,
+            (Established, Terminated) => true,
+            (Established, Failed) => true,
+            
+            // Valid transitions from Terminating
+            (Terminating, Terminated) => true,
+            (Terminating, Failed) => true,
+            
+            // No valid transitions from Terminated or Failed (terminal states)
+            (Terminated, _) => false,
+            (Failed, _) => false,
+            
+            // Any other transition is invalid
+            _ => false,
+        }
     }
 
     /// Send an ACK for a successful response
@@ -915,6 +1374,7 @@ impl Clone for Call {
             transaction_manager: self.transaction_manager.clone(),
             state: self.state.clone(),
             state_watcher: self.state_watcher.clone(),
+            state_sender: self.state_sender.clone(),
             start_time: self.start_time,
             connect_time: self.connect_time,
             end_time: self.end_time,

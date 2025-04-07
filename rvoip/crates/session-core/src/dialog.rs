@@ -333,29 +333,94 @@ impl Dialog {
 }
 
 /// Helper function to extract tag parameter from a header value
-fn extract_tag(header_value: &str) -> Option<String> {
-    // Simple tag extraction, in a real implementation would use proper parsing
+pub fn extract_tag(header_value: &str) -> Option<String> {
+    // Improved tag extraction with more robust parsing
     if let Some(tag_pos) = header_value.find(";tag=") {
         let tag_start = tag_pos + 5; // length of ";tag="
-        let tag_end = header_value[tag_start..].find(';')
+        
+        // Find the end of the tag (either at the next semicolon or the end of the string)
+        let tag_end = header_value[tag_start..]
+            .find(|c: char| c == ';' || c == '>' || c.is_whitespace())
             .map(|pos| tag_start + pos)
             .unwrap_or(header_value.len());
-        Some(header_value[tag_start..tag_end].to_string())
-    } else {
-        None
+        
+        // Extract and trim any whitespace
+        let tag = header_value[tag_start..tag_end].trim();
+        
+        // Only return if tag is not empty
+        if !tag.is_empty() {
+            return Some(tag.to_string());
+        }
     }
+    
+    // If this is a Contact or From header that should always have a tag
+    // but doesn't, we can generate one
+    if header_value.contains("From:") || header_value.contains("<sip:") {
+        if !header_value.contains(";tag=") {
+            // No tag present, generate one for interoperability
+            use uuid::Uuid;
+            return Some(format!("autogen-{}", Uuid::new_v4().to_string().split('-').next().unwrap_or("tag")));
+        }
+    }
+    
+    None
 }
 
 /// Helper function to extract a URI from a header value
-fn extract_uri(header_value: &str) -> Option<Uri> {
-    // Simple URI extraction
-    let uri_start = header_value.find('<')
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    let uri_end = header_value[uri_start..].find('>')
-        .map(|pos| uri_start + pos)
-        .unwrap_or(header_value.len());
+pub fn extract_uri(header_value: &str) -> Option<Uri> {
+    // Special handling for Contact headers which often look like: <sip:user@domain:port;transport=udp>
+    if header_value.contains("Contact:") || header_value.contains("contact:") {
+        // Contact headers often have special parameters that need to be preserved
+        if let Some(start) = header_value.find('<') {
+            let start_idx = start + 1;
+            if let Some(end) = header_value[start_idx..].find('>') {
+                let uri_str = header_value[start_idx..(start_idx + end)].trim();
+                if let Ok(uri) = Uri::from_str(uri_str) {
+                    return Some(uri);
+                }
+            }
+        }
+    }
     
-    let uri_str = header_value[uri_start..uri_end].trim();
-    Uri::from_str(uri_str).ok()
+    // Improved URI extraction with more robust parsing
+    
+    // If the header has angle brackets <sip:user@domain>, extract the part between them
+    if let Some(start) = header_value.find('<') {
+        let start_idx = start + 1;
+        if let Some(end) = header_value[start_idx..].find('>') {
+            let uri_str = header_value[start_idx..(start_idx + end)].trim();
+            return Uri::from_str(uri_str).ok();
+        }
+    }
+    
+    // If no angle brackets, try parsing the whole string (minus any parameters)
+    // This handles formats like "sip:user@domain;tag=1234"
+    let uri_str = match header_value.find(';') {
+        Some(idx) => header_value[0..idx].trim(),
+        None => header_value.trim()
+    };
+    
+    // Try parsing as URI
+    if let Ok(uri) = Uri::from_str(uri_str) {
+        return Some(uri);
+    }
+    
+    // Check if it's just a domain without the scheme
+    if !uri_str.contains(':') && !uri_str.contains('@') {
+        // Try adding "sip:" prefix
+        if let Ok(uri) = Uri::from_str(&format!("sip:{}", uri_str)) {
+            return Some(uri);
+        }
+    }
+    
+    // Last resort - try to extract just the host part
+    let host_part = uri_str
+        .trim_start_matches("sip:")
+        .trim_start_matches("sips:")
+        .trim_start_matches("tel:")
+        .split('@')
+        .last()
+        .unwrap_or(uri_str);
+    
+    Uri::from_str(&format!("sip:{}", host_part)).ok()
 } 

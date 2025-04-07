@@ -1,8 +1,7 @@
 use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::task::JoinHandle;
-use tracing::{info, error, warn, debug, Level};
+use tracing::{info, error, debug, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use rvoip_sip_client::{
@@ -10,7 +9,6 @@ use rvoip_sip_client::{
     CallConfig, CallState,
     Result,
 };
-use rvoip_sip_client::config::{TransportConfig, MediaConfig, TransactionConfig};
 
 /// SIP Call Maker - Makes outgoing calls
 #[derive(Parser, Debug)]
@@ -123,16 +121,42 @@ async fn main() -> Result<()> {
     let dtmf_task = if args.dtmf {
         let call_clone = call.clone();
         Some(tokio::spawn(async move {
-            // Wait for call to be established
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Instead of just waiting a fixed time, actually wait for call to be established
+            info!("Waiting for call to be established before sending DTMF...");
             
-            // Send DTMF sequence
-            let dtmf_sequence = "12345";
-            for (i, digit) in dtmf_sequence.chars().enumerate() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                info!("Sending DTMF digit: {}", digit);
-                if let Err(e) = call_clone.send_dtmf(digit).await {
-                    error!("Failed to send DTMF: {}", e);
+            // Set a reasonable timeout for the entire call
+            let timeout = tokio::time::sleep(Duration::from_secs(15));
+            
+            tokio::select! {
+                _ = timeout => {
+                    error!("Call setup timed out, will not send DTMF");
+                    return;
+                }
+                result = call_clone.wait_until_established() => {
+                    match result {
+                        Ok(_) => {
+                            info!("Call established, proceeding with DTMF sequence");
+                            // Send DTMF sequence
+                            let dtmf_sequence = "12345";
+                            for digit in dtmf_sequence.chars() {
+                                // Check call state before each DTMF tone
+                                let state = call_clone.state().await;
+                                if state != CallState::Established {
+                                    error!("Call is no longer established (state: {}), stopping DTMF sequence", state);
+                                    break;
+                                }
+                                
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                info!("Sending DTMF digit: {}", digit);
+                                if let Err(e) = call_clone.send_dtmf(digit).await {
+                                    error!("Failed to send DTMF: {}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("Call failed to establish, cannot send DTMF: {}", e);
+                        }
+                    }
                 }
             }
         }))
@@ -141,7 +165,7 @@ async fn main() -> Result<()> {
     };
     
     // Process client events in the foreground
-    while let Some(event) = client_events.recv().await {
+    while let Ok(event) = client_events.recv().await {
         match event {
             SipClientEvent::Call(ref call_event) => {
                 debug!("Call event: {:?}", call_event);
@@ -155,12 +179,12 @@ async fn main() -> Result<()> {
                     info!("Call state changed: {} -> {}", previous, current);
                     
                     // If call established, print info
-                    if *current == CallState::Established {
+                    if current == &CallState::Established {
                         info!("Call established with {}", call.remote_uri());
                     }
                     
                     // If call terminated, exit
-                    if *current == CallState::Terminated {
+                    if current == &CallState::Terminated {
                         info!("Call terminated, exiting");
                         break;
                     }
