@@ -16,6 +16,9 @@ pub struct ClientConfig {
     /// User-Agent header value
     pub user_agent: String,
 
+    /// Outbound proxy server address
+    pub outbound_proxy: Option<SocketAddr>,
+
     /// Registration expiry in seconds
     pub register_expires: u32,
 
@@ -39,6 +42,7 @@ impl Default for ClientConfig {
             username: "anonymous".to_string(),
             domain: "localhost".to_string(),
             user_agent: format!("RVOIP-SIP-Client/{}", env!("CARGO_PKG_VERSION")),
+            outbound_proxy: None,
             register_expires: 3600,
             register_refresh: 0.8,
             transport: TransportConfig::default(),
@@ -75,6 +79,12 @@ impl ClientConfig {
     /// Set the User-Agent header
     pub fn with_user_agent<S: Into<String>>(mut self, user_agent: S) -> Self {
         self.user_agent = user_agent.into();
+        self
+    }
+
+    /// Set outbound proxy server address
+    pub fn with_outbound_proxy(mut self, proxy: Option<SocketAddr>) -> Self {
+        self.outbound_proxy = proxy;
         self
     }
 

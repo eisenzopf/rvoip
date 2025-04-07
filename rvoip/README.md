@@ -12,72 +12,104 @@ rvoip is a 100% pure Rust implementation of a SIP/VoIP stack designed to handle,
 
 ## Architecture
 
+rvoip follows a layered architecture inspired by established SIP stacks, with clean separation between components:
+
 ```
-┌─────────────────────────┐
-│    REST/gRPC/WS API     │
-└─────────────┬───────────┘
-              │
-┌─────────────▼───────────┐      ┌─────────────────────────┐
-│    Call Engine & Logic   │◄────►│   Session Management    │
-└─────────────┬───────────┘      └───────────┬─────────────┘
-              │                               │
-┌─────────────▼───────────┐      ┌───────────▼─────────────┐
-│      SIP Signaling      │◄────►│      Media (RTP)        │
-└─────────────────────────┘      └─────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Application Layer                     │
+│           (API Server, Client Applications)              │
+└─────────────────────────────┬───────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────┐
+│                      Call Engine                         │
+│            (Call Routing, Policies, Logic)               │
+└───────────┬─────────────────────────────────┬───────────┘
+            │                                 │
+┌───────────▼────────────┐   ┌───────────────▼────────────┐
+│    Session Management  │   │        Media Engine         │
+│   (Dialogs, Call Flow) │◄──┤  (RTP, Codecs, Streaming)   │
+└───────────┬────────────┘   └───────────────┬────────────┘
+            │                                │
+┌───────────▼────────────┐   ┌───────────────▼────────────┐
+│     Transaction Layer  │   │        Media Transport      │
+│  (SIP State Machine)   │   │    (RTP/RTCP Processing)    │
+└───────────┬────────────┘   └───────────────┬────────────┘
+            │                                │
+┌───────────▼────────────────┬──────────────▼────────────┐
+│          SIP Transport     │     Media Transport        │
+│      (UDP, TCP, TLS)       │   (Socket Management)      │
+└────────────────────────────┴───────────────────────────┘
 ```
 
-## Crate Structure
+## Library Structure
 
-The project is organized into the following crates:
+The project is organized into these primary crates:
 
 - **sip-core**: SIP message parsing, serialization, URI handling
-- **sip-transport**: UDP, TCP, TLS, WebSocket transport layers
-- **rtp-core**: RTP packet encoding/decoding, RTCP support
-- **media-core**: Codec management, media relay, DTMF, jitter buffer
-- **session-core**: Call sessions, dialogs, state management
-- **call-engine**: Routing logic, call flows, policies
+- **sip-transport**: UDP, TCP, TLS, WebSocket transport layers for SIP
+- **transaction-core**: SIP transaction layer (RFC 3261 client/server transactions)
+- **session-core**: Dialog management, SDP handling, state machines
+- **rtp-core**: RTP/RTCP packet processing
+- **media-core**: Codec management, media handling, formats
+- **call-engine**: Call routing, policy enforcement, application logic
+- **sip-client**: High-level client library for SIP applications
 - **api-server**: External control API (REST/gRPC/WebSocket)
-- **utils**: Shared utilities (logging, config, UUIDs)
-- **examples**: Reference implementations
+- **examples**: Reference implementations and demos
 
-## Development Phases
+## State Management Architecture
 
-### Phase 1: Core Foundations
+rvoip implements explicit state machines at multiple layers:
+
+1. **Transaction State Machine**
+   - Client and server transaction states per RFC 3261
+   - Handles retransmissions and timeout logic
+
+2. **Dialog State Machine**
+   - Early, Confirmed, and Terminated states
+   - Manages dialog creation, updates, and termination
+
+3. **Call State Machine**
+   - Application-level call states (Initial, Ringing, Connected, etc.)
+   - Maps user-facing operations to protocol operations
+
+4. **Session State Machine**
+   - Media negotiation and management states
+   - Handles codec selection and media flow
+
+## Development Status
+
+### Phase 1: Core Foundations ✅
 
 - [x] Project structure setup
 - [x] SIP message parser/serializer
-  - Full RFC 3261 message types and parsing
-  - Support for all standard methods (INVITE, ACK, BYE, CANCEL, REGISTER, OPTIONS)
-  - Extension methods (SUBSCRIBE, NOTIFY, UPDATE, REFER, INFO, MESSAGE, PRACK, PUBLISH)
-  - Complete status code definitions (1xx-6xx)
-  - Header parsing and serialization
 - [x] Basic SIP transaction state machine
-  - Client/server transaction management
-  - INVITE and non-INVITE transaction types
-  - Timer-based retransmission handling
 - [x] UDP transport for SIP messages
-  - Async transport layer
-  - Event-driven message handling
 - [x] Basic RTP packet handling
 - [x] G.711 codec implementation
 - [x] Simple call session management
-  - Session state machine
-  - Dialog management
-  - Basic media integration
-- [ ] Minimal REST API
+- [x] SIP client library
 
-### Phase 2: Softswitch Capabilities
+### Phase 2: Library Integration 🔄
+
+- [ ] Improved dialog layer integration
+- [ ] Enhanced state management patterns
+- [ ] Complete transaction handling
+- [ ] Better separation of concerns across libraries
+- [ ] Consistent event propagation
+- [ ] Full SDP negotiation support
+- [ ] Enhanced media session handling
+
+### Phase 3: Softswitch Capabilities 🔜
 
 - [ ] Complete SIP method support
 - [ ] TCP/TLS transport
 - [ ] Call transfer and forwarding
-- [ ] SDP negotiation
 - [ ] Media relay functionality
 - [ ] Call recording
 - [ ] Extended API for call control
 - [ ] WebSocket events for call state changes
 
-### Phase 3: Advanced Features
+### Phase 4: Advanced Features 🔜
 
 - [ ] NAT traversal with ICE/STUN/TURN
 - [ ] SRTP for media encryption
@@ -88,18 +120,59 @@ The project is organized into the following crates:
 - [ ] Call queuing and distribution
 - [ ] High availability and clustering
 
+## Implementation Roadmap
+
+### Current Focus: Improving State Management
+
+1. **Dialog Integration**
+   - Fully integrate session-core Dialog implementation with sip-client
+   - Refactor Call to use Dialog for SIP protocol state
+   - Implement proper dialog matching and routing
+
+2. **State Machine Refactoring**
+   - Implement explicit state transition validation
+   - Separate application and protocol states
+   - Create modular state handlers
+
+3. **Layer Integration**
+   - Improve transaction-to-dialog routing
+   - Enhance session-to-call coordination
+   - Establish consistent event propagation model
+
 ## Getting Started
 
-*TBD as development progresses*
+### Building the Project
+
+```bash
+git clone https://github.com/rudeless/rvoip.git
+cd rvoip
+cargo build
+```
+
+### Running the Examples
+
+```bash
+# Run a SIP client demo (caller)
+cd examples/sip-client-demo
+cargo run --bin caller -- -a 127.0.0.1:5070 -u alice -s 127.0.0.1:5071 -t sip:bob@example.com
+
+# Run a SIP client demo (receiver)
+cargo run --bin receiver -- -a 127.0.0.1:5071 -u bob
+```
 
 ## Comparison with Existing Solutions
 
-Unlike PJSIP (C) and sofia-sip (C), rvoip is built as a pure Rust stack without C dependencies. While drawing inspiration from these battle-tested libraries, rvoip adopts Rust's memory safety guarantees and modern async programming model.
+Unlike PJSIP (C) and sofia-sip (C), rvoip is built as a pure Rust stack without C dependencies. While drawing inspiration from these battle-tested libraries, rvoip adopts Rust's memory safety guarantees and modern async programming model. The architecture is designed to be:
+
+- More modular than PJSIP
+- More concurrent than sofia-sip
+- More type-safe than both
+- Better suited for modern cloud-native deployments
 
 ## License
 
-*TBD*
+MIT License
 
 ## Contributing
 
-*TBD* 
+Contributions are welcome! Please feel free to submit a Pull Request. 

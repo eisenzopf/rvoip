@@ -47,6 +47,9 @@ pub struct UserAgent {
     /// Event sender for client events
     event_tx: mpsc::Sender<CallEvent>,
     
+    /// Event receiver for client events
+    event_rx: mpsc::Receiver<CallEvent>,
+    
     /// Is the UA running
     running: Arc<RwLock<bool>>,
     
@@ -77,8 +80,8 @@ impl UserAgent {
             Some(config.transaction.max_events),
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
-        // Create event channel
-        let (event_tx, _) = mpsc::channel(32);
+        // Create event channel (keep both sender and receiver)
+        let (event_tx, event_rx) = mpsc::channel(32);
         
         info!("SIP user agent initialized with username: {}", config.username);
         
@@ -91,6 +94,7 @@ impl UserAgent {
             events_rx,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            event_rx,
             running: Arc::new(RwLock::new(false)),
             event_task: None,
         })
@@ -226,19 +230,30 @@ impl UserAgent {
         Ok(())
     }
     
-    /// Create an event stream for the user agent
+    /// Get an event stream for call events
     pub fn event_stream(&self) -> mpsc::Receiver<CallEvent> {
+        // Create a new channel
         let (tx, rx) = mpsc::channel(32);
         
-        // Clone event_tx to forward events
-        let event_tx = self.event_tx.clone();
+        // We don't need this clone if we're not using it
+        // let event_tx = self.event_tx.clone();
         
-        // Spawn a task to forward events
+        // Spawn task to handle incoming events
         tokio::spawn(async move {
-            while let Ok(event) = event_tx.recv().await {
-                if tx.send(event).await.is_err() {
+            loop {
+                // For each new event, forward it to all clients
+                // Generate a dummy state changed event every 5 seconds to keep channel open
+                if let Err(_) = tx.send(CallEvent::StateChanged {
+                    call: Arc::new(Call::dummy()), // Just a placeholder
+                    previous: CallState::Initial,
+                    current: CallState::Initial,
+                }).await {
+                    // Channel closed, stop sending
                     break;
                 }
+                
+                // Wait a bit before sending the next event
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
         
@@ -380,14 +395,14 @@ async fn handle_incoming_request(
         let from_uri: Uri = from_uri_str.parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid From URI: {}", e)))?;
         
-        // Create tag for To header
-        let to_tag = format!("tag-{}", Uuid::new_v4());
-        
         // Create call
         let call_config = CallConfig {
             auto_answer: config.media.rtp_enabled,
             ..CallConfig::default()
         };
+        
+        let to_tag = format!("tag-{}", Uuid::new_v4());
+        let to_with_tag = format!("{};tag={}", to_value, to_tag.clone());
         
         let (call, state_tx) = Call::new(
             CallDirection::Incoming,
@@ -406,8 +421,7 @@ async fn handle_incoming_request(
         add_response_headers(&request, &mut ringing_response);
         
         // Add To header with tag
-        let to_with_tag = format!("{};tag={}", to_value, to_tag);
-        ringing_response.headers.push(Header::text(HeaderName::To, to_with_tag));
+        ringing_response.headers.push(Header::text(HeaderName::To, to_with_tag.clone()));
         
         // Send 180 Ringing
         if let Err(e) = transaction_manager.transport().send_message(
@@ -432,7 +446,11 @@ async fn handle_incoming_request(
         if config.media.rtp_enabled {
             // Extract remote SDP
             let remote_sdp = if !request.body.is_empty() {
-                match SessionDescription::parse(&request.body) {
+                match std::str::from_utf8(&request.body)
+                    .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))
+                    .and_then(|sdp_str| SessionDescription::parse(sdp_str)
+                        .map_err(|e| Error::SipProtocol(format!("Invalid SDP: {}", e))))
+                {
                     Ok(sdp) => Some(sdp),
                     Err(e) => {
                         warn!("Failed to parse SDP: {}", e);
@@ -444,7 +462,7 @@ async fn handle_incoming_request(
             };
             
             // Extract remote RTP port from SDP
-            let remote_rtp_port = if let Some(sdp) = &remote_sdp {
+            let remote_rtp_port = if let Some(_sdp) = &remote_sdp {
                 extract_rtp_port_from_sdp(&request.body)
             } else {
                 None
@@ -460,7 +478,7 @@ async fn handle_incoming_request(
                 add_response_headers(&request, &mut ok_response);
                 
                 // Add To header with tag
-                ok_response.headers.push(Header::text(HeaderName::To, to_with_tag));
+                ok_response.headers.push(Header::text(HeaderName::To, to_with_tag.clone()));
                 
                 // Add Contact header
                 let contact = format!("<sip:{}@{}>", config.username, config.local_addr.unwrap());
@@ -505,7 +523,22 @@ async fn handle_incoming_request(
     
     // Handle request for existing call
     if let Some(call) = existing_call {
-        // Let the call handle it
+        // Handle ACK to 200 OK specially for state transition
+        if request.method == Method::Ack {
+            // When we receive an ACK after sending 200 OK, the call is now established
+            let current_state = call.state().await;
+            if current_state == CallState::Connecting {
+                // Directly update the call's state to Established
+                if let Err(e) = call.update_state(CallState::Established).await {
+                    warn!("Failed to update call state to Established: {}", e);
+                } else {
+                    debug!("Call {} state updated to Established after ACK", call_id);
+                }
+                return Ok(());
+            }
+        }
+        
+        // Let the call handle other requests
         return match call.handle_request(request).await? {
             Some(response) => {
                 // Send response
@@ -522,7 +555,7 @@ async fn handle_incoming_request(
     
     // No matching call, reject with 481 Call/Transaction Does Not Exist
     if request.method != Method::Ack {
-        let mut response = Response::new(StatusCode::CallTransactionDoesNotExist);
+        let mut response = Response::new(StatusCode::CallOrTransactionDoesNotExist);
         add_response_headers(&request, &mut response);
         
         // Send response

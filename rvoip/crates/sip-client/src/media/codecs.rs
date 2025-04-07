@@ -87,7 +87,7 @@ impl CodecHandler {
                         .map_err(|e| Error::Media(format!("G.711 decoding error: {}", e)))?;
                     
                     // Convert AudioBuffer to i16 samples
-                    let bytes = buffer.raw_data();
+                    let bytes = &buffer.data;
                     let mut samples = Vec::with_capacity(bytes.len() / 2);
                     
                     for i in (0..bytes.len()).step_by(2) {

@@ -539,6 +539,21 @@ impl Response {
     pub fn reason_phrase(&self) -> &str {
         self.reason.as_deref().unwrap_or_else(|| self.status.reason_phrase())
     }
+    
+    /// Retrieves the Call-ID header value, if present
+    pub fn call_id(&self) -> Option<&str> {
+        self.header(&HeaderName::CallId).and_then(|h| h.value.as_text())
+    }
+    
+    /// Retrieves the From header value, if present
+    pub fn from(&self) -> Option<&str> {
+        self.header(&HeaderName::From).and_then(|h| h.value.as_text())
+    }
+    
+    /// Retrieves the To header value, if present
+    pub fn to(&self) -> Option<&str> {
+        self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+    }
 }
 
 impl fmt::Display for Response {

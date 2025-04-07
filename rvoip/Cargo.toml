@@ -24,6 +24,7 @@ members = [
     "examples/simple-session",
     "examples/simple-call-engine",
     "examples/sip-test-client",
+    "examples/sip-client-demo",
 ]
 
 [workspace.dependencies]

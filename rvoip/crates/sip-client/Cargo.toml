@@ -27,6 +27,7 @@ async-trait = "0.1"
 bytes = "1.4"
 md5 = "0.7"
 futures = "0.3"
+rand = "0.8"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

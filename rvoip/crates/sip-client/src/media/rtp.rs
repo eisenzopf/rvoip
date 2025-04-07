@@ -217,14 +217,15 @@ impl RtpSession {
             version: 2,
             padding: false,
             extension: false,
+            cc: 0,
             marker: self.marker,
             payload_type: self.payload_type,
             sequence_number: self.sequence,
             timestamp: self.timestamp,
             ssrc: self.ssrc,
             csrc: Vec::new(),
-            extension_profile: 0,
-            extension_data: Bytes::new(),
+            extension_id: None,
+            extension_data: None,
         };
         
         // Create RTP packet
@@ -234,7 +235,8 @@ impl RtpSession {
         };
         
         // Serialize packet
-        let data = packet.to_bytes();
+        let data = packet.serialize()
+            .map_err(|e| Error::Media(format!("Failed to serialize RTP packet: {}", e)))?;
         
         // Send packet
         self.socket.send(&data).await

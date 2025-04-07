@@ -345,7 +345,7 @@ async fn process_sender_report(
     let ntp_timestamp = ((ntp_msw as u64) << 32) | (ntp_lsw as u64);
     
     // Extract SSRC of sender
-    let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    let _ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
     
     // Update stats with SR information
     let mut stats_write = stats.write().await;
@@ -405,7 +405,7 @@ async fn process_receiver_report(
     }
     
     // Extract SSRC of sender
-    let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    let _ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
     
     // Check if there are report blocks for us
     let report_count = packet[0] & 0x1F;
@@ -453,7 +453,7 @@ async fn process_receiver_report(
 /// Create an RTCP Receiver Report packet
 async fn create_rtcp_receiver_report(
     ssrc: u32,
-    stats: Arc<RwLock<RtcpStats>>
+    _stats: Arc<RwLock<RtcpStats>>
 ) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(32);
     
@@ -467,12 +467,6 @@ async fn create_rtcp_receiver_report(
     
     // No report blocks for now
     
-    // Get current NTP time (64-bit)
-    let now = chrono::Utc::now();
-    let unix_seconds = now.timestamp() as u64;
-    let ntp_seconds = unix_seconds + 2_208_988_800; // Seconds from 1900 to 1970
-    let ntp_fraction = ((now.timestamp_subsec_nanos() as u64) << 32) / 1_000_000_000;
-    
     // RTCP header (version=2, padding=0, report_count=0, packet_type=203, length=1)
     buf.put_u8(0x80); // Version=2, P=0, RC=0
     buf.put_u8(203);  // Packet type: Bye
@@ -481,8 +475,8 @@ async fn create_rtcp_receiver_report(
     // SSRC
     buf.put_u32(ssrc);
     
-    buf.freeze();
-    buf.to_vec()
+    let bytes = buf.freeze();
+    bytes.to_vec()
 }
 
 /// Create an RTCP BYE packet
@@ -497,6 +491,6 @@ fn create_rtcp_bye_packet(ssrc: u32) -> Vec<u8> {
     // SSRC
     buf.put_u32(ssrc);
     
-    buf.freeze();
-    buf.to_vec()
+    let bytes = buf.freeze();
+    bytes.to_vec()
 } 

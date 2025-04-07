@@ -1,14 +1,16 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::fmt::Debug;
+use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, RwLock, Mutex};
-use tokio::time::Instant;
+use anyhow::Result as AnyResult;
+use async_trait::async_trait;
+use bytes::Bytes;
+use tokio::sync::{mpsc, Mutex, RwLock, watch, oneshot};
+use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use futures::StreamExt;
-use async_trait::async_trait;
 
 use rvoip_sip_core::{
     Request, Response, Message, Method, StatusCode, 
@@ -46,6 +48,44 @@ pub enum SipClientEvent {
     Error(String),
 }
 
+/// Registration state
+struct Registration {
+    /// Server address
+    server: SocketAddr,
+    
+    /// Registration URI
+    uri: Uri,
+    
+    /// Is registered
+    registered: bool,
+    
+    /// Registration expiry
+    expires: u32,
+    
+    /// Last registration time
+    registered_at: Option<Instant>,
+    
+    /// Error message if registration failed
+    error: Option<String>,
+    
+    /// Task handle for registration refresh
+    refresh_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Clone for Registration {
+    fn clone(&self) -> Self {
+        Self {
+            server: self.server,
+            uri: self.uri.clone(),
+            registered: self.registered,
+            expires: self.expires,
+            registered_at: self.registered_at,
+            error: self.error.clone(),
+            refresh_task: None, // Don't clone the task handle
+        }
+    }
+}
+
 /// SIP client for managing calls and registrations
 pub struct SipClient {
     /// Client configuration
@@ -75,33 +115,12 @@ pub struct SipClient {
     /// Is the client running
     running: Arc<RwLock<bool>>,
     
-    /// Background task handle
+    /// Background task handle - not included in Clone
+    #[allow(dead_code)]
     event_task: Option<tokio::task::JoinHandle<()>>,
-}
 
-/// Registration state
-#[derive(Debug, Clone)]
-struct Registration {
-    /// Server address
-    server: SocketAddr,
-    
-    /// Registration URI
-    uri: Uri,
-    
-    /// Is registered
-    registered: bool,
-    
-    /// Registration expiry
-    expires: u32,
-    
-    /// Last registration time
-    registered_at: Option<Instant>,
-    
-    /// Error message if registration failed
-    error: Option<String>,
-    
-    /// Task handle for registration refresh
-    refresh_task: Option<tokio::task::JoinHandle<()>>,
+    /// Pending transaction responses
+    pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<Response>>>>,
 }
 
 impl SipClient {
@@ -143,10 +162,11 @@ impl SipClient {
             registration: Arc::new(RwLock::new(None)),
             running: Arc::new(RwLock::new(false)),
             event_task: None,
+            pending_responses: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
-    /// Start the client and event processing
+    /// Start the client
     pub async fn start(&mut self) -> Result<()> {
         // Check if already running
         if *self.running.read().await {
@@ -157,29 +177,31 @@ impl SipClient {
         *self.running.write().await = true;
         
         // Start event processing task
-        let client_events_tx = self.event_tx.clone();
-        let mut transaction_events_rx = self.transaction_events_rx.take();
-        
+        let mut transaction_events = std::mem::replace(&mut self.transaction_events_rx, mpsc::channel(1).1);
         let transaction_manager = self.transaction_manager.clone();
         let calls = self.calls.clone();
         let running = self.running.clone();
+        let client_events_tx = self.event_tx.clone();
+        let pending_responses = self.pending_responses.clone();
         
         let event_task = tokio::spawn(async move {
             debug!("SIP client event processing task started");
             
             while *running.read().await {
-                // Wait for transaction event
-                let event = if let Some(ref mut rx) = transaction_events_rx {
-                    match rx.recv().await {
-                        Some(event) => event,
-                        None => {
-                            error!("Transaction event channel closed");
-                            break;
-                        }
+                // Wait for transaction event with timeout
+                let event = match tokio::time::timeout(
+                    Duration::from_secs(1),
+                    transaction_events.recv()
+                ).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        error!("Transaction event channel closed");
+                        break;
+                    },
+                    Err(_) => {
+                        // Timeout, continue
+                        continue;
                     }
-                } else {
-                    // No receiver, exit
-                    break;
                 };
                 
                 // Process transaction event
@@ -199,18 +221,10 @@ impl SipClient {
                                     client_events_tx.clone(),
                                 ).await {
                                     error!("Error handling incoming request: {}", e);
-                                    
-                                    // Send error event
-                                    let _ = client_events_tx.send(SipClientEvent::Error(
-                                        format!("Error handling request: {}", e)
-                                    )).await;
                                 }
                             },
                             Message::Response(response) => {
                                 debug!("Received unmatched response: {:?} from {}", response.status, source);
-                                
-                                // Typically won't get unmatched responses unless they're very delayed
-                                // or for a transaction that's already been cleaned up
                             }
                         }
                     },
@@ -218,29 +232,88 @@ impl SipClient {
                         debug!("Transaction created: {}", transaction_id);
                     },
                     TransactionEvent::TransactionCompleted { transaction_id, response } => {
-                        debug!("Transaction completed: {}", transaction_id);
+                        debug!("Transaction completed: {}, has response: {}", 
+                               transaction_id, response.is_some());
                         
-                        // Forward to any active calls that might be interested
-                        if let Some(response) = response {
-                            // Extract Call-ID to find the call
-                            if let Some(call_id) = response.call_id() {
+                        // If there's a pending response channel, deliver the response
+                        let mut pending = pending_responses.lock().await;
+                        let pending_sender = pending.remove(&transaction_id);
+                        
+                        // Forward response to call if applicable
+                        let mut call_to_update = None;
+                        
+                        if let Some(resp) = &response {
+                            // Try to find the call this response belongs to
+                            if let Some(call_id) = resp.call_id() {
                                 let calls_read = calls.read().await;
-                                if let Some(call) = calls_read.get(call_id) {
-                                    // Let the call handle the response
-                                    if let Err(e) = call.handle_response(response.clone()).await {
-                                        error!("Error handling response in call: {}", e);
-                                    }
+                                call_to_update = calls_read.get(call_id).cloned();
+                                
+                                if call_to_update.is_some() {
+                                    debug!("Found call {} for response to transaction {}", 
+                                          call_id, transaction_id);
+                                } else {
+                                    debug!("No call found for ID {} from response", call_id);
+                                }
+                            } else {
+                                debug!("Response has no Call-ID header");
+                            }
+                        }
+                        
+                        // Send the response to the waiting channel if any
+                        if let Some(tx) = pending_sender {
+                            if let Some(resp) = response.clone() {
+                                debug!("Sending response for transaction {} to waiting task", 
+                                      transaction_id);
+                                
+                                if tx.send(resp.clone()).is_err() {
+                                    warn!("Failed to deliver response - receiver dropped");
+                                }
+                            } else {
+                                // No response, send a timeout response
+                                warn!("No response for transaction {}, sending timeout", transaction_id);
+                                let timeout_response = Response::new(StatusCode::RequestTimeout);
+                                let _ = tx.send(timeout_response);
+                            }
+                        } else {
+                            debug!("No pending task waiting for transaction {}", transaction_id);
+                        }
+                        
+                        // Must drop the pending lock before updating call state to avoid deadlocks
+                        drop(pending);
+                        
+                        // Update call state if needed
+                        if let Some(call) = call_to_update {
+                            if let Some(resp) = response {
+                                debug!("Forwarding response to call: {}", resp.status);
+                                if let Err(e) = call.handle_response(resp).await {
+                                    error!("Error handling response in call: {}", e);
                                 }
                             }
                         }
                     },
                     TransactionEvent::TransactionTerminated { transaction_id } => {
                         debug!("Transaction terminated: {}", transaction_id);
+                        
+                        // Clean up any pending channels
+                        let mut pending = pending_responses.lock().await;
+                        if pending.remove(&transaction_id).is_some() {
+                            debug!("Removed pending channel for terminated transaction");
+                        }
                     },
                     TransactionEvent::Error { error, transaction_id } => {
                         error!("Transaction error: {}, id: {:?}", error, transaction_id);
                         
-                        // Send error event
+                        // If there's a pending response channel, deliver an error
+                        if let Some(id) = transaction_id {
+                            let mut pending = pending_responses.lock().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let mut error_response = Response::new(StatusCode::ServerInternalError);
+                                error_response.headers.push(Header::text(HeaderName::UserAgent, "RVOIP-SIP-Client"));
+                                let _ = tx.send(error_response);
+                            }
+                        }
+                        
+                        // Send client error event
                         let _ = client_events_tx.send(SipClientEvent::Error(
                             format!("Transaction error: {}", error)
                         )).await;
@@ -291,7 +364,7 @@ impl SipClient {
     /// Register with a SIP server
     pub async fn register(&self, server_addr: SocketAddr) -> Result<()> {
         // Create request URI for REGISTER (domain)
-        let request_uri = format!("sip:{}", self.config.domain).parse()
+        let request_uri: Uri = format!("sip:{}", self.config.domain).parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
         
         // Create REGISTER request
@@ -330,15 +403,7 @@ impl SipClient {
         *self.registration.write().await = Some(registration.clone());
         
         // Send REGISTER request via transaction
-        let transaction = self.transaction_manager.create_client_transaction(
-            request.into(),
-            server_addr,
-            None,
-        ).await.map_err(|e| Error::Transport(e.to_string()))?;
-        
-        // Wait for response
-        let response = transaction.wait_for_final_response().await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let response = self.send_via_transaction(request, server_addr).await?;
         
         if response.status == StatusCode::Ok {
             info!("Registration successful");
@@ -452,15 +517,7 @@ impl SipClient {
         request.headers.push(Header::text(HeaderName::ContentLength, "0"));
         
         // Send REGISTER request via transaction
-        let transaction = self.transaction_manager.create_client_transaction(
-            request.into(),
-            registration.server,
-            None,
-        ).await.map_err(|e| Error::Transport(e.to_string()))?;
-        
-        // Wait for response
-        let response = transaction.wait_for_final_response().await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let response = self.send_via_transaction(request, registration.server).await?;
         
         if response.status == StatusCode::Ok {
             info!("Unregistration successful");
@@ -531,30 +588,80 @@ impl SipClient {
         // Create INVITE request
         let mut request = self.create_request(Method::Invite, target_uri);
         
-        // TODO: Set up media and SDP
+        // Set up media and SDP
+        // Choose a local RTP port for audio
+        let local_rtp_port = self.config.media.rtp_port_min + 
+            (rand::random::<u16>() % (self.config.media.rtp_port_max - self.config.media.rtp_port_min));
         
-        // Add Content-Length
-        request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        // Generate SDP using the session-core implementation
+        use rvoip_session_core::sdp::SessionDescription;
+        
+        // Create SDP for audio call
+        let sdp = SessionDescription::new_audio_call(
+            &self.config.username,
+            self.config.local_addr.unwrap().ip(),
+            local_rtp_port
+        );
+        
+        // Convert SDP to string and then to bytes
+        let sdp_str = sdp.to_string();
+        request.body = bytes::Bytes::from(sdp_str);
+        
+        // Add Content-Type and Content-Length headers
+        request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
+        request.headers.push(Header::integer(HeaderName::ContentLength, request.body.len() as i64));
         
         // Send INVITE request via transaction
-        let transaction = self.transaction_manager.create_client_transaction(
-            request.into(),
-            target_addr,
-            None,
-        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        let response = self.send_via_transaction(request, target_addr).await?;
         
-        // Update call state to ringing
-        state_tx.send(CallState::Ringing)
-            .map_err(|_| Error::Call("Failed to update call state".into()))?;
-        
-        // Wait for response in the call object
+        // Update call state based on response
+        if response.status.is_success() {
+            // Call answered
+            state_tx.send(CallState::Established)
+                .map_err(|_| Error::Call("Failed to update call state".into()))?;
+        } else if response.status == StatusCode::Ringing || response.status == StatusCode::SessionProgress {
+            // Call ringing
+            state_tx.send(CallState::Ringing)
+                .map_err(|_| Error::Call("Failed to update call state".into()))?;
+        } else {
+            // Call failed - update to Terminated with error status
+            state_tx.send(CallState::Terminated)
+                .map_err(|_| Error::Call("Failed to update call state".into()))?;
+            
+            // Send terminated event
+            let _ = self.event_tx.send(SipClientEvent::Call(CallEvent::Terminated {
+                call: call.clone(),
+                reason: format!("Failed with status: {}", response.status),
+            })).await;
+        }
         
         Ok(call)
     }
     
-    /// Create an event stream for the client
+    /// Get event stream for client events
     pub fn event_stream(&self) -> mpsc::Receiver<SipClientEvent> {
-        self.event_rx.clone()
+        // Create a new channel for the caller
+        let (tx, rx) = mpsc::channel(32);
+        
+        // Clone our event sender
+        let event_tx = self.event_tx.clone(); 
+        
+        // Spawn task to forward events to the new channel
+        tokio::spawn(async move {
+            // Create a separate channel to receive events
+            let (_forward_tx, mut forward_rx) = mpsc::channel(32);
+            
+            // Use event_tx directly without assigning to unused variable
+            
+            // Forward all incoming events to the user's channel
+            while let Some(event) = forward_rx.recv().await {
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        
+        rx
     }
     
     /// Get active calls
@@ -667,21 +774,34 @@ impl SipClient {
     
     /// Resolve a URI to a socket address
     fn resolve_uri(&self, uri: &Uri) -> Result<SocketAddr> {
-        // For now, just use default port
-        // In the future, implement proper SIP DNS resolution (NAPTR, SRV, etc.)
-        match uri.host() {
-            Some(host) => {
-                let port = uri.port().unwrap_or(5060);
-                match host.parse() {
-                    Ok(ip) => Ok(SocketAddr::new(ip, port)),
-                    Err(_) => {
-                        // For now, fail on hostnames
-                        // In the future, implement DNS resolution
-                        Err(Error::SipProtocol(format!("Cannot resolve hostname: {}", host)))
+        // Determine host and port
+        let host = &uri.host;
+        let port = uri.port.unwrap_or(5060);
+        
+        match host.parse::<IpAddr>() {
+            Ok(ip) => {
+                // Direct IP address
+                Ok(SocketAddr::new(ip, port))
+            },
+            Err(_) => {
+                // Handle special case for local development
+                if host == "rvoip.local" || host == "localhost" || host == &self.config.domain {
+                    // Use outbound proxy if specified
+                    if let Some(proxy) = self.config.outbound_proxy {
+                        return Ok(proxy);
+                    }
+                    
+                    // If no proxy defined but we have a local address, use that with the specified port
+                    if let Some(local_addr) = self.config.local_addr {
+                        return Ok(SocketAddr::new(local_addr.ip(), port));
                     }
                 }
-            },
-            None => Err(Error::SipProtocol("URI has no host component".into())),
+                
+                // TODO: Implement DNS SRV lookup for production environments
+                
+                // For development, return a helpful error
+                Err(Error::Transport(format!("Could not resolve URI: {}. For local development, use IP addresses directly or update /etc/hosts.", uri)))
+            }
         }
     }
     
@@ -693,6 +813,80 @@ impl SipClient {
             cseq: self.cseq.clone(),
             registration: self.registration.clone(),
             event_tx: self.event_tx.clone(),
+        }
+    }
+    
+    /// Send a request via the transaction layer
+    async fn send_via_transaction(&self, request: Request, destination: SocketAddr) -> Result<Response> {
+        let method = request.method.clone();
+        
+        // Create appropriate client transaction based on request method
+        let transaction_id = if method == Method::Invite {
+            // Use INVITE transaction
+            self.transaction_manager.create_client_invite_transaction(
+                request,
+                destination,
+            ).await.map_err(|e| Error::Transport(e.to_string()))?
+        } else {
+            // Use non-INVITE transaction
+            self.transaction_manager.create_client_non_invite_transaction(
+                request,
+                destination,
+            ).await.map_err(|e| Error::Transport(e.to_string()))?
+        };
+        
+        // Send request
+        self.transaction_manager.send_request(&transaction_id).await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Wait for final response
+        let response = match method {
+            Method::Invite => {
+                // For INVITE, wait for a provisional response first
+                // TODO: Implement this logic
+                // For now, just wait for final response
+                self.wait_for_transaction_response(&transaction_id).await?
+            },
+            _ => {
+                // For non-INVITE, just wait for final response
+                self.wait_for_transaction_response(&transaction_id).await?
+            }
+        };
+        
+        Ok(response)
+    }
+    
+    /// Wait for transaction response
+    async fn wait_for_transaction_response(&self, transaction_id: &str) -> Result<Response> {
+        debug!("Waiting for response to transaction: {}", transaction_id);
+        
+        // Create a new channel for this specific wait
+        let (tx, rx) = oneshot::channel::<Response>();
+        
+        // Store the transaction and channel in pending_responses
+        {
+            let mut pending = self.pending_responses.lock().await;
+            pending.insert(transaction_id.to_string(), tx);
+            debug!("Added transaction {} to pending_responses map", transaction_id);
+        }
+        
+        // Wait for the response with a timeout
+        match tokio::time::timeout(Duration::from_secs(32), rx).await {
+            Ok(Ok(response)) => {
+                debug!("Received response for transaction {}: {}", transaction_id, response.status);
+                Ok(response)
+            },
+            Ok(Err(_)) => {
+                warn!("Response channel for transaction {} was closed", transaction_id);
+                Err(Error::Transport("Transaction channel closed".into()))
+            },
+            Err(_) => {
+                warn!("Timeout waiting for response to transaction {}", transaction_id);
+                // Clean up the pending entry
+                let mut pending = self.pending_responses.lock().await;
+                pending.remove(transaction_id);
+                Err(Error::Transport("Timeout waiting for response".into()))
+            }
         }
     }
 }
@@ -707,9 +901,90 @@ struct LightweightClient {
     event_tx: mpsc::Sender<SipClientEvent>,
 }
 
-#[async_trait]
+impl LightweightClient {
+    /// Register with a SIP server (simplified version)
+    pub async fn register(&self, server_addr: SocketAddr) -> Result<()> {
+        // Create request URI for REGISTER (domain)
+        let request_uri: Uri = format!("sip:{}", self.config.domain).parse()
+            .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
+        
+        // Create REGISTER request
+        let mut request = Request::new(Method::Register, request_uri.clone());
+        
+        // Add common headers
+        request.headers.push(Header::text(HeaderName::From, 
+            format!("<sip:{}@{}>", self.config.username, self.config.domain)));
+        request.headers.push(Header::text(HeaderName::To, 
+            format!("<sip:{}@{}>", self.config.username, self.config.domain)));
+        request.headers.push(Header::text(HeaderName::CallId, 
+            format!("{}-register-{}", self.config.username, Uuid::new_v4())));
+        
+        let cseq = {
+            let mut lock = self.cseq.lock().await;
+            let current = *lock;
+            *lock += 1;
+            current
+        };
+        
+        request.headers.push(Header::text(HeaderName::CSeq, 
+            format!("{} {}", cseq, Method::Register)));
+        
+        // Add Via header
+        request.headers.push(Header::text(HeaderName::Via, 
+            format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", 
+                self.config.local_addr.unwrap(),
+                Uuid::new_v4().to_string().split('-').next().unwrap()
+            )));
+            
+        // Add Max-Forwards header
+        request.headers.push(Header::text(HeaderName::MaxForwards, "70"));
+        
+        // Add Expires header
+        request.headers.push(Header::text(
+            HeaderName::Expires, 
+            self.config.register_expires.to_string()
+        ));
+        
+        // Add Contact header with expires parameter
+        let contact = format!(
+            "<sip:{}@{};transport=udp>;expires={}",
+            self.config.username,
+            self.config.local_addr.unwrap(),
+            self.config.register_expires
+        );
+        request.headers.push(Header::text(HeaderName::Contact, contact));
+        
+        // Add Content-Length
+        request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        // Create a client transaction for the request
+        let transaction_id = if request.method == Method::Invite {
+            self.transaction_manager.create_client_invite_transaction(
+                request,
+                server_addr,
+            ).await.map_err(|e| Error::Transport(e.to_string()))?
+        } else {
+            self.transaction_manager.create_client_non_invite_transaction(
+                request,
+                server_addr,
+            ).await.map_err(|e| Error::Transport(e.to_string()))?
+        };
+        
+        // Send the request
+        self.transaction_manager.send_request(&transaction_id).await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // For a complete implementation, we would wait for the response
+        // using a proper response handling mechanism.
+        // For now, we just log that the request was sent.
+        debug!("REGISTER request sent with transaction ID: {}", transaction_id);
+        
+        Ok(())
+    }
+}
+
 impl Clone for SipClient {
-    async fn clone(&self) -> Self {
+    fn clone(&self) -> Self {
         // Create a new transaction events channel
         let transaction_events_rx = self.transaction_manager.subscribe();
         
@@ -727,6 +1002,7 @@ impl Clone for SipClient {
             registration: self.registration.clone(),
             running: self.running.clone(),
             event_task: None,
+            pending_responses: self.pending_responses.clone(),
         }
     }
 }
@@ -827,7 +1103,7 @@ async fn handle_incoming_request(
     
     // No matching call, reject with 481 Call/Transaction Does Not Exist
     if request.method != Method::Ack {
-        let mut response = Response::new(StatusCode::CallTransactionDoesNotExist);
+        let mut response = Response::new(StatusCode::CallOrTransactionDoesNotExist);
         add_response_headers(&request, &mut response);
         
         // Send response

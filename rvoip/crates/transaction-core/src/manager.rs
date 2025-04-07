@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::pin::Pin;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -664,5 +666,37 @@ impl TransactionManager {
         });
         
         rx
+    }
+    
+    /// Create a dummy TransactionManager for testing
+    pub fn dummy() -> Self {
+        use crate::DummyTransport;
+        
+        let (events_tx, _) = mpsc::channel(1);
+        let (_, transport_rx) = mpsc::channel(1);
+        
+        Self {
+            transport: Arc::new(DummyTransport {}),
+            client_transactions: Arc::new(Mutex::new(HashMap::new())),
+            server_transactions: Arc::new(Mutex::new(HashMap::new())),
+            events_tx,
+            event_subscribers: Arc::new(Mutex::new(Vec::new())),
+            transport_rx: Arc::new(Mutex::new(transport_rx)),
+            running: Arc::new(Mutex::new(true)),
+        }
+    }
+}
+
+impl fmt::Debug for TransactionManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransactionManager")
+            .field("transport", &self.transport)
+            .field("client_transactions", &self.client_transactions)
+            .field("server_transactions", &self.server_transactions)
+            .field("events_tx", &self.events_tx)
+            .field("event_subscribers", &self.event_subscribers)
+            .field("transport_rx", &self.transport_rx)
+            .field("running", &self.running)
+            .finish()
     }
 } 

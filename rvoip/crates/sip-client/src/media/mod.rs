@@ -12,8 +12,15 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::RwLock;
 use bytes::Bytes;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::Duration;
+use tokio::net::UdpSocket;
+use uuid::Uuid;
+use tracing::{debug, error, warn};
 
-use crate::error::Result;
+use crate::config::CodecType;
+use crate::error::{Error, Result};
+use crate::media::rtcp::{RtcpSession, RtcpStats};
 
 /// Type of media stream
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -221,7 +228,8 @@ impl MediaSession {
     pub async fn get_rtcp_stats(&self) -> Option<RtcpStats> {
         if let Some(rtcp_session) = &self.rtcp_session {
             let rtcp = rtcp_session.read().await;
-            return Some(rtcp.get_stats().clone());
+            let stats = rtcp.get_stats().read().await.clone();
+            return Some(stats);
         }
         None
     }
