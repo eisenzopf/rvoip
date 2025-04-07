@@ -394,7 +394,7 @@ impl SessionDescription {
                     };
                     
                     // If we're parsing a media section, add to the current media
-                    if let Some(ref mut media) = current_media {
+                    if let Some(ref mut _media) = current_media {
                         // Media-level connection information would go here if needed
                     } else {
                         // Session-level connection
@@ -466,7 +466,7 @@ impl SessionDescription {
                     let attr_name = attr_parts[0];
                     let attr_value = attr_parts.get(1).map(|&v| v).unwrap_or("");
                     
-                    if let Some(ref mut media) = current_media {
+                    if let Some(ref mut _media) = current_media {
                         // Media-level attribute
                         match attr_name {
                             "rtpmap" => {
@@ -496,7 +496,7 @@ impl SessionDescription {
                                 };
                                 
                                 // Find the format with this payload type and update it
-                                for format in &mut media.formats {
+                                for format in &mut _media.formats {
                                     if format.payload_type == payload_type {
                                         format.encoding = encoding;
                                         format.clock_rate = clock_rate;
@@ -525,7 +525,7 @@ impl SessionDescription {
                                 }
                                 
                                 // Find the format with this payload type and update it
-                                for format in &mut media.formats {
+                                for format in &mut _media.formats {
                                     if format.payload_type == payload_type {
                                         format.parameters = parameters;
                                         break;
@@ -534,11 +534,11 @@ impl SessionDescription {
                             },
                             "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
                                 // Parse direction
-                                media.direction = MediaDirection::from_str(attr_name)?;
+                                _media.direction = MediaDirection::from_str(attr_name)?;
                             },
                             _ => {
                                 // Other attributes
-                                media.attributes.insert(attr_name.to_string(), attr_value.to_string());
+                                _media.attributes.insert(attr_name.to_string(), attr_value.to_string());
                             }
                         }
                     } else {

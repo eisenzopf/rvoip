@@ -368,6 +368,64 @@ impl StatusCode {
         let code = self.as_u16();
         code >= 400 && code < 700
     }
+
+    /// Get the textual reason phrase for the status code
+    pub fn as_reason(&self) -> &'static str {
+        match self {
+            Self::Trying => "Trying",
+            Self::Ringing => "Ringing",
+            Self::CallIsBeingForwarded => "Call Is Being Forwarded",
+            Self::Queued => "Queued",
+            Self::SessionProgress => "Session Progress",
+            Self::Ok => "OK",
+            Self::Accepted => "Accepted",
+            Self::MultipleChoices => "Multiple Choices",
+            Self::MovedPermanently => "Moved Permanently",
+            Self::MovedTemporarily => "Moved Temporarily",
+            Self::UseProxy => "Use Proxy",
+            Self::AlternativeService => "Alternative Service",
+            Self::BadRequest => "Bad Request",
+            Self::Unauthorized => "Unauthorized",
+            Self::PaymentRequired => "Payment Required",
+            Self::Forbidden => "Forbidden",
+            Self::NotFound => "Not Found",
+            Self::MethodNotAllowed => "Method Not Allowed",
+            Self::NotAcceptable => "Not Acceptable",
+            Self::ProxyAuthenticationRequired => "Proxy Authentication Required",
+            Self::RequestTimeout => "Request Timeout",
+            Self::Gone => "Gone",
+            Self::RequestEntityTooLarge => "Request Entity Too Large",
+            Self::RequestUriTooLong => "Request-URI Too Long",
+            Self::UnsupportedMediaType => "Unsupported Media Type",
+            Self::UnsupportedUriScheme => "Unsupported URI Scheme",
+            Self::BadExtension => "Bad Extension",
+            Self::ExtensionRequired => "Extension Required",
+            Self::IntervalTooBrief => "Interval Too Brief",
+            Self::TemporarilyUnavailable => "Temporarily Unavailable",
+            Self::CallOrTransactionDoesNotExist => "Call/Transaction Does Not Exist",
+            Self::LoopDetected => "Loop Detected",
+            Self::TooManyHops => "Too Many Hops",
+            Self::AddressIncomplete => "Address Incomplete",
+            Self::Ambiguous => "Ambiguous",
+            Self::BusyHere => "Busy Here",
+            Self::RequestTerminated => "Request Terminated",
+            Self::NotAcceptableHere => "Not Acceptable Here",
+            Self::RequestPending => "Request Pending",
+            Self::Undecipherable => "Undecipherable",
+            Self::ServerInternalError => "Server Internal Error",
+            Self::NotImplemented => "Not Implemented",
+            Self::BadGateway => "Bad Gateway",
+            Self::ServiceUnavailable => "Service Unavailable",
+            Self::ServerTimeout => "Server Time-out",
+            Self::VersionNotSupported => "Version Not Supported",
+            Self::MessageTooLarge => "Message Too Large",
+            Self::BusyEverywhere => "Busy Everywhere",
+            Self::Decline => "Decline",
+            Self::DoesNotExistAnywhere => "Does Not Exist Anywhere",
+            Self::NotAcceptable606 => "Not Acceptable",
+            Self::Custom(_) => "Custom Status Code",
+        }
+    }
 }
 
 impl fmt::Display for StatusCode {
@@ -662,6 +720,50 @@ impl Message {
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
         self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+    }
+
+    /// Convert the message to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        
+        match self {
+            Message::Request(request) => {
+                // Add request line: METHOD URI SIP/2.0\r\n
+                bytes.extend_from_slice(format!("{} {} SIP/2.0\r\n", 
+                    request.method, request.uri).as_bytes());
+                
+                // Add headers
+                for header in &request.headers {
+                    bytes.extend_from_slice(format!("{}: {}\r\n", 
+                        header.name, header.value).as_bytes());
+                }
+                
+                // Add empty line to separate headers from body
+                bytes.extend_from_slice(b"\r\n");
+                
+                // Add body if any
+                bytes.extend_from_slice(&request.body);
+            },
+            Message::Response(response) => {
+                // Add status line: SIP/2.0 CODE REASON\r\n
+                bytes.extend_from_slice(format!("SIP/2.0 {} {}\r\n", 
+                    response.status.as_u16(), response.status.reason_phrase()).as_bytes());
+                
+                // Add headers
+                for header in &response.headers {
+                    bytes.extend_from_slice(format!("{}: {}\r\n", 
+                        header.name, header.value).as_bytes());
+                }
+                
+                // Add empty line to separate headers from body
+                bytes.extend_from_slice(b"\r\n");
+                
+                // Add body if any
+                bytes.extend_from_slice(&response.body);
+            }
+        }
+        
+        bytes
     }
 }
 

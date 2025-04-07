@@ -12,6 +12,10 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Kill any existing instances 
+echo "Stopping any running instances..."
+pkill -f "sip-client-demo" || true
+
 # Function to run a component in a new terminal
 run_client() {
     local title="$1"
@@ -19,7 +23,7 @@ run_client() {
     local args="$3"
     
     # Create the full command
-    local cmd="cd '$(pwd)' && RUST_LOG=info cargo run --package sip-client-demo --bin $binary -- $args"
+    local cmd="cd '$(pwd)' && RUST_LOG=debug cargo run --package sip-client-demo --bin $binary -- $args"
     
     # Display the command
     echo "Starting $title with command:"
@@ -59,7 +63,7 @@ read
 run_client "SIP Receiver (Bob)" "receiver" "--local-addr 127.0.0.1:5071 --username bob"
 
 echo "Waiting for receiver to start up..."
-sleep 2
+sleep 5
 
 # Start caller 
 run_client "SIP Caller (Alice)" "caller" "--local-addr 127.0.0.1:5070 --username alice --server-addr 127.0.0.1:5071 --target-uri sip:bob@rvoip.local"

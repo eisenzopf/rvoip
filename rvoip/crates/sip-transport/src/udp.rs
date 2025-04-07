@@ -140,26 +140,34 @@ impl Transport for UdpTransport {
     }
     
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
-        if self.is_closed() {
-            return Err(Error::TransportClosed);
-        }
+        use tracing::{info, debug, error};
         
-        // Convert the message to a string
-        let message_str = message.to_string();
-        let bytes = message_str.as_bytes();
+        // Convert message to bytes
+        let bytes = message.to_bytes();
         
-        // Check if the message is too large
-        if bytes.len() > MAX_UDP_PACKET_SIZE {
-            return Err(Error::PacketTooLarge(bytes.len(), MAX_UDP_PACKET_SIZE));
-        }
+        debug!("Sending {} byte message to {}", bytes.len(), destination);
+        info!("Sending {} message to {}", 
+            if let Message::Request(ref req) = message { 
+                format!("{}", req.method) 
+            } else { 
+                "response".to_string() 
+            }, 
+            destination);
+        
+        // Log message content in debug mode
+        debug!("Message content: \n{}", String::from_utf8_lossy(&bytes));
         
         // Send the message
-        self.inner.socket.send_to(bytes, destination).await
-            .map_err(|e| Error::SendFailed(destination, e))?;
-            
-        trace!("Sent SIP message to {}: {}", destination, message_str);
-        
-        Ok(())
+        match self.inner.socket.send_to(&bytes, destination).await {
+            Ok(bytes_sent) => {
+                debug!("Sent {} bytes to {}", bytes_sent, destination);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send message to {}: {}", destination, e);
+                Err(Box::new(e))
+            }
+        }
     }
     
     async fn close(&self) -> Result<()> {

@@ -568,22 +568,28 @@ impl SipClient {
     
     /// Make a call to a target URI
     pub async fn call(&self, target: &str, config: CallConfig) -> Result<Arc<Call>> {
+        debug!("Making call to target URI: {}", target);
+        
         // Parse target URI
         let target_uri: Uri = target.parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid target URI: {}", e)))?;
         
         // Get target address
         let target_addr = self.resolve_uri(&target_uri)?;
+        debug!("Resolved target address: {}", target_addr);
         
         // Generate Call-ID
         let call_id = format!("{}-{}", self.config.username, Uuid::new_v4());
+        debug!("Generated Call-ID: {}", call_id);
         
         // Generate tag for From header
         let local_tag = format!("tag-{}", Uuid::new_v4());
+        debug!("Generated local tag: {}", local_tag);
         
         // Create local URI
         let local_uri = format!("sip:{}@{}", self.config.username, self.config.domain).parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid local URI: {}", e)))?;
+        debug!("Local URI: {}", local_uri);
         
         // Create call
         let (call, state_tx) = Call::new(
@@ -597,51 +603,12 @@ impl SipClient {
             self.transaction_manager.clone(),
             self.event_tx.clone().with_transformer(|event| SipClientEvent::Call(event)),
         );
+        debug!("Created new call with ID: {}", call.id());
         
-        // Store call
-        self.calls.write().await.insert(call_id.clone(), call.clone());
-        
-        // Create INVITE request
-        let mut request = self.create_request(Method::Invite, target_uri);
-        
-        // Set up media and SDP
-        // Choose a local RTP port for audio
-        let local_rtp_port = self.config.media.rtp_port_min + 
-            (rand::random::<u16>() % (self.config.media.rtp_port_max - self.config.media.rtp_port_min));
-        
-        // Generate SDP using the session-core implementation
-        use rvoip_session_core::sdp::SessionDescription;
-        
-        // Create SDP for audio call
-        let sdp = SessionDescription::new_audio_call(
-            &self.config.username,
-            self.config.local_addr.unwrap().ip(),
-            local_rtp_port
-        );
-        
-        // Convert SDP to string and then to bytes
-        let sdp_str = sdp.to_string();
-        request.body = bytes::Bytes::from(sdp_str);
-        
-        // Add Content-Type and Content-Length headers
-        request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
-        request.headers.push(Header::integer(HeaderName::ContentLength, request.body.len() as i64));
-        
-        // Send INVITE request via transaction
-        let response = self.send_via_transaction(request, target_addr).await?;
-        
-        // Update call state based on response - DO NOT USE state_tx directly
-        // Instead use the call's update_state method which will handle state validation
-        // and proper event emission
-        if response.status.is_success() {
-            // Call answered
-            call.handle_response(response.clone()).await?;
-        } else if response.status == StatusCode::Ringing || response.status == StatusCode::SessionProgress {
-            // Call ringing
-            call.handle_response(response.clone()).await?;
-        } else {
-            // Call failed - update via the appropriate method
-            call.handle_response(response.clone()).await?;
+        // Keep track of the call
+        {
+            let mut calls = self.calls.write().await;
+            calls.insert(call.id().to_string(), call.clone());
         }
         
         Ok(call)
@@ -807,58 +774,55 @@ impl SipClient {
     
     /// Send a request via the transaction layer
     async fn send_via_transaction(&self, request: Request, destination: SocketAddr) -> Result<Response> {
-        let method = request.method.clone();
+        use tracing::{info, debug};
+
+        // Log the outgoing request for debugging
+        debug!("Sending {} request to {}", request.method, destination);
+        info!("Sending {} request to {}", request.method, destination);
         
-        // Extract Call-ID to associate with the right call
-        let call_id = request.call_id()
-            .ok_or_else(|| Error::SipProtocol("Request missing Call-ID".into()))?
-            .to_string();
-            
-        debug!("Sending {} request via transaction layer for call {}", method, call_id);
-        
-        // Create appropriate client transaction based on request method
-        let transaction_id = if method == Method::Invite {
-            // Use INVITE transaction
+        // Create a transaction
+        let transaction_id = if request.method == Method::Invite {
             self.transaction_manager.create_client_invite_transaction(
                 request,
                 destination,
             ).await.map_err(|e| Error::Transport(e.to_string()))?
         } else {
-            // Use non-INVITE transaction
             self.transaction_manager.create_client_non_invite_transaction(
                 request,
                 destination,
             ).await.map_err(|e| Error::Transport(e.to_string()))?
         };
         
-        // Send request
+        debug!("Created transaction: {}", transaction_id);
+        
+        // Create a oneshot channel to receive the response
+        let (tx, rx) = oneshot::channel();
+        
+        // Store the channel for this transaction
+        {
+            let mut pending = self.pending_responses.lock().await;
+            pending.insert(transaction_id.clone(), tx);
+        }
+        
+        // Send the request
         self.transaction_manager.send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
-        debug!("Request sent via transaction {}", transaction_id);
+        debug!("Request sent, waiting for response: {}", transaction_id);
         
-        // Wait for final response
-        let response = match method {
-            Method::Invite => {
-                // For INVITE, process both provisional and final responses
-                self.wait_for_transaction_response(&transaction_id).await?
-            },
-            _ => {
-                // For non-INVITE, just wait for final response
-                self.wait_for_transaction_response(&transaction_id).await?
-            }
-        };
+        // Wait for the response with a timeout
+        let timeout = tokio::time::timeout(
+            Duration::from_secs(30), // Use a longer timeout for INVITE
+            self.wait_for_transaction_response(&transaction_id)
+        ).await;
         
-        // Process the response to update call state
-        if let Some(call) = self.calls.read().await.get(&call_id).cloned() {
-            debug!("Forwarding response to call {} state machine", call_id);
-            // Process response directly to ensure immediate state update
-            if let Err(e) = call.handle_response(response.clone()).await {
-                error!("Error handling response: {}", e);
+        match timeout {
+            Ok(result) => result,
+            Err(_) => {
+                error!("Transaction timed out: {}", transaction_id);
+                Err(Error::Timeout("Transaction timed out".into()))
             }
         }
-        
-        Ok(response)
     }
     
     /// Wait for transaction response

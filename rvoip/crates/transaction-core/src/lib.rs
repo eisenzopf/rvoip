@@ -9,7 +9,7 @@ pub mod transaction;
 pub mod transaction_manager {
     // Re-export from manager
 }
-mod utils;
+pub mod utils;
 mod manager;
 
 use std::net::SocketAddr;

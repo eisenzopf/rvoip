@@ -561,14 +561,38 @@ impl TransactionManager {
     
     /// Send a request through a client transaction
     pub async fn send_request(&self, transaction_id: &str) -> Result<()> {
-        let mut transactions = self.client_transactions.lock().await;
+        use tracing::{info, debug, error};
         
-        if let Some(tx) = transactions.get_mut(transaction_id) {
-            debug!("[{}] Sending request", transaction_id);
-            tx.send_request().await?;
-            Ok(())
-        } else {
-            Err(Error::TransactionNotFound(transaction_id.to_string()))
+        debug!("Sending request for transaction: {}", transaction_id);
+        
+        // Find transaction
+        let mut transactions = self.client_transactions.lock().await;
+        let transaction = transactions.get_mut(transaction_id)
+            .ok_or_else(|| Error::InvalidTransaction(format!("Transaction {} not found", transaction_id)))?;
+        
+        // Send the request
+        let request = transaction.request().clone();
+        let destination = transaction.destination();
+        
+        // Log the request details
+        info!("Sending {} request to {} for transaction {}", 
+            request.method, destination, transaction_id);
+        
+        // Get the transport
+        let transport = self.transport.clone();
+        
+        // Send the request via transport
+        match transport.send_message(Message::Request(request.clone()), destination).await {
+            Ok(_) => {
+                debug!("Request sent successfully for transaction {}", transaction_id);
+                // Start transaction timers
+                transaction.start().await?;
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send request for transaction {}: {}", transaction_id, e);
+                Err(Error::TransportError(format!("Failed to send request: {}", e)))
+            }
         }
     }
     
@@ -690,8 +714,51 @@ impl TransactionManager {
         
         // Retrieve the client INVITE transaction
         let mut client_transactions = self.client_transactions.lock().await;
-        let transaction = client_transactions.get_mut(transaction_id)
-            .ok_or_else(|| Error::TransactionNotFound(transaction_id.to_string()))?;
+        
+        // First try with the given transaction ID
+        let tx_option = client_transactions.get_mut(transaction_id);
+        
+        // Find the transaction if not found directly
+        let transaction = if let Some(tx) = tx_option {
+            debug!("Found transaction {} directly", transaction_id);
+            tx
+        } else {
+            // Log detailed information about available transactions
+            let available_transaction_ids: Vec<String> = client_transactions.keys().cloned().collect();
+            debug!("Transaction {} not found directly. Current transactions: {:?}", 
+                transaction_id, available_transaction_ids);
+                
+            // Try to find matching INVITE transaction by inspecting all
+            let response_call_id = crate::utils::extract_call_id(&Message::Response(response.clone()))
+                .ok_or_else(|| Error::Other("Could not extract Call-ID from response".to_string()))?;
+                
+            debug!("Looking for transaction with Call-ID: {}", response_call_id);
+            
+            // Find matching transaction by Call-ID
+            let matching_tx = client_transactions.iter_mut()
+                .find(|(_, tx)| {
+                    if tx.original_request().method != Method::Invite {
+                        return false;
+                    }
+                    
+                    if let Some(req_call_id) = crate::utils::extract_call_id(&Message::Request(tx.original_request().clone())) {
+                        req_call_id == response_call_id
+                    } else {
+                        false
+                    }
+                })
+                .map(|(_, tx)| tx)
+                .ok_or_else(|| {
+                    // If not found, provide detailed error without accessing client_transactions again
+                    Error::Other(format!(
+                        "No matching INVITE transaction found for Call-ID: {}. Available transactions: {:?}",
+                        response_call_id, available_transaction_ids
+                    ))
+                })?;
+                
+            debug!("Found matching transaction by Call-ID: {}", matching_tx.id());
+            matching_tx
+        };
         
         // Check that it's an INVITE transaction
         if transaction.original_request().method != Method::Invite {
@@ -699,7 +766,6 @@ impl TransactionManager {
         }
         
         // Cast to ClientInviteTransaction to access the create_2xx_ack method
-        // This is not ideal but works for now
         if let Some(invite_tx) = transaction.as_any().downcast_ref::<crate::transaction::client::ClientInviteTransaction>() {
             // Generate ACK request
             let ack = invite_tx.create_2xx_ack(response)?;

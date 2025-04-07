@@ -119,4 +119,27 @@ pub fn extract_transaction_id(message: &Message) -> Result<String> {
             }
         }
     }
+}
+
+/// Extract a transaction ID from a response
+/// This must match how transaction IDs are generated in client transactions
+pub fn extract_transaction_id_from_response(response: &rvoip_sip_core::Response) -> Option<String> {
+    // Get the Via header which contains the branch parameter
+    if let Some(via) = response.header(&rvoip_sip_core::HeaderName::Via) {
+        if let Some(via_text) = via.value.as_text() {
+            // Extract the branch parameter
+            if let Some(branch_pos) = via_text.find("branch=") {
+                let branch_start = branch_pos + 7; // "branch=" length
+                let branch_end = via_text[branch_start..]
+                    .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                    .map(|pos| branch_start + pos)
+                    .unwrap_or(via_text.len());
+                let branch = &via_text[branch_start..branch_end];
+                
+                // ict_ prefix for INVITE client transactions
+                return Some(format!("ict_{}", branch));
+            }
+        }
+    }
+    None
 } 

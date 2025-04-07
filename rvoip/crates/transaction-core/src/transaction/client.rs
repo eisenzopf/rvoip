@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use tracing::{debug, trace, warn};
 
-use rvoip_sip_core::{Message, Method, Request, Response, StatusCode, Uri, HeaderName, Header};
+use rvoip_sip_core::{Message, Method, Request, Response, StatusCode, Uri, HeaderName, Header, HeaderValue};
 use rvoip_sip_transport::Transport;
 
 use crate::error::{Error, Result};
@@ -48,17 +48,61 @@ pub struct ClientInviteTransaction {
 impl ClientInviteTransaction {
     /// Create a new client INVITE transaction
     pub fn new(
-        request: Request,
+        mut request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
         // Ensure the request is an INVITE
         if request.method != Method::Invite {
-            return Err(Error::Other("Request must be INVITE for client INVITE transaction".to_string()));
+            return Err(Error::Other("Request must be INVITE for INVITE client transaction".to_string()));
         }
         
-        // Generate transaction ID from branch parameter
-        let id = utils::extract_transaction_id(&Message::Request(request.clone()))?;
+        // Check if request has a Via header with branch parameter
+        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
+            Some(branch) => branch,
+            None => {
+                // No branch parameter found, add one
+                debug!("Adding missing branch parameter to Via header");
+                
+                // Generate a branch parameter
+                let new_branch = utils::generate_branch();
+                
+                // Check if there's an existing Via header we can modify
+                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
+                
+                if let Some(via_header) = found_via {
+                    // Modify existing Via header to add branch
+                    let current_value = via_header.value.to_string();
+                    let new_value = if current_value.contains("branch=") {
+                        current_value // Already has branch, don't modify (shouldn't happen)
+                    } else {
+                        format!("{};branch={}", current_value, new_branch)
+                    };
+                    
+                    // Update header value
+                    via_header.value = HeaderValue::Text(new_value);
+                    new_branch // Return the branch we just added
+                } else {
+                    // No Via header found, add a new one with branch
+                    debug!("No Via header found, adding one with branch parameter");
+                    
+                    // Use localhost as placeholder - in real scenarios the correct local interface would be used
+                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
+                    request.headers.push(Header::text(HeaderName::Via, via_value));
+                    
+                    new_branch // Return the branch we just added
+                }
+            }
+        };
+        
+        // Ensure we have a Max-Forwards header
+        if !request.headers.iter().any(|h| h.name == HeaderName::MaxForwards) {
+            debug!("Adding missing Max-Forwards header");
+            request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
+        }
+        
+        let id = format!("ict_{}", branch);
+        debug!("Created transaction with ID: {}", id);
         
         Ok(ClientInviteTransaction {
             id,
@@ -67,8 +111,8 @@ impl ClientInviteTransaction {
             last_response: None,
             remote_addr,
             transport,
-            timer_a: Duration::from_millis(500),  // Initial T1
-            timer_b: Duration::from_secs(32),     // 64 * T1
+            timer_a: Duration::from_millis(500), // T1 (500ms)
+            timer_b: Duration::from_secs(32),    // 64*T1 seconds
             timer_d: Duration::from_secs(32),     // > 32s for unreliable transport
             retransmit_count: 0,
         })
@@ -531,7 +575,7 @@ pub struct ClientNonInviteTransaction {
 impl ClientNonInviteTransaction {
     /// Create a new client non-INVITE transaction
     pub fn new(
-        request: Request,
+        mut request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
@@ -540,11 +584,52 @@ impl ClientNonInviteTransaction {
             return Err(Error::Other("Request must not be INVITE for non-INVITE client transaction".to_string()));
         }
         
-        // Extract branch to generate ID
-        let branch = utils::extract_branch(&Message::Request(request.clone()))
-            .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
+        // Check if request has a Via header with branch parameter
+        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
+            Some(branch) => branch,
+            None => {
+                // No branch parameter found, add one
+                debug!("Adding missing branch parameter to Via header");
+                
+                // Generate a branch parameter
+                let new_branch = utils::generate_branch();
+                
+                // Check if there's an existing Via header we can modify
+                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
+                
+                if let Some(via_header) = found_via {
+                    // Modify existing Via header to add branch
+                    let current_value = via_header.value.to_string();
+                    let new_value = if current_value.contains("branch=") {
+                        current_value // Already has branch, don't modify (shouldn't happen)
+                    } else {
+                        format!("{};branch={}", current_value, new_branch)
+                    };
+                    
+                    // Update header value
+                    via_header.value = HeaderValue::Text(new_value);
+                    new_branch // Return the branch we just added
+                } else {
+                    // No Via header found, add a new one with branch
+                    debug!("No Via header found, adding one with branch parameter");
+                    
+                    // Use localhost as placeholder - in real scenarios the correct local interface would be used
+                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
+                    request.headers.push(Header::text(HeaderName::Via, via_value));
+                    
+                    new_branch // Return the branch we just added
+                }
+            }
+        };
+        
+        // Ensure we have a Max-Forwards header
+        if !request.headers.iter().any(|h| h.name == HeaderName::MaxForwards) {
+            debug!("Adding missing Max-Forwards header");
+            request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
+        }
         
         let id = format!("nict_{}", branch);
+        debug!("Created transaction with ID: {}", id);
         
         Ok(ClientNonInviteTransaction {
             id,
