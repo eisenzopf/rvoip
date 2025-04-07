@@ -615,7 +615,7 @@ async fn handle_incoming_request(
                 debug!("Received ACK for call {} in Connecting state, transitioning to Established", call_id);
                 
                 // Directly update the call's state to Established
-                if let Err(e) = call.update_state(CallState::Established).await {
+                if let Err(e) = call.transition_to(CallState::Established).await {
                     warn!("Failed to update call state to Established: {}", e);
                 } else {
                     info!("Call {} established successfully after ACK", call_id);

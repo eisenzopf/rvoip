@@ -1136,7 +1136,7 @@ impl Call {
 
     /// Update the call state (deprecated, use transition_to instead)
     pub async fn update_state(&self, new_state: CallState) -> Result<()> {
-        // Forward to transition_to
+        // Simply forward to transition_to
         self.transition_to(new_state).await
     }
 
@@ -1308,7 +1308,9 @@ impl Call {
 
     /// Update the call state from any state to a new state
     pub async fn transition_to(&self, new_state: CallState) -> Result<()> {
-        debug!("Call {} state transition: {} -> {}", self.id, self.state().await, new_state);
+        // Get current state before changing it
+        let previous_state = self.state().await;
+        debug!("Call {} state transition: {} -> {}", self.id, previous_state, new_state);
         
         // Update state
         {
@@ -1327,7 +1329,7 @@ impl Call {
         // Send state change event
         let _ = self.event_tx.send(CallEvent::StateChanged {
             call: Arc::new(self.clone()),
-            previous: self.state().await,
+            previous: previous_state,
             current: new_state,
         }).await;
         

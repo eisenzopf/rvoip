@@ -126,6 +126,20 @@ impl Transaction for ServerInviteTransaction {
                 }
                 
                 match self.state {
+                    TransactionState::Initial => {
+                        // In some cases, ACK might arrive before the state has been properly updated
+                        // This is not ideal but should be handled gracefully
+                        debug!("[{}] Received ACK in INITIAL state, handling it anyway", self.id);
+                        // We won't transition state here as this is an abnormal case
+                        // The dialog layer should handle this appropriately
+                        Ok(None)
+                    },
+                    TransactionState::ServerProceeding => {
+                        // ACK received prematurely, but we'll be tolerant
+                        debug!("[{}] Received ACK in PROCEEDING state, transitioning to CONFIRMED", self.id);
+                        self.transition_to(TransactionState::Confirmed)?;
+                        Ok(None)
+                    },
                     TransactionState::Completed => {
                         debug!("[{}] Received ACK in COMPLETED state, transitioning to CONFIRMED", self.id);
                         self.transition_to(TransactionState::Confirmed)?;
