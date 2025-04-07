@@ -82,6 +82,8 @@ pub struct TransactionManager {
     client_transactions: Arc<Mutex<HashMap<String, BoxedClientTransaction>>>,
     /// Active server transactions
     server_transactions: Arc<Mutex<HashMap<String, BoxedServerTransaction>>>,
+    /// Transaction destinations - maps transaction IDs to their destinations
+    transaction_destinations: Arc<Mutex<HashMap<String, SocketAddr>>>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
     /// Additional event senders for subscribers
@@ -106,6 +108,7 @@ impl TransactionManager {
             transport: transport.clone(),
             client_transactions: Arc::new(Mutex::new(HashMap::new())),
             server_transactions: Arc::new(Mutex::new(HashMap::new())),
+            transaction_destinations: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
             event_subscribers: Arc::new(Mutex::new(Vec::new())),
             transport_rx: Arc::new(Mutex::new(transport_rx)),
@@ -341,7 +344,7 @@ impl TransactionManager {
         message: &Message,
         request: &Request,
         source: SocketAddr,
-        destination: SocketAddr,
+        _destination: SocketAddr,
         transport: &Arc<dyn Transport>,
         server_transactions: &Arc<Mutex<HashMap<String, BoxedServerTransaction>>>,
         events_tx: &mpsc::Sender<TransactionEvent>,
@@ -495,71 +498,55 @@ impl TransactionManager {
         Ok(())
     }
     
-    /// Create a new client INVITE transaction
-    pub async fn create_client_invite_transaction(
-        &self,
-        request: Request,
-        destination: SocketAddr,
+    /// Create a client transaction
+    pub async fn create_client_transaction(&self, 
+        request: Request, 
+        destination: SocketAddr
     ) -> Result<String> {
-        // Ensure the request is an INVITE
-        if request.method != Method::Invite {
-            return Err(Error::Other("Request must be INVITE for client INVITE transaction".to_string()));
-        }
+        debug!("Creating client transaction for {} request to {}", request.method, destination);
         
-        // Create the transaction
-        let mut transaction = ClientInviteTransaction::new(
-            request,
-            destination,
-            self.transport.clone(),
-        )?;
+        // Different transaction types based on the method
+        let tx: BoxedClientTransaction = if request.method == Method::Invite {
+            debug!("Creating INVITE client transaction to {}", destination);
+            Box::new(ClientInviteTransaction::new(
+                request.clone(),
+                destination,
+                self.transport.clone(),
+            )?)
+        } else {
+            debug!("Creating non-INVITE client transaction to {}", destination);
+            Box::new(ClientNonInviteTransaction::new(
+                request.clone(),
+                destination,
+                self.transport.clone(),
+            )?)
+        };
         
-        let transaction_id = transaction.id().to_string();
-        debug!("[{}] Created new client INVITE transaction", transaction_id);
+        // Get transaction ID
+        let id = tx.id().to_string();
+        debug!("Created client transaction with ID: {}", id);
         
-        // Add transaction to collection
-        self.client_transactions.lock().await.insert(transaction_id.clone(), Box::new(transaction));
+        // Store the transaction
+        let mut client_txs = self.client_transactions.lock().await;
+        client_txs.insert(id.clone(), tx);
+        
+        // Store the destination address
+        let mut destinations = self.transaction_destinations.lock().await;
+        destinations.insert(id.clone(), destination);
+        debug!("Stored destination {} for transaction {}", destination, id);
         
         // Notify of transaction creation
         self.events_tx.send(TransactionEvent::TransactionCreated {
-            transaction_id: transaction_id.clone(),
+            transaction_id: id.clone(),
         }).await?;
         
-        Ok(transaction_id)
+        Ok(id)
     }
     
-    /// Create a new client non-INVITE transaction
-    pub async fn create_client_non_invite_transaction(
-        &self,
-        request: Request,
-        destination: SocketAddr,
-    ) -> Result<String> {
-        // Ensure the request is not an INVITE or ACK
-        if request.method == Method::Invite || request.method == Method::Ack {
-            return Err(Error::Other(format!(
-                "Request cannot be {} for client non-INVITE transaction", 
-                request.method
-            )));
-        }
-        
-        // Create the transaction
-        let mut transaction = ClientNonInviteTransaction::new(
-            request,
-            destination,
-            self.transport.clone(),
-        )?;
-        
-        let transaction_id = transaction.id().to_string();
-        debug!("[{}] Created new client non-INVITE transaction", transaction_id);
-        
-        // Add transaction to collection
-        self.client_transactions.lock().await.insert(transaction_id.clone(), Box::new(transaction));
-        
-        // Notify of transaction creation
-        self.events_tx.send(TransactionEvent::TransactionCreated {
-            transaction_id: transaction_id.clone(),
-        }).await?;
-        
-        Ok(transaction_id)
+    /// Lookup a transaction destination
+    pub async fn get_transaction_destination(&self, transaction_id: &str) -> Option<SocketAddr> {
+        let destinations = self.transaction_destinations.lock().await;
+        destinations.get(transaction_id).copied()
     }
     
     /// Send a request through a client transaction
@@ -696,7 +683,7 @@ impl TransactionManager {
     }
     
     /// Send an ACK for a 2xx response (outside of transaction)
-    pub async fn send_2xx_ack(&self, _transaction_id: &str, response: &rvoip_sip_core::Response) -> Result<()> {
+    pub async fn send_2xx_ack(&self, transaction_id: &str, response: &rvoip_sip_core::Response) -> Result<()> {
         // Create a basic ACK request based on the response
         // This is a simplified version - in a real implementation, we would create a proper ACK
         let mut ack = rvoip_sip_core::Request::new(
@@ -749,53 +736,94 @@ impl TransactionManager {
             0
         ));
         
-        // Extract destination from response
-        let destination = if let Some(contact) = response.header(&rvoip_sip_core::HeaderName::Contact) {
+        // 1. First try to extract destination from Contact header (preferred SIP way)
+        let mut destination_from_contact = None;
+        if let Some(contact) = response.header(&rvoip_sip_core::HeaderName::Contact) {
             if let Some(contact_text) = contact.value.as_text() {
+                info!("Contact header in 200 OK: {}", contact_text);
                 if let Some(uri_start) = contact_text.find('<') {
                     let uri_start = uri_start + 1;
                     if let Some(uri_end) = contact_text[uri_start..].find('>') {
                         let uri_str = &contact_text[uri_start..(uri_start + uri_end)];
+                        info!("Extracted URI from Contact: {}", uri_str);
                         
                         if let Ok(uri) = rvoip_sip_core::Uri::from_str(uri_str) {
                             // Determine destination address from URI
                             let host = uri.host.clone();
                             let port = uri.port.unwrap_or(5060);
+                            info!("URI host: {}, port: {}", host, port);
                             
                             // Try to resolve host as an IP address
                             if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                                Some(std::net::SocketAddr::new(ip, port))
-                            } else {
-                                // Use default destination for now
-                                // In a real implementation, we would do DNS resolution
-                                Some(utils::extract_destination(_transaction_id).unwrap_or_else(|| {
-                                    std::net::SocketAddr::from(([127, 0, 0, 1], 5060))
-                                }))
+                                destination_from_contact = Some(std::net::SocketAddr::new(ip, port));
+                                info!("Successfully extracted destination from Contact: {}", destination_from_contact.unwrap());
                             }
-                        } else {
-                            None
                         }
-                    } else {
-                        None
                     }
-                } else {
-                    None
                 }
-            } else {
-                None
             }
-        } else {
-            None
-        };
+        }
         
-        // If destination could not be determined, use a fallback
-        let destination = destination.unwrap_or_else(|| {
-            utils::extract_destination(_transaction_id).unwrap_or_else(|| {
-                std::net::SocketAddr::from(([127, 0, 0, 1], 5060))
-            })
-        });
+        // 2. Try to extract from Via if Contact failed
+        let mut destination_from_via = None;
+        if destination_from_contact.is_none() {
+            if let Some(via) = response.header(&rvoip_sip_core::HeaderName::Via) {
+                if let Some(via_text) = via.value.as_text() {
+                    info!("Via header in 200 OK: {}", via_text);
+                    // Extract received and rport parameters
+                    let mut received = None;
+                    let mut rport = None;
+                    
+                    if let Some(received_pos) = via_text.find("received=") {
+                        let received_start = received_pos + 9; // "received=" length
+                        let received_end = via_text[received_start..]
+                            .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                            .map(|pos| received_start + pos)
+                            .unwrap_or(via_text.len());
+                        received = Some(via_text[received_start..received_end].to_string());
+                    }
+                    
+                    if let Some(rport_pos) = via_text.find("rport=") {
+                        let rport_start = rport_pos + 6; // "rport=" length
+                        let rport_end = via_text[rport_start..]
+                            .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                            .map(|pos| rport_start + pos)
+                            .unwrap_or(via_text.len());
+                        let rport_str = &via_text[rport_start..rport_end];
+                        rport = rport_str.parse::<u16>().ok();
+                    }
+                    
+                    if let (Some(ip_str), Some(port)) = (received, rport) {
+                        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                            destination_from_via = Some(std::net::SocketAddr::new(ip, port));
+                            info!("Successfully extracted destination from Via: {}", destination_from_via.unwrap());
+                        }
+                    }
+                }
+            }
+        }
         
-        debug!("Sending ACK for 2xx response to {}", destination);
+        // 3. Look up from transaction registry
+        let destination_from_registry = self.get_transaction_destination(transaction_id).await;
+        if let Some(addr) = destination_from_registry {
+            info!("Found destination in transaction registry: {}", addr);
+        }
+        
+        // Determine the best destination to use - order of preference:
+        // 1. Contact header (most reliable for 2xx responses)
+        // 2. Via header with received/rport
+        // 3. Transaction registry
+        // 4. Fallback hardcoded address
+        let destination = destination_from_contact
+            .or(destination_from_via)
+            .or(destination_from_registry)
+            .unwrap_or_else(|| {
+                let fallback = std::net::SocketAddr::from(([127, 0, 0, 1], 5071));
+                warn!("No reliable destination found for ACK, using fallback: {}", fallback);
+                fallback
+            });
+        
+        info!("Sending ACK for 2xx response to {}", destination);
         
         // Send the ACK directly via transport
         self.transport.send_message(
@@ -811,6 +839,7 @@ impl fmt::Debug for TransactionManager {
             .field("transport", &self.transport)
             .field("client_transactions", &self.client_transactions)
             .field("server_transactions", &self.server_transactions)
+            .field("transaction_destinations", &self.transaction_destinations)
             .field("events_tx", &self.events_tx)
             .field("event_subscribers", &self.event_subscribers)
             .field("transport_rx", &self.transport_rx)

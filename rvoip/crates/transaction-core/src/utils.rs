@@ -1,6 +1,7 @@
 use rand::{thread_rng, Rng};
 use rvoip_sip_core::{Header, HeaderName, Message, Method, Request, Response, StatusCode};
 use std::str::FromStr;
+use tracing::debug;
 
 use crate::error::{Error, Result};
 
@@ -145,14 +146,22 @@ pub fn extract_transaction_id_from_response(response: &rvoip_sip_core::Response)
 }
 
 /// Extract the destination address from a transaction ID
-/// This is a workaround since we don't store the destination directly in the transaction
+/// 
+/// NOTE: This is a temporary placeholder function. In a proper implementation,
+/// this destination should be retrieved from the transaction registry.
+/// The transaction manager now maintains a mapping of transaction IDs to their destinations
+/// in the transaction_destinations field, which should be used instead of this function.
+///
+/// This function is kept for backward compatibility but will always return the testing configuration
+/// which may not be correct for production usage.
 pub fn extract_destination(transaction_id: &str) -> Option<std::net::SocketAddr> {
-    // In a real implementation, this would get the address from a map/store
-    // For now, return a default address for testing
+    debug!("WARNING: Using placeholder extract_destination for transaction {}", transaction_id);
+    debug!("This is inefficient and should be replaced with TransactionManager.get_transaction_destination");
     
-    // We could also parse a format like t_{branch}_{ip}_{port}
-    // if that's how transaction IDs are structured
-    
-    // Default to localhost port 5060 for simplicity
-    Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5060)))
+    // Hard-coded destination for testing - NOT FOR PRODUCTION USE
+    // In a real application, this should be:
+    // 1. Retrieved from the transaction registry
+    // 2. Extracted from the transaction ID if encoded there
+    // 3. Or determined from the SIP URI
+    Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5071)))
 } 

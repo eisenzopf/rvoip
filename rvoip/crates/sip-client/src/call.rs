@@ -596,7 +596,7 @@ impl Call {
             drop(dialog_guard);
             
             // Send BYE via transaction
-            let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+            let transaction_id = self.transaction_manager.create_client_transaction(
                 bye_request,
                 self.remote_addr,
             ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -694,7 +694,7 @@ impl Call {
         
         // Send the request via transaction manager, which will properly add Via, Max-Forwards, etc.
         debug!("Creating transaction for INFO request (DTMF)");
-        let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+        let transaction_id = self.transaction_manager.create_client_transaction(
             request,
             self.remote_addr
         ).await.map_err(|e| {
@@ -1071,121 +1071,178 @@ impl Call {
             }
         }
         
-        // Handle based on status code
-        match status {
-            StatusCode::Trying => {
-                debug!("Got 100 Trying, call is being processed");
+        // Handle response based on call state
+        if self.direction == CallDirection::Outgoing {
+            // This is our outgoing call
+            match (current_state, response.status.as_u16()) {
+                // 100 Trying - ignore, we're already in a calling state
+                (CallState::Ringing, 100) => {
+                    debug!("Received 100 Trying for outgoing call in ringing state");
+                },
                 
-                // Update state to Connecting if in Initial state
-                if current_state == CallState::Initial {
-                    self.transition_to(CallState::Connecting).await?;
-                }
-            },
-            StatusCode::Ringing | StatusCode::SessionProgress => {
-                debug!("Got provisional response, remote endpoint is alerting");
-                
-                // Update state to Ringing if in Initial or Connecting state
-                if current_state == CallState::Initial || current_state == CallState::Connecting {
-                    self.transition_to(CallState::Ringing).await?;
-                }
-                
-                // Extract and store SDP if present
-                if !response.body.is_empty() {
-                    match std::str::from_utf8(&response.body) {
-                        Ok(sdp_str) => {
-                            match rvoip_session_core::sdp::SessionDescription::parse(sdp_str) {
-                                Ok(sdp) => {
-                                    debug!("SDP received in provisional response");
-                                    *self.remote_sdp.write().await = Some(sdp);
-                                },
-                                Err(e) => warn!("Invalid SDP in provisional response: {}", e),
-                            }
-                        },
-                        Err(e) => warn!("Invalid UTF-8 in SDP: {}", e),
+                // 180 Ringing - update state if necessary
+                (CallState::Initial, 180) | (CallState::Ringing, 180) => {
+                    debug!("Received 180 Ringing for outgoing call");
+                    if current_state != CallState::Ringing {
+                        self.transition_to(CallState::Ringing).await?;
                     }
-                }
-            },
-            StatusCode::Ok => {
-                debug!("Call setup succeeded (200 OK)");
+                },
                 
-                // Extract and store SDP
-                if !response.body.is_empty() {
-                    match std::str::from_utf8(&response.body) {
-                        Ok(sdp_str) => {
-                            match rvoip_session_core::sdp::SessionDescription::parse(sdp_str) {
-                                Ok(sdp) => {
-                                    debug!("SDP received in 200 OK");
-                                    *self.remote_sdp.write().await = Some(sdp.clone());
-                                    
-                                    // Set up media
-                                    if let Err(e) = self.setup_media_internal(&sdp).await {
-                                        warn!("Failed to set up media: {}", e);
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!("Invalid SDP in 200 OK: {}", e);
-                                    return Err(Error::SipProtocol(format!("Invalid SDP in 200 OK: {}", e)));
-                                },
+                // 200 OK - call is accepted
+                (CallState::Initial, 200) | (CallState::Ringing, 200) => {
+                    debug!("Received 200 OK for outgoing call, call is accepted");
+                    
+                    // Update call state to connecting
+                    self.transition_to(CallState::Connecting).await?;
+                    
+                    // Extract remote tag
+                    if let Some(to_header) = response.header(&HeaderName::To) {
+                        if let Some(to_text) = to_header.value.as_text() {
+                            if let Some(tag_start) = to_text.find("tag=") {
+                                let tag_start = tag_start + 4; // "tag=" length
+                                let tag_end = to_text[tag_start..]
+                                    .find(|c: char| c == ';' || c.is_whitespace())
+                                    .map(|pos| tag_start + pos)
+                                    .unwrap_or(to_text.len());
+                                let tag = to_text[tag_start..tag_end].to_string();
+                                debug!("Extracted remote tag: {}", tag);
+                                self.set_remote_tag(tag).await;
                             }
+                        }
+                    }
+                    
+                    // Process SDP for media setup
+                    if !response.body.is_empty() {
+                        if let Ok(body_str) = std::str::from_utf8(&response.body) {
+                            if let Ok(sdp) = rvoip_session_core::sdp::SessionDescription::parse(body_str) {
+                                debug!("Successfully parsed SDP from 200 OK response");
+                                self.setup_media_from_sdp(&sdp).await?;
+                            } else {
+                                warn!("Failed to parse SDP from 200 OK response");
+                            }
+                        } else {
+                            warn!("Failed to parse SDP from 200 OK response - invalid UTF-8");
+                        }
+                    }
+                    
+                    // Send ACK immediately
+                    debug!("Immediately sending ACK after 200 OK");
+                    match self.send_ack().await {
+                        Ok(_) => {
+                            debug!("ACK sent successfully, moving to Established state");
+                            // Transition to established state after ACK is sent
+                            self.transition_to(CallState::Established).await?;
                         },
                         Err(e) => {
-                            warn!("Invalid UTF-8 in SDP: {}", e);
-                            return Err(Error::SipProtocol(format!("Invalid UTF-8 in SDP: {}", e)));
-                        },
+                            error!("Failed to send ACK: {}", e);
+                            self.transition_to(CallState::Failed).await?;
+                            return Err(e);
+                        }
                     }
-                }
+                },
                 
-                // Make sure we go through Connecting state before Established
-                if current_state != CallState::Connecting {
-                    debug!("Transitioning from {} to Connecting state after 200 OK", current_state);
+                // 4xx-6xx responses - call failed
+                (_, status) if status >= 400 && status < 700 => {
+                    warn!("Call {} failed with status {}", self.id, status);
+                    self.transition_to(CallState::Failed).await?;
+                },
+                
+                // Any other response in established state - possibly a re-INVITE response
+                (CallState::Established, _) => {
+                    debug!("Received response in established state, possibly re-INVITE response");
+                    // Handle re-INVITE response (future implementation)
+                },
+                
+                // Log unexpected responses
+                (state, status) => {
+                    debug!("Unexpected response status {} in state {}", status, state);
+                }
+            }
+        } else {
+            // This is an incoming call
+            match (current_state, response.status.as_u16()) {
+                // 100 Trying - ignore, we're already in a calling state
+                (CallState::Ringing, 100) => {
+                    debug!("Received 100 Trying for incoming call in ringing state");
+                },
+                
+                // 180 Ringing - update state if necessary
+                (CallState::Initial, 180) | (CallState::Ringing, 180) => {
+                    debug!("Received 180 Ringing for incoming call");
+                    if current_state != CallState::Ringing {
+                        self.transition_to(CallState::Ringing).await?;
+                    }
+                },
+                
+                // 200 OK - call is accepted
+                (CallState::Initial, 200) | (CallState::Ringing, 200) => {
+                    debug!("Received 200 OK for incoming call, call is accepted");
+                    
+                    // Update call state to connecting
                     self.transition_to(CallState::Connecting).await?;
-                }
-                
-                // Now update state to Established
-                debug!("Transitioning to Established state after 200 OK");
-                self.transition_to(CallState::Established).await?;
-                
-                // Record connection time
-                {
-                    let mut connect_time = self.connect_time.write().await;
-                    *connect_time = Some(Instant::now());
-                }
-                
-                // Send ACK in a separate task to avoid holding locks
-                let self_clone = self.clone();
-                tokio::spawn(async move {
-                    match self_clone.send_ack().await {
-                        Ok(_) => debug!("ACK sent for 200 OK"),
-                        Err(e) => error!("Failed to send ACK: {}", e),
+                    
+                    // Extract remote tag
+                    if let Some(to_header) = response.header(&HeaderName::To) {
+                        if let Some(to_text) = to_header.value.as_text() {
+                            if let Some(tag_start) = to_text.find("tag=") {
+                                let tag_start = tag_start + 4; // "tag=" length
+                                let tag_end = to_text[tag_start..]
+                                    .find(|c: char| c == ';' || c.is_whitespace())
+                                    .map(|pos| tag_start + pos)
+                                    .unwrap_or(to_text.len());
+                                let tag = to_text[tag_start..tag_end].to_string();
+                                debug!("Extracted remote tag: {}", tag);
+                                self.set_remote_tag(tag).await;
+                            }
+                        }
                     }
-                });
-            },
-            StatusCode::Unauthorized => {
-                debug!("Authentication required, not implemented yet");
+                    
+                    // Process SDP for media setup
+                    if !response.body.is_empty() {
+                        if let Ok(body_str) = std::str::from_utf8(&response.body) {
+                            if let Ok(sdp) = rvoip_session_core::sdp::SessionDescription::parse(body_str) {
+                                debug!("Successfully parsed SDP from 200 OK response");
+                                self.setup_media_from_sdp(&sdp).await?;
+                            } else {
+                                warn!("Failed to parse SDP from 200 OK response");
+                            }
+                        } else {
+                            warn!("Failed to parse SDP from 200 OK response - invalid UTF-8");
+                        }
+                    }
+                    
+                    // Send ACK immediately
+                    debug!("Immediately sending ACK after 200 OK");
+                    match self.send_ack().await {
+                        Ok(_) => {
+                            debug!("ACK sent successfully, moving to Established state");
+                            // Transition to established state after ACK is sent
+                            self.transition_to(CallState::Established).await?;
+                        },
+                        Err(e) => {
+                            error!("Failed to send ACK: {}", e);
+                            self.transition_to(CallState::Failed).await?;
+                            return Err(e);
+                        }
+                    }
+                },
                 
-                // Update state to Terminated
-                self.transition_to(CallState::Terminated).await?;
+                // 4xx-6xx responses - call failed
+                (_, status) if status >= 400 && status < 700 => {
+                    warn!("Call {} failed with status {}", self.id, status);
+                    self.transition_to(CallState::Failed).await?;
+                },
                 
-                // Set end time
-                {
-                    let mut end_time = self.end_time.write().await;
-                    *end_time = Some(Instant::now());
+                // Any other response in established state - possibly a re-INVITE response
+                (CallState::Established, _) => {
+                    debug!("Received response in established state, possibly re-INVITE response");
+                    // Handle re-INVITE response (future implementation)
+                },
+                
+                // Log unexpected responses
+                (state, status) => {
+                    debug!("Unexpected response status {} in state {}", status, state);
                 }
-            },
-            _ if status.is_error() => {
-                debug!("Call setup failed: {}", status);
-                
-                // Update state to Terminated
-                self.transition_to(CallState::Failed).await?;
-                
-                // Set end time
-                {
-                    let mut end_time = self.end_time.write().await;
-                    *end_time = Some(Instant::now());
-                }
-            },
-            _ => {
-                debug!("Unhandled response: {}", status);
             }
         }
         
@@ -1748,7 +1805,7 @@ impl WeakCall {
         req.headers.push(Header::integer(HeaderName::ContentLength, body_len));
         
         // Send via transaction manager
-        let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+        let transaction_id = self.transaction_manager.create_client_transaction(
             req,
             self.remote_addr,
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -1809,7 +1866,7 @@ impl WeakCall {
         
         // Send via transaction manager
         debug!("Creating transaction for BYE request");
-        let transaction_id = self.transaction_manager.create_client_non_invite_transaction(
+        let transaction_id = self.transaction_manager.create_client_transaction(
             bye_request,
             self.remote_addr
         ).await.map_err(|e| {

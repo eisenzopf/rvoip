@@ -516,9 +516,9 @@ impl SipClient {
         debug!("Creating INVITE request for call {}", call.id());
         let invite_request = call.create_invite_request().await?;
         
-        // Create a transaction for the INVITE
+        // Create a transaction for the INVITE using the unified method
         debug!("Creating transaction for INVITE");
-        let transaction_id = self.transaction_manager.create_client_invite_transaction(
+        let transaction_id = self.transaction_manager.create_client_transaction(
             invite_request,
             target_addr
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -700,18 +700,11 @@ impl SipClient {
         debug!("Sending {} request to {}", request.method, destination);
         info!("Sending {} request to {}", request.method, destination);
         
-        // Create a transaction
-        let transaction_id = if request.method == Method::Invite {
-            self.transaction_manager.create_client_invite_transaction(
-                request,
-                destination,
-            ).await.map_err(|e| Error::Transport(e.to_string()))?
-        } else {
-            self.transaction_manager.create_client_non_invite_transaction(
-                request,
-                destination,
-            ).await.map_err(|e| Error::Transport(e.to_string()))?
-        };
+        // Create a transaction using the unified method
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            request,
+            destination,
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
         debug!("Created transaction: {}", transaction_id);
         
@@ -846,18 +839,11 @@ impl LightweightClient {
         // Add Content-Length
         request.headers.push(Header::text(HeaderName::ContentLength, "0"));
         
-        // Create a client transaction for the request
-        let transaction_id = if request.method == Method::Invite {
-            self.transaction_manager.create_client_invite_transaction(
-                request,
-                server_addr,
-            ).await.map_err(|e| Error::Transport(e.to_string()))?
-        } else {
-            self.transaction_manager.create_client_non_invite_transaction(
-                request,
-                server_addr,
-            ).await.map_err(|e| Error::Transport(e.to_string()))?
-        };
+        // Create a client transaction for the request using the unified method
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            request,
+            server_addr,
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
         // Send the request
         self.transaction_manager.send_request(&transaction_id).await

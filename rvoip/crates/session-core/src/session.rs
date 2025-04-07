@@ -500,7 +500,7 @@ impl Session {
             request.uri.port.unwrap_or(5060)
         ).parse()?;
         
-        let tx_id = self.transaction_manager.create_client_invite_transaction(
+        let tx_id = self.transaction_manager.create_client_transaction(
             request, 
             destination
         ).await?;
@@ -566,7 +566,7 @@ impl Session {
             request.uri.port.unwrap_or(5060)
         ).parse()?;
         
-        let tx_id = self.transaction_manager.create_client_non_invite_transaction(
+        let tx_id = self.transaction_manager.create_client_transaction(
             request, 
             destination
         ).await?;
@@ -729,7 +729,7 @@ impl SessionManager {
     }
     
     /// Create a new incoming session from an INVITE request
-    pub async fn create_incoming_session(&self, request: Request) -> Result<Arc<Session>> {
+    pub async fn create_incoming_session(&self, _request: Request) -> Result<Arc<Session>> {
         let session = Arc::new(Session::new(
             SessionDirection::Incoming,
             self.config.clone(),

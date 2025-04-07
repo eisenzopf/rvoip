@@ -864,18 +864,11 @@ impl SipClient {
         // Create a channel for this specific request
         let (response_tx, response_rx) = oneshot::channel::<Response>();
         
-        // Create transaction based on the method
-        let transaction_id = if method == Method::Invite {
-            self.transaction_manager.create_client_invite_transaction(
-                request.clone(),
-                self.server_addr,
-            ).await.context("Failed to create INVITE transaction")?
-        } else {
-            self.transaction_manager.create_client_non_invite_transaction(
-                request.clone(),
-                self.server_addr,
-            ).await.context("Failed to create non-INVITE transaction")?
-        };
+        // Create transaction using the unified method
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            request.clone(),
+            self.server_addr,
+        ).await.context("Failed to create transaction")?;
         
         // Store the response channel
         {
