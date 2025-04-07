@@ -9,8 +9,9 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use tracing::{debug, error, warn};
+use async_trait::async_trait;
 
-use crate::call::{Call, CallState, CallDirection, WeakCall};
+use crate::call::{Call, CallState, CallDirection, WeakCall, CallRegistryInterface};
 use crate::error::{Result, Error};
 
 /// Record of a call state change
@@ -22,6 +23,23 @@ pub struct CallStateRecord {
     pub previous_state: CallState,
     /// New state 
     pub new_state: CallState,
+}
+
+/// Transaction information record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionRecord {
+    /// Transaction ID
+    pub transaction_id: String,
+    /// Transaction type (e.g., "INVITE", "BYE", "INFO")
+    pub transaction_type: String,
+    /// Timestamp when the transaction was created
+    pub timestamp: SystemTime,
+    /// Direction (incoming/outgoing)
+    pub direction: CallDirection,
+    /// Current status (e.g., "created", "completed", "terminated")
+    pub status: String,
+    /// Additional information about the transaction
+    pub info: Option<String>,
 }
 
 /// Call record with detailed information
@@ -45,6 +63,10 @@ pub struct CallRecord {
     pub duration: Option<Duration>,
     /// SIP call ID
     pub sip_call_id: String,
+    /// Transaction history
+    pub transactions: Vec<TransactionRecord>,
+    /// Initial INVITE transaction ID (if known)
+    pub invite_transaction_id: Option<String>,
 }
 
 /// Call filter criteria
@@ -257,6 +279,8 @@ impl CallRegistry {
             state_history: Vec::new(),
             duration: None,
             sip_call_id: call.sip_call_id().to_string(),
+            transactions: Vec::new(),
+            invite_transaction_id: None,
         };
         
         // Add to active calls (strong reference)
@@ -788,6 +812,8 @@ impl CallRegistry {
                             state_history: Vec::new(),
                             duration: None,
                             sip_call_id: call.sip_call_id().to_string(),
+                            transactions: Vec::new(),
+                            invite_transaction_id: None,
                         };
                         return Some(CallLookupResult {
                             record,
@@ -805,6 +831,90 @@ impl CallRegistry {
             active_call,
             weak_call,
         })
+    }
+
+    /// Log a transaction for a call
+    pub async fn log_transaction(&self, call_id: &str, transaction: TransactionRecord) -> Result<()> {
+        let mut history = self.call_history.write().await;
+        
+        if let Some(record) = history.get_mut(call_id) {
+            // Add transaction to history
+            record.transactions.push(transaction.clone());
+            
+            // If this is an INVITE transaction, store it specifically
+            if transaction.transaction_type == "INVITE" {
+                record.invite_transaction_id = Some(transaction.transaction_id.clone());
+            }
+            
+            // Try to save to storage if configured
+            if self.storage_path.is_some() {
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    let _ = self_clone.save_to_storage().await;
+                });
+            }
+            
+            Ok(())
+        } else {
+            Err(Error::Call(format!("Call record not found: {}", call_id)))
+        }
+    }
+    
+    /// Get transactions for a call
+    pub async fn get_transactions(&self, call_id: &str) -> Result<Vec<TransactionRecord>> {
+        let history = self.call_history.read().await;
+        
+        if let Some(record) = history.get(call_id) {
+            Ok(record.transactions.clone())
+        } else {
+            Err(Error::Call(format!("Call record not found: {}", call_id)))
+        }
+    }
+    
+    /// Get a specific transaction by ID
+    pub async fn get_transaction(&self, call_id: &str, transaction_id: &str) -> Result<Option<TransactionRecord>> {
+        let history = self.call_history.read().await;
+        
+        if let Some(record) = history.get(call_id) {
+            let transaction = record.transactions.iter()
+                .find(|t| t.transaction_id == transaction_id)
+                .cloned();
+            
+            Ok(transaction)
+        } else {
+            Err(Error::Call(format!("Call record not found: {}", call_id)))
+        }
+    }
+    
+    /// Update transaction status
+    pub async fn update_transaction_status(&self, call_id: &str, transaction_id: &str, status: &str, info: Option<String>) -> Result<()> {
+        let mut history = self.call_history.write().await;
+        
+        if let Some(record) = history.get_mut(call_id) {
+            let found = record.transactions.iter_mut()
+                .find(|t| t.transaction_id == transaction_id);
+            
+            if let Some(transaction) = found {
+                transaction.status = status.to_string();
+                if let Some(info_str) = info {
+                    transaction.info = Some(info_str);
+                }
+                
+                // Try to save to storage if configured
+                if self.storage_path.is_some() {
+                    let self_clone = self.clone();
+                    tokio::spawn(async move {
+                        let _ = self_clone.save_to_storage().await;
+                    });
+                }
+                
+                Ok(())
+            } else {
+                Err(Error::Call(format!("Transaction not found: {}", transaction_id)))
+            }
+        } else {
+            Err(Error::Call(format!("Call record not found: {}", call_id)))
+        }
     }
 }
 
@@ -833,5 +943,21 @@ impl CallRegistry {
         runtime.block_on(async {
             self.call_history.read().await.clone()
         })
+    }
+}
+
+// Implement the CallRegistryInterface trait for CallRegistry
+#[async_trait]
+impl CallRegistryInterface for CallRegistry {
+    async fn log_transaction(&self, call_id: &str, transaction: TransactionRecord) -> Result<()> {
+        self.log_transaction(call_id, transaction).await
+    }
+    
+    async fn get_transactions(&self, call_id: &str) -> Result<Vec<TransactionRecord>> {
+        self.get_transactions(call_id).await
+    }
+    
+    async fn update_transaction_status(&self, call_id: &str, transaction_id: &str, status: &str, info: Option<String>) -> Result<()> {
+        self.update_transaction_status(call_id, transaction_id, status, info).await
     }
 } 

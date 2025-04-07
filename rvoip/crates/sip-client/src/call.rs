@@ -231,6 +231,25 @@ pub struct Call {
 
     // Store the original INVITE request
     original_invite: Arc<RwLock<Option<Request>>>,
+    
+    // Store the transaction ID of the INVITE request
+    invite_transaction_id: Arc<RwLock<Option<String>>>,
+    
+    // Call registry reference
+    registry: Arc<RwLock<Option<Arc<dyn CallRegistryInterface + Send + Sync>>>>,
+}
+
+/// Interface for call registry methods needed by Call
+#[async_trait::async_trait]
+pub trait CallRegistryInterface {
+    /// Log a transaction
+    async fn log_transaction(&self, call_id: &str, transaction: crate::call_registry::TransactionRecord) -> Result<()>;
+    
+    /// Get transactions for a call
+    async fn get_transactions(&self, call_id: &str) -> Result<Vec<crate::call_registry::TransactionRecord>>;
+    
+    /// Update transaction status
+    async fn update_transaction_status(&self, call_id: &str, transaction_id: &str, status: &str, info: Option<String>) -> Result<()>;
 }
 
 impl Call {
@@ -274,6 +293,8 @@ impl Call {
             dialog: Arc::new(RwLock::new(None)),
             last_response: Arc::new(RwLock::new(None)),
             original_invite: Arc::new(RwLock::new(None)),
+            invite_transaction_id: Arc::new(RwLock::new(None)),
+            registry: Arc::new(RwLock::new(None)),
         });
 
         // Initialize local SDP based on call direction and configuration
@@ -1314,7 +1335,7 @@ impl Call {
     pub(crate) async fn send_ack(&self) -> Result<()> {
         debug!("Sending ACK for call {}", self.id);
         
-        // Check if we have a dialog to use for creating the ACK
+        // Create the ACK request 
         let request = {
             let mut dialog_write = self.dialog.write().await;
             if let Some(ref mut dialog) = *dialog_write {
@@ -1368,45 +1389,90 @@ impl Call {
             }
         };
         
-        // Process response after releasing the dialog lock
-        // Last response is protected by its own lock so it's safe to access here
+        // Get the last response and check if dialog exists
         let response_opt = self.last_response.read().await.clone();
         let has_dialog = self.dialog.read().await.is_some();
         
-        // Find the most recent response to determine where to send the ACK
-        if has_dialog {
-            if let Some(response) = response_opt {
+        // Get stored transaction ID (if any)
+        let invite_tx_id_opt = self.invite_transaction_id.read().await.clone();
+        
+        // Flag to track if we've sent the ACK
+        let mut ack_sent = false;
+        
+        // Try sending ACK with the transaction ID from the response Via header
+        if has_dialog && !ack_sent {
+            if let Some(response) = response_opt.clone() {
                 if response.status.is_success() {
-                    // For 2xx responses, use the dialog's transaction ID to send ACK
-                    debug!("Using transaction manager to send ACK for 2xx response");
-                    
-                    // Extract transaction ID directly from the response's Via header
-                    if let Some(transaction_id) = rvoip_transaction_core::utils::extract_transaction_id_from_response(&response) {
-                        debug!("Using transaction ID from response: {} for ACK", transaction_id);
+                    // Try to extract transaction ID from Via header
+                    if let Some(tx_id) = rvoip_transaction_core::utils::extract_transaction_id_from_response(&response) {
+                        debug!("Using transaction ID from response Via header: {} for ACK", tx_id);
                         
-                        // Send ACK via transaction manager
-                        if let Err(e) = self.transaction_manager.send_2xx_ack(&transaction_id, &response).await {
-                            warn!("[{}] Failed to send ACK for 2xx response: {}", transaction_id, e);
-                            // No fallback - propagate the error
-                            return Err(Error::Transport(format!("Failed to send ACK: {}", e)));
+                        // Try sending ACK via transaction manager
+                        match self.transaction_manager.send_2xx_ack(&tx_id, &response).await {
+                            Ok(_) => {
+                                debug!("ACK sent successfully via transaction manager using response Via");
+                                ack_sent = true;
+                            },
+                            Err(e) => {
+                                warn!("[{}] Failed to send ACK for 2xx response using Via header: {}", tx_id, e);
+                                // Continue with fallbacks
+                            }
                         }
-                        return Ok(());
                     } else {
-                        return Err(Error::SipProtocol("Could not extract transaction ID from response".into()));
+                        debug!("Could not extract transaction ID from response Via header");
                     }
                 }
             }
         }
         
-        // Send directly via transport (ACK is end-to-end, not transaction-based)
-        self.transaction_manager.transport().send_message(
-            Message::Request(request),
-            self.remote_addr
-        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        // Try using stored INVITE transaction ID
+        if !ack_sent && invite_tx_id_opt.is_some() {
+            let tx_id = invite_tx_id_opt.unwrap();
+            debug!("Using stored INVITE transaction ID: {} for ACK", tx_id);
+            
+            if let Some(response) = response_opt.clone() {
+                if response.status.is_success() {
+                    // Try sending ACK via transaction manager with stored ID
+                    match self.transaction_manager.send_2xx_ack(&tx_id, &response).await {
+                        Ok(_) => {
+                            debug!("ACK sent successfully via transaction manager using stored ID");
+                            ack_sent = true;
+                        },
+                        Err(e) => {
+                            warn!("[{}] Failed to send ACK using stored transaction ID: {}", tx_id, e);
+                            // Continue with fallbacks
+                        }
+                    }
+                }
+            }
+        }
         
-        debug!("ACK sent for call {}", self.id);
+        // Fallback: Send directly via transport as a last resort
+        if !ack_sent {
+            debug!("Sending ACK directly via transport to {}", self.remote_addr);
+            match self.transaction_manager.transport().send_message(
+                Message::Request(request),
+                self.remote_addr
+            ).await {
+                Ok(_) => {
+                    debug!("ACK sent successfully via direct transport");
+                    ack_sent = true;
+                },
+                Err(e) => {
+                    error!("Failed to send ACK via direct transport: {}", e);
+                    return Err(Error::Transport(format!("Failed to send ACK: {}", e)));
+                }
+            }
+        }
         
-        Ok(())
+        if ack_sent {
+            debug!("ACK sent for call {}", self.id);
+            Ok(())
+        } else {
+            let error_msg = "Failed to send ACK - all methods exhausted";
+            error!("{}", error_msg);
+            Err(Error::Transport(error_msg.to_string()))
+        }
     }
 
     /// Get the call's most recent received response
@@ -1607,6 +1673,25 @@ impl Call {
         *invite = Some(request);
         Ok(())
     }
+
+    /// Set the transaction ID for the INVITE
+    pub async fn store_invite_transaction_id(&self, transaction_id: String) -> Result<()> {
+        debug!("Storing INVITE transaction ID: {} for call {}", transaction_id, self.id);
+        let mut tx_id = self.invite_transaction_id.write().await;
+        *tx_id = Some(transaction_id);
+        Ok(())
+    }
+
+    /// Set the call registry
+    pub fn set_registry(&self, registry: Arc<dyn CallRegistryInterface + Send + Sync>) {
+        let mut registry_guard = self.registry.blocking_write();
+        *registry_guard = Some(registry);
+    }
+    
+    /// Get the call registry
+    pub fn registry(&self) -> Option<Arc<dyn CallRegistryInterface + Send + Sync>> {
+        self.registry.blocking_read().clone()
+    }
 }
 
 impl Clone for Call {
@@ -1640,6 +1725,8 @@ impl Clone for Call {
             dialog: self.dialog.clone(),
             last_response: self.last_response.clone(),
             original_invite: self.original_invite.clone(),
+            invite_transaction_id: self.invite_transaction_id.clone(),
+            registry: self.registry.clone(),
         }
     }
 }
@@ -1667,6 +1754,8 @@ impl Call {
             dialog: Arc::downgrade(&self.dialog),
             last_response: Arc::downgrade(&self.last_response),
             original_invite: Arc::downgrade(&self.original_invite),
+            invite_transaction_id: Arc::downgrade(&self.invite_transaction_id),
+            registry: Arc::downgrade(&self.registry),
             // Store strong refs to essential components
             transaction_manager: self.transaction_manager.clone(),
             event_tx: self.event_tx.clone(),
@@ -1704,6 +1793,8 @@ pub struct WeakCall {
     dialog: Weak<RwLock<Option<Dialog>>>,
     last_response: Weak<RwLock<Option<Response>>>,
     original_invite: Weak<RwLock<Option<Request>>>,
+    invite_transaction_id: Weak<RwLock<Option<String>>>,
+    registry: Weak<RwLock<Option<Arc<dyn CallRegistryInterface + Send + Sync>>>>,
     
     // These need to remain strong since they're external connections
     transaction_manager: Arc<TransactionManager>,

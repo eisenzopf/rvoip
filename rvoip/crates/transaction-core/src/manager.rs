@@ -60,6 +60,16 @@ pub enum TransactionEvent {
         /// Transaction ID (if available)
         transaction_id: Option<String>,
     },
+    
+    /// Response was received for a transaction
+    ResponseReceived {
+        /// SIP message
+        message: Message,
+        /// Source address of the message
+        source: SocketAddr,
+        /// Transaction ID
+        transaction_id: String,
+    },
 }
 
 /// Transaction timer data
@@ -454,46 +464,57 @@ impl TransactionManager {
     ) -> Result<()> {
         // Try to match with existing transaction
         let mut transactions = client_transactions.lock().await;
+        let mut found_match = false;
+        let mut matched_transaction_id = String::new();
         
-        for tx in transactions.values_mut() {
+        // First, try to match with existing transactions
+        for (id, tx) in transactions.iter_mut() {
             if tx.matches(message) {
-                debug!("[{}] Found matching client transaction", tx.id());
+                debug!("[{}] Found matching client transaction", id);
                 tx.process_message(message.clone()).await?;
-                
-                // For any final response, emit the completion event
-                // This ensures the application is always notified of responses
-                if response.status.is_success() || response.status.is_error() {
-                    debug!("[{}] Got final response ({}), emitting TransactionCompleted event", 
-                           tx.id(), response.status);
-                    
-                    // Create completion event
-                    let completed_event = TransactionEvent::TransactionCompleted {
-                        transaction_id: tx.id().to_string(),
-                        response: Some(response.clone()),
-                    };
-                    
-                    // Send to primary channel
-                    events_tx.send(completed_event.clone()).await?;
-                    
-                    // Send to subscribers
-                    for tx in &*event_subscribers.lock().await {
-                        tx.send(completed_event.clone()).await.ok(); // Ignore errors
-                    }
-                }
-                
-                // Message was handled by existing transaction
-                return Ok(());
+                found_match = true;
+                matched_transaction_id = id.clone();
+                break;
             }
         }
         
-        // No matching transaction, this might be a stray response or a new 2xx for INVITE
-        debug!("Response not matched with any transaction, forwarding to upper layer");
-        
-        // Forward to application
-        events_tx.send(TransactionEvent::UnmatchedMessage {
-            message: message.clone(),
-            source,
-        }).await?;
+        // If no match found, forward as unmatched
+        if !found_match {
+            debug!("No matching transaction found for response");
+            
+            // Create event with additional transaction ID information
+            let mut event = TransactionEvent::UnmatchedMessage {
+                message: message.clone(),
+                source,
+            };
+            
+            // Send to primary channel
+            events_tx.send(event.clone()).await?;
+            
+            // Send to all subscribers
+            for tx in &*event_subscribers.lock().await {
+                tx.send(event.clone()).await.ok(); // Ignore errors
+            }
+        } else {
+            // Even though the transaction matched, also send it directly
+            // This helps with 2xx responses to INVITE that need special handling
+            // Include the transaction ID with the unmatched message
+            
+            // Create a new event including the transaction ID
+            let event = TransactionEvent::ResponseReceived {
+                message: message.clone(),
+                source,
+                transaction_id: matched_transaction_id, 
+            };
+            
+            // Send to primary channel
+            events_tx.send(event.clone()).await?;
+            
+            // Send to all subscribers
+            for tx in &*event_subscribers.lock().await {
+                tx.send(event.clone()).await.ok(); // Ignore errors
+            }
+        }
         
         Ok(())
     }

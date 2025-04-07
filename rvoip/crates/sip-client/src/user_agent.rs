@@ -251,6 +251,41 @@ impl UserAgent {
                     TransactionEvent::Error { error, transaction_id } => {
                         error!("Transaction error: {}, id: {:?}", error, transaction_id);
                     },
+                    TransactionEvent::ResponseReceived { message, source: _, transaction_id } => {
+                        if let Message::Response(response) = message {
+                            debug!("Received response for transaction {}: {}", transaction_id, response.status);
+                            
+                            // Extract call ID
+                            if let Some(call_id) = response.call_id() {
+                                // Find the call
+                                let calls_read = active_calls.read().await;
+                                if let Some(call) = calls_read.get(call_id) {
+                                    debug!("Found call {} for response, handling", call_id);
+                                    
+                                    // Handle response
+                                    if let Err(e) = call.handle_response(response).await {
+                                        error!("Failed to handle response: {}", e);
+                                    }
+                                    
+                                    // For 2xx responses to INVITE, store transaction ID
+                                    if response.status.is_success() {
+                                        if let Some((_, method)) = rvoip_transaction_core::utils::extract_cseq(&Message::Response(response)) {
+                                            if method == Method::Invite {
+                                                debug!("Storing transaction ID {} for 2xx response to INVITE", transaction_id);
+                                                if let Err(e) = call.store_invite_transaction_id(transaction_id).await {
+                                                    error!("Failed to store transaction ID: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    debug!("No call found for call-ID {}", call_id);
+                                }
+                            } else {
+                                debug!("Response missing Call-ID header");
+                            }
+                        }
+                    },
                 }
             }
             
