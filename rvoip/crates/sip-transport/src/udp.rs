@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::io;
 
 use bytes::BytesMut;
 use tokio::net::UdpSocket;
@@ -165,7 +166,7 @@ impl Transport for UdpTransport {
             },
             Err(e) => {
                 error!("Failed to send message to {}: {}", destination, e);
-                Err(Box::new(e))
+                Err(Error::SendFailed(destination, e))
             }
         }
     }

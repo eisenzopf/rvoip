@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 use uuid::Uuid;
 
 use rvoip_sip_core::{
@@ -180,7 +180,7 @@ impl UserAgent {
                             if let Some(call_id) = response.call_id() {
                                 let calls_read = active_calls.read().await;
                                 if let Some(call) = calls_read.get(call_id) {
-                                    // Let the call handle the response
+                                    // Let the call handle the response (now works with immutable reference)
                                     if let Err(e) = call.handle_response(response.clone()).await {
                                         error!("Error handling response in call: {}", e);
                                     }

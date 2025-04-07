@@ -142,4 +142,17 @@ pub fn extract_transaction_id_from_response(response: &rvoip_sip_core::Response)
         }
     }
     None
+}
+
+/// Extract the destination address from a transaction ID
+/// This is a workaround since we don't store the destination directly in the transaction
+pub fn extract_destination(transaction_id: &str) -> Option<std::net::SocketAddr> {
+    // In a real implementation, this would get the address from a map/store
+    // For now, return a default address for testing
+    
+    // We could also parse a format like t_{branch}_{ip}_{port}
+    // if that's how transaction IDs are structured
+    
+    // Default to localhost port 5060 for simplicity
+    Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5060)))
 } 

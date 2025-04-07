@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::str::FromStr;
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use tokio::sync::{mpsc, RwLock, watch, Mutex};
 use tokio::time::Instant;
@@ -126,6 +127,15 @@ pub enum CallEvent {
         /// Reason for termination
         reason: String,
     },
+    /// Response received for a call
+    ResponseReceived {
+        /// Call instance
+        call: Arc<Call>,
+        /// Response received
+        response: Response,
+        /// Transaction ID
+        transaction_id: String,
+    },
     /// Error occurred
     Error {
         /// Call instance
@@ -187,10 +197,10 @@ pub struct Call {
     start_time: Option<Instant>,
 
     /// Call connect time
-    connect_time: Option<Instant>,
+    connect_time: Arc<RwLock<Option<Instant>>>,
 
     /// Call end time
-    end_time: Option<Instant>,
+    end_time: Arc<RwLock<Option<Instant>>>,
 
     /// Active media sessions
     media_sessions: Arc<RwLock<Vec<MediaSession>>>,
@@ -243,8 +253,8 @@ impl Call {
             state_watcher: state_rx,
             state_sender: Arc::new(state_tx.clone()),
             start_time: Some(Instant::now()),
-            connect_time: None,
-            end_time: None,
+            connect_time: Arc::new(RwLock::new(None)),
+            end_time: Arc::new(RwLock::new(None)),
             media_sessions: Arc::new(RwLock::new(Vec::new())),
             event_tx,
             local_sdp: Arc::new(RwLock::new(None)),
@@ -296,10 +306,17 @@ impl Call {
     }
 
     /// Get the call duration
-    pub fn duration(&self) -> Option<Duration> {
-        let start = self.connect_time?;
-        let end = self.end_time.unwrap_or_else(Instant::now);
-        Some(end.duration_since(start))
+    pub async fn duration(&self) -> Option<Duration> {
+        let connect_guard = self.connect_time.read().await;
+        let connect = connect_guard.clone()?;
+        
+        let end = if let Some(end_time) = self.end_time.read().await.clone() {
+            end_time
+        } else {
+            Instant::now()
+        };
+        
+        Some(end.duration_since(connect))
     }
 
     /// Get the active media sessions
@@ -309,6 +326,8 @@ impl Call {
 
     /// Answer an incoming call
     pub async fn answer(&self) -> Result<()> {
+        use tracing::{debug, info, error};
+        
         if self.direction != CallDirection::Incoming {
             return Err(Error::Call("Cannot answer an outgoing call".into()));
         }
@@ -320,9 +339,146 @@ impl Call {
             ));
         }
 
-        // Implementation will be filled in later
-        debug!("Answering call {} not implemented yet", self.id);
-
+        info!("Answering incoming call {}", self.id);
+        
+        // Create local SDP
+        let local_sdp = rvoip_session_core::sdp::SessionDescription::new_audio_call(
+            "rvoip",
+            self.local_uri.host.parse().unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1])),
+            9999, // We're using a dummy port since we're not actually streaming audio
+        );
+        
+        // Store local SDP
+        {
+            let mut local_sdp_guard = self.local_sdp.write().await;
+            *local_sdp_guard = Some(local_sdp.clone());
+        }
+        
+        // Create 200 OK response with SDP
+        let mut response = rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok);
+        
+        // Get the original request from the transaction
+        // For now, we assume we can only answer from the INVITE transaction's context
+        let last_response = self.last_response().await;
+        if last_response.is_none() {
+            return Err(Error::Call("No INVITE request to answer".into()));
+        }
+        
+        // Add common headers
+        let original_request = last_response.unwrap();
+        
+        // Add headers from To, From, Call-ID, CSeq
+        for header in &original_request.headers {
+            match header.name {
+                rvoip_sip_core::HeaderName::Via | 
+                rvoip_sip_core::HeaderName::From |
+                rvoip_sip_core::HeaderName::CallId | 
+                rvoip_sip_core::HeaderName::CSeq => {
+                    response.headers.push(header.clone());
+                },
+                _ => {},
+            }
+        }
+        
+        // Add To header with tag
+        let to_value = format!("<{}>;tag={}", self.local_uri, self.local_tag);
+        response.headers.push(rvoip_sip_core::Header::text(
+            rvoip_sip_core::HeaderName::To, 
+            to_value
+        ));
+        
+        // Add Contact header
+        let contact = format!("<sip:{}@{};transport=udp>", 
+                            self.local_uri.user.clone().unwrap_or_default(), 
+                            self.local_uri.host);
+        response.headers.push(rvoip_sip_core::Header::text(
+            rvoip_sip_core::HeaderName::Contact,
+            contact
+        ));
+        
+        // Add Content-Type for SDP
+        response.headers.push(rvoip_sip_core::Header::text(
+            rvoip_sip_core::HeaderName::ContentType,
+            "application/sdp"
+        ));
+        
+        // Add SDP body
+        let sdp_string = local_sdp.to_string();
+        response.body = bytes::Bytes::from(sdp_string);
+        
+        // Add Content-Length
+        response.headers.push(rvoip_sip_core::Header::integer(
+            rvoip_sip_core::HeaderName::ContentLength,
+            response.body.len() as i64
+        ));
+        
+        // Change state to Connecting
+        self.update_state(CallState::Connecting).await?;
+        
+        // Send 200 OK
+        debug!("Sending 200 OK response to INVITE");
+        self.transaction_manager.transport().send_message(
+            rvoip_sip_core::Message::Response(response),
+            self.remote_addr
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Set connect time
+        {
+            let mut connect_time = self.connect_time.write().await;
+            *connect_time = Some(Instant::now());
+        }
+        
+        // Create dialog
+        {
+            let remote_tag = self.remote_tag.read().await.clone()
+                .ok_or_else(|| Error::SipProtocol("Missing remote tag".into()))?;
+            
+            // Create a dummy request and response for Dialog construction
+            let mut dummy_request = rvoip_sip_core::Request::new(
+                rvoip_sip_core::Method::Invite,
+                self.remote_uri.clone()
+            );
+            dummy_request.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::CallId,
+                self.sip_call_id.clone()
+            ));
+            dummy_request.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::From,
+                format!("<{}>;tag={}", self.remote_uri, remote_tag)
+            ));
+            dummy_request.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::To,
+                format!("<{}>", self.local_uri)
+            ));
+            
+            let mut dummy_response = rvoip_sip_core::Response::new(
+                rvoip_sip_core::StatusCode::Ok
+            );
+            dummy_response.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::CallId,
+                self.sip_call_id.clone()
+            ));
+            dummy_response.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::From,
+                format!("<{}>;tag={}", self.remote_uri, remote_tag)
+            ));
+            dummy_response.headers.push(rvoip_sip_core::Header::text(
+                rvoip_sip_core::HeaderName::To,
+                format!("<{}>;tag={}", self.local_uri, self.local_tag)
+            ));
+            
+            // Use from_2xx_response to create the dialog
+            if let Some(dialog) = rvoip_session_core::dialog::Dialog::from_2xx_response(
+                &dummy_request, &dummy_response, false
+            ) {
+                let mut dialog_guard = self.dialog.write().await;
+                *dialog_guard = Some(dialog);
+            }
+        }
+        
+        // The call will move to Established when we receive the ACK
+        info!("Call {} answered, waiting for ACK", self.id);
+        
         Ok(())
     }
 
@@ -744,193 +900,147 @@ impl Call {
         // Log the response details
         info!("Call {} received {} response in state {}", self.id, status, current_state);
         
-        match current_state {
-            CallState::Initial => {
-                // We just sent the INVITE and got a response
-                if (100..200).contains(&status.as_u16()) {
-                    debug!("Call {} received provisional response: {}", self.id, status);
+        // Update dialog if final response
+        if !status.is_provisional() {
+            // Extract remote tag if it exists
+            if let Some(to) = response.to() {
+                if let Some(tag_pos) = to.find("tag=") {
+                    let tag_start = tag_pos + 4;
+                    let tag_end = to[tag_start..].find(';')
+                        .map(|pos| tag_start + pos)
+                        .unwrap_or(to.len());
+                    let tag = &to[tag_start..tag_end];
                     
-                    // Update state to Ringing
-                    self.update_state(CallState::Ringing).await?;
+                    // Store remote tag
+                    *self.remote_tag.write().await = Some(tag.to_string());
                     
-                    // Try to create early dialog for reliable provisional responses
-                    if status.as_u16() >= 180 {
-                        // Create an early dialog if this is a reliable provisional response
-                        let invite_request = self.create_invite_request().await?;
-                        if let Some(dialog) = Dialog::from_provisional_response(&invite_request, &response, true) {
-                            debug!("Created early dialog from provisional response");
-                            let mut dialog_guard = self.dialog.write().await;
-                            *dialog_guard = Some(dialog);
-                        }
-                    }
-                } else if (200..300).contains(&status.as_u16()) {
-                    debug!("Call {} received 2xx response: {}", self.id, status);
-                    
-                    // Extract remote tag for dialog
-                    if let Some(to) = response.header(&HeaderName::To) {
-                        if let Some(to_value) = to.value.as_text() {
-                            if let Some(tag) = extract_tag(to_value) {
-                                let mut remote_tag = self.remote_tag.write().await;
-                                *remote_tag = Some(tag);
-                            }
-                        }
-                    }
-                    
-                    // Process SDP if present
-                    let mut has_sdp = false;
-                    if let Some(content_type) = response.header(&HeaderName::ContentType) {
-                        if let Some(content_type_value) = content_type.value.as_text() {
-                            if content_type_value.to_lowercase().contains("application/sdp") && !response.body.is_empty() {
-                                has_sdp = true;
-                                if let Ok(sdp) = SessionDescription::parse(&String::from_utf8_lossy(&response.body)) {
-                                    debug!("Processing SDP from 2xx response");
-                                    let mut remote_sdp = self.remote_sdp.write().await;
-                                    *remote_sdp = Some(sdp);
-                                } else {
-                                    error!("Failed to parse SDP from 2xx response");
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Create dialog from 2xx response
-                    let invite_request = self.create_invite_request().await?;
-                    if let Some(dialog) = Dialog::from_2xx_response(&invite_request, &response, true) {
-                        debug!("Created confirmed dialog from 2xx response");
-                        let mut dialog_guard = self.dialog.write().await;
-                        *dialog_guard = Some(dialog);
+                    // Create a fake request to use in dialog creation based on what we know
+                    if status.is_success() && current_state != CallState::Established {
+                        // Try to create a dialog from 2xx response
+                        let invite_req = self.create_invite_request().await?;
                         
-                        // Update state to connecting
-                        self.update_state(CallState::Connecting).await?;
+                        debug!("Created fake INVITE request to build dialog");
                         
-                        // Send ACK
-                        let _ = self.send_ack().await;
-                        
-                        // Update state to established if we have SDP
-                        if has_sdp {
-                            debug!("Call {} has SDP, moving to Established state", self.id);
-                            self.update_state(CallState::Established).await?;
-                            
-                            // Record connect time
-                            self.connect_time = Some(Instant::now());
+                        // Create dialog from 2xx response
+                        if let Some(dialog) = Dialog::from_2xx_response(&invite_req, &response, true) {
+                            debug!("Created dialog from 2xx response");
+                            *self.dialog.write().await = Some(dialog);
                         } else {
-                            debug!("Call {} has no SDP, staying in Connecting state", self.id);
+                            warn!("Failed to create dialog from 2xx response");
                         }
-                    } else {
-                        error!("Failed to create dialog from 2xx response");
-                        self.update_state(CallState::Failed).await?;
                     }
-                } else {
-                    // Error response
-                    debug!("Call {} received error response: {}", self.id, status);
-                    self.update_state(CallState::Failed).await?;
+                }
+            }
+        }
+        
+        // Handle based on status code
+        match status {
+            StatusCode::Trying => {
+                debug!("Got 100 Trying, call is being processed");
+                
+                // Update state to Connecting if in Initial state
+                if current_state == CallState::Initial {
+                    self.transition_to(CallState::Connecting).await?;
                 }
             },
-            CallState::Ringing => {
-                // We're in Ringing state and got another response
-                if (100..200).contains(&status.as_u16()) {
-                    // Another provisional response, nothing to do
-                    debug!("Call {} received another provisional response: {}", self.id, status);
-                } else if (200..300).contains(&status.as_u16()) {
-                    debug!("Call {} received 2xx response while Ringing: {}", self.id, status);
-                    
-                    // Extract remote tag for dialog
-                    if let Some(to) = response.header(&HeaderName::To) {
-                        if let Some(to_value) = to.value.as_text() {
-                            if let Some(tag) = extract_tag(to_value) {
-                                let mut remote_tag = self.remote_tag.write().await;
-                                *remote_tag = Some(tag);
+            StatusCode::Ringing | StatusCode::SessionProgress => {
+                debug!("Got provisional response, remote endpoint is alerting");
+                
+                // Update state to Ringing if in Initial or Connecting state
+                if current_state == CallState::Initial || current_state == CallState::Connecting {
+                    self.transition_to(CallState::Ringing).await?;
+                }
+                
+                // Extract and store SDP if present
+                if !response.body.is_empty() {
+                    match std::str::from_utf8(&response.body) {
+                        Ok(sdp_str) => {
+                            match rvoip_session_core::sdp::SessionDescription::parse(sdp_str) {
+                                Ok(sdp) => {
+                                    debug!("SDP received in provisional response");
+                                    *self.remote_sdp.write().await = Some(sdp);
+                                },
+                                Err(e) => warn!("Invalid SDP in provisional response: {}", e),
                             }
-                        }
+                        },
+                        Err(e) => warn!("Invalid UTF-8 in SDP: {}", e),
                     }
-                    
-                    // Process SDP if present
-                    let mut has_sdp = false;
-                    if let Some(content_type) = response.header(&HeaderName::ContentType) {
-                        if let Some(content_type_value) = content_type.value.as_text() {
-                            if content_type_value.to_lowercase().contains("application/sdp") && !response.body.is_empty() {
-                                has_sdp = true;
-                                if let Ok(sdp) = SessionDescription::parse(&String::from_utf8_lossy(&response.body)) {
-                                    debug!("Processing SDP from 2xx response");
-                                    let mut remote_sdp = self.remote_sdp.write().await;
-                                    *remote_sdp = Some(sdp);
-                                } else {
-                                    error!("Failed to parse SDP from 2xx response");
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Create or update dialog
-                    let mut dialog_guard = self.dialog.write().await;
-                    let invite_request = self.create_invite_request().await?;
-                    
-                    if let Some(ref mut early_dialog) = *dialog_guard {
-                        if early_dialog.state == DialogState::Early {
-                            // Update early dialog to confirmed
-                            debug!("Updating early dialog to confirmed");
-                            if early_dialog.update_from_2xx(&response) {
-                                // Update state to connecting
-                                drop(dialog_guard); // Release lock before state update
-                                self.update_state(CallState::Connecting).await?;
-                                
-                                // Send ACK
-                                let _ = self.send_ack().await;
-                                
-                                // Update state to established if we have SDP
-                                if has_sdp {
-                                    debug!("Call {} has SDP, moving to Established state", self.id);
-                                    self.update_state(CallState::Established).await?;
+                }
+            },
+            StatusCode::Ok => {
+                debug!("Call setup succeeded (200 OK)");
+                
+                // Extract and store SDP
+                if !response.body.is_empty() {
+                    match std::str::from_utf8(&response.body) {
+                        Ok(sdp_str) => {
+                            match rvoip_session_core::sdp::SessionDescription::parse(sdp_str) {
+                                Ok(sdp) => {
+                                    debug!("SDP received in 200 OK");
+                                    *self.remote_sdp.write().await = Some(sdp.clone());
                                     
-                                    // Record connect time
-                                    self.connect_time = Some(Instant::now());
-                                } else {
-                                    debug!("Call {} has no SDP, staying in Connecting state", self.id);
-                                }
-                                
-                                return Ok(());
+                                    // Set up media
+                                    if let Err(e) = self.setup_media_internal(&sdp).await {
+                                        warn!("Failed to set up media: {}", e);
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Invalid SDP in 200 OK: {}", e);
+                                    return Err(Error::SipProtocol(format!("Invalid SDP in 200 OK: {}", e)));
+                                },
                             }
-                        }
+                        },
+                        Err(e) => {
+                            warn!("Invalid UTF-8 in SDP: {}", e);
+                            return Err(Error::SipProtocol(format!("Invalid UTF-8 in SDP: {}", e)));
+                        },
                     }
-                    
-                    // No dialog or dialog update failed, create new dialog
-                    if let Some(dialog) = Dialog::from_2xx_response(&invite_request, &response, true) {
-                        debug!("Created confirmed dialog from 2xx response");
-                        *dialog_guard = Some(dialog);
-                        
-                        // Release lock before state update
-                        drop(dialog_guard);
-                        
-                        // Update state to connecting
-                        self.update_state(CallState::Connecting).await?;
-                        
-                        // Send ACK
-                        let _ = self.send_ack().await;
-                        
-                        // Update state to established if we have SDP
-                        if has_sdp {
-                            debug!("Call {} has SDP, moving to Established state", self.id);
-                            self.update_state(CallState::Established).await?;
-                            
-                            // Record connect time
-                            self.connect_time = Some(Instant::now());
-                        } else {
-                            debug!("Call {} has no SDP, staying in Connecting state", self.id);
-                        }
-                    } else {
-                        drop(dialog_guard);
-                        error!("Failed to create dialog from 2xx response");
-                        self.update_state(CallState::Failed).await?;
+                }
+                
+                // Update state to Established
+                self.transition_to(CallState::Established).await?;
+                
+                // Record connection time
+                {
+                    let mut connect_time = self.connect_time.write().await;
+                    *connect_time = Some(Instant::now());
+                }
+                
+                // Send ACK in a separate task to avoid holding locks
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    match self_clone.send_ack().await {
+                        Ok(_) => debug!("ACK sent for 200 OK"),
+                        Err(e) => error!("Failed to send ACK: {}", e),
                     }
-                } else {
-                    // Error response
-                    debug!("Call {} received error response: {}", self.id, status);
-                    self.update_state(CallState::Failed).await?;
+                });
+            },
+            StatusCode::Unauthorized => {
+                debug!("Authentication required, not implemented yet");
+                
+                // Update state to Terminated
+                self.transition_to(CallState::Terminated).await?;
+                
+                // Set end time
+                {
+                    let mut end_time = self.end_time.write().await;
+                    *end_time = Some(Instant::now());
                 }
             },
-            // ... handle other states similarly ...
+            _ if status.is_error() => {
+                debug!("Call setup failed: {}", status);
+                
+                // Update state to Terminated
+                self.transition_to(CallState::Failed).await?;
+                
+                // Set end time
+                {
+                    let mut end_time = self.end_time.write().await;
+                    *end_time = Some(Instant::now());
+                }
+            },
             _ => {
-                debug!("Call {} ignoring response in state {}: {}", self.id, current_state, status);
+                debug!("Unhandled response: {}", status);
             }
         }
         
@@ -958,8 +1068,8 @@ impl Call {
             state_watcher: watch::channel(CallState::Initial).1,
             state_sender: Arc::new(watch::channel(CallState::Initial).0),
             start_time: None,
-            connect_time: None,
-            end_time: None,
+            connect_time: Arc::new(RwLock::new(None)),
+            end_time: Arc::new(RwLock::new(None)),
             media_sessions: Arc::new(RwLock::new(Vec::new())),
             event_tx: mpsc::channel(1).0,
             local_sdp: Arc::new(RwLock::new(None)),
@@ -969,115 +1079,63 @@ impl Call {
         }
     }
 
-    /// Update the call state and emit state change event
-    pub(crate) async fn update_state(&self, new_state: CallState) -> Result<()> {
-        let previous = {
-            let mut state = self.state.write().await;
-            let previous = *state;
-            
-            // Validate state transition
-            if !self.is_valid_transition(previous, new_state) {
-                debug!("Invalid state transition: {} -> {}", previous, new_state);
-                return Err(Error::InvalidState(format!(
-                    "Invalid state transition from {} to {}",
-                    previous, new_state
-                )));
-            }
-            
-            *state = new_state;
-            previous
-        };
-        
-        // Always update the watcher to keep it in sync
-        if let Err(e) = self.state_sender.send(new_state) {
-            debug!("Failed to update state watcher: {:?}", e);
-            // Not a fatal error, continue
-        } else {
-            debug!("Updated state watcher to: {}", new_state);
-        }
-        
-        // Only emit event if the state actually changed
-        if previous != new_state {
-            debug!("Call {} state changed: {} -> {}", self.id, previous, new_state);
-            
-            // Set timing information based on state transitions
-            match new_state {
-                CallState::Established => {
-                    if self.connect_time.is_none() {
-                        // In a real implementation we'd update the connect_time field
-                        // Can't modify fields through immutable reference 
-                        // This would need to be handled through interior mutability or refactoring
-                        debug!("Call established at {}", Instant::now().elapsed().as_secs_f32());
-                    }
-                },
-                CallState::Terminated | CallState::Failed => {
-                    if self.end_time.is_none() {
-                        // In a real implementation we'd update the end_time field
-                        // Can't modify fields through immutable reference
-                        // This would need to be handled through interior mutability or refactoring
-                        debug!("Call terminated at {}", Instant::now().elapsed().as_secs_f32());
-                    }
-                },
-                _ => {},
-            }
-            
-            // Send state change event
-            self.event_tx.send(CallEvent::StateChanged {
-                call: Arc::new(self.clone()),
-                previous,
-                current: new_state,
-            }).await.map_err(|_| Error::Call("Failed to send state change event".into()))?;
-        }
-        
-        Ok(())
+    /// Update the call state (deprecated, use transition_to instead)
+    pub async fn update_state(&self, new_state: CallState) -> Result<()> {
+        // Forward to transition_to
+        self.transition_to(new_state).await
     }
-    
-    /// Validate if a state transition is allowed
-    fn is_valid_transition(&self, from: CallState, to: CallState) -> bool {
-        use CallState::*;
+
+    /// Create an INVITE request for outgoing call
+    pub(crate) async fn create_invite_request(&self) -> Result<Request> {
+        // Create a new INVITE request to the remote URI
+        let mut request = Request::new(Method::Invite, self.remote_uri.clone());
         
-        // Allow transition to same state (no-op)
-        if from == to {
-            return true;
+        // Add From header with tag
+        let from_value = format!("<{}>;tag={}", self.local_uri, self.local_tag);
+        request.headers.push(Header::text(HeaderName::From, from_value));
+        
+        // Add To header (no tag for initial INVITE)
+        let to_value = format!("<{}>", self.remote_uri);
+        request.headers.push(Header::text(HeaderName::To, to_value));
+        
+        // Add Call-ID header
+        request.headers.push(Header::text(HeaderName::CallId, self.sip_call_id.clone()));
+        
+        // Add CSeq header
+        let cseq = *self.cseq.lock().await;
+        request.headers.push(Header::text(HeaderName::CSeq, format!("{} INVITE", cseq)));
+        
+        // Add Via header (placeholder - will be filled by transaction layer)
+        request.headers.push(Header::text(
+            HeaderName::Via,
+            format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_uri.host, Uuid::new_v4())
+        ));
+        
+        // Add Max-Forwards header
+        request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
+        
+        // Add Contact header
+        let username = self.local_uri.user.clone().unwrap_or_else(|| "anonymous".to_string());
+        request.headers.push(Header::text(
+            HeaderName::Contact,
+            format!("<sip:{}@{}>", username, self.local_uri.host)
+        ));
+        
+        // Add User-Agent header
+        request.headers.push(Header::text(HeaderName::UserAgent, "RVOIP SIP Client"));
+        
+        // Add Content-Type and Content-Length for SDP
+        if let Some(sdp) = self.local_sdp.read().await.as_ref() {
+            let sdp_string = sdp.to_string();
+            request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
+            request.headers.push(Header::integer(HeaderName::ContentLength, sdp_string.len() as i64));
+            request.body = Bytes::from(sdp_string);
+        } else {
+            // No SDP, just add Content-Length: 0
+            request.headers.push(Header::integer(HeaderName::ContentLength, 0));
         }
         
-        match (from, to) {
-            // Valid transitions from Initial
-            (Initial, Ringing) => true,
-            (Initial, Connecting) => true,
-            (Initial, Terminating) => true,
-            (Initial, Terminated) => true,
-            (Initial, Failed) => true,
-            
-            // Valid transitions from Ringing
-            (Ringing, Connecting) => true,
-            (Ringing, Established) => true,  // Shortcut for quick answer
-            (Ringing, Terminating) => true,
-            (Ringing, Terminated) => true,
-            (Ringing, Failed) => true,
-            
-            // Valid transitions from Connecting
-            (Connecting, Established) => true,
-            (Connecting, Terminating) => true,
-            (Connecting, Terminated) => true,
-            (Connecting, Failed) => true,
-            
-            // Valid transitions from Established
-            (Established, Terminating) => true,
-            (Established, Terminated) => true,
-            (Established, Failed) => true,
-            
-            // Valid transitions from Terminating
-            (Terminating, Terminated) => true,
-            (Terminating, Failed) => true,
-            
-            // No valid transitions from Terminated or Failed (terminal states)
-            (Terminated, _) => false,
-            (Failed, _) => false,
-            
-            // Any other transition is invalid
-            _ => false,
-        }
+        Ok(request)
     }
 
     /// Send an ACK for a successful response
@@ -1085,7 +1143,7 @@ impl Call {
         debug!("Sending ACK for call {}", self.id);
         
         // Check if we have a dialog to use for creating the ACK
-        let mut request = {
+        let request = {
             let mut dialog_write = self.dialog.write().await;
             if let Some(ref mut dialog) = *dialog_write {
                 // Use dialog to create the ACK request
@@ -1098,12 +1156,11 @@ impl Call {
                 
                 // Add Via header with branch parameter
                 let branch = format!("z9hG4bK-{}", Uuid::new_v4());
-                let via_value = format!(
+                ack.headers.push(Header::text(HeaderName::Via, format!(
                     "SIP/2.0/UDP {};branch={}",
                     self.local_uri.host,
                     branch
-                );
-                ack.headers.push(Header::text(HeaderName::Via, via_value));
+                )));
                 
                 // Add From header with tag
                 let from_value = format!(
@@ -1139,11 +1196,14 @@ impl Call {
             }
         };
         
+        // Process response after releasing the dialog lock
+        // Last response is protected by its own lock so it's safe to access here
+        let response_opt = self.last_response.read().await.clone();
+        let has_dialog = self.dialog.read().await.is_some();
+        
         // Find the most recent response to determine where to send the ACK
-        if let Some(_dialog) = self.dialog.read().await.clone() {
-            // If we have a dialog, check if last response was 2xx
-            let last_response = self.last_response().await;
-            if let Some(response) = last_response {
+        if has_dialog {
+            if let Some(response) = response_opt {
                 if response.status.is_success() {
                     // For 2xx responses, use the dialog's transaction ID to send ACK
                     debug!("Using transaction manager to send ACK for 2xx response");
@@ -1182,6 +1242,82 @@ impl Call {
         // Return stored response if available
         self.last_response.read().await.clone()
     }
+
+    /// Update the call state from any state to a new state
+    pub async fn transition_to(&self, new_state: CallState) -> Result<()> {
+        debug!("Call {} state transition: {} -> {}", self.id, self.state().await, new_state);
+        
+        // Update state
+        {
+            let mut state = self.state.write().await;
+            *state = new_state;
+        }
+        
+        // Notify state change via watcher
+        if let Err(e) = self.state_sender.send(new_state) {
+            debug!("Failed to update state watcher: {:?}", e);
+            // Not a fatal error, continue
+        } else {
+            debug!("Updated state watcher to: {}", new_state);
+        }
+        
+        // Send state change event
+        let _ = self.event_tx.send(CallEvent::StateChanged {
+            call: Arc::new(self.clone()),
+            previous: self.state().await,
+            current: new_state,
+        }).await;
+        
+        Ok(())
+    }
+
+    /// Set up media session based on remote SDP
+    async fn setup_media_internal(&self, remote_sdp: &rvoip_session_core::sdp::SessionDescription) -> Result<()> {
+        // Implementation of setup_media that can be called from handle_response
+        debug!("Setting up media session based on remote SDP");
+        
+        // Set up audio session if there's an audio stream
+        let sdp_str = remote_sdp.to_string();
+        let sdp_bytes = sdp_str.as_bytes();
+        let rtp_port = rvoip_session_core::sdp::extract_rtp_port_from_sdp(sdp_bytes).unwrap_or(0);
+        
+        if rtp_port > 0 {
+            debug!("Remote audio RTP port: {}", rtp_port);
+            
+            // In a real implementation, we would initialize the RTP media session here
+            // For now, we just emit an event notifying about media
+            let _ = self.event_tx.send(CallEvent::MediaAdded {
+                call: Arc::new(self.clone()),
+                media_type: MediaType::Audio,
+            }).await;
+        }
+        
+        Ok(())
+    }
+
+    /// Set the remote tag
+    pub async fn set_remote_tag(&self, tag: String) {
+        let mut remote_tag = self.remote_tag.write().await;
+        *remote_tag = Some(tag);
+    }
+
+    /// Store the last response
+    pub async fn store_last_response(&self, response: Response) {
+        let mut last_response = self.last_response.write().await;
+        *last_response = Some(response);
+    }
+
+    /// Set up media from SDP
+    pub async fn setup_media_from_sdp(&self, sdp: &rvoip_session_core::sdp::SessionDescription) -> Result<()> {
+        // Store remote SDP
+        {
+            let mut remote_sdp = self.remote_sdp.write().await;
+            *remote_sdp = Some(sdp.clone());
+        }
+        
+        // Call the internal setup method
+        self.setup_media_internal(sdp).await
+    }
 }
 
 impl Clone for Call {
@@ -1203,8 +1339,8 @@ impl Clone for Call {
             state_watcher: self.state_watcher.clone(),
             state_sender: self.state_sender.clone(),
             start_time: self.start_time,
-            connect_time: self.connect_time,
-            end_time: self.end_time,
+            connect_time: self.connect_time.clone(),
+            end_time: self.end_time.clone(),
             media_sessions: self.media_sessions.clone(),
             event_tx: self.event_tx.clone(),
             local_sdp: self.local_sdp.clone(),

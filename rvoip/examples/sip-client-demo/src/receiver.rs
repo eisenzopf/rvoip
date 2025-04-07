@@ -100,6 +100,9 @@ async fn main() -> Result<()> {
             CallEvent::DtmfReceived { call: _, digit } => {
                 info!("DTMF received: {}", digit);
             },
+            CallEvent::ResponseReceived { call: _, response, transaction_id } => {
+                info!("Response received: {} (transaction ID: {})", response.status, transaction_id);
+            },
             CallEvent::Terminated { call: _, reason } => {
                 info!("Call terminated: {}", reason);
             },

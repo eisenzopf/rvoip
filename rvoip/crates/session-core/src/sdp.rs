@@ -324,6 +324,8 @@ impl SessionDescription {
         // Create an audio media description
         let mut media = MediaDescription::new_audio(rtp_port);
         media.add_pcmu();
+        media.add_pcma();
+        media.direction = MediaDirection::SendRecv;
         
         // Add the media description
         sdp.media.push(media);
@@ -672,6 +674,41 @@ pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
         }
         None
     }
+}
+
+/// Create a default audio SDP for simple call scenarios
+pub fn default_audio(host_str: String, port: u16) -> SessionDescription {
+    // Parse host string into IpAddr, defaulting to 127.0.0.1 if it fails
+    let host = host_str.parse().unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1]));
+    
+    // Create default session description
+    let mut sdp = SessionDescription::default();
+    
+    // Update session name
+    sdp.session_name = "RVOIP SIP Call".to_string();
+    
+    // Update origin
+    sdp.origin.username = "rvoip".to_string();
+    sdp.origin.unicast_address = host;
+    
+    // Update connection
+    if let Some(connection) = &mut sdp.connection {
+        connection.connection_address = host;
+    }
+    
+    // Create audio media description
+    let mut audio = MediaDescription::new_audio(port);
+    audio.add_pcmu();
+    audio.add_pcma();
+    audio.direction = MediaDirection::SendRecv;
+    
+    // Add the media description
+    sdp.media.push(audio);
+    
+    // Add session attributes
+    sdp.attributes.insert("tool".to_string(), "rvoip".to_string());
+    
+    sdp
 }
 
 #[cfg(test)]
