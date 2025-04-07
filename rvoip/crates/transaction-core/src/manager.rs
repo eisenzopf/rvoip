@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::str::FromStr;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use rvoip_sip_core::{Message, Method, Request, Response, parse_message};
+use rvoip_sip_core::{Message, Method, Request, Response, HeaderName};
 use rvoip_sip_transport::{Transport, TransportEvent};
 
 use crate::error::{Error, Result};
@@ -19,7 +18,6 @@ use crate::transaction::{
     client::{ClientTransaction, ClientInviteTransaction, ClientNonInviteTransaction},
     server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction},
 };
-use crate::utils;
 
 /// Transaction events sent by the transaction manager
 #[derive(Debug, Clone)]
@@ -683,6 +681,75 @@ impl TransactionManager {
             event_subscribers: Arc::new(Mutex::new(Vec::new())),
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             running: Arc::new(Mutex::new(true)),
+        }
+    }
+    
+    /// Send ACK for a 2xx response to INVITE
+    pub async fn send_2xx_ack(&self, transaction_id: &str, response: &Response) -> Result<()> {
+        debug!("Generating and sending ACK for 2xx response to transaction {}", transaction_id);
+        
+        // Retrieve the client INVITE transaction
+        let mut client_transactions = self.client_transactions.lock().await;
+        let transaction = client_transactions.get_mut(transaction_id)
+            .ok_or_else(|| Error::TransactionNotFound(transaction_id.to_string()))?;
+        
+        // Check that it's an INVITE transaction
+        if transaction.original_request().method != Method::Invite {
+            return Err(Error::Other(format!("Transaction {} is not an INVITE transaction", transaction_id)));
+        }
+        
+        // Cast to ClientInviteTransaction to access the create_2xx_ack method
+        // This is not ideal but works for now
+        if let Some(invite_tx) = transaction.as_any().downcast_ref::<crate::transaction::client::ClientInviteTransaction>() {
+            // Generate ACK request
+            let ack = invite_tx.create_2xx_ack(response)?;
+            
+            // Get target from Contact header in response
+            let target_addr = if let Some(contact) = response.header(&HeaderName::Contact) {
+                if let Some(contact_text) = contact.value.as_text() {
+                    // Try to extract URI
+                    if let Some(uri_start) = contact_text.find('<') {
+                        let uri_start = uri_start + 1;
+                        if let Some(uri_end) = contact_text[uri_start..].find('>') {
+                            let uri_str = &contact_text[uri_start..(uri_start + uri_end)];
+                            // Try to parse URI
+                            if let Ok(uri) = rvoip_sip_core::Uri::from_str(uri_str) {
+                                // Get host and port
+                                let host = &uri.host;
+                                let port = uri.port.unwrap_or(5060);
+                                
+                                // Try to resolve host to IP
+                                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                                    Some(std::net::SocketAddr::new(ip, port))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            // If we couldn't extract target from Contact, use the transaction's remote address
+            let destination = target_addr.unwrap_or_else(|| invite_tx.remote_addr());
+            
+            // Send ACK directly via transport
+            debug!("Sending ACK to {}", destination);
+            self.transport().send_message(ack.into(), destination).await?;
+            
+            Ok(())
+        } else {
+            Err(Error::Other(format!("Failed to cast transaction {} to ClientInviteTransaction", transaction_id)))
         }
     }
 }

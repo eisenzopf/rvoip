@@ -2,6 +2,8 @@ use rand::{thread_rng, Rng};
 use rvoip_sip_core::{Header, HeaderName, Message, Method, Request, Response, StatusCode};
 use std::str::FromStr;
 
+use crate::error::{Error, Result};
+
 /// Generate a random branch parameter for Via header
 pub fn generate_branch() -> String {
     let mut rng = thread_rng();
@@ -89,4 +91,32 @@ pub fn create_ringing_response(request: &Request) -> Response {
 /// Create an OK (200) response for a request
 pub fn create_ok_response(request: &Request) -> Response {
     create_response(request, StatusCode::Ok)
+}
+
+/// Extract the transaction ID from a message
+pub fn extract_transaction_id(message: &Message) -> Result<String> {
+    let branch = extract_branch(message)
+        .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
+    
+    // Determine transaction type prefix based on message type
+    match message {
+        Message::Request(request) => {
+            if request.method == Method::Invite {
+                Ok(format!("ict_{}", branch)) // Invite Client Transaction
+            } else {
+                Ok(format!("nict_{}", branch)) // Non-Invite Client Transaction
+            }
+        },
+        Message::Response(_response) => {
+            if let Some((_, method)) = extract_cseq(message) {
+                if method == Method::Invite {
+                    Ok(format!("ist_{}", branch)) // Invite Server Transaction
+                } else {
+                    Ok(format!("nist_{}", branch)) // Non-Invite Server Transaction
+                }
+            } else {
+                Err(Error::Other("Missing or invalid CSeq header".to_string()))
+            }
+        }
+    }
 } 

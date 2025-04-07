@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::str::FromStr;
+use uuid::Uuid;
 
 use tracing::{debug, trace, warn};
 
-use rvoip_sip_core::{Message, Method, Request, Response, StatusCode};
+use rvoip_sip_core::{Message, Method, Request, Response, StatusCode, Uri, HeaderName, Header};
 use rvoip_sip_transport::Transport;
 
 use crate::error::{Error, Result};
@@ -52,14 +54,11 @@ impl ClientInviteTransaction {
     ) -> Result<Self> {
         // Ensure the request is an INVITE
         if request.method != Method::Invite {
-            return Err(Error::Other("Request must be INVITE for ClientInviteTransaction".to_string()));
+            return Err(Error::Other("Request must be INVITE for client INVITE transaction".to_string()));
         }
         
-        // Extract branch to generate ID
-        let branch = utils::extract_branch(&Message::Request(request.clone()))
-            .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
-        
-        let id = format!("ict_{}", branch);
+        // Generate transaction ID from branch parameter
+        let id = utils::extract_transaction_id(&Message::Request(request.clone()))?;
         
         Ok(ClientInviteTransaction {
             id,
@@ -68,11 +67,16 @@ impl ClientInviteTransaction {
             last_response: None,
             remote_addr,
             transport,
-            timer_a: Duration::from_millis(500),  // T1 (500ms)
-            timer_b: Duration::from_secs(32),     // 64*T1 seconds
-            timer_d: Duration::from_secs(32),     // >32s for unreliable transports
+            timer_a: Duration::from_millis(500),  // Initial T1
+            timer_b: Duration::from_secs(32),     // 64 * T1
+            timer_d: Duration::from_secs(32),     // > 32s for unreliable transport
             retransmit_count: 0,
         })
+    }
+    
+    /// Get the remote address
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
     }
     
     /// Transition to a new state
@@ -112,16 +116,16 @@ impl ClientInviteTransaction {
         // Copy headers from original request
         for header in &self.request.headers {
             if matches!(header.name, 
-                rvoip_sip_core::HeaderName::Via | 
-                rvoip_sip_core::HeaderName::From | 
-                rvoip_sip_core::HeaderName::To | 
-                rvoip_sip_core::HeaderName::CallId | 
-                rvoip_sip_core::HeaderName::Route | 
-                rvoip_sip_core::HeaderName::MaxForwards
+                HeaderName::Via | 
+                HeaderName::From | 
+                HeaderName::To | 
+                HeaderName::CallId | 
+                HeaderName::Route | 
+                HeaderName::MaxForwards
             ) {
                 // For To header, preserve the tag from the response
-                if header.name == rvoip_sip_core::HeaderName::To && response.header(&rvoip_sip_core::HeaderName::To).is_some() {
-                    ack = ack.with_header(response.header(&rvoip_sip_core::HeaderName::To).unwrap().clone());
+                if header.name == HeaderName::To && response.header(&HeaderName::To).is_some() {
+                    ack = ack.with_header(response.header(&HeaderName::To).unwrap().clone());
                 } else {
                     ack = ack.with_header(header.clone());
                 }
@@ -130,16 +134,104 @@ impl ClientInviteTransaction {
         
         // Update CSeq for ACK
         if let Some((cseq_num, _)) = utils::extract_cseq(&Message::Request(self.request.clone())) {
-            ack = ack.with_header(rvoip_sip_core::Header::text(
-                rvoip_sip_core::HeaderName::CSeq,
+            ack = ack.with_header(Header::text(
+                HeaderName::CSeq,
                 format!("{} ACK", cseq_num)
             ));
         }
         
         // Add Content-Length header if not present
-        ack = ack.clone().with_header(rvoip_sip_core::Header::integer(
-            rvoip_sip_core::HeaderName::ContentLength,
+        ack = ack.clone().with_header(Header::integer(
+            HeaderName::ContentLength,
             ack.body.len() as i64
+        ));
+        
+        Ok(ack)
+    }
+
+    /// Create an ACK request for a 2xx response
+    pub fn create_2xx_ack(&self, response: &Response) -> Result<Request> {
+        // Extract Request-URI from Contact header in the response
+        let request_uri = if let Some(contact) = response.header(&HeaderName::Contact) {
+            if let Some(contact_text) = contact.value.as_text() {
+                // Try to extract URI
+                if let Some(uri_start) = contact_text.find('<') {
+                    let uri_start = uri_start + 1;
+                    if let Some(uri_end) = contact_text[uri_start..].find('>') {
+                        let uri_str = &contact_text[uri_start..(uri_start + uri_end)];
+                        
+                        // Try to parse URI
+                        match Uri::from_str(uri_str) {
+                            Ok(uri) => uri,
+                            Err(_) => self.request.uri.clone() // Fallback to original request URI
+                        }
+                    } else {
+                        self.request.uri.clone() // Fallback
+                    }
+                } else {
+                    self.request.uri.clone() // Fallback
+                }
+            } else {
+                self.request.uri.clone() // Fallback
+            }
+        } else {
+            self.request.uri.clone() // Fallback
+        };
+        
+        // Create base request
+        let mut ack = Request {
+            method: Method::Ack,
+            uri: request_uri,
+            version: self.request.version.clone(),
+            headers: Vec::new(),
+            body: bytes::Bytes::new(), // ACK typically has no body
+        };
+        
+        // Copy headers from original request
+        for header in &self.request.headers {
+            if matches!(header.name, 
+                HeaderName::From | 
+                HeaderName::CallId | 
+                HeaderName::Route | 
+                HeaderName::MaxForwards
+            ) {
+                ack = ack.with_header(header.clone());
+            }
+        }
+        
+        // Add Via header with new branch (ACK for 2xx is a separate transaction)
+        let branch = format!("z9hG4bK-{}", Uuid::new_v4());
+        for via in self.request.headers.iter().filter(|h| h.name == HeaderName::Via) {
+            if let Some(via_text) = via.value.as_text() {
+                let via_parts: Vec<&str> = via_text.split(';').collect();
+                if !via_parts.is_empty() {
+                    // Keep the protocol and address part, but generate a new branch
+                    ack = ack.with_header(Header::text(
+                        HeaderName::Via,
+                        format!("{};branch={}", via_parts[0], branch)
+                    ));
+                    break;
+                }
+            }
+        }
+        
+        // Use To header from response (with tag)
+        if let Some(to_header) = response.header(&HeaderName::To) {
+            ack = ack.with_header(to_header.clone());
+        }
+        
+        // Update CSeq for ACK
+        if let Some((cseq_num, _)) = utils::extract_cseq(&Message::Request(self.request.clone())) {
+            ack = ack.with_header(Header::text(
+                HeaderName::CSeq,
+                format!("{} ACK", cseq_num)
+            ));
+        }
+        
+        // Add Content-Length header
+        ack = ack.clone().with_header(Header::integer(
+            HeaderName::ContentLength,
+            0
         ));
         
         Ok(ack)
@@ -175,8 +267,14 @@ impl Transaction for ClientInviteTransaction {
                 // Client transactions don't process requests
                 Ok(None)
             },
-            Message::Response(response) => {
-                let status = response.status;
+            Message::Response(_response) => {
+                if self.state == TransactionState::Terminated {
+                    // In terminated state, we ignore responses
+                    trace!("[{}] Client transaction already terminated, ignoring response", self.id);
+                    return Ok(None);
+                }
+
+                let status = _response.status;
                 
                 match self.state {
                     TransactionState::Calling => {
@@ -185,7 +283,7 @@ impl Transaction for ClientInviteTransaction {
                             self.transition_to(TransactionState::Proceeding)?;
                             
                             // Store response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response);
                             
                             // Continue with timer B (request timeout)
                             Ok(None)
@@ -194,11 +292,11 @@ impl Transaction for ClientInviteTransaction {
                             self.transition_to(TransactionState::Completed)?;
                             
                             // Store response
-                            self.last_response = Some(response.clone());
+                            self.last_response = Some(_response.clone());
                             
                             // Create and send ACK for non-2xx responses
                             if !status.is_success() {
-                                let ack = self.create_ack(&response)?;
+                                let ack = self.create_ack(&_response)?;
                                 debug!("[{}] Sending ACK for non-2xx response", self.id);
                                 self.transport.send_message(ack.into(), self.remote_addr).await?;
                                 
@@ -220,7 +318,7 @@ impl Transaction for ClientInviteTransaction {
                             debug!("[{}] Received additional provisional response: {}", self.id, status);
                             
                             // Store latest provisional response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response);
                             
                             Ok(None)
                         } else if status.is_success() || status.is_error() {
@@ -228,11 +326,11 @@ impl Transaction for ClientInviteTransaction {
                             self.transition_to(TransactionState::Completed)?;
                             
                             // Store response
-                            self.last_response = Some(response.clone());
+                            self.last_response = Some(_response.clone());
                             
                             // Create and send ACK for non-2xx responses
                             if !status.is_success() {
-                                let ack = self.create_ack(&response)?;
+                                let ack = self.create_ack(&_response)?;
                                 debug!("[{}] Sending ACK for non-2xx response", self.id);
                                 self.transport.send_message(ack.into(), self.remote_addr).await?;
                                 
@@ -254,7 +352,7 @@ impl Transaction for ClientInviteTransaction {
                             // Retransmission of final response, resend ACK
                             debug!("[{}] Received retransmission of final non-2xx response, resending ACK", self.id);
                             
-                            let ack = self.create_ack(&response)?;
+                            let ack = self.create_ack(&_response)?;
                             self.transport.send_message(ack.into(), self.remote_addr).await?;
                             
                             Ok(None)
@@ -263,7 +361,7 @@ impl Transaction for ClientInviteTransaction {
                             debug!("[{}] Received 2xx response in COMPLETED state", self.id);
                             
                             // Store latest response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response);
                             
                             Ok(None)
                         }
@@ -278,7 +376,7 @@ impl Transaction for ClientInviteTransaction {
     }
     
     fn matches(&self, message: &Message) -> bool {
-        if let Message::Response(response) = message {
+        if let Message::Response(_response) = message {
             // Extract CSeq and method
             if let Some((_, method)) = utils::extract_cseq(message) {
                 // Only match INVITE responses
@@ -338,17 +436,17 @@ impl Transaction for ClientInviteTransaction {
                     // Add basic headers
                     for header in &self.request.headers {
                         if matches!(header.name, 
-                            rvoip_sip_core::HeaderName::From | 
-                            rvoip_sip_core::HeaderName::To | 
-                            rvoip_sip_core::HeaderName::CallId | 
-                            rvoip_sip_core::HeaderName::CSeq
+                            HeaderName::From | 
+                            HeaderName::To | 
+                            HeaderName::CallId | 
+                            HeaderName::CSeq
                         ) {
                             timeout_response = timeout_response.with_header(header.clone());
                         }
                     }
                     
-                    timeout_response = timeout_response.with_header(rvoip_sip_core::Header::integer(
-                        rvoip_sip_core::HeaderName::ContentLength, 0
+                    timeout_response = timeout_response.with_header(Header::integer(
+                        HeaderName::ContentLength, 0
                     ));
                     
                     self.last_response = Some(timeout_response.clone());
@@ -370,6 +468,10 @@ impl Transaction for ClientInviteTransaction {
                 Ok(None)
             }
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -433,12 +535,9 @@ impl ClientNonInviteTransaction {
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
-        // Ensure the request is not an INVITE or ACK
-        if request.method == Method::Invite || request.method == Method::Ack {
-            return Err(Error::Other(format!(
-                "Request cannot be {} for ClientNonInviteTransaction", 
-                request.method
-            )));
+        // Ensure the request is not an INVITE
+        if request.method == Method::Invite {
+            return Err(Error::Other("Request must not be INVITE for non-INVITE client transaction".to_string()));
         }
         
         // Extract branch to generate ID
@@ -456,9 +555,16 @@ impl ClientNonInviteTransaction {
             transport,
             timer_e: Duration::from_millis(500),  // T1 (500ms)
             timer_f: Duration::from_secs(32),     // 64*T1 seconds
-            timer_k: Duration::from_secs(5),      // T4 seconds for unreliable transports
+            timer_k: Duration::from_secs(5),      // 5s for unreliable transport
             retransmit_count: 0,
         })
+    }
+    
+    /// Create an ACK request for a non-2xx response
+    fn create_ack(&self, _response: &Response) -> Result<Request> {
+        // Only INVITE transactions should send ACKs
+        // This method should never be called for non-INVITE transactions
+        Err(Error::Other("Non-INVITE transactions do not send ACKs".to_string()))
     }
     
     /// Transition to a new state
@@ -514,40 +620,35 @@ impl Transaction for ClientNonInviteTransaction {
                 // Client transactions don't process requests
                 Ok(None)
             },
-            Message::Response(response) => {
-                let status = response.status;
+            Message::Response(_response) => {
+                if self.state == TransactionState::Terminated {
+                    // In terminated state, we ignore responses
+                    trace!("[{}] Client transaction already terminated, ignoring response", self.id);
+                    return Ok(None);
+                }
+
+                let status = _response.status;
                 
                 match self.state {
                     TransactionState::Trying => {
-                        if status == StatusCode::Trying {
-                            debug!("[{}] Received 100 Trying response", self.id);
-                            
-                            // Store response
-                            self.last_response = Some(response);
-                            
-                            // Stay in TRYING state, keep timer E (retransmission) running
-                            Ok(None)
-                        } else if status.is_provisional() {
+                        if status.is_provisional() {
                             debug!("[{}] Received provisional response: {}", self.id, status);
                             self.transition_to(TransactionState::Proceeding)?;
                             
                             // Store response
-                            self.last_response = Some(response);
-                            
-                            // Continue with timer E, but reset the interval
-                            self.timer_e = Duration::from_millis(500); // Reset to T1
+                            self.last_response = Some(_response);
                             
                             Ok(None)
-                        } else {
+                        } else if status.is_success() || status.is_error() {
                             debug!("[{}] Received final response: {}", self.id, status);
                             self.transition_to(TransactionState::Completed)?;
                             
                             // Store response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response.clone());
                             
-                            // Start timer K
-                            // We'll handle this in the transaction manager with on_timeout
-                            
+                            Ok(None)
+                        } else {
+                            warn!("[{}] Received invalid response: {}", self.id, status);
                             Ok(None)
                         }
                     },
@@ -556,26 +657,40 @@ impl Transaction for ClientNonInviteTransaction {
                             debug!("[{}] Received additional provisional response: {}", self.id, status);
                             
                             // Store latest provisional response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response);
                             
                             Ok(None)
-                        } else {
+                        } else if status.is_success() || status.is_error() {
                             debug!("[{}] Received final response: {}", self.id, status);
                             self.transition_to(TransactionState::Completed)?;
                             
                             // Store response
-                            self.last_response = Some(response);
+                            self.last_response = Some(_response.clone());
                             
-                            // Start timer K
-                            // We'll handle this in the transaction manager with on_timeout
-                            
+                            Ok(None)
+                        } else {
+                            warn!("[{}] Received invalid response: {}", self.id, status);
                             Ok(None)
                         }
                     },
                     TransactionState::Completed => {
-                        // Ignore retransmissions of the final response
-                        trace!("[{}] Ignoring retransmission of final response", self.id);
-                        Ok(None)
+                        if !status.is_success() {
+                            // Retransmission of final response, resend ACK
+                            debug!("[{}] Received retransmission of final non-2xx response, resending ACK", self.id);
+                            
+                            let ack = self.create_ack(&_response)?;
+                            self.transport.send_message(ack.into(), self.remote_addr).await?;
+                            
+                            Ok(None)
+                        } else {
+                            // 2xx responses are handled by TU/core directly
+                            debug!("[{}] Received 2xx response in COMPLETED state", self.id);
+                            
+                            // Store latest response
+                            self.last_response = Some(_response);
+                            
+                            Ok(None)
+                        }
                     },
                     _ => {
                         warn!("[{}] Received response in invalid state: {:?}", self.id, self.state);
@@ -587,7 +702,7 @@ impl Transaction for ClientNonInviteTransaction {
     }
     
     fn matches(&self, message: &Message) -> bool {
-        if let Message::Response(response) = message {
+        if let Message::Response(_response) = message {
             // Extract CSeq and method
             if let Some((_, method)) = utils::extract_cseq(message) {
                 // Match method with our request
@@ -644,17 +759,17 @@ impl Transaction for ClientNonInviteTransaction {
                     // Add basic headers
                     for header in &self.request.headers {
                         if matches!(header.name, 
-                            rvoip_sip_core::HeaderName::From | 
-                            rvoip_sip_core::HeaderName::To | 
-                            rvoip_sip_core::HeaderName::CallId | 
-                            rvoip_sip_core::HeaderName::CSeq
+                            HeaderName::From | 
+                            HeaderName::To | 
+                            HeaderName::CallId | 
+                            HeaderName::CSeq
                         ) {
                             timeout_response = timeout_response.with_header(header.clone());
                         }
                     }
                     
-                    timeout_response = timeout_response.with_header(rvoip_sip_core::Header::integer(
-                        rvoip_sip_core::HeaderName::ContentLength, 0
+                    timeout_response = timeout_response.with_header(Header::integer(
+                        HeaderName::ContentLength, 0
                     ));
                     
                     self.last_response = Some(timeout_response.clone());
@@ -679,6 +794,10 @@ impl Transaction for ClientNonInviteTransaction {
                 Ok(None)
             }
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::time::Duration;
+use std::any::Any;
 
 use rvoip_sip_core::{Message, Request, Response};
 
@@ -45,7 +46,7 @@ pub enum TransactionState {
 
 /// SIP transaction interface
 #[async_trait::async_trait]
-pub trait Transaction: fmt::Debug + Send + Sync {
+pub trait Transaction: fmt::Debug + Send + Sync + Any {
     /// Get the transaction ID
     fn id(&self) -> &str;
     
@@ -86,4 +87,7 @@ pub trait Transaction: fmt::Debug + Send + Sync {
     
     /// Handle a timeout event
     async fn on_timeout(&mut self) -> crate::Result<Option<Message>>;
+
+    /// Downcast to a specific transaction type
+    fn as_any(&self) -> &dyn Any;
 } 

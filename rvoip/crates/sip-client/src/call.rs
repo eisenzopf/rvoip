@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use std::time::Duration;
+use std::str::FromStr;
+use std::collections::HashMap;
 
 use tokio::sync::{mpsc, RwLock, watch, Mutex};
 use tokio::time::Instant;
@@ -15,8 +17,9 @@ use rvoip_sip_core::{
     Header, HeaderName, HeaderValue
 };
 use rvoip_session_core::sdp::{SessionDescription, extract_rtp_port_from_sdp};
-use rvoip_session_core::dialog::{Dialog, DialogState, DialogId, extract_tag};
+use rvoip_session_core::dialog::{Dialog, DialogState, DialogId, extract_tag, extract_uri};
 use rvoip_transaction_core::TransactionManager;
+use rvoip_sip_transport::Transport;
 
 use crate::config::CallConfig;
 use crate::error::{Error, Result};
@@ -203,6 +206,9 @@ pub struct Call {
 
     /// Dialog
     dialog: Arc<RwLock<Option<Dialog>>>,
+
+    /// Last response received
+    last_response: Arc<RwLock<Option<Response>>>,
 }
 
 impl Call {
@@ -244,6 +250,7 @@ impl Call {
             local_sdp: Arc::new(RwLock::new(None)),
             remote_sdp: Arc::new(RwLock::new(None)),
             dialog: Arc::new(RwLock::new(None)),
+            last_response: Arc::new(RwLock::new(None)),
         });
 
         (call, state_tx)
@@ -710,7 +717,7 @@ impl Call {
                 }
                 
                 response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                Ok(Some(response))
+                return Ok(Some(response));
             },
             // Add other method handlers as needed
             _ => {
@@ -732,7 +739,7 @@ impl Call {
                 }
                 
                 response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                Ok(Some(response))
+                return Ok(Some(response));
             }
         }
     }
@@ -740,6 +747,12 @@ impl Call {
     /// Handle an incoming response for this call
     pub(crate) async fn handle_response(&self, response: Response) -> Result<()> {
         debug!("Handling incoming response {} for call {}", response.status, self.id);
+        
+        // Store the response immediately for any later use
+        {
+            let mut last_response = self.last_response.write().await;
+            *last_response = Some(response.clone());
+        }
         
         let current_state = self.state().await;
         debug!("Current call state before processing response: {}", current_state);
@@ -1021,8 +1034,6 @@ impl Call {
                             }
                         }
                         
-                        drop(dialog_lock); // Release the lock
-                        
                         // Extract remote SDP
                         if !response.body.is_empty() {
                             debug!("Processing SDP in success response");
@@ -1167,6 +1178,7 @@ impl Call {
             local_sdp: Arc::new(RwLock::new(None)),
             remote_sdp: Arc::new(RwLock::new(None)),
             dialog: Arc::new(RwLock::new(None)),
+            last_response: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1306,9 +1318,6 @@ impl Call {
                 );
                 ack.headers.push(Header::text(HeaderName::Via, via_value));
                 
-                // Add Max-Forwards
-                ack.headers.push(Header::integer(HeaderName::MaxForwards, 70));
-                
                 // Add From header with tag
                 let from_value = format!(
                     "<{}>;tag={}",
@@ -1318,31 +1327,52 @@ impl Call {
                 ack.headers.push(Header::text(HeaderName::From, from_value));
                 
                 // Add To header with remote tag if available
-                let remote_tag_value = self.remote_tag.read().await.clone();
-                let to_value = if let Some(tag) = remote_tag_value {
+                let to_tag = self.remote_tag.read().await.clone();
+                let to_value = if let Some(tag) = to_tag {
                     format!("<{}>;tag={}", self.remote_uri, tag)
                 } else {
                     format!("<{}>", self.remote_uri)
                 };
                 ack.headers.push(Header::text(HeaderName::To, to_value));
                 
-                // Add Call-ID
+                // Add Call-ID header
                 ack.headers.push(Header::text(HeaderName::CallId, self.sip_call_id.clone()));
                 
-                // Add CSeq - use the current CSeq with ACK method
+                // Add CSeq header
                 let cseq = *self.cseq.lock().await;
-                ack.headers.push(Header::text(
-                    HeaderName::CSeq,
-                    format!("{} {}", cseq, Method::Ack)
-                ));
+                ack.headers.push(Header::text(HeaderName::CSeq, format!("{} ACK", cseq)));
+                
+                // Add Max-Forwards header
+                ack.headers.push(Header::integer(HeaderName::MaxForwards, 70));
+                
+                // Add Content-Length header
+                ack.headers.push(Header::integer(HeaderName::ContentLength, 0));
                 
                 ack
             }
         };
         
-        // Add Content-Length if not present
-        if !request.headers.iter().any(|h| h.name == HeaderName::ContentLength) {
-            request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        // Find the most recent response to determine where to send the ACK
+        if let Some(_dialog) = self.dialog.read().await.clone() {
+            // If we have a dialog, check if last response was 2xx
+            let last_response = self.last_response().await;
+            if let Some(response) = last_response {
+                if response.status.is_success() {
+                    // For 2xx responses, use the dialog's transaction ID to send ACK
+                    // This uses a special method in transaction manager that correctly
+                    // routes the ACK based on Contact URI in the 2xx response
+                    debug!("Using transaction manager to send ACK for 2xx response");
+                    // We need to find the transaction ID that was used for the initial INVITE
+                    // For now, we'll use a fixed format based on our ID scheme
+                    let transaction_id = format!("ict_{}", self.local_tag.split('-').last().unwrap_or("unknown"));
+                    if let Err(e) = self.transaction_manager.send_2xx_ack(&transaction_id, &response).await {
+                        warn!("[{}] Failed to send ACK for 2xx response: {}", transaction_id, e);
+                        // Fall back to direct transport
+                        debug!("Falling back to direct transport for ACK");
+                    }
+                    return Ok(());
+                }
+            }
         }
         
         // Send directly via transport (ACK is end-to-end, not transaction-based)
@@ -1354,6 +1384,12 @@ impl Call {
         debug!("ACK sent for call {}", self.id);
         
         Ok(())
+    }
+
+    /// Get the call's most recent received response
+    pub async fn last_response(&self) -> Option<Response> {
+        // Return stored response if available
+        self.last_response.read().await.clone()
     }
 }
 
@@ -1383,6 +1419,7 @@ impl Clone for Call {
             local_sdp: self.local_sdp.clone(),
             remote_sdp: self.remote_sdp.clone(),
             dialog: self.dialog.clone(),
+            last_response: self.last_response.clone(),
         }
     }
 } 
