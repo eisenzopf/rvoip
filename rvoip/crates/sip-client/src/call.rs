@@ -237,7 +237,7 @@ impl Call {
         let (state_tx, state_rx) = watch::channel(CallState::Initial);
 
         let call = Arc::new(Self {
-            id: Uuid::new_v4().to_string(),
+            id: sip_call_id.clone(),
             direction,
             config,
             sip_call_id,
