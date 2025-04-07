@@ -178,180 +178,70 @@ impl SipClient {
             return Ok(());
         }
         
-        // Set running flag to true
+        // Set running flag
         *self.running.write().await = true;
-        
-        // Create clone of transaction manager
-        let transaction_manager = self.transaction_manager.clone();
-        let calls = self.calls.clone();
-        let pending_responses = self.pending_responses.clone();
-        
-        // Take transaction events channel
+
+        // Set up event processing task
         let mut transaction_events = std::mem::replace(
-            &mut self.transaction_events_rx, 
+            &mut self.transaction_events_rx,
             mpsc::channel(1).1
         );
-        
+        let running = self.running.clone();
+        let transaction_manager = self.transaction_manager.clone();
+        let calls = self.calls.clone();
+        let event_tx = self.event_tx.clone();
+        let pending_responses = self.pending_responses.clone();
+        let client_events_tx = self.event_tx.clone();
+
         // Create a client events channel
-        let (client_events_tx, _) = mpsc::channel(32);
-        let client_events_tx_for_broadcast = client_events_tx.clone();
-        
-        // Create broadcast clones
-        let broadcast_tx_for_closure = self.event_broadcast.clone();
-        let broadcast_tx_for_task = self.event_broadcast.clone();
-        
-        // Create a task to forward events to broadcast channel
-        let client_events_with_broadcast = client_events_tx_for_broadcast.with_transformer(move |event: SipClientEvent| {
-            // Send a copy to broadcast channel before returning
-            let _ = broadcast_tx_for_closure.send(event.clone());
-            event
+        let (client_events_tx, mut client_events_rx) = mpsc::channel(32);
+        let broadcast_tx = self.event_broadcast.clone();
+
+        // Create a task to forward events from client_events to broadcast
+        tokio::spawn(async move {
+            while let Some(event) = client_events_rx.recv().await {
+                // Forward to broadcast channel
+                let _ = broadcast_tx.send(event);
+            }
         });
-        
+
+        // Process transaction events in a background task
         let event_task = tokio::spawn(async move {
-            debug!("SIP client event processing task started");
+            info!("SIP client event processor started");
             
-            // Create a receiver for transaction events
-            let mut transaction_events = Box::pin(transaction_events);
-            
-            // Create a broadcast channel for client events
-            let broadcast_tx = broadcast_tx_for_task;
-            let mut client_events = broadcast_tx.subscribe();
-            
-            loop {
-                tokio::select! {
-                    // Process transaction events
-                    Some(event) = transaction_events.recv() => {
-                        // Process transaction event logic...
-                        match event {
-                            TransactionEvent::UnmatchedMessage { message, source } => {
-                                // Handle unmatched message (typically requests)
-                                match message {
-                                    Message::Request(request) => {
-                                        debug!("Received {} request from {}", request.method, source);
-                                        
-                                        // Handle incoming request
-                                        if let Err(e) = handle_incoming_request(
-                                            request,
-                                            source,
-                                            transaction_manager.clone(),
-                                            calls.clone(),
-                                            client_events_tx.clone(),
-                                        ).await {
-                                            error!("Error handling incoming request: {}", e);
-                                        }
-                                    },
-                                    Message::Response(response) => {
-                                        debug!("Received unmatched response: {:?} from {}", response.status, source);
-                                    }
-                                }
-                            },
-                            TransactionEvent::TransactionCreated { transaction_id } => {
-                                debug!("Transaction created: {}", transaction_id);
-                            },
-                            TransactionEvent::TransactionCompleted { transaction_id, response } => {
-                                // Event is sent when a transaction is completed with a final response
-                                debug!("Transaction completed: {}", transaction_id);
-                                
-                                // Check if we have a pending response handler
-                                let call_to_update = {
-                                    let mut pending = pending_responses.lock().await;
-                                    
-                                    // Find matching pending response sender
-                                    let pending_sender = pending.remove(&transaction_id);
-                                    
-                                    // Check if we need to update call state
-                                    let call_to_update = if let Some(resp) = &response {
-                                        if let Some(call_id) = resp.call_id() {
-                                            let calls_read = calls.read().await;
-                                            calls_read.get(call_id).cloned()
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    };
-                                    
-                                    // Send the response to the waiting channel if any
-                                    if let Some(tx) = pending_sender {
-                                        if let Some(resp) = response.clone() {
-                                            debug!("Sending response for transaction {} to waiting task", 
-                                                  transaction_id);
-                                            
-                                            if tx.send(resp.clone()).is_err() {
-                                                warn!("Failed to deliver response - receiver dropped");
-                                            }
-                                        } else {
-                                            // No response, send a timeout response
-                                            warn!("No response for transaction {}, sending timeout", transaction_id);
-                                            let timeout_response = Response::new(StatusCode::RequestTimeout);
-                                            let _ = tx.send(timeout_response);
-                                        }
-                                    } else {
-                                        debug!("No pending task waiting for transaction {}", transaction_id);
-                                    }
-                                    
-                                    call_to_update
-                                };
-                                
-                                // Update call state if needed
-                                if let Some(call) = call_to_update {
-                                    if let Some(resp) = response {
-                                        debug!("Forwarding response to call: {}", resp.status);
-                                        // Using handle_response with immutable reference
-                                        if let Err(e) = call.handle_response(resp).await {
-                                            error!("Error handling response in call: {}", e);
-                                        }
-                                    }
-                                }
-                            },
-                            TransactionEvent::TransactionTerminated { transaction_id } => {
-                                debug!("Transaction terminated: {}", transaction_id);
-                                
-                                // Clean up any pending channels
-                                let mut pending = pending_responses.lock().await;
-                                if pending.remove(&transaction_id).is_some() {
-                                    debug!("Removed pending channel for terminated transaction");
-                                }
-                            },
-                            TransactionEvent::Error { error, transaction_id } => {
-                                error!("Transaction error: {}, id: {:?}", error, transaction_id);
-                                
-                                // If there's a pending response channel, deliver an error
-                                if let Some(id) = transaction_id {
-                                    let mut pending = pending_responses.lock().await;
-                                    if let Some(tx) = pending.remove(&id) {
-                                        let mut error_response = Response::new(StatusCode::ServerInternalError);
-                                        error_response.headers.push(Header::text(HeaderName::UserAgent, "RVOIP-SIP-Client"));
-                                        let _ = tx.send(error_response);
-                                    }
-                                }
-                                
-                                // Send client error event
-                                let _ = client_events_tx.send(SipClientEvent::Error(
-                                    format!("Transaction error: {}", error)
-                                )).await;
-                            },
-                        }
-                    },
-                    
-                    // Process client events to keep broadcast channel working
-                    Ok(_) = client_events.recv() => {
-                        // Do nothing, just draining the channel to prevent build-up
-                        debug!("Received event from broadcast channel");
-                    },
-                    
-                    // Exit if channels closed
-                    else => {
-                        debug!("Event channels closed, ending event processing loop");
+            while *running.read().await {
+                // Wait for transaction event with timeout
+                let event = match tokio::time::timeout(
+                    Duration::from_secs(1),
+                    transaction_events.recv()
+                ).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        error!("Transaction event channel closed");
                         break;
+                    },
+                    Err(_) => {
+                        // Timeout, continue
+                        continue;
                     }
-                }
+                };
+                
+                // Process transaction event
+                handle_transaction_event(
+                    event,
+                    transaction_manager.clone(),
+                    calls.clone(),
+                    event_tx.clone(),
+                    pending_responses.clone(),
+                ).await;
             }
             
-            debug!("SIP client event processing task ended");
+            info!("SIP client event processor stopped");
         });
         
         self.event_task = Some(event_task);
+        
+        info!("SIP client started with username: {}", self.config.username);
         
         Ok(())
     }
@@ -1224,4 +1114,115 @@ fn add_response_headers(request: &Request, response: &mut Response) {
     
     // Add Content-Length
     response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+}
+
+// Handle a transaction event
+async fn handle_transaction_event(
+    event: TransactionEvent,
+    transaction_manager: Arc<TransactionManager>,
+    calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
+    event_tx: mpsc::Sender<SipClientEvent>,
+    pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<Response>>>>,
+) {
+    use tracing::{info, debug, error, warn};
+    
+    match event {
+        TransactionEvent::TransactionCreated { transaction_id } => {
+            debug!("Transaction created: {}", transaction_id);
+        },
+        TransactionEvent::TransactionCompleted { transaction_id, response } => {
+            if let Some(response) = response {
+                debug!("Transaction {} completed with response {} ({:?})", 
+                    transaction_id, response.status, response.status);
+                
+                // Extract Call-ID to find the call
+                if let Some(call_id) = response.call_id() {
+                    debug!("Found Call-ID {} in response", call_id);
+                    
+                    // Look up the call
+                    let calls_read = calls.read().await;
+                    if let Some(call) = calls_read.get(call_id) {
+                        debug!("Found call for Call-ID {}, handling response", call_id);
+                        
+                        // Handle the response
+                        if let Err(e) = call.handle_response(response.clone()).await {
+                            error!("Error handling response in call {}: {}", call_id, e);
+                        } else {
+                            debug!("Response handled successfully for call {}", call_id);
+                        }
+                    } else {
+                        warn!("Call not found for Call-ID {}", call_id);
+                    }
+                    drop(calls_read);  // Explicitly release lock
+                }
+                
+                // Also handle pending response channels
+                if let Some(sender) = {
+                    let mut pending = pending_responses.lock().await;
+                    pending.remove(&transaction_id)
+                } {
+                    debug!("Sending response to pending channel for transaction {}", transaction_id);
+                    let _ = sender.send(response.clone()); // Ignore errors from closed channels
+                }
+            } else {
+                debug!("Transaction {} completed with no response", transaction_id);
+            }
+        },
+        TransactionEvent::TransactionTerminated { transaction_id } => {
+            debug!("Transaction terminated: {}", transaction_id);
+        },
+        TransactionEvent::UnmatchedMessage { message, source } => {
+            match message {
+                Message::Request(request) => {
+                    debug!("Handling unmatched request: {}", request.method);
+                    
+                    // Extract Call-ID to find the call
+                    if let Some(call_id) = request.call_id() {
+                        let call_opt = {
+                            let calls_read = calls.read().await;
+                            calls_read.get(call_id).cloned()
+                        };
+                        
+                        if let Some(call) = call_opt {
+                            info!("Found call for unmatched request: {}", call_id);
+                            
+                            // Let the call handle the request
+                            match call.handle_request(request).await {
+                                Ok(Some(response)) => {
+                                    info!("Sending response for unmatched request: {}", response.status);
+                                    
+                                    // Send response
+                                    if let Err(e) = transaction_manager.transport().send_message(
+                                        Message::Response(response),
+                                        source
+                                    ).await {
+                                        error!("Failed to send response: {}", e);
+                                    }
+                                },
+                                Ok(None) => {
+                                    debug!("No response needed for unmatched request");
+                                },
+                                Err(e) => {
+                                    error!("Error handling unmatched request: {}", e);
+                                }
+                            }
+                        } else {
+                            warn!("Call not found for unmatched request with Call-ID: {}", call_id);
+                        }
+                    } else {
+                        warn!("Unmatched request has no Call-ID");
+                    }
+                },
+                Message::Response(response) => {
+                    debug!("Unmatched response: {:?}", response);
+                }
+            }
+        },
+        TransactionEvent::Error { error, transaction_id } => {
+            error!("Transaction error: {}, transaction ID: {:?}", error, transaction_id);
+            
+            // Forward error to client events
+            let _ = event_tx.send(SipClientEvent::Error(error.to_string())).await;
+        }
+    }
 } 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -232,52 +232,83 @@ impl UserAgent {
     
     /// Get an event stream for call events
     pub fn event_stream(&self) -> mpsc::Receiver<CallEvent> {
-        // Create a new channel
+        // Create a new forwarding channel
         let (tx, rx) = mpsc::channel(32);
         
-        // Clone only the active_calls Arc, not the entire self
-        let active_calls = self.active_calls.clone();
+        // Create a clone for the first task
+        let tx1 = tx.clone();
         
-        // Spawn task to send state updates
         tokio::spawn(async move {
-            // Create a periodic timer
+            // Periodically send events to keep the channel active
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Just a keep-alive tick
+                    },
+                    // If the channel closes, exit the task
+                    _ = tx1.closed() => break,
+                }
+                
+                // Simple poll event to keep the connection alive
+                let dummy_event = CallEvent::StateChanged {
+                    call: Arc::new(Call::dummy()),
+                    previous: CallState::Initial,
+                    current: CallState::Initial,
+                };
+                
+                if tx1.send(dummy_event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        
+        // Also periodically check call states to ensure state change events are sent
+        let active_calls = self.active_calls.clone();
+        let tx2 = tx.clone();
+        
+        tokio::spawn(async move {
+            // Create a periodic timer (every 500ms)
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             
+            // Keep track of last known states for each call
+            let mut last_states = HashMap::new();
+            
             // Keep running until receiver is closed
-            while !tx.is_closed() {
+            while !tx2.is_closed() {
                 interval.tick().await;
                 
                 // Get all active calls
                 let calls = active_calls.read().await;
                 
-                // If we have no active calls, send a dummy event to keep the channel alive
-                if calls.is_empty() {
-                    let test_event = CallEvent::StateChanged {
-                        call: Arc::new(Call::dummy()),
-                        previous: CallState::Initial,
-                        current: CallState::Initial,
-                    };
+                // For each active call, check if state has changed
+                for (call_id, call) in calls.iter() {
+                    let current_state = call.state().await;
+                    let previous_state = last_states.get(call_id).copied().unwrap_or(CallState::Initial);
                     
-                    if tx.send(test_event).await.is_err() {
-                        break;
-                    }
-                } else {
-                    // For each active call, send the current state
-                    for (_, call) in calls.iter() {
-                        let current_state = call.state().await;
+                    // Only send if state changed
+                    if current_state != previous_state {
+                        info!("Call {} state changed: {} -> {}", call_id, previous_state, current_state);
                         
-                        // Send the current state as an event
+                        // Send the state change event
                         let event = CallEvent::StateChanged {
                             call: call.clone(),
-                            previous: current_state, // We don't have the previous state here, so use current
+                            previous: previous_state,
                             current: current_state,
                         };
                         
-                        if tx.send(event).await.is_err() {
+                        if tx2.send(event).await.is_err() {
                             break;
                         }
+                        
+                        // Update the last known state
+                        last_states.insert(call_id.clone(), current_state);
                     }
                 }
+                
+                // Cleanup removed calls
+                last_states.retain(|call_id, _| calls.contains_key(call_id));
             }
         });
         
@@ -362,79 +393,62 @@ async fn handle_incoming_request(
     let existing_call = calls_read.get(&call_id).cloned();
     drop(calls_read);
     
-    // Handle INVITE request - new incoming call
+    // Handling INVITE requests
     if request.method == Method::Invite && existing_call.is_none() {
-        // Create temporary response to prevent retransmissions
-        let mut response = Response::new(StatusCode::Trying);
-        add_response_headers(&request, &mut response);
-        
-        debug!("Sending 100 Trying for new call {}", call_id);
-        
-        // Send 100 Trying
-        if let Err(e) = transaction_manager.transport().send_message(
-            Message::Response(response),
-            source
-        ).await {
-            warn!("Failed to send 100 Trying: {}", e);
-        }
-        
-        // Get From header for caller ID
-        let from_header = request.headers.iter()
-            .find(|h| h.name == HeaderName::From)
-            .ok_or_else(|| Error::SipProtocol("Missing From header".into()))?;
-        
-        let from_value = from_header.value.as_text()
-            .ok_or_else(|| Error::SipProtocol("Invalid From header".into()))?;
-        
-        // Get To header
-        let to_header = request.headers.iter()
+        debug!("Processing new INVITE request from {}", source);
+
+        // Extract From URI for caller identification
+        let from_uri = match extract_uri_from_header(&request, HeaderName::From) {
+            Some(uri) => uri,
+            None => return Err(Error::SipProtocol("Missing From URI".into())),
+        };
+
+        // Extract To URI
+        let to_uri = match extract_uri_from_header(&request, HeaderName::To) {
+            Some(uri) => uri,
+            None => return Err(Error::SipProtocol("Missing To URI".into())),
+        };
+
+        // Get To header value for tag
+        let to_header_value = match request.headers.iter()
             .find(|h| h.name == HeaderName::To)
-            .ok_or_else(|| Error::SipProtocol("Missing To header".into()))?;
-        
-        let to_value = to_header.value.as_text()
-            .ok_or_else(|| Error::SipProtocol("Invalid To header".into()))?;
-        
-        // Extract URI from To header
-        let to_uri_str = if let Some(uri_end) = to_value.find('>') {
-            if let Some(uri_start) = to_value.find('<') {
-                &to_value[uri_start + 1..uri_end]
-            } else {
-                to_value
-            }
-        } else {
-            to_value
+            .and_then(|h| h.value.as_text()) {
+            Some(value) => value.to_string(),
+            None => return Err(Error::SipProtocol("Missing To header".into())),
         };
-        
-        // Parse To URI
-        let to_uri: Uri = to_uri_str.parse()
-            .map_err(|e| Error::SipProtocol(format!("Invalid To URI: {}", e)))?;
-        
-        // Extract URI from From header
-        let from_uri_str = if let Some(uri_end) = from_value.find('>') {
-            if let Some(uri_start) = from_value.find('<') {
-                &from_value[uri_start + 1..uri_end]
-            } else {
-                from_value
-            }
-        } else {
-            from_value
-        };
-        
-        // Parse From URI
-        let from_uri: Uri = from_uri_str.parse()
-            .map_err(|e| Error::SipProtocol(format!("Invalid From URI: {}", e)))?;
-        
-        debug!("Creating new call object for incoming call from {} to {}", from_uri, to_uri);
-        
-        // Create call
-        let call_config = CallConfig {
-            auto_answer: config.media.rtp_enabled,
-            ..CallConfig::default()
-        };
-        
+
+        // Generate tag for To header
         let to_tag = format!("tag-{}", Uuid::new_v4());
-        let to_with_tag = format!("{};tag={}", to_value, to_tag.clone());
-        
+        let to_with_tag = format!("{};tag={}", to_header_value, to_tag);
+
+        info!("Processing INVITE for call {}", call_id);
+
+        // Debug SDP content if present
+        if !request.body.is_empty() {
+            if let Ok(sdp_str) = std::str::from_utf8(&request.body) {
+                debug!("Received SDP in INVITE:\n{}", sdp_str);
+            } else {
+                warn!("INVITE contains body but it's not valid UTF-8");
+            }
+        } else {
+            warn!("INVITE request has no SDP body");
+        }
+
+        // Create call config from client config
+        let call_config = CallConfig {
+            audio_enabled: config.media.rtp_enabled,
+            video_enabled: false,
+            dtmf_enabled: true,
+            auto_answer: config.media.rtp_enabled,
+            auto_answer_delay: Duration::from_secs(0),
+            call_timeout: Duration::from_secs(60),
+            media: None,
+            auth_username: None,
+            auth_password: None,
+            display_name: None,
+        };
+
+        // Create call with auto-generated ID
         let (call, state_tx) = Call::new(
             CallDirection::Incoming,
             call_config,
@@ -446,16 +460,16 @@ async fn handle_incoming_request(
             transaction_manager.clone(),
             event_tx.clone(),
         );
-        
+
         // Send a ringing response
         let mut ringing_response = Response::new(StatusCode::Ringing);
         add_response_headers(&request, &mut ringing_response);
-        
+
         // Add To header with tag
         ringing_response.headers.push(Header::text(HeaderName::To, to_with_tag.clone()));
-        
+
         debug!("Sending 180 Ringing for call {}", call_id);
-        
+
         // Send 180 Ringing
         if let Err(e) = transaction_manager.transport().send_message(
             Message::Response(ringing_response),
@@ -463,7 +477,7 @@ async fn handle_incoming_request(
         ).await {
             warn!("Failed to send 180 Ringing: {}", e);
         }
-        
+
         // Update call state to ringing
         if let Err(e) = state_tx.send(CallState::Ringing)
             .map_err(|_| Error::Call("Failed to update call state".into())) {
@@ -471,10 +485,10 @@ async fn handle_incoming_request(
         } else {
             debug!("Call {} state updated to Ringing", call_id);
         }
-        
+
         // Store call
         active_calls.write().await.insert(call_id.clone(), call.clone());
-        
+
         // Send event
         if let Err(e) = event_tx.send(CallEvent::IncomingCall(call.clone())).await
             .map_err(|_| Error::Call("Failed to send call event".into())) {
@@ -482,30 +496,38 @@ async fn handle_incoming_request(
         } else {
             debug!("Sent IncomingCall event for call {}", call_id);
         }
-        
+
         // If auto-answer is enabled, answer the call
         if config.media.rtp_enabled {
             debug!("Auto-answer is enabled, proceeding to answer call {}", call_id);
             
             // Extract remote SDP
-            let remote_sdp = if !request.body.is_empty() {
+            if !request.body.is_empty() {
                 match std::str::from_utf8(&request.body)
                     .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))
                     .and_then(|sdp_str| SessionDescription::parse(sdp_str)
                         .map_err(|e| Error::SipProtocol(format!("Invalid SDP: {}", e))))
                 {
-                    Ok(sdp) => Some(sdp),
+                    Ok(remote_sdp) => {
+                        debug!("Successfully parsed SDP from INVITE");
+                        
+                        // Store SDP in the call for media setup
+                        if let Err(e) = call.setup_media_from_sdp(&remote_sdp).await {
+                            warn!("Error setting up media from SDP: {}", e);
+                        }
+                    },
                     Err(e) => {
                         warn!("Failed to parse SDP: {}", e);
-                        None
+                        debug!("SDP content that failed to parse: {:?}", 
+                            String::from_utf8_lossy(&request.body));
                     }
                 }
             } else {
-                None
-            };
+                debug!("No SDP body in INVITE, skipping SDP parsing");
+            }
             
             // Extract remote RTP port from SDP
-            let remote_rtp_port = if let Some(_sdp) = &remote_sdp {
+            let remote_rtp_port = if !request.body.is_empty() {
                 extract_rtp_port_from_sdp(&request.body)
             } else {
                 None
@@ -513,6 +535,12 @@ async fn handle_incoming_request(
             
             if remote_rtp_port.is_none() {
                 warn!("Could not extract RTP port from INVITE SDP");
+                
+                // Store the failed body for troubleshooting
+                if !request.body.is_empty() {
+                    let body_text = String::from_utf8_lossy(&request.body);
+                    debug!("SDP body that failed to extract RTP port:\n{}", body_text);
+                }
             } else {
                 info!("Remote endpoint RTP port is {}", remote_rtp_port.unwrap());
                 
@@ -536,6 +564,12 @@ async fn handle_incoming_request(
                 );
                 
                 let sdp_str = sdp.to_string();
+                debug!("Created SDP answer:\n{}", sdp_str);
+                
+                // Store SDP in the call for later use
+                if let Err(e) = call.setup_local_sdp().await {
+                    warn!("Failed to set up local SDP: {}", e);
+                }
                 
                 // Add Content-Type and Content-Length
                 ok_response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
@@ -549,20 +583,19 @@ async fn handle_incoming_request(
                 
                 debug!("Sending 200 OK with SDP answer for call {}", call_id);
                 
+                // Update call state to connecting BEFORE sending response
+                if let Err(e) = call.update_state(CallState::Connecting).await {
+                    error!("Failed to update call state to Connecting: {}", e);
+                } else {
+                    info!("Call {} transitioned from Ringing to Connecting", call_id);
+                }
+                
                 // Send 200 OK
                 if let Err(e) = transaction_manager.transport().send_message(
                     Message::Response(ok_response),
                     source
                 ).await {
                     warn!("Failed to send 200 OK: {}", e);
-                }
-                
-                // Update call state to connecting
-                if let Err(e) = state_tx.send(CallState::Connecting)
-                    .map_err(|_| Error::Call("Failed to update call state".into())) {
-                    error!("Failed to update call state to Connecting: {}", e);
-                } else {
-                    debug!("Call {} state updated to Connecting", call_id);
                 }
             }
         }
@@ -585,7 +618,7 @@ async fn handle_incoming_request(
                 if let Err(e) = call.update_state(CallState::Established).await {
                     warn!("Failed to update call state to Established: {}", e);
                 } else {
-                    debug!("Call {} state updated to Established after ACK", call_id);
+                    info!("Call {} established successfully after ACK", call_id);
                 }
                 
                 return Ok(());
@@ -628,4 +661,29 @@ async fn handle_incoming_request(
     }
     
     Ok(())
+}
+
+/// Helper function to extract URI from a SIP header
+fn extract_uri_from_header(request: &Request, header_name: HeaderName) -> Option<Uri> {
+    let header = request.headers.iter()
+        .find(|h| h.name == header_name)?;
+    
+    let value = header.value.as_text()?;
+    
+    // Extract URI from the header value
+    let uri_str = if let Some(uri_end) = value.find('>') {
+        if let Some(uri_start) = value.find('<') {
+            &value[uri_start + 1..uri_end]
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+    
+    // Parse the URI
+    match uri_str.parse() {
+        Ok(uri) => Some(uri),
+        Err(_) => None,
+    }
 } 

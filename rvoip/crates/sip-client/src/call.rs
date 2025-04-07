@@ -263,7 +263,61 @@ impl Call {
             last_response: Arc::new(RwLock::new(None)),
         });
 
+        // Initialize local SDP based on call direction and configuration
+        let call_clone = call.clone();
+        tokio::spawn(async move {
+            if let Err(e) = call_clone.setup_local_sdp().await {
+                tracing::error!("Failed to set up local SDP: {}", e);
+            }
+        });
+
         (call, state_tx)
+    }
+
+    /// Setup local SDP for use in INVITE or answer
+    pub(crate) async fn setup_local_sdp(&self) -> Result<()> {
+        if self.local_sdp.read().await.is_some() {
+            // Local SDP already initialized
+            return Ok(());
+        }
+
+        tracing::debug!("Setting up local SDP for call {}", self.id);
+
+        // Parse local address
+        let local_ip = if let Ok(ip) = self.local_uri.host.parse::<IpAddr>() {
+            ip
+        } else {
+            // Default to localhost if can't parse
+            IpAddr::from([127, 0, 0, 1])
+        };
+
+        tracing::debug!("Local IP for SDP: {}", local_ip);
+
+        // Create local SDP - use a specific port range based on config
+        let rtp_port = if self.direction == CallDirection::Outgoing {
+            10000 // Fixed port for caller
+        } else {
+            10002 // Fixed port for receiver
+        };
+
+        // Create the SDP
+        let local_sdp = rvoip_session_core::sdp::SessionDescription::new_audio_call(
+            &self.local_uri.user.clone().unwrap_or_else(|| "anonymous".to_string()),
+            local_ip,
+            rtp_port,
+        );
+
+        // Log the SDP for debugging
+        let sdp_str = local_sdp.to_string();
+        tracing::debug!("Created local SDP for call {}:\n{}", self.id, sdp_str);
+
+        // Store the SDP
+        {
+            let mut local_sdp_guard = self.local_sdp.write().await;
+            *local_sdp_guard = Some(local_sdp);
+        }
+
+        Ok(())
     }
 
     /// Get the call ID
@@ -341,18 +395,19 @@ impl Call {
 
         info!("Answering incoming call {}", self.id);
         
-        // Create local SDP
-        let local_sdp = rvoip_session_core::sdp::SessionDescription::new_audio_call(
-            "rvoip",
-            self.local_uri.host.parse().unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1])),
-            9999, // We're using a dummy port since we're not actually streaming audio
-        );
+        // Ensure local SDP is initialized
+        self.setup_local_sdp().await?;
         
-        // Store local SDP
-        {
-            let mut local_sdp_guard = self.local_sdp.write().await;
-            *local_sdp_guard = Some(local_sdp.clone());
-        }
+        // Get the local SDP
+        let local_sdp = match self.local_sdp.read().await.clone() {
+            Some(sdp) => sdp,
+            None => {
+                error!("No local SDP available when answering call {}", self.id);
+                return Err(Error::Call("No local SDP available for answer".into()));
+            }
+        };
+        
+        debug!("Using local SDP for answer:\n{}", local_sdp.to_string());
         
         // Create 200 OK response with SDP
         let mut response = rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok);
@@ -1087,6 +1142,9 @@ impl Call {
 
     /// Create an INVITE request for outgoing call
     pub(crate) async fn create_invite_request(&self) -> Result<Request> {
+        // Ensure local SDP is initialized
+        self.setup_local_sdp().await?;
+
         // Create a new INVITE request to the remote URI
         let mut request = Request::new(Method::Invite, self.remote_uri.clone());
         
@@ -1127,11 +1185,16 @@ impl Call {
         // Add Content-Type and Content-Length for SDP
         if let Some(sdp) = self.local_sdp.read().await.as_ref() {
             let sdp_string = sdp.to_string();
+            
+            // Debug log the SDP
+            tracing::debug!("Including SDP in INVITE request for call {}:\n{}", self.id, sdp_string);
+            
             request.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
             request.headers.push(Header::integer(HeaderName::ContentLength, sdp_string.len() as i64));
             request.body = Bytes::from(sdp_string);
         } else {
             // No SDP, just add Content-Length: 0
+            tracing::warn!("No local SDP available when creating INVITE request for call {}", self.id);
             request.headers.push(Header::integer(HeaderName::ContentLength, 0));
         }
         

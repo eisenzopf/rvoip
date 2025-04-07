@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use thiserror::Error;
+use tracing;
 
 /// Errors related to SDP operations
 #[derive(Error, Debug)]
@@ -657,23 +658,64 @@ impl SessionDescription {
 
 /// Helper function to extract RTP port from SDP bytes
 pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
-    let sdp_str = std::str::from_utf8(sdp).ok()?;
+    use tracing::{debug, warn, trace};
     
-    if let Ok(session) = SessionDescription::parse(sdp_str) {
-        session.get_audio_port()
-    } else {
-        // Fallback to manual parsing if structured parsing fails
-        for line in sdp_str.lines() {
-            if line.starts_with("m=audio ") {
-                // Format is "m=audio <port> RTP/AVP..."
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    return parts[1].parse().ok();
+    trace!("Extracting RTP port from SDP bytes, length: {}", sdp.len());
+    
+    // First, convert the SDP bytes to string
+    let sdp_str = match std::str::from_utf8(sdp) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Invalid UTF-8 in SDP: {}", e);
+            return None;
+        }
+    };
+    
+    debug!("Parsing SDP:\n{}", sdp_str);
+    
+    // Try the structured approach first
+    match SessionDescription::parse(sdp_str) {
+        Ok(session) => {
+            let port = session.get_audio_port();
+            if let Some(p) = port {
+                debug!("Successfully extracted audio RTP port {} using structured parsing", p);
+                return Some(p);
+            } else {
+                warn!("No audio media found in SDP using structured parsing");
+            }
+        },
+        Err(e) => {
+            warn!("Failed to parse SDP using structured approach: {}", e);
+        }
+    }
+    
+    // Fall back to manual parsing if structured parsing fails
+    debug!("Falling back to manual parsing to extract RTP port");
+    for (i, line) in sdp_str.lines().enumerate() {
+        trace!("SDP line {}: {}", i, line);
+        
+        if line.starts_with("m=audio ") {
+            debug!("Found audio media line: {}", line);
+            // Format is "m=audio <port> RTP/AVP..."
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                match parts[1].parse::<u16>() {
+                    Ok(port) => {
+                        debug!("Manually extracted audio RTP port: {}", port);
+                        return Some(port);
+                    },
+                    Err(e) => {
+                        warn!("Failed to parse port number '{}': {}", parts[1], e);
+                    }
                 }
+            } else {
+                warn!("Invalid audio media line format, expected at least 3 parts: {}", line);
             }
         }
-        None
     }
+    
+    warn!("Could not extract RTP port from SDP");
+    None
 }
 
 /// Create a default audio SDP for simple call scenarios

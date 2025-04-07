@@ -169,7 +169,7 @@ Unlike PJSIP (C) and sofia-sip (C), rvoip is built as a pure Rust stack without 
 - More type-safe than both
 - Better suited for modern cloud-native deployments
 
-This architecture is also inspired by Kamailio for carrier scalability and FreeSWITCH for media handling.
+The SIP client library is modelled off of PJSIP and sifia-sip and the server logic is inspired by Kamailio for carrier scalability and FreeSWITCH for media handling.
 
 ## License
 
