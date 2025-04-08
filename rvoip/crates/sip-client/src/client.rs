@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::{mpsc, Mutex, RwLock, watch, oneshot, broadcast};
 use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 use uuid::Uuid;
 
 use rvoip_sip_core::{
@@ -511,6 +511,25 @@ impl SipClient {
         // Store the transaction ID in the call
         call.store_invite_transaction_id(transaction_id.clone()).await?;
         
+        // Log the transaction in the call registry
+        if let Some(registry) = call.registry() {
+            // Create transaction record
+            let transaction = crate::call_registry::TransactionRecord {
+                transaction_id: transaction_id.clone(),
+                transaction_type: "INVITE".to_string(),
+                timestamp: std::time::SystemTime::now(),
+                direction: CallDirection::Outgoing,
+                status: "created".to_string(),
+                info: None,
+                destination: Some(remote_addr.to_string()),
+            };
+            
+            debug!("Logging INVITE transaction {} in registry", transaction_id);
+            if let Err(e) = registry.log_transaction(&call.id(), transaction).await {
+                error!("Failed to log transaction in registry: {}", e);
+            }
+        }
+        
         // Send INVITE via transaction
         debug!("Sending INVITE via transaction: {}", transaction_id);
         self.transaction_manager.send_request(&transaction_id).await
@@ -924,6 +943,9 @@ async fn handle_transaction_event(
     match event {
         TransactionEvent::TransactionCreated { transaction_id } => {
             debug!("Transaction created: {}", transaction_id);
+            
+            // We don't know which call this belongs to yet, it will be associated later
+            // when we get a response or when explicit transaction logging is done
         },
         TransactionEvent::ResponseReceived { message, source: _, transaction_id } => {
             if let Message::Response(response) = message {
@@ -940,19 +962,12 @@ async fn handle_transaction_event(
                         debug!("Found call for Call-ID {}, handling response with transaction ID {}", 
                                call_id, transaction_id);
                         
-                        // Handle the response
-                        if let Err(e) = call.handle_response(response.clone()).await {
-                            error!("Error handling response in call {}: {}", call_id, e);
-                        } else {
-                            debug!("Response handled successfully for call {}", call_id);
-                        }
+                        // Store transaction ID for the response
+                        store_transaction_id(call.clone(), &transaction_id).await;
                         
-                        // For 2xx responses, store the transaction ID in the call
-                        if response.status.is_success() {
-                            debug!("Storing transaction ID {} for 2xx response in call {}", transaction_id, call_id);
-                            if let Err(e) = call.store_invite_transaction_id(transaction_id.clone()).await {
-                                error!("Failed to store transaction ID: {}", e);
-                            }
+                        // Let call handle the response
+                        if let Err(e) = call.handle_response(&response.clone()).await {
+                            error!("Error handling response: {}", e);
                         }
                     } else {
                         warn!("Call not found for Call-ID {}", call_id);
@@ -984,11 +999,12 @@ async fn handle_transaction_event(
                     if let Some(call) = calls_read.get(call_id) {
                         debug!("Found call for Call-ID {}, handling response", call_id);
                         
-                        // Handle the response
-                        if let Err(e) = call.handle_response(response.clone()).await {
-                            error!("Error handling response in call {}: {}", call_id, e);
-                        } else {
-                            debug!("Response handled successfully for call {}", call_id);
+                        // Store transaction ID for the response
+                        store_transaction_id(call.clone(), &transaction_id).await;
+                        
+                        // Let call handle the response
+                        if let Err(e) = call.handle_response(&response.clone()).await {
+                            error!("Error handling response: {}", e);
                         }
                         
                         // For 2xx responses to INVITE, store the transaction ID for later ACK
@@ -998,6 +1014,19 @@ async fn handle_transaction_event(
                                     debug!("Storing transaction ID {} for 2xx response to INVITE", transaction_id);
                                     if let Err(e) = call.store_invite_transaction_id(transaction_id.clone()).await {
                                         error!("Failed to store transaction ID: {}", e);
+                                    }
+                                    
+                                    // Log/update transaction in registry
+                                    if let Some(registry) = call.registry() {
+                                        // Update transaction status
+                                        if let Err(e) = registry.update_transaction_status(
+                                            call_id,
+                                            &transaction_id,
+                                            "completed",
+                                            Some(format!("Completed with status: {}", response.status))
+                                        ).await {
+                                            error!("Failed to update transaction status: {}", e);
+                                        }
                                     }
                                 }
                             }
@@ -1172,7 +1201,7 @@ async fn handle_transaction_event(
                             debug!("Found call for Call-ID {}, but no matching transaction", call_id);
                             
                             // Handle the response at call level
-                            if let Err(e) = call.handle_response(response.clone()).await {
+                            if let Err(e) = call.handle_response(&response.clone()).await {
                                 error!("Error handling unmatched response: {}", e);
                             }
                         } else {
@@ -1193,14 +1222,14 @@ async fn handle_transaction_event(
                 }
                 
                 // Forward error to application
-                if let Err(e) = event_tx.send(SipClientEvent::Error(Error::Transport(error.to_string()))).await {
+                if let Err(e) = event_tx.send(SipClientEvent::Error(error.to_string())).await {
                     error!("Failed to send error event: {}", e);
                 }
             } else {
                 warn!("General transaction error: {}", error);
                 
                 // Forward error to application
-                if let Err(e) = event_tx.send(SipClientEvent::Error(Error::Transport(error.to_string()))).await {
+                if let Err(e) = event_tx.send(SipClientEvent::Error(error.to_string())).await {
                     error!("Failed to send error event: {}", e);
                 }
             }
@@ -1382,6 +1411,7 @@ async fn log_transaction(
         direction,
         status: status.to_string(),
         info,
+        destination: None,
     };
     
     // Find the call
@@ -1400,4 +1430,18 @@ async fn log_transaction(
     } else {
         debug!("Call not found, transaction not logged");
     }
+}
+
+/// Store transaction ID for the response
+async fn store_transaction_id(call: Arc<Call>, transaction_id: &str) -> Result<()> {
+    use tracing::{debug, error};
+    
+    debug!("Storing transaction ID {} for call {}", transaction_id, call.id());
+    
+    // Store the transaction ID in the call
+    if let Err(e) = call.store_invite_transaction_id(transaction_id.to_string()).await {
+        error!("Failed to store transaction ID: {}", e);
+    }
+    
+    Ok(())
 } 

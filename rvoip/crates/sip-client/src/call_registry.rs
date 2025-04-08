@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use std::path::Path;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
+use std::net::SocketAddr;
 
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -40,6 +41,8 @@ pub struct TransactionRecord {
     pub status: String,
     /// Additional information about the transaction
     pub info: Option<String>,
+    /// Destination address (for outgoing transactions)
+    pub destination: Option<String>,
 }
 
 /// Call record with detailed information
@@ -440,7 +443,7 @@ impl CallRegistry {
         // Try to upgrade any weak references that aren't already included
         let refs = self.weak_calls.read().await;
         for (id, weak_call) in refs.iter() {
-            if !result.contains_key(id) {
+            if !result.contains_key::<String>(id) {
                 if let Some(call) = weak_call.upgrade() {
                     result.insert(id.clone(), call);
                 }
@@ -916,6 +919,47 @@ impl CallRegistry {
             Err(Error::Call(format!("Call record not found: {}", call_id)))
         }
     }
+
+    /// Get transaction destination (SocketAddr) from the registry, used for ACK fallback
+    async fn get_transaction_destination(&self, call_id: &str) -> Result<Option<SocketAddr>> {
+        let calls = self.call_history.read().await;
+        
+        // Look for the call
+        if let Some(call_record) = calls.get(call_id) {
+            // Look for any INVITE transaction with a destination
+            for tx in &call_record.transactions {
+                // Prioritize INVITE transactions as they're most likely to have the correct destination
+                if tx.transaction_type == "INVITE" && tx.destination.is_some() {
+                    if let Some(dest_str) = &tx.destination {
+                        // Try to parse the destination string as a SocketAddr
+                        if let Ok(addr) = dest_str.parse::<SocketAddr>() {
+                            debug!("Found destination for call {}: {}", call_id, addr);
+                            return Ok(Some(addr));
+                        }
+                    }
+                }
+            }
+            
+            // If no INVITE transaction found, try any transaction with a destination
+            for tx in &call_record.transactions {
+                if let Some(dest_str) = &tx.destination {
+                    // Try to parse the destination string as a SocketAddr
+                    if let Ok(addr) = dest_str.parse::<SocketAddr>() {
+                        debug!("Found fallback destination for call {}: {}", call_id, addr);
+                        return Ok(Some(addr));
+                    }
+                }
+            }
+            
+            // No suitable transaction found, but the call exists
+            debug!("No transaction with destination found for call {}", call_id);
+            return Ok(None);
+        }
+        
+        // Call not found
+        debug!("Call {} not found in registry", call_id);
+        Ok(None)
+    }
 }
 
 impl Clone for CallRegistry {
@@ -959,5 +1003,9 @@ impl CallRegistryInterface for CallRegistry {
     
     async fn update_transaction_status(&self, call_id: &str, transaction_id: &str, status: &str, info: Option<String>) -> Result<()> {
         self.update_transaction_status(call_id, transaction_id, status, info).await
+    }
+    
+    async fn get_transaction_destination(&self, call_id: &str) -> Result<Option<SocketAddr>> {
+        self.get_transaction_destination(call_id).await
     }
 } 

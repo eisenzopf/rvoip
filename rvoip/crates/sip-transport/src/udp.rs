@@ -65,6 +65,32 @@ impl UdpTransport {
         Ok((transport, events_rx))
     }
 
+    /// Create a default dummy UDP transport (used only for creating dummy transaction managers)
+    /// This transport doesn't work for real communication
+    pub fn default() -> Self {
+        // Create a socket bound to 0.0.0.0:0 (which will fail, but we need the structure)
+        let socket = UdpSocket::from_std(std::net::UdpSocket::bind("0.0.0.0:0").unwrap_or_else(|_| {
+            // If binding fails, create a dummy socket that will never work
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap_or_else(|_| {
+                panic!("Failed to create dummy UDP socket");
+            });
+            socket.set_nonblocking(true).unwrap();
+            socket
+        })).unwrap();
+        
+        // Create a dummy event channel
+        let (events_tx, _) = mpsc::channel(1);
+        
+        // Create and return the transport with closed=true so it won't be used
+        UdpTransport {
+            inner: Arc::new(UdpTransportInner {
+                socket,
+                closed: AtomicBool::new(true), // Mark as closed
+                events_tx,
+            }),
+        }
+    }
+
     // Spawns a task to receive packets from the UDP socket
     fn spawn_receive_loop(&self) {
         let transport = self.clone();

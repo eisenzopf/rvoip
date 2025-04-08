@@ -133,6 +133,26 @@ impl TransactionManager {
         Ok((manager, events_rx))
     }
     
+    /// Create a dummy transaction manager for use in situations where a real one is not needed
+    /// This should only be used for non-functional instances (like in WeakCall::upgrade)
+    pub fn dummy(
+        transport: Arc<dyn Transport>,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+    ) -> Self {
+        let (events_tx, _) = mpsc::channel(10);
+        
+        TransactionManager {
+            transport,
+            client_transactions: Arc::new(Mutex::new(HashMap::new())),
+            server_transactions: Arc::new(Mutex::new(HashMap::new())),
+            transaction_destinations: Arc::new(Mutex::new(HashMap::new())),
+            events_tx,
+            event_subscribers: Arc::new(Mutex::new(Vec::new())),
+            transport_rx: Arc::new(Mutex::new(transport_rx)),
+            running: Arc::new(Mutex::new(false)), // Not running
+        }
+    }
+    
     /// Start processing incoming transport messages
     fn start_message_loop(&self) {
         let transport = self.transport.clone();

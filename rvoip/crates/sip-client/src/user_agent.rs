@@ -238,7 +238,7 @@ impl UserAgent {
                                 let calls_read = active_calls.read().await;
                                 if let Some(call) = calls_read.get(call_id) {
                                     // Let the call handle the response (now works with immutable reference)
-                                    if let Err(e) = call.handle_response(response.clone()).await {
+                                    if let Err(e) = call.handle_response(&response.clone()).await {
                                         error!("Error handling response in call: {}", e);
                                     }
                                 }
@@ -263,7 +263,7 @@ impl UserAgent {
                                     debug!("Found call {} for response, handling", call_id);
                                     
                                     // Handle response
-                                    if let Err(e) = call.handle_response(response).await {
+                                    if let Err(e) = call.handle_response(&response).await {
                                         error!("Failed to handle response: {}", e);
                                     }
                                     
