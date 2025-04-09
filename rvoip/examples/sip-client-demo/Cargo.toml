@@ -10,7 +10,7 @@ publish = false
 unused_imports = "allow"
 
 [dependencies]
-# Use our new SIP client library
+# Use our SIP client library with default features (including ICE)
 rvoip-sip-client = { path = "../../crates/sip-client" }
 
 # Async runtime and utilities

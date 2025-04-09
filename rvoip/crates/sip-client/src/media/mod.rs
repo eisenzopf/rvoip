@@ -29,6 +29,7 @@ use tracing::{debug, error, warn};
 use crate::config::CodecType as ClientCodecType;
 use crate::error::{Error, Result};
 use crate::media::rtcp::{RtcpSession, RtcpStats};
+use crate::ice::{IceSession, IceSessionState, IceConfig};
 
 /// Type of media stream
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,6 +77,9 @@ pub struct MediaSession {
     
     /// Holding state
     holding: Arc<RwLock<bool>>,
+    
+    /// ICE session for NAT traversal
+    ice_session: Option<Arc<IceSession>>,
 }
 
 impl MediaSession {
@@ -86,7 +90,29 @@ impl MediaSession {
         remote_rtp_addr: SocketAddr,
         codec: ClientCodecType,
         enable_rtcp: bool,
+        enable_ice: bool,
     ) -> Result<Self> {
+        // Set up ICE session if enabled
+        let ice_session = if enable_ice {
+            // Create ICE configuration
+            let ice_config = IceConfig::default()
+                .with_stun_servers(vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                ])
+                .with_gathering_policy(crate::ice::GatheringPolicy::All);
+            
+            // Create ICE session
+            let session = IceSession::new(ice_config).await?;
+            
+            // Start gathering candidates
+            session.start_gathering().await?;
+            
+            Some(Arc::new(session))
+        } else {
+            None
+        };
+    
         // Will be implemented in rtp.rs
         let rtp_session = RtpSession::new(
             local_rtp_addr,
@@ -118,7 +144,7 @@ impl MediaSession {
         };
         
         Ok(Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: Uuid::new_v4().to_string(),
             media_type,
             rtp_session: Arc::new(RwLock::new(rtp_session)),
             rtcp_session,
@@ -129,6 +155,7 @@ impl MediaSession {
             codec,
             muted: Arc::new(RwLock::new(false)),
             holding: Arc::new(RwLock::new(false)),
+            ice_session,
         })
     }
     
@@ -206,8 +233,54 @@ impl MediaSession {
         rtp_session.send_packet(data).await
     }
     
+    /// Get the ICE session if enabled
+    pub fn ice_session(&self) -> Option<Arc<IceSession>> {
+        self.ice_session.clone()
+    }
+    
+    /// Check if ICE is enabled for this session
+    pub fn is_ice_enabled(&self) -> bool {
+        self.ice_session.is_some()
+    }
+    
+    /// Get ICE state if ICE is enabled
+    pub async fn ice_state(&self) -> Option<IceSessionState> {
+        if let Some(ice) = &self.ice_session {
+            Some(ice.state().await)
+        } else {
+            None
+        }
+    }
+    
     /// Start media flow
     pub async fn start(&self) -> Result<()> {
+        // If ICE is enabled, wait for ICE to connect first
+        if let Some(ice_session) = &self.ice_session {
+            let ice_state = ice_session.state().await;
+            
+            // Only proceed if ICE is connected or we're not using ICE
+            match ice_state {
+                IceSessionState::Connected => {
+                    // If we have a selected candidate pair, use those addresses
+                    if let Some((local, remote)) = ice_session.selected_pair().await {
+                        // Update RTP session with ICE-selected addresses
+                        let mut rtp_session = self.rtp_session.write().await;
+                        rtp_session.update_remote_addr(remote.socket_addr()).await?;
+                    }
+                }
+                IceSessionState::Failed => {
+                    return Err(crate::error::Error::Media("ICE connection failed".into()));
+                }
+                _ if ice_state != IceSessionState::New => {
+                    // ICE is still in progress, wait for it to complete
+                    return Err(crate::error::Error::Media("ICE connection not established yet".into()));
+                }
+                _ => {
+                    // ICE is in New state or otherwise not active, proceed without ICE
+                }
+            }
+        }
+        
         let mut rtp_session = self.rtp_session.write().await;
         rtp_session.start().await?;
         
@@ -227,6 +300,11 @@ impl MediaSession {
         if let Some(rtcp_session) = &self.rtcp_session {
             let mut rtcp = rtcp_session.write().await;
             rtcp.stop().await?;
+        }
+        
+        // Terminate ICE session if active
+        if let Some(ice_session) = &self.ice_session {
+            ice_session.terminate().await?;
         }
         
         Ok(())
@@ -254,6 +332,7 @@ impl std::fmt::Debug for MediaSession {
             .field("remote_rtcp_addr", &self.remote_rtcp_addr)
             .field("codec", &self.codec)
             .field("rtcp_enabled", &self.rtcp_session.is_some())
+            .field("ice_enabled", &self.ice_session.is_some())
             .finish()
     }
 } 

@@ -1835,17 +1835,19 @@ name = "rvoip-ice-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "byteorder",
  "bytes",
+ "futures",
  "rand",
  "serde",
  "serde_json",
- "stun 0.4.4",
+ "socket2",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "turn 0.6.1",
- "webrtc-ice",
+ "uuid",
 ]
 
 [[package]]

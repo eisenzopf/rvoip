@@ -43,6 +43,14 @@ pub enum Error {
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// Authentication error
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+
+    /// Protocol error
+    #[error("Protocol error: {0}")]
+    ProtocolError(String),
+
     /// Other errors
     #[error("{0}")]
     Other(String),

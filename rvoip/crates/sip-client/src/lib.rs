@@ -241,6 +241,10 @@ pub use call_registry::{CallRegistry, CallRecord, CallStateRecord, CallFilter, C
 pub mod media;
 pub use media::{MediaSession, MediaType};
 
+// ICE (Interactive Connectivity Establishment) for NAT traversal
+pub mod ice;
+pub use ice::{IceSession, IceSessionState, SipIceCandidate};
+
 // User agent implementation (will be needed for backward compatibility)
 mod user_agent;
 pub use user_agent::UserAgent;

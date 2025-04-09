@@ -135,6 +135,9 @@ impl SdpHandler {
             // Extract local port
             let local_port = local_audio.port;
             
+            // Local address
+            let local_rtp_addr = SocketAddr::new(self.local_ip, local_port);
+            
             // Find matching codecs
             let mut common_codecs = Vec::new();
             
@@ -143,8 +146,11 @@ impl SdpHandler {
                     if local_format.encoding.to_uppercase() == remote_format.encoding.to_uppercase() {
                         // Codec match found
                         let codec_type = match local_format.encoding.to_uppercase().as_str() {
-                            "PCMU" => CodecType::Pcmu,
-                            "PCMA" => CodecType::Pcma,
+                            "PCMU" => CodecType::PCMU,
+                            "PCMA" => CodecType::PCMA,
+                            "G722" => CodecType::G722,
+                            "G729" => CodecType::G729,
+                            "OPUS" => CodecType::OPUS,
                             // Add other codec types as needed
                             _ => continue, // Skip unsupported codecs
                         };
@@ -160,28 +166,36 @@ impl SdpHandler {
                 return Err(Error::SdpParsing("No matching codecs found".into()));
             }
             
-            // Create RTP session config
-            let rtp_config = RtpSessionConfig {
-                local_port,
-                remote_addr: remote_rtp_addr,
-                payload_type: common_codecs[0].1, // Use first matching codec
-                // Add other configuration as needed
-                ..Default::default()
+            // Check for ICE attributes in remote SDP
+            let has_ice = remote_sdp.attributes.contains_key("ice-ufrag") || 
+                          remote_audio.attributes.contains_key("ice-ufrag");
+            
+            // Extract ICE candidates from remote SDP if ICE is in use
+            let remote_candidates = if has_ice {
+                self.extract_ice_candidates(remote_sdp)
+            } else {
+                Vec::new()
             };
             
-            // Create codec parameters
-            let codec_params = CodecParams {
-                codec_type: common_codecs[0].0, // Use first matching codec
-                // Add other parameters as needed
-                ..Default::default()
-            };
-            
-            // Create media session
+            // Create media session with ICE if needed
             let media_session = MediaSession::new(
                 MediaType::Audio,
-                rtp_config,
-                codec_params,
-            );
+                local_rtp_addr,
+                remote_rtp_addr,
+                common_codecs[0].0, // Use first matching codec
+                self.call_config.enable_rtcp(),
+                has_ice && self.call_config.enable_ice(),
+            ).await?;
+            
+            // If we have ICE candidates and ICE is enabled, add them to the ICE session
+            if has_ice && self.call_config.enable_ice() && !remote_candidates.is_empty() {
+                if let Some(ice_session) = media_session.ice_session() {
+                    // Add each remote candidate to our ICE session
+                    for candidate in remote_candidates {
+                        ice_session.add_remote_candidate(candidate).await?;
+                    }
+                }
+            }
             
             return Ok(Some(media_session));
         }
@@ -316,28 +330,18 @@ impl SdpHandler {
             // Add RTP/SAVPF protocol for SRTP with DTLS
             media.protocol = "UDP/TLS/RTP/SAVPF".to_string();
             
-            // Add ICE candidates
-            for (i, candidate) in candidates.iter().enumerate() {
-                let foundation = &candidate.foundation;
-                let component = candidate.component;
-                let transport = candidate.protocol.to_lowercase();
-                let priority = candidate.priority;
-                let ip = candidate.ip.to_string();
-                let port = candidate.port;
-                let typ = &candidate.candidate_type;
+            // Add ICE candidates using SipIceCandidate trait
+            for candidate in &candidates {
+                // Get SDP line using our SipIceCandidate trait
+                let candidate_line = crate::ice::SipIceCandidate::to_sdp_line(candidate);
                 
-                // Format: foundation component transport priority ip port typ candidate-type [raddr related-addr] [rport related-port]
-                let mut candidate_str = format!(
-                    "{} {} {} {} {} {} typ {}",
-                    foundation, component, transport, priority, ip, port, typ
-                );
-                
-                // Add related address if present
-                if let (Some(raddr), Some(rport)) = (candidate.related_address, candidate.related_port) {
-                    candidate_str.push_str(&format!(" raddr {} rport {}", raddr, rport));
+                // Extract the part after "a=candidate:"
+                if let Some(stripped) = candidate_line.strip_prefix("a=candidate:") {
+                    media.attributes.insert("candidate".to_string(), stripped.to_string());
+                } else {
+                    // Default fallback
+                    media.attributes.insert("candidate".to_string(), candidate_line);
                 }
-                
-                media.attributes.insert(format!("candidate:{}", i), candidate_str);
             }
             
             // Add end-of-candidates attribute
@@ -386,7 +390,15 @@ impl SdpHandler {
         let component = parts[1].parse::<u32>().ok()?;
         
         // Parse transport
-        let protocol = parts[2].to_uppercase();
+        let transport_str = parts[2].to_lowercase();
+        // Convert transport string to TransportType enum
+        let transport = match transport_str.as_str() {
+            "udp" => crate::ice::TransportType::Udp,
+            "tcp" => crate::ice::TransportType::Tcp,
+            "tcp-active" => crate::ice::TransportType::TcpActive,
+            "tcp-passive" => crate::ice::TransportType::TcpPassive,
+            _ => crate::ice::TransportType::Udp, // Default
+        };
         
         // Parse priority
         let priority = parts[3].parse::<u32>().ok()?;
@@ -403,7 +415,15 @@ impl SdpHandler {
         }
         
         // Parse candidate type
-        let candidate_type = parts[7].to_string();
+        let candidate_type_str = parts[7].to_lowercase();
+        // Convert candidate type string to CandidateType enum
+        let candidate_type = match candidate_type_str.as_str() {
+            "host" => crate::ice::CandidateType::Host,
+            "srflx" => crate::ice::CandidateType::Srflx,
+            "prflx" => crate::ice::CandidateType::Prflx,
+            "relay" => crate::ice::CandidateType::Relay,
+            _ => crate::ice::CandidateType::Host, // Default
+        };
         
         // Parse related address and port if present
         let mut related_address = None;
@@ -417,17 +437,19 @@ impl SdpHandler {
             }
         }
         
-        // Create candidate
+        // Create candidate using new IceCandidate struct
         Some(crate::ice::IceCandidate {
             foundation,
             component,
-            protocol,
+            transport,
             priority,
             ip,
             port,
             candidate_type,
             related_address,
             related_port,
+            network_type: None,
+            generation: None,
         })
     }
     

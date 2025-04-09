@@ -7,16 +7,16 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Async runtime
-tokio = { workspace = true, features = ["net", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "sync", "time", "macros"] }
 
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
-# ICE/STUN/TURN dependencies
-webrtc-ice = "0.10"
-stun = "0.4"
-turn = "0.6"
+# Network and protocol dependencies
+socket2 = "0.5"
+byteorder = "1.5"
+uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Serialization
 bytes = { workspace = true }
@@ -28,6 +28,10 @@ tracing = { workspace = true }
 
 # Random numbers
 rand = "0.8"
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

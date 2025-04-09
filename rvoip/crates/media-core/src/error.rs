@@ -27,6 +27,10 @@ pub enum Error {
     #[error("Format error: {0}")]
     Format(String),
 
+    /// Invalid format
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+
     /// SRTP error
     #[error("SRTP error: {0}")]
     Srtp(String),

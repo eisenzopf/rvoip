@@ -1,92 +1,61 @@
 use std::io;
-use std::net::AddrParseError;
+use std::fmt;
+
 use thiserror::Error;
+
+use rvoip_sip_core::{Error as SipError};
+use rvoip_transaction_core::{Error as TransactionError};
+use rvoip_media_core::{Error as MediaError};
 
 /// Result type for sip-client operations
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error types for the SIP client
-#[derive(Debug, thiserror::Error)]
+#[derive(Error, Debug)]
 pub enum Error {
-    /// Transport error
-    #[error("Transport error: {0}")]
-    Transport(String),
-    
-    /// SIP protocol error
-    #[error("SIP protocol error: {0}")]
-    SipProtocol(String),
-    
-    /// SDP protocol error
-    #[error("SDP protocol error: {0}")]
-    SdpProtocol(String),
-    
-    /// Call error
-    #[error("Call error: {0}")]
-    Call(String),
-    
-    /// Media error
+    /// SIP protocol errors
+    #[error("SIP error: {0}")]
+    Sip(#[from] SipError),
+
+    /// Transaction errors
+    #[error("Transaction error: {0}")]
+    Transaction(#[from] TransactionError),
+
+    /// Media errors
     #[error("Media error: {0}")]
-    Media(#[from] rvoip_media_core::Error),
-    
-    /// Authentication error
-    #[error("Authentication error: {0}")]
-    Authentication(String),
-    
-    /// Registration error
-    #[error("Registration error: {0}")]
-    Registration(String),
-    
-    /// Configuration error
-    #[error("Configuration error: {0}")]
-    Configuration(String),
-    
-    /// Client error
-    #[error("Client error: {0}")]
-    Client(String),
-    
-    /// Unknown error
-    #[error("Unknown error: {0}")]
-    Unknown(String),
+    Media(#[from] MediaError),
 
-    /// SDP negotiation errors
-    #[error("SDP negotiation error: {0}")]
-    SdpNegotiation(String),
+    /// I/O errors
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
 
-    /// Network errors
-    #[error("Network error: {0}")]
-    Network(#[from] io::Error),
+    /// Invalid arguments
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 
-    /// Address parsing errors
-    #[error("Address parse error: {0}")]
-    AddrParse(#[from] AddrParseError),
-
-    /// Timeout errors
-    #[error("Timeout: {0}")]
-    Timeout(String),
-
-    /// Invalid state transitions
-    #[error("Invalid state transition: {0}")]
+    /// Invalid state 
+    #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    /// Storage errors
-    #[error("Storage error: {0}")]
-    Storage(String),
-
-    /// General errors
+    /// Call not found
+    #[error("Call not found: {0}")]
+    CallNotFound(String),
+    
+    /// Network errors
+    #[error("Network error: {0}")]
+    Network(String),
+    
+    /// Authentication errors
+    #[error("Authentication error: {0}")]
+    Auth(String),
+    
+    /// Feature not available
+    #[error("Feature not available: {0}")]
+    FeatureNotAvailable(String),
+    
+    /// Other error
     #[error("{0}")]
     Other(String),
-
-    /// SDP parsing error
-    #[error("SDP parsing error: {0}")]
-    SdpParsing(String),
-    
-    /// ICE error (from ice-core)
-    #[error("ICE error: {0}")]
-    Ice(#[from] rvoip_ice_core::Error),
-    
-    /// Transport error (from sip-transport)
-    #[error("SIP transport error: {0}")]
-    SipTransport(#[from] rvoip_sip_transport::Error),
 }
 
 impl From<anyhow::Error> for Error {
