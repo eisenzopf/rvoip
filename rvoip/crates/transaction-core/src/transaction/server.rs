@@ -177,7 +177,7 @@ impl Transaction for ServerInviteTransaction {
             
             // Check if branch matches
             if let (Some(incoming_branch), Some(our_branch)) = (
-                utils::extract_branch(message),
+                message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
                 utils::extract_branch(&Message::Request(self.request.clone()))
             ) {
                 // Match transaction by branch
@@ -461,7 +461,7 @@ impl Transaction for ServerNonInviteTransaction {
             
             // Check if branch matches
             if let (Some(incoming_branch), Some(our_branch)) = (
-                utils::extract_branch(message),
+                message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
                 utils::extract_branch(&Message::Request(self.request.clone()))
             ) {
                 // Match transaction by branch

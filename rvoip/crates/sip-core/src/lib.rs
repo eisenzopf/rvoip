@@ -6,6 +6,7 @@
 mod error;
 mod header;
 mod header_parsers;
+mod headers;
 mod message;
 mod method;
 mod multipart;
@@ -19,6 +20,7 @@ pub use header_parsers::{
     parse_auth_params, parse_contact, parse_address, parse_via, 
     parse_multiple_vias, parse_cseq, parse_content_type,
 };
+pub use headers::{Via, ViaParams};
 pub use message::{Message, Request, Response, StatusCode};
 pub use method::Method;
 pub use multipart::{MimePart, MultipartBody};
@@ -34,7 +36,7 @@ pub mod prelude {
     pub use super::{
         Error, Header, HeaderName, HeaderValue, Host, Message, Method, 
         Request, Response, Result, Scheme, StatusCode, Uri, Version, 
-        parse_message, IncrementalParser, ParseState, MultipartBody,
+        Via, ViaParams, parse_message, IncrementalParser, ParseState, MultipartBody,
         MimePart, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
     };
 }

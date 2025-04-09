@@ -1,4 +1,5 @@
-use crate::{parse_sip_message, expect_parse_error, validate_message};
+mod test_utils;
+use test_utils::{parse_sip_message, expect_parse_error, validate_message};
 use rvoip_sip_core::{Method, Uri, StatusCode, Message};
 
 /// Custom torture tests for additional SIP message corner cases

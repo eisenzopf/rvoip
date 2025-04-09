@@ -506,6 +506,28 @@ impl Request {
     pub fn cseq(&self) -> Option<&str> {
         self.header(&HeaderName::CSeq).and_then(|h| h.value.as_text())
     }
+
+    /// Get all Via headers as structured Via objects
+    pub fn via_headers(&self) -> Vec<crate::Via> {
+        let mut result = Vec::new();
+        
+        for header in &self.headers {
+            if header.name == HeaderName::Via {
+                if let Some(text) = header.value.as_text() {
+                    if let Ok(via) = crate::Via::parse(text) {
+                        result.push(via);
+                    }
+                }
+            }
+        }
+        
+        result
+    }
+
+    /// Get the first Via header as a structured Via object
+    pub fn first_via(&self) -> Option<crate::Via> {
+        self.via_headers().into_iter().next()
+    }
 }
 
 impl fmt::Display for Request {
@@ -611,6 +633,28 @@ impl Response {
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
         self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+    }
+
+    /// Get all Via headers as structured Via objects
+    pub fn via_headers(&self) -> Vec<crate::Via> {
+        let mut result = Vec::new();
+        
+        for header in &self.headers {
+            if header.name == HeaderName::Via {
+                if let Some(text) = header.value.as_text() {
+                    if let Ok(via) = crate::Via::parse(text) {
+                        result.push(via);
+                    }
+                }
+            }
+        }
+        
+        result
+    }
+
+    /// Get the first Via header as a structured Via object
+    pub fn first_via(&self) -> Option<crate::Via> {
+        self.via_headers().into_iter().next()
     }
 }
 
@@ -720,6 +764,19 @@ impl Message {
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
         self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+    }
+
+    /// Get Via headers as structured Via objects
+    pub fn via_headers(&self) -> Vec<crate::Via> {
+        match self {
+            Message::Request(req) => req.via_headers(),
+            Message::Response(resp) => resp.via_headers(),
+        }
+    }
+
+    /// Get the first Via header as a structured Via object
+    pub fn first_via(&self) -> Option<crate::Via> {
+        self.via_headers().into_iter().next()
     }
 
     /// Convert the message to bytes

@@ -423,12 +423,22 @@ impl Transaction for ClientInviteTransaction {
         if let Message::Response(_response) = message {
             // Extract CSeq and method
             if let Some((_, method)) = utils::extract_cseq(message) {
-                // Only match INVITE responses
-                if method != Method::Invite {
+                // Match method with our request
+                if method != self.request.method {
                     return false;
                 }
                 
                 // Check if branch and call-id match
+                if let (Some(incoming_branch), Some(our_branch)) = (
+                    message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                    utils::extract_branch(&Message::Request(self.request.clone()))
+                ) {
+                    if incoming_branch == our_branch {
+                        return true;
+                    }
+                }
+                
+                // Fall back to checking call-id
                 if let (Some(call_id), Some(our_call_id)) = (
                     utils::extract_call_id(message),
                     utils::extract_call_id(&Message::Request(self.request.clone()))
@@ -796,6 +806,16 @@ impl Transaction for ClientNonInviteTransaction {
                 }
                 
                 // Check if branch and call-id match
+                if let (Some(incoming_branch), Some(our_branch)) = (
+                    message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                    utils::extract_branch(&Message::Request(self.request.clone()))
+                ) {
+                    if incoming_branch == our_branch {
+                        return true;
+                    }
+                }
+                
+                // Fall back to checking call-id
                 if let (Some(call_id), Some(our_call_id)) = (
                     utils::extract_call_id(message),
                     utils::extract_call_id(&Message::Request(self.request.clone()))
