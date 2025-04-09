@@ -23,6 +23,18 @@ bytes = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# TLS support
+tokio-rustls = "0.24"
+rustls = "0.21"
+rustls-pemfile = "1.0"
+
+[features]
+default = ["udp", "tls"]
+udp = []
+tls = ["tokio-rustls", "rustls", "rustls-pemfile"]
+tcp = []
+ws = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true } 

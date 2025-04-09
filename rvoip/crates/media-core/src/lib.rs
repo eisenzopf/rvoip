@@ -5,12 +5,16 @@
 
 pub mod error;
 pub mod codec;
+pub mod srtp;
+pub mod dtls;
 
-pub use error::Error;
+pub use error::{Error, Result};
 pub use codec::Codec;
+pub use srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+pub use dtls::{DtlsConnection, DtlsConfig, DtlsEvent, TransportConn};
 
-/// Result type for media operations
-pub type Result<T> = std::result::Result<T, Error>;
+use std::net::SocketAddr;
+use std::io;
 
 /// Media sample type (raw audio data)
 pub type Sample = i16;

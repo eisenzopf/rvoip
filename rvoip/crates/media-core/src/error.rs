@@ -1,32 +1,63 @@
+use std::io;
 use thiserror::Error;
 
-/// Error type for media operations
+/// Result type for media operations
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Error types for media operations
 #[derive(Debug, Error)]
 pub enum Error {
-    /// Error when encoding audio
-    #[error("Failed to encode audio: {0}")]
-    EncodeError(String),
-
-    /// Error when decoding audio
-    #[error("Failed to decode audio: {0}")]
-    DecodeError(String),
-
-    /// Invalid audio format
-    #[error("Invalid audio format: {0}")]
-    InvalidFormat(String),
-
-    /// Buffer too small
-    #[error("Buffer too small: need {required} but have {available}")]
-    BufferTooSmall {
-        required: usize,
-        available: usize,
-    },
-
-    /// Unsupported codec feature or operation
-    #[error("Unsupported codec feature: {0}")]
-    UnsupportedFeature(String),
-
     /// I/O error
     #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(#[from] io::Error),
+
+    /// Media processing error
+    #[error("Media processing error: {0}")]
+    Media(String),
+
+    /// Network error
+    #[error("Network error: {0}")]
+    Network(String),
+
+    /// Codec error
+    #[error("Codec error: {0}")]
+    Codec(String),
+
+    /// Format error
+    #[error("Format error: {0}")]
+    Format(String),
+
+    /// SRTP error
+    #[error("SRTP error: {0}")]
+    Srtp(String),
+
+    /// DTLS error
+    #[error("DTLS error: {0}")]
+    Dtls(String),
+
+    /// ICE error
+    #[error("ICE error: {0}")]
+    Ice(String),
+
+    /// Invalid state
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+
+    /// Invalid parameter
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
+
+    /// Timeout
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
+    /// Other errors
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<&str> for Error {
+    fn from(err: &str) -> Self {
+        Error::Other(err.to_string())
+    }
 } 

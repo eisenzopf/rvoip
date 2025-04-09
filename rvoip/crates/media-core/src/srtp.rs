@@ -9,7 +9,6 @@ use webrtc_srtp::{session::Session, session::SessionKeys, session::Context, prot
 use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
-use crate::media::rtp::RtpPacket;
 
 /// SRTP key material
 #[derive(Debug, Clone)]
@@ -91,7 +90,7 @@ pub struct SrtpSession {
     remote_addr: SocketAddr,
     
     /// RTP receiver
-    rtp_rx: Arc<Mutex<Option<mpsc::Sender<RtpPacket>>>>,
+    rtp_rx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     
     /// Running flag
     running: Arc<RwLock<bool>>,
@@ -106,10 +105,10 @@ impl SrtpSession {
         config: SrtpConfig,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-    ) -> Result<(Self, mpsc::Receiver<RtpPacket>)> {
+    ) -> Result<(Self, mpsc::Receiver<Vec<u8>>)> {
         // Create UDP socket
         let socket = UdpSocket::bind(local_addr).await
-            .map_err(|e| Error::Media(format!("Failed to bind UDP socket: {}", e)))?;
+            .map_err(|e| Error::Network(format!("Failed to bind UDP socket: {}", e)))?;
         
         // Create SRTP sessions
         let local_keys = SessionKeys {
@@ -184,17 +183,9 @@ impl SrtpSession {
                         // Decrypt SRTP packet
                         match inbound.lock().await.decrypt_rtp(&packet_data) {
                             Ok(decrypted) => {
-                                // Try to parse as RTP packet
-                                match RtpPacket::parse(&decrypted) {
-                                    Ok(packet) => {
-                                        // Forward packet to receiver
-                                        if let Some(tx) = &*rtp_rx.lock().await {
-                                            let _ = tx.try_send(packet);
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!("Failed to parse RTP packet: {}", e);
-                                    }
+                                // Forward packet to receiver
+                                if let Some(tx) = &*rtp_rx.lock().await {
+                                    let _ = tx.try_send(decrypted);
                                 }
                             },
                             Err(e) => {
@@ -219,31 +210,15 @@ impl SrtpSession {
         Ok(())
     }
     
-    /// Send an RTP packet
-    pub async fn send_rtp(&self, packet: &RtpPacket) -> Result<()> {
-        // Serialize the packet
-        let rtp_data = packet.serialize();
-        
-        // Encrypt the packet
-        let encrypted = self.outbound.lock().await.encrypt_rtp(&rtp_data)
-            .map_err(|e| Error::Media(format!("Failed to encrypt RTP packet: {}", e)))?;
-        
-        // Send the encrypted packet
-        self.socket.send_to(&encrypted, self.remote_addr).await
-            .map_err(|e| Error::Media(format!("Failed to send SRTP packet: {}", e)))?;
-        
-        Ok(())
-    }
-    
-    /// Send raw RTP data
-    pub async fn send_rtp_data(&self, data: &[u8]) -> Result<()> {
+    /// Send RTP data through SRTP
+    pub async fn send_rtp(&self, data: &[u8]) -> Result<()> {
         // Encrypt the packet
         let encrypted = self.outbound.lock().await.encrypt_rtp(data)
             .map_err(|e| Error::Media(format!("Failed to encrypt RTP packet: {}", e)))?;
         
         // Send the encrypted packet
         self.socket.send_to(&encrypted, self.remote_addr).await
-            .map_err(|e| Error::Media(format!("Failed to send SRTP packet: {}", e)))?;
+            .map_err(|e| Error::Network(format!("Failed to send SRTP packet: {}", e)))?;
         
         Ok(())
     }
@@ -267,5 +242,20 @@ impl SrtpSession {
         *self.rtp_rx.lock().await = None;
         
         Ok(())
+    }
+    
+    /// Get local address
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+    
+    /// Get remote address
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+    
+    /// Set remote address
+    pub fn set_remote_addr(&mut self, addr: SocketAddr) {
+        self.remote_addr = addr;
     }
 } 

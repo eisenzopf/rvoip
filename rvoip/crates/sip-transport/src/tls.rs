@@ -15,9 +15,7 @@ use tokio_rustls::server::TlsStream;
 use tracing::{debug, error, info, warn};
 use bytes::Bytes;
 
-use rvoip_sip_core::Message;
-use rvoip_sip_transport::{Transport, TransportEvent};
-
+use crate::{Transport, TransportEvent};
 use crate::error::{Error, Result};
 
 /// TLS transport for SIP
@@ -52,7 +50,7 @@ impl TlsTransport {
             .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(cert, key)
-            .map_err(|e| Error::Transport(format!("TLS error: {}", e)))?;
+            .map_err(|e| Error::TlsError(format!("TLS config error: {}", e)))?;
         
         // Create TLS acceptor
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -214,20 +212,15 @@ impl TlsTransport {
             }
         }
         
-        // Connect to remote
-        let tcp_stream = TcpStream::connect(remote_addr).await
-            .map_err(|e| Error::Transport(format!("Failed to connect: {}", e)))?;
-        
-        // TODO: Implement client TLS configuration and connection
-        
-        Ok(())
+        // Connect to remote (not implemented yet)
+        Err(Error::NotImplemented("TLS client connection not implemented yet".to_string()))
     }
 }
 
 #[async_trait]
 impl Transport for TlsTransport {
-    /// Send a SIP message
-    async fn send_message(&self, message: Message, destination: SocketAddr) -> io::Result<()> {
+    /// Send a message
+    async fn send_message(&self, message: rvoip_sip_core::Message, destination: SocketAddr) -> io::Result<()> {
         // Convert message to bytes
         let bytes = message.to_string().into_bytes();
         
@@ -250,16 +243,16 @@ impl Transport for TlsTransport {
 fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
     // Load certificate file
     let mut cert_file = File::open(path)
-        .map_err(|e| Error::Transport(format!("Failed to open certificate file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to open certificate file: {}", e)))?;
     
     // Read certificate data
     let mut cert_data = Vec::new();
     cert_file.read_to_end(&mut cert_data)
-        .map_err(|e| Error::Transport(format!("Failed to read certificate file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to read certificate file: {}", e)))?;
     
     // Parse PEM certificates
     let certs = rustls_pemfile::certs(&mut cert_data.as_slice())
-        .map_err(|_| Error::Transport("Failed to parse certificate".into()))?
+        .map_err(|_| Error::TlsError("Failed to parse certificate".into()))?
         .iter()
         .map(|v| Certificate(v.clone()))
         .collect();
@@ -271,19 +264,19 @@ fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
 fn load_private_key(path: &Path) -> Result<PrivateKey> {
     // Load key file
     let mut key_file = File::open(path)
-        .map_err(|e| Error::Transport(format!("Failed to open key file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to open key file: {}", e)))?;
     
     // Read key data
     let mut key_data = Vec::new();
     key_file.read_to_end(&mut key_data)
-        .map_err(|e| Error::Transport(format!("Failed to read key file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to read key file: {}", e)))?;
     
     // Parse PEM key
     let keys = rustls_pemfile::pkcs8_private_keys(&mut key_data.as_slice())
-        .map_err(|_| Error::Transport("Failed to parse private key".into()))?;
+        .map_err(|_| Error::TlsError("Failed to parse private key".into()))?;
     
     if keys.is_empty() {
-        return Err(Error::Transport("No private keys found".into()));
+        return Err(Error::TlsError("No private keys found".into()));
     }
     
     Ok(PrivateKey(keys[0].clone()))

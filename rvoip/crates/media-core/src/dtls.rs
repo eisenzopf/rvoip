@@ -15,8 +15,7 @@ use webrtc_srtp::protection_profile::ProtectionProfile;
 use webrtc_util::Conn;
 
 use crate::error::{Error, Result};
-use crate::media::srtp::{SrtpKeys, SrtpConfig};
-use crate::ice::IceAgent;
+use crate::srtp::{SrtpKeys, SrtpConfig};
 
 /// DTLS configuration
 #[derive(Debug, Clone)]
@@ -57,6 +56,15 @@ pub enum DtlsEvent {
     Error(String),
 }
 
+/// Wrapper for UDP socket or ICE agent
+pub enum TransportConn {
+    /// UDP socket for DTLS
+    UdpSocket(Arc<UdpSocket>),
+    
+    /// ICE agent for DTLS
+    IceAgent(Arc<rvoip_ice_core::IceAgent>),
+}
+
 /// DTLS connection for secure key exchange
 pub struct DtlsConnection {
     /// DTLS configuration
@@ -65,8 +73,8 @@ pub struct DtlsConnection {
     /// DTLS connection
     conn: Option<Arc<DTLSConn>>,
     
-    /// UDP socket for DTLS
-    socket: Arc<RwLock<Option<Arc<UdpSocket>>>>,
+    /// Transport connection
+    transport: Arc<RwLock<Option<TransportConn>>>,
     
     /// Local address
     local_addr: SocketAddr,
@@ -95,7 +103,7 @@ impl DtlsConnection {
         let conn = Self {
             config,
             conn: None,
-            socket: Arc::new(RwLock::new(None)),
+            transport: Arc::new(RwLock::new(None)),
             local_addr,
             remote_addr,
             event_tx: Arc::new(Mutex::new(Some(event_tx))),
@@ -105,16 +113,17 @@ impl DtlsConnection {
         Ok((conn, event_rx))
     }
     
-    /// Set the ICE agent to use for DTLS
-    pub async fn set_ice_agent(&self, ice_agent: Arc<IceAgent>) -> Result<()> {
-        // TODO: Implement ICE-DTLS integration
+    /// Set the UDP socket to use for DTLS
+    pub async fn set_udp_socket(&self, socket: Arc<UdpSocket>) -> Result<()> {
+        let mut transport_guard = self.transport.write().await;
+        *transport_guard = Some(TransportConn::UdpSocket(socket));
         Ok(())
     }
     
-    /// Set the UDP socket to use for DTLS
-    pub async fn set_socket(&self, socket: Arc<UdpSocket>) -> Result<()> {
-        let mut sock_guard = self.socket.write().await;
-        *sock_guard = Some(socket);
+    /// Set the ICE agent to use for DTLS
+    pub async fn set_ice_agent(&self, ice_agent: Arc<rvoip_ice_core::IceAgent>) -> Result<()> {
+        let mut transport_guard = self.transport.write().await;
+        *transport_guard = Some(TransportConn::IceAgent(ice_agent));
         Ok(())
     }
     
@@ -128,12 +137,12 @@ impl DtlsConnection {
         // Set running flag
         *self.running.write().await = true;
         
-        // Get socket
-        let socket = {
-            let socket_guard = self.socket.read().await;
-            match &*socket_guard {
-                Some(socket) => socket.clone(),
-                None => return Err(Error::Media("No socket set for DTLS".into())),
+        // Get transport
+        let transport = {
+            let transport_guard = self.transport.read().await;
+            match &*transport_guard {
+                Some(transport) => transport.clone(),
+                None => return Err(Error::Media("No transport set for DTLS".into())),
             }
         };
         
@@ -163,24 +172,35 @@ impl DtlsConnection {
             dtls_config.certificates = vec![cert];
         }
         
-        // Create connection
-        let conn = if self.config.is_client {
-            // Connect as client
-            DTLSConn::connect(Arc::new(socket.clone()), self.remote_addr, dtls_config).await
-                .map_err(|e| Error::Media(format!("Failed to connect DTLS: {}", e)))?
-        } else {
-            // Listen as server
-            DTLSConn::accept(Arc::new(socket.clone()), self.remote_addr, dtls_config).await
-                .map_err(|e| Error::Media(format!("Failed to accept DTLS: {}", e)))?
+        // Clone necessary values for the task
+        let is_client = self.config.is_client;
+        let running = self.running.clone();
+        let event_tx = self.event_tx.clone();
+        let remote_addr = self.remote_addr;
+        
+        // Create the DTLS connection
+        let conn = match transport {
+            TransportConn::UdpSocket(socket) => {
+                if is_client {
+                    // Connect as client
+                    DTLSConn::connect(Arc::new(socket), remote_addr, dtls_config).await
+                        .map_err(|e| Error::Media(format!("Failed to connect DTLS: {}", e)))?
+                } else {
+                    // Listen as server
+                    DTLSConn::accept(Arc::new(socket), remote_addr, dtls_config).await
+                        .map_err(|e| Error::Media(format!("Failed to accept DTLS: {}", e)))?
+                }
+            },
+            TransportConn::IceAgent(_) => {
+                // Not implemented yet
+                return Err(Error::Media("DTLS over ICE not implemented yet".into()));
+            }
         };
         
         // Store connection
         self.conn = Some(Arc::new(conn.clone()));
         
         // Start a task to monitor DTLS state
-        let event_tx = self.event_tx.clone();
-        let running = self.running.clone();
-        
         tokio::spawn(async move {
             // Report connected
             if let Some(tx) = &*event_tx.lock().await {

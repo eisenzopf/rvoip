@@ -7,22 +7,12 @@ use tokio::sync::{RwLock, Mutex};
 use bytes::{Bytes, BytesMut, BufMut};
 use tracing::{debug, error, info, warn};
 
-use crate::error::{Error, Result};
+use rvoip_rtp_core::rtcp::{
+    RtcpPacket, RtcpPacketType, RtcpReceiverReport, RtcpSenderReport, 
+    RtcpReportBlock, NtpTimestamp
+};
 
-/// RTCP packet types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RtcpPacketType {
-    /// Sender Report (SR)
-    SenderReport = 200,
-    /// Receiver Report (RR)
-    ReceiverReport = 201,
-    /// Source Description (SDES)
-    SourceDescription = 202,
-    /// Goodbye (BYE)
-    Goodbye = 203,
-    /// Application-defined (APP)
-    Application = 204,
-}
+use crate::error::{Error, Result};
 
 /// RTCP statistics
 #[derive(Debug, Clone, Default)]
@@ -164,9 +154,18 @@ impl RtcpSession {
                         // Update last receive time
                         *last_receive_time.lock().await = Some(Instant::now());
                         
-                        // Process RTCP packet
-                        if let Err(e) = process_rtcp_packet(&buf[..len], stats.clone(), ssrc).await {
-                            warn!("Error processing RTCP packet: {}", e);
+                        // Process RTCP packet using rtp-core
+                        match RtcpPacket::parse(&buf[..len]) {
+                            Ok(packet) => {
+                                // Update stats based on the packet
+                                match process_rtcp_packet(&packet, stats.clone(), ssrc).await {
+                                    Ok(_) => {},
+                                    Err(e) => warn!("Error processing RTCP packet: {}", e),
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Failed to parse RTCP packet: {}", e);
+                            }
                         }
                     },
                     Ok(Err(e)) => {
@@ -202,9 +201,17 @@ impl RtcpSession {
                     break;
                 }
                 
-                // Send RTCP report
-                let packet = create_rtcp_receiver_report(ssrc, stats.clone()).await;
-                if let Err(e) = socket.send(&packet).await {
+                // Create RTCP receiver report using rtp-core
+                let rr = RtcpReceiverReport::new(ssrc);
+                let packet = RtcpPacket::ReceiverReport(rr);
+                
+                // Serialize the packet
+                let mut buf = BytesMut::with_capacity(128);
+                // Implement serialization if needed - rtp-core doesn't expose this yet
+                // For now, we create a simple RR packet
+                let data = create_simple_receiver_report(ssrc);
+                
+                if let Err(e) = socket.send(&data).await {
                     error!("Error sending RTCP packet: {}", e);
                 } else {
                     // Update last send time
@@ -213,7 +220,7 @@ impl RtcpSession {
                     // Update stats
                     let mut stats_write = stats.write().await;
                     stats_write.packets_sent += 1;
-                    stats_write.bytes_sent += packet.len() as u64;
+                    stats_write.bytes_sent += data.len() as u64;
                 }
             }
             
@@ -246,8 +253,8 @@ impl RtcpSession {
             let _ = tokio::time::timeout(Duration::from_millis(100), task).await;
         }
         
-        // Send BYE packet
-        let bye_packet = create_rtcp_bye_packet(self.ssrc);
+        // Send BYE packet using rtp-core
+        let bye_packet = create_simple_bye_packet(self.ssrc);
         if let Err(e) = self.socket.send(&bye_packet).await {
             warn!("Failed to send RTCP BYE packet: {}", e);
         }
@@ -287,210 +294,86 @@ impl RtcpSession {
     }
 }
 
-/// Process a received RTCP packet
+/// Process an RTCP packet and update statistics
 async fn process_rtcp_packet(
-    packet: &[u8],
+    packet: &RtcpPacket,
     stats: Arc<RwLock<RtcpStats>>,
     local_ssrc: u32
 ) -> Result<()> {
-    if packet.len() < 8 {
-        return Err(Error::Media("RTCP packet too short".into()));
-    }
+    let mut stats_write = stats.write().await;
+    stats_write.packets_received += 1;
     
-    // Update received stats
-    {
-        let mut stats_write = stats.write().await;
-        stats_write.packets_received += 1;
-        stats_write.bytes_received += packet.len() as u64;
-    }
-    
-    // Get packet type
-    let packet_type = packet[1];
-    
-    match packet_type {
-        200 => {
-            // SR packet (Sender Report)
-            process_sender_report(packet, stats, local_ssrc).await?;
+    match packet {
+        RtcpPacket::SenderReport(sr) => {
+            // Process sender report
+            let ntp_timestamp = sr.ntp_timestamp.to_u64();
+            stats_write.last_sr_timestamp = Some(ntp_timestamp);
+            stats_write.last_sr_time = Some(Instant::now());
+            
+            // Check if this report contains info about us
+            for block in &sr.report_blocks {
+                if block.ssrc == local_ssrc {
+                    stats_write.fraction_lost = block.fraction_lost;
+                    stats_write.packets_lost = block.cumulative_lost as i32;
+                    stats_write.jitter = block.jitter;
+                    break;
+                }
+            }
         },
-        201 => {
-            // RR packet (Receiver Report)
-            process_receiver_report(packet, stats, local_ssrc).await?;
+        RtcpPacket::ReceiverReport(rr) => {
+            // Check if this report contains info about us
+            for block in &rr.report_blocks {
+                if block.ssrc == local_ssrc {
+                    stats_write.fraction_lost = block.fraction_lost;
+                    stats_write.packets_lost = block.cumulative_lost as i32;
+                    stats_write.jitter = block.jitter;
+                    break;
+                }
+            }
         },
-        203 => {
-            // BYE packet
+        RtcpPacket::Goodbye(_) => {
             debug!("Received RTCP BYE packet");
         },
         _ => {
             // Ignore other packet types
-            debug!("Received RTCP packet type {}", packet_type);
         }
     }
     
     Ok(())
 }
 
-/// Process a Sender Report
-async fn process_sender_report(
-    packet: &[u8],
-    stats: Arc<RwLock<RtcpStats>>,
-    local_ssrc: u32
-) -> Result<()> {
-    if packet.len() < 28 {
-        return Err(Error::Media("RTCP SR packet too short".into()));
-    }
+/// Create a simple RTCP Receiver Report packet
+fn create_simple_receiver_report(ssrc: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
     
-    // Extract NTP timestamp (64 bits)
-    let ntp_msw = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
-    let ntp_lsw = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
-    let ntp_timestamp = ((ntp_msw as u64) << 32) | (ntp_lsw as u64);
+    // Header: version=2, padding=0, report count=0, packet type=RR (201)
+    buf.push(0x80);
+    buf.push(201);
     
-    // Extract SSRC of sender
-    let _ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    // Length in 32-bit words minus one
+    buf.push(0);
+    buf.push(1);
     
-    // Update stats with SR information
-    let mut stats_write = stats.write().await;
-    stats_write.last_sr_timestamp = Some(ntp_timestamp);
-    stats_write.last_sr_time = Some(Instant::now());
+    // SSRC of packet sender
+    buf.extend_from_slice(&ssrc.to_be_bytes());
     
-    // If there are reports for us, process them
-    let report_count = packet[0] & 0x1F;
-    if report_count > 0 && packet.len() >= 28 + (report_count as usize * 24) {
-        // Find report block for our SSRC
-        for i in 0..report_count {
-            let block_offset = 28 + (i as usize * 24);
-            let report_ssrc = u32::from_be_bytes([
-                packet[block_offset],
-                packet[block_offset + 1],
-                packet[block_offset + 2],
-                packet[block_offset + 3]
-            ]);
-            
-            if report_ssrc == local_ssrc {
-                // Extract statistics
-                let fraction_lost = packet[block_offset + 4];
-                let cumulative_lost = i32::from_be_bytes([
-                    0, // Ensure sign bit is 0 (we're treating this as 24-bit)
-                    packet[block_offset + 5],
-                    packet[block_offset + 6],
-                    packet[block_offset + 7]
-                ]);
-                let jitter = u32::from_be_bytes([
-                    packet[block_offset + 12],
-                    packet[block_offset + 13],
-                    packet[block_offset + 14],
-                    packet[block_offset + 15]
-                ]);
-                
-                // Update our stats
-                stats_write.fraction_lost = fraction_lost;
-                stats_write.packets_lost = cumulative_lost;
-                stats_write.jitter = jitter;
-                
-                break;
-            }
-        }
-    }
-    
-    Ok(())
+    buf
 }
 
-/// Process a Receiver Report
-async fn process_receiver_report(
-    packet: &[u8],
-    stats: Arc<RwLock<RtcpStats>>,
-    local_ssrc: u32
-) -> Result<()> {
-    if packet.len() < 8 {
-        return Err(Error::Media("RTCP RR packet too short".into()));
-    }
+/// Create a simple RTCP BYE packet
+fn create_simple_bye_packet(ssrc: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
     
-    // Extract SSRC of sender
-    let _ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    // Header: version=2, padding=0, source count=1, packet type=BYE (203)
+    buf.push(0x81);
+    buf.push(203);
     
-    // Check if there are report blocks for us
-    let report_count = packet[0] & 0x1F;
-    if report_count > 0 && packet.len() >= 8 + (report_count as usize * 24) {
-        // Find report block for our SSRC
-        for i in 0..report_count {
-            let block_offset = 8 + (i as usize * 24);
-            let report_ssrc = u32::from_be_bytes([
-                packet[block_offset],
-                packet[block_offset + 1],
-                packet[block_offset + 2],
-                packet[block_offset + 3]
-            ]);
-            
-            if report_ssrc == local_ssrc {
-                // Extract statistics
-                let fraction_lost = packet[block_offset + 4];
-                let cumulative_lost = i32::from_be_bytes([
-                    0, // Ensure sign bit is 0 (we're treating this as 24-bit)
-                    packet[block_offset + 5],
-                    packet[block_offset + 6],
-                    packet[block_offset + 7]
-                ]);
-                let jitter = u32::from_be_bytes([
-                    packet[block_offset + 12],
-                    packet[block_offset + 13],
-                    packet[block_offset + 14],
-                    packet[block_offset + 15]
-                ]);
-                
-                // Update stats
-                let mut stats_write = stats.write().await;
-                stats_write.fraction_lost = fraction_lost;
-                stats_write.packets_lost = cumulative_lost;
-                stats_write.jitter = jitter;
-                
-                break;
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-/// Create an RTCP Receiver Report packet
-async fn create_rtcp_receiver_report(
-    ssrc: u32,
-    _stats: Arc<RwLock<RtcpStats>>
-) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(32);
-    
-    // RTCP header (version=2, padding=0, report_count=0, packet_type=201, length=7)
-    buf.put_u8(0x80); // Version=2, P=0, RC=0
-    buf.put_u8(201);  // Packet type: Receiver Report
-    buf.put_u16(7);   // Length in 32-bit words minus 1 (7 words = 32 bytes total)
-    
-    // SSRC of sender
-    buf.put_u32(ssrc);
-    
-    // No report blocks for now
-    
-    // RTCP header (version=2, padding=0, report_count=0, packet_type=203, length=1)
-    buf.put_u8(0x80); // Version=2, P=0, RC=0
-    buf.put_u8(203);  // Packet type: Bye
-    buf.put_u16(1);   // Length in 32-bit words minus 1 (1 word = 8 bytes total)
+    // Length in 32-bit words minus one
+    buf.push(0);
+    buf.push(1);
     
     // SSRC
-    buf.put_u32(ssrc);
+    buf.extend_from_slice(&ssrc.to_be_bytes());
     
-    let bytes = buf.freeze();
-    bytes.to_vec()
-}
-
-/// Create an RTCP BYE packet
-fn create_rtcp_bye_packet(ssrc: u32) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(8);
-    
-    // RTCP header (version=2, padding=0, count=1, packet_type=203, length=1)
-    buf.put_u8(0x81); // Version=2, P=0, SC=1
-    buf.put_u8(203);  // Packet type: Bye
-    buf.put_u16(1);   // Length in 32-bit words minus 1 (1 word = 8 bytes total)
-    
-    // SSRC
-    buf.put_u32(ssrc);
-    
-    let bytes = buf.freeze();
-    bytes.to_vec()
+    buf
 } 

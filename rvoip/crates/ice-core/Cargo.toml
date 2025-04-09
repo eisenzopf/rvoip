@@ -1,0 +1,34 @@
+[package]
+name = "rvoip-ice-core"
+version = "0.1.0"
+edition = "2021"
+description = "ICE (Interactive Connectivity Establishment) implementation for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# ICE/STUN/TURN dependencies
+webrtc-ice = "0.10"
+stun = "0.4"
+turn = "0.6"
+
+# Serialization
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Random numbers
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true } 

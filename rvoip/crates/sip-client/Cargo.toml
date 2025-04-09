@@ -14,12 +14,13 @@ unused_imports = "allow"
 [dependencies]
 # Core crates
 rvoip-sip-core = { path = "../sip-core" }
-rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-sip-transport = { path = "../sip-transport", features = ["tls"] }
 rvoip-transaction-core = { path = "../transaction-core" }
 rvoip-session-core = { path = "../session-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
 rvoip-media-core = { path = "../media-core" }
 rvoip-call-engine = { path = "../call-engine" }
+rvoip-ice-core = { path = "../ice-core" }
 
 # Async runtime and utilities
 tokio = { version = "1.29", features = ["full"] }
@@ -50,12 +51,12 @@ opus = { version = "0.3", optional = true }  # Opus codec
 g729 = { version = "0.3", optional = true }  # G.729 codec
 
 [features]
-default = ["pcmu", "pcma"]
-pcmu = []  # G.711 μ-law
-pcma = []  # G.711 A-law
-g722 = []  # G.722
-g729 = ["dep:g729"]  # G.729
-opus = ["dep:opus"]  # Opus
+default = []
+pcmu = ["rvoip-media-core/pcmu"]
+pcma = ["rvoip-media-core/pcma"]
+g722 = ["rvoip-media-core/g722"]
+g729 = ["rvoip-media-core/g729"]
+opus = ["rvoip-media-core/opus"]
 all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
 
 [dev-dependencies]

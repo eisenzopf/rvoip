@@ -30,7 +30,7 @@ pub enum Error {
 
     /// I/O error
     #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    IoError(String),
 
     /// Channel error (receiver dropped)
     #[error("Channel closed")]
@@ -43,6 +43,38 @@ pub enum Error {
     /// Other error
     #[error("{0}")]
     Other(String),
+
+    /// Parsing error
+    #[error("Parsing error: {0}")]
+    ParseError(String),
+
+    /// Socket binding error
+    #[error("Socket binding error: {0}")]
+    BindError(String),
+
+    /// Buffer full error
+    #[error("Buffer full: {0}")]
+    BufferFull(String),
+
+    /// Connection failed
+    #[error("Connection failed: {0}")]
+    ConnectionFailed(String),
+
+    /// Not implemented
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
+    /// Unknown error
+    #[error("Unknown error: {0}")]
+    Unknown(String),
+    
+    /// TLS error
+    #[error("TLS error: {0}")]
+    TlsError(String),
+    
+    /// TCP error
+    #[error("TCP error: {0}")]
+    TcpError(String),
 }
 
 impl From<&str> for Error {
@@ -60,5 +92,17 @@ impl From<String> for Error {
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::ChannelClosed
+    }
+}
+
+/// Convert an io::Error into a Transport Error
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        match err.kind() {
+            io::ErrorKind::ConnectionRefused => Error::ConnectionFailed(err.to_string()),
+            io::ErrorKind::AddrInUse => Error::BindError(err.to_string()),
+            io::ErrorKind::InvalidInput => Error::ParseError(err.to_string()),
+            _ => Error::IoError(err.to_string()),
+        }
     }
 } 

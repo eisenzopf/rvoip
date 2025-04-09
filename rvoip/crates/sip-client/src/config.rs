@@ -2,6 +2,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::net::IpAddr;
 
+use rvoip_ice_core::IceServerConfig as IceServerCoreConfig;
+use rvoip_media_core::codec::CodecType as MediaCodecType;
+
 /// SIP client configuration
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -248,6 +251,26 @@ pub struct IceServerConfig {
     pub credential: Option<String>,
 }
 
+impl From<IceServerConfig> for IceServerCoreConfig {
+    fn from(config: IceServerConfig) -> Self {
+        Self {
+            url: config.url,
+            username: config.username,
+            credential: config.credential,
+        }
+    }
+}
+
+impl From<IceServerCoreConfig> for IceServerConfig {
+    fn from(config: IceServerCoreConfig) -> Self {
+        Self {
+            url: config.url,
+            username: config.username,
+            credential: config.credential,
+        }
+    }
+}
+
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
@@ -481,4 +504,28 @@ pub enum CodecType {
     G729,
     /// Opus
     OPUS,
+}
+
+impl From<CodecType> for MediaCodecType {
+    fn from(codec: CodecType) -> Self {
+        match codec {
+            CodecType::PCMU => MediaCodecType::Pcmu,
+            CodecType::PCMA => MediaCodecType::Pcma,
+            CodecType::G729 => MediaCodecType::G729,
+            CodecType::OPUS => MediaCodecType::Opus,
+            // If G722 doesn't have a direct equivalent, use a placeholder or default
+            _ => MediaCodecType::Pcmu, // Default for now
+        }
+    }
+}
+
+impl From<MediaCodecType> for CodecType {
+    fn from(codec: MediaCodecType) -> Self {
+        match codec {
+            MediaCodecType::Pcmu => CodecType::PCMU,
+            MediaCodecType::Pcma => CodecType::PCMA,
+            MediaCodecType::G729 => CodecType::G729,
+            MediaCodecType::Opus => CodecType::OPUS,
+        }
+    }
 } 

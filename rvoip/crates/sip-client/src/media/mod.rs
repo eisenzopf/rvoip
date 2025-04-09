@@ -2,17 +2,19 @@
 
 mod rtp;
 mod rtcp;
-mod codecs;
 mod sdp_handler;
-mod srtp;
-mod dtls;
 
 pub use rtp::*;
 pub use rtcp::*;
-pub use codecs::*;
 pub use sdp_handler::{SdpHandler, media_direction_to_can_send, media_direction_to_can_receive};
-pub use srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-pub use dtls::{DtlsConnection, DtlsConfig, DtlsEvent};
+
+// Re-export media components from media-core
+pub use rvoip_media_core::{
+    SrtpSession, SrtpConfig, SrtpKeys,
+    DtlsConnection, DtlsConfig, DtlsEvent, TransportConn,
+    codec::Codec, codec::CodecParams, codec::CodecType,
+    codec::OpusCodec,
+};
 
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -24,7 +26,7 @@ use tokio::net::UdpSocket;
 use uuid::Uuid;
 use tracing::{debug, error, warn};
 
-use crate::config::CodecType;
+use crate::config::CodecType as ClientCodecType;
 use crate::error::{Error, Result};
 use crate::media::rtcp::{RtcpSession, RtcpStats};
 
@@ -67,7 +69,7 @@ pub struct MediaSession {
     remote_rtcp_addr: Option<SocketAddr>,
     
     /// Active codec
-    codec: CodecType,
+    codec: ClientCodecType,
     
     /// Muted state
     muted: Arc<RwLock<bool>>,
@@ -82,7 +84,7 @@ impl MediaSession {
         media_type: MediaType,
         local_rtp_addr: SocketAddr,
         remote_rtp_addr: SocketAddr,
-        codec: CodecType,
+        codec: ClientCodecType,
         enable_rtcp: bool,
     ) -> Result<Self> {
         // Will be implemented in rtp.rs
@@ -161,7 +163,7 @@ impl MediaSession {
     }
     
     /// Get active codec
-    pub fn codec(&self) -> CodecType {
+    pub fn codec(&self) -> ClientCodecType {
         self.codec
     }
     

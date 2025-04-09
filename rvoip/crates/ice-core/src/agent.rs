@@ -1,107 +1,18 @@
-use std::net::{SocketAddr, IpAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::net::UdpSocket;
 use webrtc_ice::agent::{Agent, AgentConfig};
-use webrtc_ice::candidate::{Candidate, CandidateType};
 use webrtc_ice::url::Url;
 use webrtc_ice::state::ConnectionState;
 use webrtc_ice::network_type::NetworkType;
 use tracing::{debug, error, info, warn};
 
+use crate::candidate::{IceCandidate, CandidateType};
+use crate::config::{IceConfig, IceServerConfig};
 use crate::error::{Error, Result};
-
-/// ICE server configuration
-#[derive(Debug, Clone)]
-pub struct IceServerConfig {
-    /// Server URL (stun: or turn: protocol)
-    pub url: String,
-    
-    /// Username for TURN server
-    pub username: Option<String>,
-    
-    /// Credential for TURN server
-    pub credential: Option<String>,
-}
-
-/// ICE configuration
-#[derive(Debug, Clone)]
-pub struct IceConfig {
-    /// ICE servers (STUN/TURN)
-    pub servers: Vec<IceServerConfig>,
-    
-    /// ICE connection timeout
-    pub timeout: Duration,
-    
-    /// Whether to use UDP
-    pub use_udp: bool,
-    
-    /// Whether to use TCP
-    pub use_tcp: bool,
-    
-    /// Whether to gather host candidates
-    pub gather_host: bool,
-    
-    /// Whether to gather server reflexive candidates
-    pub gather_srflx: bool,
-    
-    /// Whether to gather relay candidates
-    pub gather_relay: bool,
-}
-
-impl Default for IceConfig {
-    fn default() -> Self {
-        Self {
-            servers: vec![
-                // Default to Google's public STUN server
-                IceServerConfig {
-                    url: "stun:stun.l.google.com:19302".to_string(),
-                    username: None,
-                    credential: None,
-                }
-            ],
-            timeout: Duration::from_secs(30),
-            use_udp: true,
-            use_tcp: true,
-            gather_host: true,
-            gather_srflx: true,
-            gather_relay: true,
-        }
-    }
-}
-
-/// ICE candidate
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IceCandidate {
-    /// Foundation
-    pub foundation: String,
-    
-    /// Component ID
-    pub component: u32,
-    
-    /// Network protocol
-    pub protocol: String,
-    
-    /// Priority
-    pub priority: u32,
-    
-    /// IP address
-    pub ip: IpAddr,
-    
-    /// Port
-    pub port: u16,
-    
-    /// Candidate type
-    pub candidate_type: String,
-    
-    /// Related address (for reflexive/relay candidates)
-    pub related_address: Option<IpAddr>,
-    
-    /// Related port (for reflexive/relay candidates)
-    pub related_port: Option<u16>,
-}
 
 /// ICE agent state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,15 +109,15 @@ impl IceAgent {
         let mut urls = Vec::new();
         for server in &config.servers {
             let url = Url::parse(&server.url)
-                .map_err(|e| Error::Ice(format!("Failed to parse ICE server URL: {}", e)))?;
+                .map_err(|e| Error::ConfigError(format!("Failed to parse ICE server URL: {}", e)))?;
             
             // Add authentication if necessary (for TURN)
             let url = if url.scheme == "turn" || url.scheme == "turns" {
                 if let (Some(username), Some(credential)) = (&server.username, &server.credential) {
                     url.with_username(username.clone())
-                        .map_err(|e| Error::Ice(format!("Failed to set username: {}", e)))?
+                        .map_err(|e| Error::ConfigError(format!("Failed to set username: {}", e)))?
                         .with_password(credential.clone())
-                        .map_err(|e| Error::Ice(format!("Failed to set credential: {}", e)))?
+                        .map_err(|e| Error::ConfigError(format!("Failed to set credential: {}", e)))?
                 } else {
                     url
                 }
@@ -240,12 +151,12 @@ impl IceAgent {
         // Create the ICE agent
         let agent = Agent::new(agent_config)
             .await
-            .map_err(|e| Error::Ice(format!("Failed to create ICE agent: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to create ICE agent: {}", e)))?;
         
         // Add ICE servers
         for url in urls {
             agent.add_url(url).await
-                .map_err(|e| Error::Ice(format!("Failed to add ICE server: {}", e)))?;
+                .map_err(|e| Error::IceError(format!("Failed to add ICE server: {}", e)))?;
         }
         
         // Create a channel for events
@@ -322,7 +233,7 @@ impl IceAgent {
             agent.on_candidate(Box::new(move |c| {
                 if let Some(c) = c {
                     // Convert to our candidate type
-                    let candidate = convert_candidate(&c);
+                    let candidate = convert_webrtc_to_candidate(&c);
                     
                     // Store candidate
                     if let Ok(mut candidates) = local_candidates_clone.write() {
@@ -347,8 +258,8 @@ impl IceAgent {
             agent.on_selected_candidate_pair_change(Box::new(move |p| {
                 if let Some((local, remote)) = p {
                     // Convert to our candidate types
-                    let local_candidate = convert_candidate(&local);
-                    let remote_candidate = convert_candidate(&remote);
+                    let local_candidate = convert_webrtc_to_candidate(&local);
+                    let remote_candidate = convert_webrtc_to_candidate(&remote);
                     
                     // Store pair
                     if let Ok(mut pair) = selected_pair_clone.write() {
@@ -390,7 +301,7 @@ impl IceAgent {
         // Start gathering
         self.agent.gather_candidates()
             .await
-            .map_err(|e| Error::Ice(format!("Failed to gather candidates: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to gather candidates: {}", e)))?;
         
         Ok(())
     }
@@ -398,13 +309,13 @@ impl IceAgent {
     /// Add a remote candidate
     pub async fn add_remote_candidate(&self, candidate: IceCandidate) -> Result<()> {
         // Convert to webrtc-ice candidate
-        let webrtc_candidate = convert_to_webrtc_candidate(&candidate)
-            .map_err(|e| Error::Ice(format!("Failed to convert candidate: {}", e)))?;
+        let webrtc_candidate = convert_candidate_to_webrtc(&candidate)
+            .map_err(|e| Error::InvalidCandidate(e))?;
         
         // Add candidate to agent
         self.agent.add_remote_candidate(&webrtc_candidate)
             .await
-            .map_err(|e| Error::Ice(format!("Failed to add remote candidate: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to add remote candidate: {}", e)))?;
         
         // Store candidate
         {
@@ -420,7 +331,7 @@ impl IceAgent {
         // Start connecting
         self.agent.connect()
             .await
-            .map_err(|e| Error::Ice(format!("Failed to start connectivity checks: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to start connectivity checks: {}", e)))?;
         
         Ok(())
     }
@@ -430,7 +341,7 @@ impl IceAgent {
         // Send data
         self.agent.write(data)
             .await
-            .map_err(|e| Error::Ice(format!("Failed to send data: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to send data: {}", e)))?;
         
         Ok(())
     }
@@ -460,7 +371,7 @@ impl IceAgent {
         // Close the agent
         self.agent.close()
             .await
-            .map_err(|e| Error::Ice(format!("Failed to close ICE agent: {}", e)))?;
+            .map_err(|e| Error::IceError(format!("Failed to close ICE agent: {}", e)))?;
         
         // Clear event sender
         *self.event_tx.lock().await = None;
@@ -469,29 +380,13 @@ impl IceAgent {
     }
 }
 
-/// Convert webrtc-ice candidate to our candidate type
-fn convert_candidate(candidate: &Candidate) -> IceCandidate {
-    IceCandidate {
-        foundation: candidate.foundation.clone(),
-        component: candidate.component as u32,
-        protocol: candidate.transport.to_string(),
-        priority: candidate.priority,
-        ip: candidate.address.ip(),
-        port: candidate.address.port(),
-        candidate_type: candidate.candidate_type.to_string(),
-        related_address: candidate.related_address.as_ref().map(|a| a.ip()),
-        related_port: candidate.related_address.as_ref().map(|a| a.port()),
-    }
-}
-
 /// Convert our candidate type to webrtc-ice candidate
-fn convert_to_webrtc_candidate(candidate: &IceCandidate) -> std::result::Result<Candidate, String> {
-    let candidate_type = match candidate.candidate_type.as_str() {
-        "host" => CandidateType::Host,
-        "srflx" => CandidateType::ServerReflexive,
-        "prflx" => CandidateType::PeerReflexive,
-        "relay" => CandidateType::Relay,
-        _ => return Err(format!("Unknown candidate type: {}", candidate.candidate_type)),
+fn convert_candidate_to_webrtc(candidate: &IceCandidate) -> std::result::Result<webrtc_ice::candidate::Candidate, String> {
+    let candidate_type = match candidate.candidate_type {
+        CandidateType::Host => webrtc_ice::candidate::CandidateType::Host,
+        CandidateType::ServerReflexive => webrtc_ice::candidate::CandidateType::ServerReflexive,
+        CandidateType::PeerReflexive => webrtc_ice::candidate::CandidateType::PeerReflexive,
+        CandidateType::Relay => webrtc_ice::candidate::CandidateType::Relay,
     };
     
     let address = SocketAddr::new(candidate.ip, candidate.port);
@@ -502,7 +397,7 @@ fn convert_to_webrtc_candidate(candidate: &IceCandidate) -> std::result::Result<
     };
     
     // Create candidate
-    let mut webrtc_candidate = Candidate::new(
+    let mut webrtc_candidate = webrtc_ice::candidate::Candidate::new(
         None, // agent will fill this
         None, // agent will fill this
         None, // agent will fill this
@@ -524,4 +419,28 @@ fn convert_to_webrtc_candidate(candidate: &IceCandidate) -> std::result::Result<
     }
     
     Ok(webrtc_candidate)
+}
+
+/// Convert webrtc-ice candidate to our candidate type
+fn convert_webrtc_to_candidate(candidate: &webrtc_ice::candidate::Candidate) -> IceCandidate {
+    let candidate_type = match candidate.candidate_type {
+        webrtc_ice::candidate::CandidateType::Host => CandidateType::Host,
+        webrtc_ice::candidate::CandidateType::ServerReflexive => CandidateType::ServerReflexive,
+        webrtc_ice::candidate::CandidateType::PeerReflexive => CandidateType::PeerReflexive,
+        webrtc_ice::candidate::CandidateType::Relay => CandidateType::Relay,
+        _ => CandidateType::Host, // Default to host for unknown types
+    };
+    
+    IceCandidate {
+        foundation: candidate.foundation.clone(),
+        component: candidate.component as u32,
+        protocol: candidate.transport.to_string(),
+        priority: candidate.priority,
+        ip: candidate.address.ip(),
+        port: candidate.address.port(),
+        candidate_type,
+        related_address: candidate.related_address.as_ref().map(|a| a.ip()),
+        related_port: candidate.related_address.as_ref().map(|a| a.port()),
+        tcp_type: None, // Not available in webrtc-ice
+    }
 } 

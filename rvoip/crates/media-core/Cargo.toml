@@ -7,6 +7,7 @@ description = "Core media handling functionality for the RVOIP project"
 [dependencies]
 # Use the rtp-core crate from our workspace
 rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-ice-core = { path = "../ice-core" }
 
 # Logging
 tracing = "0.1"
@@ -24,5 +25,31 @@ bytes = "1.5"
 # CLI argument parsing for the demo binary
 clap = { version = "4.4", features = ["derive"] }
 
-# Test utilities
+# Serde for serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# SRTP support
+webrtc-srtp = "0.10"
+
+# DTLS support
+webrtc-dtls = "0.8"
+webrtc-util = "0.7"
+
+# Random generation
+rand = "0.8"
+
+# Media codecs (optional)
+opus = { version = "0.3", optional = true }
+g729 = { version = "0.3", optional = true }
+
+[features]
+default = ["pcmu", "pcma"]
+pcmu = []
+pcma = []
+g722 = []
+g729 = ["dep:g729"]
+opus = ["dep:opus"]
+all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
+
 [dev-dependencies] 

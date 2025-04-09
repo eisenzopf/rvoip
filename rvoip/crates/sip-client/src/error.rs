@@ -26,7 +26,7 @@ pub enum Error {
     
     /// Media error
     #[error("Media error: {0}")]
-    Media(String),
+    Media(#[from] rvoip_media_core::Error),
     
     /// Authentication error
     #[error("Authentication error: {0}")]
@@ -61,7 +61,7 @@ pub enum Error {
     AddrParse(#[from] AddrParseError),
 
     /// Timeout errors
-    #[error("Operation timed out: {0}")]
+    #[error("Timeout: {0}")]
     Timeout(String),
 
     /// Invalid state transitions
@@ -80,21 +80,13 @@ pub enum Error {
     #[error("SDP parsing error: {0}")]
     SdpParsing(String),
     
-    /// SRTP error
-    #[error("SRTP error: {0}")]
-    Srtp(String),
-    
-    /// DTLS error
-    #[error("DTLS error: {0}")]
-    Dtls(String),
-    
-    /// Codec error
-    #[error("Codec error: {0}")]
-    Codec(String),
-    
-    /// ICE error
+    /// ICE error (from ice-core)
     #[error("ICE error: {0}")]
-    Ice(String),
+    Ice(#[from] rvoip_ice_core::Error),
+    
+    /// Transport error (from sip-transport)
+    #[error("SIP transport error: {0}")]
+    SipTransport(#[from] rvoip_sip_transport::Error),
 }
 
 impl From<anyhow::Error> for Error {
