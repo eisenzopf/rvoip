@@ -79,6 +79,22 @@ pub enum Error {
     /// SDP parsing error
     #[error("SDP parsing error: {0}")]
     SdpParsing(String),
+    
+    /// SRTP error
+    #[error("SRTP error: {0}")]
+    Srtp(String),
+    
+    /// DTLS error
+    #[error("DTLS error: {0}")]
+    Dtls(String),
+    
+    /// Codec error
+    #[error("Codec error: {0}")]
+    Codec(String),
+    
+    /// ICE error
+    #[error("ICE error: {0}")]
+    Ice(String),
 }
 
 impl From<anyhow::Error> for Error {

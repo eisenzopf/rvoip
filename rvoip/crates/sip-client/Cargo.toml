@@ -34,6 +34,29 @@ futures = "0.3"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.13"
+
+# NAT traversal and secure transport
+webrtc-ice = "0.10"  # ICE protocol implementation
+tokio-rustls = "0.24"  # TLS support for tokio
+rustls = "0.21"  # TLS implementation
+webrtc-dtls = "0.8"  # DTLS for media security
+webrtc-srtp = "0.10"  # SRTP for encrypted media
+stun = "0.4"  # STUN protocol support
+turn = "0.6"  # TURN protocol support
+
+# Additional media codecs
+opus = { version = "0.3", optional = true }  # Opus codec
+g729 = { version = "0.3", optional = true }  # G.729 codec
+
+[features]
+default = ["pcmu", "pcma"]
+pcmu = []  # G.711 μ-law
+pcma = []  # G.711 A-law
+g722 = []  # G.722
+g729 = ["dep:g729"]  # G.729
+opus = ["dep:opus"]  # Opus
+all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

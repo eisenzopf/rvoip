@@ -297,6 +297,184 @@ impl SdpHandler {
         
         Ok(port)
     }
+    
+    /// Add ICE candidates to local SDP
+    pub async fn add_ice_candidates(&self, local_sdp: &mut SessionDescription, candidates: Vec<crate::ice::IceCandidate>) -> Result<()> {
+        // Add ICE attributes to session level
+        local_sdp.attributes.insert("ice-ufrag".to_string(), generate_ice_ufrag());
+        local_sdp.attributes.insert("ice-pwd".to_string(), generate_ice_pwd());
+        
+        // Add fingerprint for DTLS (using SHA-256)
+        // In a real implementation, this would be generated from the certificate
+        local_sdp.attributes.insert("fingerprint".to_string(), "sha-256 AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00".to_string());
+        
+        // Add setup attribute (actpass for offer, active for answer)
+        local_sdp.attributes.insert("setup".to_string(), "actpass".to_string());
+        
+        // Add candidates to media level
+        for media in &mut local_sdp.media {
+            // Add RTP/SAVPF protocol for SRTP with DTLS
+            media.protocol = "UDP/TLS/RTP/SAVPF".to_string();
+            
+            // Add ICE candidates
+            for (i, candidate) in candidates.iter().enumerate() {
+                let foundation = &candidate.foundation;
+                let component = candidate.component;
+                let transport = candidate.protocol.to_lowercase();
+                let priority = candidate.priority;
+                let ip = candidate.ip.to_string();
+                let port = candidate.port;
+                let typ = &candidate.candidate_type;
+                
+                // Format: foundation component transport priority ip port typ candidate-type [raddr related-addr] [rport related-port]
+                let mut candidate_str = format!(
+                    "{} {} {} {} {} {} typ {}",
+                    foundation, component, transport, priority, ip, port, typ
+                );
+                
+                // Add related address if present
+                if let (Some(raddr), Some(rport)) = (candidate.related_address, candidate.related_port) {
+                    candidate_str.push_str(&format!(" raddr {} rport {}", raddr, rport));
+                }
+                
+                media.attributes.insert(format!("candidate:{}", i), candidate_str);
+            }
+            
+            // Add end-of-candidates attribute
+            media.attributes.insert("end-of-candidates".to_string(), "".to_string());
+            
+            // Add rtcp-mux attribute for RTP/RTCP multiplexing
+            media.attributes.insert("rtcp-mux".to_string(), "".to_string());
+        }
+        
+        Ok(())
+    }
+    
+    /// Extract ICE candidates from remote SDP
+    pub fn extract_ice_candidates(&self, remote_sdp: &SessionDescription) -> Vec<crate::ice::IceCandidate> {
+        let mut candidates = Vec::new();
+        
+        // Process each media section
+        for media in &remote_sdp.media {
+            // Look for candidate attributes
+            for (attr_name, attr_value) in &media.attributes {
+                if attr_name.starts_with("candidate:") || attr_name == "candidate" {
+                    if let Some(candidate) = self.parse_ice_candidate(attr_value) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        
+        candidates
+    }
+    
+    /// Parse an ICE candidate from SDP attribute
+    fn parse_ice_candidate(&self, candidate_str: &str) -> Option<crate::ice::IceCandidate> {
+        // Format: foundation component transport priority ip port typ candidate-type [raddr related-addr] [rport related-port]
+        let parts: Vec<&str> = candidate_str.split_whitespace().collect();
+        
+        if parts.len() < 8 {
+            // Not enough parts
+            return None;
+        }
+        
+        // Parse foundation
+        let foundation = parts[0].to_string();
+        
+        // Parse component
+        let component = parts[1].parse::<u32>().ok()?;
+        
+        // Parse transport
+        let protocol = parts[2].to_uppercase();
+        
+        // Parse priority
+        let priority = parts[3].parse::<u32>().ok()?;
+        
+        // Parse IP address
+        let ip = parts[4].parse().ok()?;
+        
+        // Parse port
+        let port = parts[5].parse::<u16>().ok()?;
+        
+        // Check for "typ"
+        if parts[6] != "typ" {
+            return None;
+        }
+        
+        // Parse candidate type
+        let candidate_type = parts[7].to_string();
+        
+        // Parse related address and port if present
+        let mut related_address = None;
+        let mut related_port = None;
+        
+        if parts.len() > 9 && parts[8] == "raddr" {
+            related_address = parts[9].parse().ok();
+            
+            if parts.len() > 11 && parts[10] == "rport" {
+                related_port = parts[11].parse().ok();
+            }
+        }
+        
+        // Create candidate
+        Some(crate::ice::IceCandidate {
+            foundation,
+            component,
+            protocol,
+            priority,
+            ip,
+            port,
+            candidate_type,
+            related_address,
+            related_port,
+        })
+    }
+    
+    /// Extract DTLS setup role from SDP
+    pub fn extract_dtls_setup(&self, sdp: &SessionDescription) -> Option<&'static str> {
+        // Look for setup attribute at session level
+        if let Some(setup) = sdp.attributes.get("setup") {
+            return Some(match setup.as_str() {
+                "active" => "passive",
+                "passive" => "active",
+                "actpass" => "active",
+                _ => "active",
+            });
+        }
+        
+        // Look for setup attribute at media level
+        for media in &sdp.media {
+            if let Some(setup) = media.attributes.get("setup") {
+                return Some(match setup.as_str() {
+                    "active" => "passive",
+                    "passive" => "active",
+                    "actpass" => "active",
+                    _ => "active",
+                });
+            }
+        }
+        
+        // Default to active
+        Some("active")
+    }
+    
+    /// Extract DTLS fingerprint from SDP
+    pub fn extract_dtls_fingerprint(&self, sdp: &SessionDescription) -> Option<String> {
+        // Look for fingerprint attribute at session level
+        if let Some(fingerprint) = sdp.attributes.get("fingerprint") {
+            return Some(fingerprint.clone());
+        }
+        
+        // Look for fingerprint attribute at media level
+        for media in &sdp.media {
+            if let Some(fingerprint) = media.attributes.get("fingerprint") {
+                return Some(fingerprint.clone());
+            }
+        }
+        
+        None
+    }
 }
 
 /// A utility function to convert media direction from SDP to a boolean
@@ -309,4 +487,36 @@ pub fn media_direction_to_can_send(direction: MediaDirection) -> bool {
 /// indicating whether the local side can receive audio
 pub fn media_direction_to_can_receive(direction: MediaDirection) -> bool {
     matches!(direction, MediaDirection::SendRecv | MediaDirection::RecvOnly)
+}
+
+/// Generate random ICE username fragment
+fn generate_ice_ufrag() -> String {
+    let mut rng = rand::thread_rng();
+    
+    // Generate 4-6 random bytes and convert to base64
+    let size = 4 + (rng.next_u32() % 3) as usize;
+    let mut bytes = vec![0u8; size];
+    rand::RngCore::fill_bytes(&mut rng, &mut bytes);
+    
+    // Convert to base64 and remove padding
+    let ufrag = base64::encode(&bytes).replace("=", "");
+    
+    // Truncate to 4-6 characters
+    ufrag[0..size].to_string()
+}
+
+/// Generate random ICE password
+fn generate_ice_pwd() -> String {
+    let mut rng = rand::thread_rng();
+    
+    // Generate 22-24 random bytes and convert to base64
+    let size = 22 + (rng.next_u32() % 3) as usize;
+    let mut bytes = vec![0u8; size];
+    rand::RngCore::fill_bytes(&mut rng, &mut bytes);
+    
+    // Convert to base64 and remove padding
+    let pwd = base64::encode(&bytes).replace("=", "");
+    
+    // Truncate to 22-24 characters
+    pwd[0..size].to_string()
 } 

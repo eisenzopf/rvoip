@@ -4,11 +4,15 @@ mod rtp;
 mod rtcp;
 mod codecs;
 mod sdp_handler;
+mod srtp;
+mod dtls;
 
 pub use rtp::*;
 pub use rtcp::*;
 pub use codecs::*;
 pub use sdp_handler::{SdpHandler, media_direction_to_can_send, media_direction_to_can_receive};
+pub use srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+pub use dtls::{DtlsConnection, DtlsConfig, DtlsEvent};
 
 use std::sync::Arc;
 use std::net::SocketAddr;

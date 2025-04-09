@@ -221,6 +221,31 @@ pub struct MediaConfig {
 
     /// Preferred codecs in order of preference
     pub preferred_codecs: Vec<CodecType>,
+    
+    /// Enable SRTP for secure media
+    pub srtp_enabled: bool,
+    
+    /// Enable DTLS-SRTP for key exchange
+    pub dtls_srtp_enabled: bool,
+    
+    /// Enable ICE for NAT traversal
+    pub ice_enabled: bool,
+    
+    /// ICE servers (STUN/TURN)
+    pub ice_servers: Vec<IceServerConfig>,
+}
+
+/// ICE server configuration
+#[derive(Debug, Clone)]
+pub struct IceServerConfig {
+    /// Server URL (stun: or turn: protocol)
+    pub url: String,
+    
+    /// Username for TURN server
+    pub username: Option<String>,
+    
+    /// Credential for TURN server
+    pub credential: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -235,7 +260,54 @@ impl Default for MediaConfig {
             audio_sample_rate: 8000,
             audio_ptime: 20,
             preferred_codecs: vec![CodecType::PCMU, CodecType::PCMA],
+            srtp_enabled: false,  // Default to disabled for backward compatibility
+            dtls_srtp_enabled: false,  // Default to disabled for backward compatibility
+            ice_enabled: false,  // Default to disabled for backward compatibility
+            ice_servers: vec![
+                // Default to Google's public STUN server
+                IceServerConfig {
+                    url: "stun:stun.l.google.com:19302".to_string(),
+                    username: None,
+                    credential: None,
+                }
+            ],
         }
+    }
+}
+
+impl MediaConfig {
+    /// Enable SRTP for secure media
+    pub fn with_srtp(mut self, enabled: bool) -> Self {
+        self.srtp_enabled = enabled;
+        self
+    }
+    
+    /// Enable DTLS-SRTP for key exchange
+    pub fn with_dtls_srtp(mut self, enabled: bool) -> Self {
+        self.dtls_srtp_enabled = enabled;
+        self
+    }
+    
+    /// Enable ICE for NAT traversal
+    pub fn with_ice(mut self, enabled: bool) -> Self {
+        self.ice_enabled = enabled;
+        self
+    }
+    
+    /// Set ICE servers
+    pub fn with_ice_servers(mut self, servers: Vec<IceServerConfig>) -> Self {
+        self.ice_servers = servers;
+        self
+    }
+    
+    /// Add an ICE server
+    pub fn add_ice_server(mut self, url: &str, username: Option<String>, credential: Option<String>) -> Self {
+        self.ice_servers.push(IceServerConfig {
+            url: url.to_string(),
+            username,
+            credential,
+        });
+        self
     }
 }
 
