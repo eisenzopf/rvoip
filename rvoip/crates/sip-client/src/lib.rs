@@ -246,8 +246,8 @@ pub mod ice;
 pub use ice::{IceSession, IceSessionState, SipIceCandidate};
 
 // User agent implementation (will be needed for backward compatibility)
-mod user_agent;
-pub use user_agent::UserAgent;
+pub mod user_agent;
+pub use user_agent::core::UserAgent;
 
 // Re-export sip_core for internal use
 pub use rvoip_sip_core as sip_core;

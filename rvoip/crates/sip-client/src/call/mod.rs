@@ -11,6 +11,15 @@ pub use registry_interface::CallRegistryInterface;
 mod weak_call;
 pub use weak_call::WeakCall;
 
+// Core Call implementation split into separate modules
+mod struct;
+mod api;
+mod sip_handlers;
+mod state;
+mod media;
+mod dialog;
+
+// Re-export the Call struct
 mod call;
 pub use call::Call;
 
