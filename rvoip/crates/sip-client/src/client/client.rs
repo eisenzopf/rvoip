@@ -333,9 +333,146 @@ impl SipClient {
     
     /// Call a SIP URI
     pub async fn call(&self, target_uri: &str, config: CallConfig) -> Result<Arc<Call>> {
-        // Implement the call functionality with proper transaction management
-        // For now returning an error as the implementation is not complete
-        Err(Error::Call("Not fully implemented yet".into()))
+        // Parse the target URI
+        let uri = target_uri.parse::<Uri>()
+            .map_err(|e| Error::SipProtocol(format!("Invalid target URI: {}", e)))?;
+        
+        // Get local address from config
+        let local_addr = self.config.local_addr
+            .ok_or_else(|| Error::Configuration("Local address not configured".into()))?;
+        
+        // Create a call ID (UUID)
+        let call_id = format!("{}@{}", uuid::Uuid::new_v4(), self.config.domain);
+        
+        // Create a random tag
+        let local_tag = format!("{}", uuid::Uuid::new_v4().as_simple());
+        
+        // Get the remote address - either from the URI or a configured outbound proxy
+        let remote_addr = if let Some(proxy) = self.config.outbound_proxy {
+            proxy
+        } else {
+            // Get host and port from URI
+            let host = uri.host()
+                .ok_or_else(|| Error::SipProtocol("URI missing host".into()))?;
+            let port = uri.port().unwrap_or(5060);
+            
+            // Resolve the address
+            let addr_str = format!("{}:{}", host, port);
+            addr_str.parse::<SocketAddr>()
+                .map_err(|e| Error::SipProtocol(format!("Failed to resolve address: {}", e)))?
+        };
+        
+        // Create a new call event channel
+        let (call_event_tx, _call_event_rx) = mpsc::channel(10);
+        
+        // Create From URI
+        let from_uri = format!("sip:{}@{}", self.config.username, self.config.domain).parse::<Uri>()
+            .map_err(|e| Error::SipProtocol(format!("Invalid From URI: {}", e)))?;
+        
+        // Create a new call
+        let (call, _state_tx) = Call::new(
+            CallDirection::Outgoing,
+            config,
+            call_id.clone(),
+            local_tag.clone(),
+            from_uri,
+            uri.clone(),
+            remote_addr,
+            self.transaction_manager.clone(),
+            call_event_tx,
+        );
+        
+        // Setup local SDP
+        call.setup_local_sdp().await?;
+        
+        // Get local SDP for INVITE
+        let local_sdp = call.local_sdp.read().await.clone();
+        
+        // Create an INVITE request
+        let mut invite = Request::new(Method::Invite, uri.clone());
+        
+        // Add headers
+        invite.headers.push(Header::text(HeaderName::From, 
+            format!("<sip:{}@{}>;tag={}", self.config.username, self.config.domain, local_tag)));
+        invite.headers.push(Header::text(HeaderName::To, 
+            format!("<{}>", uri)));
+        invite.headers.push(Header::text(HeaderName::CallId, call_id));
+        
+        // Get next CSeq
+        let cseq = {
+            let mut cseq_lock = self.cseq.lock().await;
+            let current = *cseq_lock;
+            *cseq_lock += 1;
+            current
+        };
+        
+        invite.headers.push(Header::text(HeaderName::CSeq, 
+            format!("{} INVITE", cseq)));
+        invite.headers.push(Header::text(HeaderName::Contact, 
+            format!("<sip:{}@{}>", self.config.username, local_addr)));
+        invite.headers.push(Header::text(HeaderName::MaxForwards, "70"));
+        
+        // Add SDP if we have it
+        if let Some(sdp) = local_sdp {
+            let sdp_str = sdp.to_string();
+            invite.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
+            invite.headers.push(Header::text(HeaderName::ContentLength, sdp_str.len().to_string()));
+            invite.body = Some(sdp_str.into_bytes());
+        } else {
+            invite.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        }
+        
+        // Add Via header (will be added by transaction layer)
+        
+        // Store the request
+        call.store_invite_request(invite.clone()).await?;
+        
+        // Store the call in our map
+        self.calls.lock().await.insert(call.id().to_string(), call.clone());
+        
+        // Send the INVITE request via transaction layer
+        let transaction_id = self.transaction_manager.send_request(invite, remote_addr).await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Store the transaction ID
+        *call.invite_transaction_id.write().await = Some(transaction_id.clone());
+        
+        // Now wait for response in a separate task so we don't block
+        let call_clone = call.clone();
+        let pending_responses = self.pending_responses.clone();
+        
+        tokio::spawn(async move {
+            // Create a channel for the response
+            let (tx, rx) = oneshot::channel();
+            
+            // Register for the response
+            pending_responses.lock().await.insert(transaction_id, tx);
+            
+            // Wait for response
+            match tokio::time::timeout(Duration::from_secs(32), rx).await {
+                Ok(Ok(response)) => {
+                    // Process the response
+                    if let Err(e) = call_clone.handle_response(&response).await {
+                        error!("Error handling call response: {}", e);
+                    }
+                },
+                Ok(Err(_)) => {
+                    error!("Response channel closed");
+                    // Transition to failed state
+                    let _ = call_clone.transition_to(CallState::Failed).await;
+                },
+                Err(_) => {
+                    error!("Timeout waiting for INVITE response");
+                    // Transition to failed state
+                    let _ = call_clone.transition_to(CallState::Failed).await;
+                }
+            }
+        });
+        
+        // Update call state
+        call.transition_to(CallState::Calling).await?;
+        
+        Ok(call)
     }
     
     /// Get a stream of client events

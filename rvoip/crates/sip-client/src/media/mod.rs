@@ -3,10 +3,12 @@
 mod rtp;
 mod rtcp;
 mod codecs;
+mod sdp_handler;
 
 pub use rtp::*;
 pub use rtcp::*;
 pub use codecs::*;
+pub use sdp_handler::{SdpHandler, media_direction_to_can_send, media_direction_to_can_receive};
 
 use std::sync::Arc;
 use std::net::SocketAddr;

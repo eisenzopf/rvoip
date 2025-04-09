@@ -75,6 +75,10 @@ pub enum Error {
     /// General errors
     #[error("{0}")]
     Other(String),
+
+    /// SDP parsing error
+    #[error("SDP parsing error: {0}")]
+    SdpParsing(String),
 }
 
 impl From<anyhow::Error> for Error {

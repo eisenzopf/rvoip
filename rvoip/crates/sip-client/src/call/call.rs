@@ -19,7 +19,7 @@ use rvoip_transaction_core::TransactionManager;
 
 use crate::config::CallConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaSession, MediaType};
+use crate::media::{MediaSession, MediaType, SdpHandler};
 
 use super::types::{CallDirection, CallState, StateChangeError};
 use super::events::CallEvent;
@@ -167,8 +167,45 @@ impl Call {
     
     /// Setup local SDP for the call
     pub(crate) async fn setup_local_sdp(&self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        debug!("Setting up local SDP for call {}", self.id);
+        
+        // Get local IP from configuration or use a reasonable default
+        let local_ip = self.config.local_ip.unwrap_or_else(|| {
+            // Use the IP from our bound socket or a fallback
+            match self.transaction_manager.transport().local_addr() {
+                Ok(addr) => addr.ip(),
+                Err(_) => {
+                    warn!("Could not get local IP from transport, using 127.0.0.1");
+                    "127.0.0.1".parse().unwrap()
+                }
+            }
+        });
+        
+        // Get port range from config or use defaults
+        let rtp_port_range_start = self.config.rtp_port_range_start.unwrap_or(10000);
+        let rtp_port_range_end = self.config.rtp_port_range_end.unwrap_or(20000);
+        
+        // Create SDP handler
+        let sdp_handler = SdpHandler::new(
+            local_ip,
+            rtp_port_range_start,
+            rtp_port_range_end,
+            self.config.clone(),
+            self.local_sdp.clone(),
+            self.remote_sdp.clone(),
+        );
+        
+        // Get username for SDP
+        let username = match self.local_uri.username() {
+            Some(username) => username.to_string(),
+            None => "anonymous".to_string(),
+        };
+        
+        // Initialize local SDP
+        let _sdp = sdp_handler.init_local_sdp(&username).await?;
+        
+        debug!("Local SDP created successfully for call {}", self.id);
+        
         Ok(())
     }
     
@@ -274,16 +311,87 @@ impl Call {
             }
         }
         
+        // Get local IP from configuration or use a reasonable default
+        let local_ip = self.config.local_ip.unwrap_or_else(|| {
+            // Use the IP from our bound socket or a fallback
+            match self.transaction_manager.transport().local_addr() {
+                Ok(addr) => addr.ip(),
+                Err(_) => {
+                    warn!("Could not get local IP from transport, using 127.0.0.1");
+                    "127.0.0.1".parse().unwrap()
+                }
+            }
+        });
+        
+        // Process SDP if it exists in the INVITE
+        let mut media_session = None;
+        if let Some(body) = &invite.body {
+            // Extract content type
+            let content_type = invite.header(&HeaderName::ContentType)
+                .and_then(|h| h.value.as_text());
+                
+            // Create SDP handler
+            let sdp_handler = SdpHandler::new(
+                local_ip,
+                self.config.rtp_port_range_start.unwrap_or(10000),
+                self.config.rtp_port_range_end.unwrap_or(20000),
+                self.config.clone(),
+                self.local_sdp.clone(),
+                self.remote_sdp.clone(),
+            );
+            
+            // Check if the body contains SDP
+            if let Some(sdp_data) = SdpHandler::extract_sdp_from_message(body, content_type) {
+                debug!("INVITE contains SDP, generating response SDP");
+                
+                // Get username for SDP
+                let username = match self.local_uri.username() {
+                    Some(username) => username.to_string(),
+                    None => "anonymous".to_string(),
+                };
+                
+                // Generate response SDP
+                match sdp_handler.generate_response_sdp(sdp_data, &username).await {
+                    Ok(local_sdp) => {
+                        // Convert SDP to string
+                        let sdp_string = local_sdp.to_string();
+                        
+                        // Add Content-Type and Content-Length headers
+                        response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
+                        response.headers.push(Header::text(HeaderName::ContentLength, sdp_string.len().to_string()));
+                        
+                        // Set response body
+                        response.body = Some(sdp_string.into_bytes());
+                        
+                        // Process remote SDP to create media session
+                        if let Ok(Some(session)) = sdp_handler.process_remote_sdp(sdp_data).await {
+                            media_session = Some(session);
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to generate response SDP: {}", e);
+                        // Add empty Content-Length
+                        response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+                    }
+                }
+            } else {
+                // No SDP in INVITE, add empty Content-Length
+                response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+            }
+        } else {
+            // No body in INVITE, add empty Content-Length
+            response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        }
+        
         // Add Contact header
         let contact = format!("<sip:{}@{}>", 
             self.local_uri.username().unwrap_or("anonymous"),
-            self.local_addr.to_string()
+            match self.transaction_manager.transport().local_addr() {
+                Ok(addr) => addr.to_string(),
+                Err(_) => local_ip.to_string() + ":5060"
+            }
         );
         response.headers.push(Header::text(HeaderName::Contact, contact));
-        
-        // Add Content-Type and Content-Length
-        // In a real implementation, we would add SDP here
-        response.headers.push(Header::text(HeaderName::ContentLength, "0"));
         
         // Create dialog from 2xx response
         let dialog = Dialog::from_2xx_response(&invite, &response, false);
@@ -307,6 +415,13 @@ impl Call {
         
         // Set connection time
         *self.connect_time.write().await = Some(Instant::now());
+        
+        // If we have a media session, save it
+        if let Some(session) = media_session {
+            debug!("Starting media session for call {}", self.id);
+            // Save the media session
+            self.media_sessions.write().await.push(session);
+        }
         
         Ok(())
     }

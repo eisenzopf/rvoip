@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::time::Duration;
+use std::net::IpAddr;
 
 /// SIP client configuration
 #[derive(Debug, Clone)]
@@ -39,6 +40,19 @@ pub struct ClientConfig {
     
     /// Whether to retain call history between restarts
     pub persist_call_history: bool,
+
+    /// Optional local IP address to use for media
+    pub local_ip: Option<IpAddr>,
+    
+    /// RTP port range start (default: 10000)
+    /// 
+    /// This is the beginning of the range to use for allocating RTP ports
+    pub rtp_port_range_start: Option<u16>,
+    
+    /// RTP port range end (default: 20000)
+    /// 
+    /// This is the end of the range to use for allocating RTP ports
+    pub rtp_port_range_end: Option<u16>,
 }
 
 impl Default for ClientConfig {
@@ -56,6 +70,9 @@ impl Default for ClientConfig {
             transaction: TransactionConfig::default(),
             max_call_history: Some(100),
             persist_call_history: false,
+            local_ip: None,
+            rtp_port_range_start: None,
+            rtp_port_range_end: None,
         }
     }
 }
@@ -135,6 +152,19 @@ impl ClientConfig {
     /// Set whether to persist call history between restarts
     pub fn with_persist_call_history(mut self, persist: bool) -> Self {
         self.persist_call_history = persist;
+        self
+    }
+
+    /// Set the local IP address to use for media
+    pub fn with_local_ip(mut self, local_ip: IpAddr) -> Self {
+        self.local_ip = Some(local_ip);
+        self
+    }
+    
+    /// Set the RTP port range
+    pub fn with_rtp_port_range(mut self, start: u16, end: u16) -> Self {
+        self.rtp_port_range_start = Some(start);
+        self.rtp_port_range_end = Some(end);
         self
     }
 }
