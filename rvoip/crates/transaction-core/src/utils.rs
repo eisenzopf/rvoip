@@ -16,7 +16,7 @@ pub fn generate_branch() -> String {
 pub fn extract_branch(message: &Message) -> Option<String> {
     // Use the structured Via implementation to get the branch parameter
     message.first_via()
-        .and_then(|via| via.params.branch().map(|s| s.to_string()))
+        .and_then(|via| via.get("branch").map(|s| s.to_string()))
 }
 
 /// Extract the Call-ID from a message
@@ -114,7 +114,7 @@ pub fn extract_transaction_id(message: &Message) -> Result<String> {
 pub fn extract_transaction_id_from_response(response: &rvoip_sip_core::Response) -> Option<String> {
     // Use the structured Via implementation
     response.first_via()
-        .and_then(|via| via.params.branch().map(|branch| 
+        .and_then(|via| via.get("branch").map(|branch| 
             // ict_ prefix for INVITE client transactions
             format!("ict_{}", branch)
         ))

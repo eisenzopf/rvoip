@@ -6,7 +6,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in SIP protocol handling
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum Error {
     /// Invalid SIP method
     #[error("Invalid SIP method")]
@@ -88,6 +88,18 @@ pub enum Error {
     /// Input/output error
     #[error("I/O error: {0}")]
     Io(String),
+    
+    /// Line too long in SIP message
+    #[error("Line too long: {0} characters")]
+    LineTooLong(usize),
+
+    /// Too many headers in SIP message
+    #[error("Too many headers: {0}")]
+    TooManyHeaders(usize),
+
+    /// Body too large in SIP message
+    #[error("Body too large: {0} bytes")]
+    BodyTooLarge(usize),
 
     /// Other error with message
     #[error("{0}")]

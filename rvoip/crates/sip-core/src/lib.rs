@@ -5,30 +5,23 @@
 
 mod error;
 mod header;
-mod header_parsers;
-mod headers;
 mod message;
 mod method;
-mod multipart;
 mod parser;
 mod uri;
 mod version;
 
 pub use error::{Error, Result};
 pub use header::{Header, HeaderName, HeaderValue};
-pub use header_parsers::{
-    parse_auth_params, parse_contact, parse_address, parse_via, 
-    parse_multiple_vias, parse_cseq, parse_content_type,
-};
-pub use headers::{Via, ViaParams};
 pub use message::{Message, Request, Response, StatusCode};
 pub use method::Method;
-pub use multipart::{MimePart, MultipartBody};
 pub use parser::{
-    parse_message, IncrementalParser, ParseState, MAX_LINE_LENGTH,
-    MAX_HEADER_COUNT, MAX_BODY_SIZE,
+    parse_message, parse_message_bytes, IncrementalParser, ParseState, 
+    parse_via, parse_multiple_vias, Via, 
+    parse_uri, parse_multipart, MimePart, MultipartBody,
+    MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
 };
-pub use uri::{Host, Scheme, Uri};
+pub use uri::{Uri, Scheme, Host};
 pub use version::Version;
 
 /// Re-export of common types and functions
@@ -36,7 +29,7 @@ pub mod prelude {
     pub use super::{
         Error, Header, HeaderName, HeaderValue, Host, Message, Method, 
         Request, Response, Result, Scheme, StatusCode, Uri, Version, 
-        Via, ViaParams, parse_message, IncrementalParser, ParseState, MultipartBody,
+        Via, parse_message, parse_message_bytes, IncrementalParser, ParseState, MultipartBody,
         MimePart, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
     };
 }

@@ -430,7 +430,7 @@ impl Transaction for ClientInviteTransaction {
                 
                 // Check if branch and call-id match
                 if let (Some(incoming_branch), Some(our_branch)) = (
-                    message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                    message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
                     utils::extract_branch(&Message::Request(self.request.clone()))
                 ) {
                     if incoming_branch == our_branch {
@@ -807,7 +807,7 @@ impl Transaction for ClientNonInviteTransaction {
                 
                 // Check if branch and call-id match
                 if let (Some(incoming_branch), Some(our_branch)) = (
-                    message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                    message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
                     utils::extract_branch(&Message::Request(self.request.clone()))
                 ) {
                     if incoming_branch == our_branch {

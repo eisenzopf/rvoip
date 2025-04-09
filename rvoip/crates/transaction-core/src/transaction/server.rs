@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tracing::{debug, trace, warn};
 
-use rvoip_sip_core::{Message, Method, Request, Response, StatusCode};
+use rvoip_sip_core::{Message, Method, Request, Response, StatusCode, HeaderName, Header, HeaderValue};
 use rvoip_sip_transport::Transport;
 
 use crate::error::{Error, Result};
@@ -46,13 +46,47 @@ pub struct ServerInviteTransaction {
 impl ServerInviteTransaction {
     /// Create a new server INVITE transaction
     pub fn new(
-        request: Request,
+        mut request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
-        // Extract branch to generate ID
-        let branch = utils::extract_branch(&Message::Request(request.clone()))
-            .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
+        // Extract branch to generate ID, or generate a new one if missing
+        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
+            Some(branch) => branch,
+            None => {
+                // No branch parameter found, add one
+                debug!("Adding missing branch parameter to Via header");
+                
+                // Generate a branch parameter
+                let new_branch = utils::generate_branch();
+                
+                // Check if there's an existing Via header we can modify
+                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
+                
+                if let Some(via_header) = found_via {
+                    // Modify existing Via header to add branch
+                    let current_value = via_header.value.to_string();
+                    let new_value = if current_value.contains("branch=") {
+                        current_value // Already has branch, don't modify (shouldn't happen)
+                    } else {
+                        format!("{};branch={}", current_value, new_branch)
+                    };
+                    
+                    // Update header value
+                    via_header.value = HeaderValue::text(new_value);
+                    new_branch // Return the branch we just added
+                } else {
+                    // No Via header found, add a new one with branch
+                    debug!("No Via header found, adding one with branch parameter");
+                    
+                    // Use localhost as placeholder
+                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
+                    request.headers.push(Header::text(HeaderName::Via, via_value));
+                    
+                    new_branch // Return the branch we just added
+                }
+            }
+        };
         
         let id = format!("ist_{}", branch);
         
@@ -177,7 +211,7 @@ impl Transaction for ServerInviteTransaction {
             
             // Check if branch matches
             if let (Some(incoming_branch), Some(our_branch)) = (
-                message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
                 utils::extract_branch(&Message::Request(self.request.clone()))
             ) {
                 // Match transaction by branch
@@ -332,13 +366,47 @@ pub struct ServerNonInviteTransaction {
 impl ServerNonInviteTransaction {
     /// Create a new server non-INVITE transaction
     pub fn new(
-        request: Request,
+        mut request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
-        // Extract branch to generate ID
-        let branch = utils::extract_branch(&Message::Request(request.clone()))
-            .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
+        // Extract branch to generate ID, or generate a new one if missing
+        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
+            Some(branch) => branch,
+            None => {
+                // No branch parameter found, add one
+                debug!("Adding missing branch parameter to Via header");
+                
+                // Generate a branch parameter
+                let new_branch = utils::generate_branch();
+                
+                // Check if there's an existing Via header we can modify
+                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
+                
+                if let Some(via_header) = found_via {
+                    // Modify existing Via header to add branch
+                    let current_value = via_header.value.to_string();
+                    let new_value = if current_value.contains("branch=") {
+                        current_value // Already has branch, don't modify (shouldn't happen)
+                    } else {
+                        format!("{};branch={}", current_value, new_branch)
+                    };
+                    
+                    // Update header value
+                    via_header.value = HeaderValue::text(new_value);
+                    new_branch // Return the branch we just added
+                } else {
+                    // No Via header found, add a new one with branch
+                    debug!("No Via header found, adding one with branch parameter");
+                    
+                    // Use localhost as placeholder
+                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
+                    request.headers.push(Header::text(HeaderName::Via, via_value));
+                    
+                    new_branch // Return the branch we just added
+                }
+            }
+        };
         
         let id = format!("nist_{}", branch);
         
@@ -461,7 +529,7 @@ impl Transaction for ServerNonInviteTransaction {
             
             // Check if branch matches
             if let (Some(incoming_branch), Some(our_branch)) = (
-                message.first_via().and_then(|via| via.params.branch().map(|s| s.to_string())),
+                message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
                 utils::extract_branch(&Message::Request(self.request.clone()))
             ) {
                 // Match transaction by branch
