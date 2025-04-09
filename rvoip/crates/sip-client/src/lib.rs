@@ -253,4 +253,10 @@ pub use user_agent::UserAgent;
 pub use rvoip_sip_core as sip_core;
 
 /// Version of the crate
-pub const VERSION: &str = env!("CARGO_PKG_VERSION"); 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Default SIP port for UDP
+pub const DEFAULT_SIP_PORT: u16 = 5060;
+
+/// Default SIP port for TLS
+pub const DEFAULT_SIPS_PORT: u16 = 5061; 

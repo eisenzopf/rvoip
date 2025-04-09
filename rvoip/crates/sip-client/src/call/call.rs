@@ -20,6 +20,8 @@ use rvoip_transaction_core::TransactionManager;
 use crate::config::CallConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaSession, MediaType, SdpHandler};
+use crate::DEFAULT_SIP_PORT;
+use crate::config::{DEFAULT_RTP_PORT_MIN, DEFAULT_RTP_PORT_MAX};
 
 use super::types::{CallDirection, CallState, StateChangeError};
 use super::events::CallEvent;
@@ -137,8 +139,8 @@ impl Call {
         // Get local address from transaction manager or use a fallback
         let local_addr = transaction_manager.transport().local_addr()
             .unwrap_or_else(|_| {
-                warn!("Could not get local address from transport, using 127.0.0.1:5060");
-                "127.0.0.1:5060".parse().unwrap()
+                warn!("Could not get local address from transport, using 127.0.0.1:{}", DEFAULT_SIP_PORT);
+                format!("127.0.0.1:{}", DEFAULT_SIP_PORT).parse().unwrap()
             });
         
         // Create the call instance
@@ -177,44 +179,34 @@ impl Call {
     }
     
     /// Setup local SDP for the call
-    pub(crate) async fn setup_local_sdp(&self) -> Result<()> {
+    pub(crate) async fn setup_local_sdp(&self) -> Result<Option<SessionDescription>> {
         debug!("Setting up local SDP for call {}", self.id);
         
-        // Get local IP from transaction manager or use a reasonable default
-        let local_ip = match self.transaction_manager.transport().local_addr() {
-            Ok(addr) => addr.ip(),
-            Err(_) => {
-                warn!("Could not get local IP from transport, using 127.0.0.1");
-                "127.0.0.1".parse().unwrap()
-            }
+        // Create an SDP handler
+        let local_ip = if let Ok(addr) = self.transaction_manager.transport().local_addr() {
+            addr.ip()
+        } else {
+            "127.0.0.1".parse().unwrap()
         };
         
-        // Get port range from config or use defaults
-        let rtp_port_range_start = self.config.rtp_port_range_start.unwrap_or(10000);
-        let rtp_port_range_end = self.config.rtp_port_range_end.unwrap_or(20000);
-        
-        // Create SDP handler
         let sdp_handler = SdpHandler::new(
             local_ip,
-            rtp_port_range_start,
-            rtp_port_range_end,
+            self.config.rtp_port_range_start.unwrap_or(DEFAULT_RTP_PORT_MIN),
+            self.config.rtp_port_range_end.unwrap_or(DEFAULT_RTP_PORT_MAX),
             self.config.clone(),
             self.local_sdp.clone(),
             self.remote_sdp.clone(),
         );
         
-        // Get username for SDP
-        let username = match self.local_uri.username() {
-            Some(username) => username.to_string(),
-            None => "anonymous".to_string(),
-        };
+        // Create a new local SDP
+        let local_sdp = sdp_handler.create_local_sdp().await?;
         
-        // Initialize local SDP
-        let _sdp = sdp_handler.init_local_sdp(&username).await?;
+        // Store the created SDP
+        if let Some(sdp) = &local_sdp {
+            *self.local_sdp.write().await = Some(sdp.clone());
+        }
         
-        debug!("Local SDP created successfully for call {}", self.id);
-        
-        Ok(())
+        Ok(local_sdp)
     }
     
     /// Get the unique call ID
@@ -234,7 +226,7 @@ impl Call {
     
     /// Get the current call state
     pub async fn state(&self) -> CallState {
-        *self.state_watcher.borrow()
+        *self.state.read().await
     }
     
     /// Get the remote URI
@@ -247,10 +239,10 @@ impl Call {
         self.remote_display_name.read().await.clone()
     }
     
-    /// Get the caller ID (display name or URI)
+    /// Get a caller ID string
     pub async fn caller_id(&self) -> String {
-        if let Some(name) = self.remote_display_name().await {
-            name
+        if let Some(name) = self.remote_display_name.read().await.as_ref() {
+            name.to_string()
         } else {
             self.remote_uri.to_string()
         }
@@ -348,8 +340,8 @@ impl Call {
             // Create SDP handler
             let sdp_handler = SdpHandler::new(
                 local_ip,
-                self.config.rtp_port_range_start.unwrap_or(10000),
-                self.config.rtp_port_range_end.unwrap_or(20000),
+                self.config.rtp_port_range_start.unwrap_or(DEFAULT_RTP_PORT_MIN),
+                self.config.rtp_port_range_end.unwrap_or(DEFAULT_RTP_PORT_MAX),
                 self.config.clone(),
                 self.local_sdp.clone(),
                 self.remote_sdp.clone(),
@@ -382,7 +374,7 @@ impl Call {
             self.local_uri.username().unwrap_or("anonymous"),
             match self.transaction_manager.transport().local_addr() {
                 Ok(addr) => addr.to_string(),
-                Err(_) => local_ip.to_string() + ":5060"
+                Err(_) => format!("{}:{}", local_ip, DEFAULT_SIP_PORT)
             }
         );
         response.headers.push(Header::text(HeaderName::Contact, contact));
@@ -792,14 +784,14 @@ impl Call {
         Ok(())
     }
     
-    /// Setup media session from SDP
+    /// Setup media from remote SDP
     pub async fn setup_media_from_sdp(&self, sdp: &SessionDescription) -> Result<()> {
         debug!("Setting up media from SDP for call {}", self.id);
         
-        // Store the remote SDP
+        // Update our remote SDP
         *self.remote_sdp.write().await = Some(sdp.clone());
         
-        // Create an SDP handler
+        // Create SDP handler
         let local_ip = if let Ok(addr) = self.transaction_manager.transport().local_addr() {
             addr.ip()
         } else {
@@ -808,30 +800,20 @@ impl Call {
         
         let sdp_handler = SdpHandler::new(
             local_ip,
-            self.config.rtp_port_range_start.unwrap_or(10000),
-            self.config.rtp_port_range_end.unwrap_or(20000),
+            self.config.rtp_port_range_start.unwrap_or(DEFAULT_RTP_PORT_MIN),
+            self.config.rtp_port_range_end.unwrap_or(DEFAULT_RTP_PORT_MAX),
             self.config.clone(),
             self.local_sdp.clone(),
             self.remote_sdp.clone(),
         );
         
-        // Process the remote SDP
-        match sdp_handler.process_remote_sdp(sdp).await {
-            Ok(Some(session)) => {
-                // Add the media session
-                debug!("Adding media session for call {}", self.id);
-                self.media_sessions.write().await.push(session);
-                Ok(())
-            },
-            Ok(None) => {
-                debug!("No media session created from SDP");
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to process SDP: {}", e);
-                Err(e)
-            }
-        }
+        // Setup the media based on remote SDP
+        let media_session = sdp_handler.setup_media(sdp).await?;
+        
+        // Store the media session
+        self.media_sessions.write().await.push(media_session);
+        
+        Ok(())
     }
     
     /// Get the remote tag
@@ -886,14 +868,14 @@ impl Call {
                 registry.update_dialog_info(
                     &dialog.id.to_string(),
                     Some(dialog.call_id.clone()),
-                    dialog.local_tag.clone(),
-                    dialog.remote_tag.clone(),
                     Some(dialog.state.to_string()),
-                    Some(dialog.local_uri.to_string()),
-                    Some(dialog.remote_uri.to_string()),
+                    Some(dialog.local_tag.clone().unwrap_or_default()),
+                    Some(dialog.remote_tag.clone().unwrap_or_default()),
+                    Some(local_seq),
+                    Some(remote_seq),
+                    None, // route_set
                     Some(remote_target.to_string()),
-                    Some(local_seq.to_string()),
-                    Some(remote_seq.to_string())
+                    Some(dialog.local_uri.scheme.to_string() == "sips")
                 ).await?;
                 
                 return Ok(());

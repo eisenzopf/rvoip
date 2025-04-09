@@ -4,6 +4,8 @@ use std::net::IpAddr;
 
 use rvoip_ice_core::IceServerConfig as IceServerCoreConfig;
 use rvoip_media_core::codec::CodecType as MediaCodecType;
+use crate::error::{Error, Result};
+use crate::DEFAULT_SIP_PORT;
 
 /// SIP client configuration
 #[derive(Debug, Clone)]
@@ -61,16 +63,16 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            local_addr: None,
             username: "anonymous".to_string(),
             domain: "localhost".to_string(),
-            user_agent: format!("RVOIP-SIP-Client/{}", env!("CARGO_PKG_VERSION")),
             outbound_proxy: None,
             register_expires: 3600,
             register_refresh: 0.8,
+            local_addr: None,
+            user_agent: format!("RVOIP SIP Client {}", crate::VERSION),
             transport: TransportConfig::default(),
-            media: MediaConfig::default(),
             transaction: TransactionConfig::default(),
+            media: MediaConfig::default(),
             max_call_history: Some(100),
             persist_call_history: false,
             local_ip: None,
@@ -271,14 +273,20 @@ impl From<IceServerCoreConfig> for IceServerConfig {
     }
 }
 
+/// Default RTP port range start
+pub const DEFAULT_RTP_PORT_MIN: u16 = 10000;
+
+/// Default RTP port range end
+pub const DEFAULT_RTP_PORT_MAX: u16 = 20000;
+
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
             rtp_enabled: true,
             rtcp_enabled: true,
             rtcp_interval: Duration::from_secs(5),
-            rtp_port_min: 10000,
-            rtp_port_max: 20000,
+            rtp_port_min: DEFAULT_RTP_PORT_MIN,
+            rtp_port_max: DEFAULT_RTP_PORT_MAX,
             jitter_buffer_ms: 60,
             audio_sample_rate: 8000,
             audio_ptime: 20,

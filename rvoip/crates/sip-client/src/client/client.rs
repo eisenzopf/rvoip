@@ -21,6 +21,7 @@ use crate::config::{ClientConfig, CallConfig};
 use crate::error::{Error, Result};
 use crate::call::{Call, CallState, CallEvent, CallDirection};
 use crate::call_registry;
+use crate::DEFAULT_SIP_PORT;
 
 use super::events::SipClientEvent;
 use super::registration::Registration;
@@ -348,8 +349,8 @@ impl SipClient {
         let local_tag = format!("{}", uuid::Uuid::new_v4().as_simple());
         
         // Extract host and port from URI
-        let host = uri.host.as_deref().unwrap_or("");
-        let port = uri.port.unwrap_or(5060);
+        let host = uri.host.clone();
+        let port = uri.port.unwrap_or(DEFAULT_SIP_PORT);
         
         // Create a socket address from host and port
         let remote_addr = match host.parse::<IpAddr>() {
@@ -381,10 +382,6 @@ impl SipClient {
             call_event_tx,
         );
         
-        // Get local SDP for INVITE - setup_local_sdp returns Option<SessionDescription>
-        let local_sdp_result = call.setup_local_sdp().await?;
-        let local_sdp = local_sdp_result;
-        
         // Create an INVITE request
         let mut invite = Request::new(Method::Invite, uri.clone());
         
@@ -409,24 +406,24 @@ impl SipClient {
             format!("<sip:{}@{}>", self.config.username, local_addr)));
         invite.headers.push(Header::text(HeaderName::MaxForwards, "70"));
         
+        // Store the request
+        call.store_invite_request(invite.clone()).await?;
+        
+        // Get local SDP for INVITE
+        let local_sdp = call.setup_local_sdp().await?;
+        
         // Add SDP if we have it
         if let Some(sdp) = local_sdp {
             let sdp_str = sdp.to_string();
             invite.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
             invite.headers.push(Header::text(HeaderName::ContentLength, sdp_str.len().to_string()));
-            invite.body = sdp_str.into_bytes();
+            invite.body = sdp_str.into_bytes().into();
         } else {
             invite.headers.push(Header::text(HeaderName::ContentLength, "0"));
         }
         
-        // Add Via header (will be added by transaction layer)
-        
-        // Store the request
-        call.store_invite_request(invite.clone()).await?;
-        
-        // Store the call in our map - we can't access private fields 
-        // so just keep track of the Arc<Call> for now
-        self.calls.lock().await.insert(call.id().to_string(), Arc::new(RwLock::new(call.clone())));
+        // Store the call in our map
+        self.calls.lock().await.insert(call.id().to_string(), Arc::new(RwLock::new(call.as_ref().clone())));
         
         // Send the INVITE request via transaction layer
         let transaction_id = self.transaction_manager.create_client_transaction(
@@ -442,8 +439,8 @@ impl SipClient {
         call.store_invite_transaction_id(transaction_id.clone()).await?;
         
         // Now wait for response in a separate task so we don't block
-        let call_clone = call.clone();
         let pending_responses = self.pending_responses.clone();
+        let task_call = call.clone();
         
         tokio::spawn(async move {
             // Create a channel for the response
@@ -456,19 +453,19 @@ impl SipClient {
             match tokio::time::timeout(Duration::from_secs(32), rx).await {
                 Ok(Ok(response)) => {
                     // Process the response
-                    if let Err(e) = call_clone.handle_response(&response).await {
+                    if let Err(e) = task_call.handle_response(&response).await {
                         error!("Error handling call response: {}", e);
                     }
                 },
                 Ok(Err(_)) => {
                     error!("Response channel closed");
                     // Transition to failed state
-                    let _ = call_clone.transition_to(CallState::Failed).await;
+                    let _ = task_call.transition_to(CallState::Failed).await;
                 },
                 Err(_) => {
                     error!("Timeout waiting for INVITE response");
                     // Transition to failed state
-                    let _ = call_clone.transition_to(CallState::Failed).await;
+                    let _ = task_call.transition_to(CallState::Failed).await;
                 }
             }
         });

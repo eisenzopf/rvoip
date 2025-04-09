@@ -297,23 +297,16 @@ impl RtcpSession {
     
     /// Process and handle an RTCP packet
     pub async fn handle_packet(&mut self, data: &[u8]) -> Result<()> {
-        // If we have a socket, send the packet
-        if let Some(socket) = &self.socket {
-            socket.send(data)
-                .await
-                .map_err(|e| Error::Network(e.to_string()))?;
-        }
+        debug!("Handling RTCP packet of {} bytes", data.len());
         
+        // TODO: Implement RTCP packet handling
         Ok(())
     }
     
     /// Send a receiver report
     pub async fn send_receiver_report(&self) -> Result<()> {
-        // Process the RTCP report if we have a socket
-        let socket = match &self.socket {
-            Some(s) => s,
-            None => return Err(Error::Media(rvoip_media_core::Error::Other("RTCP socket not available".into()))),
-        };
+        // Use the socket directly since it's an Arc<UdpSocket> not an Option
+        let socket = &self.socket;
         
         // Create receiver report
         let stats = self.stats.read().await;

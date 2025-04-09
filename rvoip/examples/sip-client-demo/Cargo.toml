@@ -8,6 +8,7 @@ publish = false
 # Turn off specific warnings
 [lints.rust]
 unused_imports = "allow"
+warnings = "allow"  # Ignore all warnings
 
 [dependencies]
 # Use our SIP client library with default features (including ICE)

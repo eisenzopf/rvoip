@@ -67,6 +67,13 @@ impl SdpHandler {
         }
     }
     
+    /// Create a local SDP with a default username
+    pub async fn create_local_sdp(&self) -> Result<Option<SessionDescription>> {
+        // Use "anonymous" as the default username
+        let sdp = self.init_local_sdp("anonymous").await?;
+        Ok(Some(sdp))
+    }
+    
     /// Initialize local SDP for an outgoing call
     pub async fn init_local_sdp(&self, username: &str) -> Result<SessionDescription> {
         // Allocate an RTP port for audio
@@ -79,6 +86,15 @@ impl SdpHandler {
         *self.local_sdp.write().await = Some(sdp.clone());
         
         Ok(sdp)
+    }
+    
+    /// Setup media based on a remote SDP
+    pub async fn setup_media(&self, sdp: &SessionDescription) -> Result<MediaSession> {
+        // Process the remote SDP to create a media session
+        let media_session_opt = self.process_remote_sdp(sdp).await?;
+        
+        // Return the media session or error if none was created
+        media_session_opt.ok_or_else(|| Error::Media("Failed to create media session from SDP".into()))
     }
     
     /// Process a remote SDP and create a media session

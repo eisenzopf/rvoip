@@ -108,4 +108,11 @@ impl From<&str> for Error {
     fn from(s: &str) -> Self {
         Error::Other(s.to_string())
     }
+}
+
+/// Implement From trait for std::net::AddrParseError
+impl From<std::net::AddrParseError> for Error {
+    fn from(err: std::net::AddrParseError) -> Self {
+        Error::Configuration(format!("Invalid socket address: {}", err))
+    }
 } 

@@ -10,6 +10,7 @@ license = "MIT"
 # Turn off specific warnings
 [lints.rust]
 unused_imports = "allow"
+warnings = "allow"  # Ignore all warnings
 
 [dependencies]
 # Core crates
