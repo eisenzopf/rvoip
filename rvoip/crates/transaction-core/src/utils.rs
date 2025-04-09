@@ -17,8 +17,14 @@ pub fn extract_branch(message: &Message) -> Option<String> {
     message
         .header(&HeaderName::Via)
         .and_then(|via| {
-            let value = via.value.to_string_value();
-            // Extract branch parameter (very basic implementation)
+            // First try to get as raw text since that preserves the original format
+            let value = if let Some(text) = via.value.as_text() {
+                text.to_string()
+            } else {
+                via.value.to_string_value()
+            };
+            
+            // Extract branch parameter
             if let Some(branch_pos) = value.find("branch=") {
                 let branch_start = branch_pos + 7; // "branch=" length
                 let branch_end = value[branch_start..]
@@ -127,19 +133,24 @@ pub fn extract_transaction_id(message: &Message) -> Result<String> {
 pub fn extract_transaction_id_from_response(response: &rvoip_sip_core::Response) -> Option<String> {
     // Get the Via header which contains the branch parameter
     if let Some(via) = response.header(&rvoip_sip_core::HeaderName::Via) {
-        if let Some(via_text) = via.value.as_text() {
-            // Extract the branch parameter
-            if let Some(branch_pos) = via_text.find("branch=") {
-                let branch_start = branch_pos + 7; // "branch=" length
-                let branch_end = via_text[branch_start..]
-                    .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
-                    .map(|pos| branch_start + pos)
-                    .unwrap_or(via_text.len());
-                let branch = &via_text[branch_start..branch_end];
-                
-                // ict_ prefix for INVITE client transactions
-                return Some(format!("ict_{}", branch));
-            }
+        // First try to get as raw text since that preserves the original format
+        let via_text = if let Some(text) = via.value.as_text() {
+            text
+        } else {
+            return None; // Can't extract from non-text header value
+        };
+        
+        // Extract the branch parameter
+        if let Some(branch_pos) = via_text.find("branch=") {
+            let branch_start = branch_pos + 7; // "branch=" length
+            let branch_end = via_text[branch_start..]
+                .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                .map(|pos| branch_start + pos)
+                .unwrap_or(via_text.len());
+            let branch = &via_text[branch_start..branch_end];
+            
+            // ict_ prefix for INVITE client transactions
+            return Some(format!("ict_{}", branch));
         }
     }
     None
