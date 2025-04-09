@@ -347,19 +347,18 @@ impl SipClient {
         // Create a random tag
         let local_tag = format!("{}", uuid::Uuid::new_v4().as_simple());
         
-        // Get the remote address - either from the URI or a configured outbound proxy
-        let remote_addr = if let Some(proxy) = self.config.outbound_proxy {
-            proxy
-        } else {
-            // Get host and port from URI
-            let host = uri.host()
-                .ok_or_else(|| Error::SipProtocol("URI missing host".into()))?;
-            let port = uri.port().unwrap_or(5060);
-            
-            // Resolve the address
-            let addr_str = format!("{}:{}", host, port);
-            addr_str.parse::<SocketAddr>()
-                .map_err(|e| Error::SipProtocol(format!("Failed to resolve address: {}", e)))?
+        // Extract host and port from URI
+        let host = uri.host.as_deref().unwrap_or("");
+        let port = uri.port.unwrap_or(5060);
+        
+        // Create a socket address from host and port
+        let remote_addr = match host.parse::<IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, port),
+            Err(_) => {
+                // Hostname instead of IP, need to resolve
+                // For now, just return an error, in practice would use DNS
+                return Err(Error::Call(format!("Could not parse host: {}", host)));
+            }
         };
         
         // Create a new call event channel
@@ -382,11 +381,9 @@ impl SipClient {
             call_event_tx,
         );
         
-        // Setup local SDP
-        call.setup_local_sdp().await?;
-        
-        // Get local SDP for INVITE
-        let local_sdp = call.local_sdp.read().await.clone();
+        // Get local SDP for INVITE - setup_local_sdp returns Option<SessionDescription>
+        let local_sdp_result = call.setup_local_sdp().await?;
+        let local_sdp = local_sdp_result;
         
         // Create an INVITE request
         let mut invite = Request::new(Method::Invite, uri.clone());
@@ -417,7 +414,7 @@ impl SipClient {
             let sdp_str = sdp.to_string();
             invite.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
             invite.headers.push(Header::text(HeaderName::ContentLength, sdp_str.len().to_string()));
-            invite.body = Some(sdp_str.into_bytes());
+            invite.body = sdp_str.into_bytes();
         } else {
             invite.headers.push(Header::text(HeaderName::ContentLength, "0"));
         }
@@ -427,15 +424,22 @@ impl SipClient {
         // Store the request
         call.store_invite_request(invite.clone()).await?;
         
-        // Store the call in our map
-        self.calls.lock().await.insert(call.id().to_string(), call.clone());
+        // Store the call in our map - we can't access private fields 
+        // so just keep track of the Arc<Call> for now
+        self.calls.lock().await.insert(call.id().to_string(), Arc::new(RwLock::new(call.clone())));
         
         // Send the INVITE request via transaction layer
-        let transaction_id = self.transaction_manager.send_request(invite, remote_addr).await
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            invite.clone(), 
+            remote_addr
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Send the request
+        self.transaction_manager.send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
         // Store the transaction ID
-        *call.invite_transaction_id.write().await = Some(transaction_id.clone());
+        call.store_invite_transaction_id(transaction_id.clone()).await?;
         
         // Now wait for response in a separate task so we don't block
         let call_clone = call.clone();
@@ -470,7 +474,7 @@ impl SipClient {
         });
         
         // Update call state
-        call.transition_to(CallState::Calling).await?;
+        call.transition_to(CallState::Ringing).await?;
         
         Ok(call)
     }

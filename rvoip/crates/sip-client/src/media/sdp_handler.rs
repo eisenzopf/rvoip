@@ -16,6 +16,12 @@ use crate::error::{Error, Result};
 use crate::media::{MediaSession, MediaType};
 use crate::config::CallConfig;
 
+use anyhow::format_err;
+use bytes::{Bytes, BytesMut};
+use rand::rngs::ThreadRng;
+use rand::Rng;
+use rand::RngCore;
+
 /// SDP handler for SIP calls
 pub struct SdpHandler {
     /// Local IP address
@@ -75,68 +81,40 @@ impl SdpHandler {
         Ok(sdp)
     }
     
-    /// Process remote SDP from a received message
-    pub async fn process_remote_sdp(&self, sdp_data: &[u8]) -> Result<Option<MediaSession>> {
-        // Parse the SDP
-        let sdp_str = std::str::from_utf8(sdp_data)
-            .map_err(|e| Error::SdpParsing(e.to_string()))?;
-            
-        let sdp = SessionDescription::parse(sdp_str)
-            .map_err(|e| Error::SdpParsing(e.to_string()))?;
-            
-        info!("Received remote SDP with {} media sections", sdp.media.len());
-        
-        // Store the remote SDP
-        *self.remote_sdp.write().await = Some(sdp.clone());
-        
-        // Get our local SDP
-        let local_sdp = self.local_sdp.read().await.clone();
-        
-        // If we have both local and remote SDP, we can set up media
-        if let Some(local_sdp) = local_sdp {
-            // Extract media information from both SDPs and create the media session
-            return self.create_media_session(&local_sdp, &sdp).await;
-        }
-        
-        // If we don't have local SDP yet, we'll create media sessions later
-        Ok(None)
-    }
-    
-    /// Create media sessions based on local and remote SDP
-    pub async fn create_media_session(
-        &self,
-        local_sdp: &SessionDescription,
-        remote_sdp: &SessionDescription,
-    ) -> Result<Option<MediaSession>> {
+    /// Process a remote SDP and create a media session
+    pub async fn process_remote_sdp(&self, sdp: &SessionDescription) -> Result<Option<MediaSession>> {
         // For now, we only support audio
-        let local_audio = local_sdp.media.iter()
+        let local_audio = sdp.media.iter()
             .find(|m| m.media_type == "audio");
-            
-        let remote_audio = remote_sdp.media.iter()
+        
+        let remote_audio = sdp.media.iter()
             .find(|m| m.media_type == "audio");
-            
-        // Check if we have both audio media
+        
         if let (Some(local_audio), Some(remote_audio)) = (local_audio, remote_audio) {
-            // Extract remote address
-            let remote_addr = if let Some(conn) = &remote_sdp.connection {
-                conn.connection_address
-            } else if let Some(media_conn) = remote_audio.connection.as_ref() {
-                media_conn.connection_address
+            debug!("Found matching audio media in local and remote SDP");
+            
+            // Extract remote RTP/RTCP address
+            let remote_ip = if let Some(media_connection) = remote_audio.attributes.get("connection") {
+                // Try to extract IP from media-level connection attribute
+                media_connection.parse()
+                    .map_err(|_| Error::SdpParsing("Invalid connection address in media attribute".into()))?
+            } else if let Some(c) = &sdp.connection {
+                c.connection_address
             } else {
-                return Err(Error::SdpParsing("Remote SDP missing connection information".into()));
+                return Err(Error::SdpParsing("No connection information found".into()));
             };
             
-            // Extract remote port
+            // Extract port
             let remote_port = remote_audio.port;
             
-            // Complete remote address
-            let remote_rtp_addr = SocketAddr::new(remote_addr, remote_port);
+            // Create remote RTP address
+            let remote_rtp_addr = SocketAddr::new(remote_ip, remote_port);
             
-            // Extract local port
-            let local_port = local_audio.port;
-            
-            // Local address
+            // Create local RTP address
+            let local_port = self.allocate_rtp_port().await?;
             let local_rtp_addr = SocketAddr::new(self.local_ip, local_port);
+            
+            debug!("Using local RTP addr {} and remote RTP addr {}", local_rtp_addr, remote_rtp_addr);
             
             // Find matching codecs
             let mut common_codecs = Vec::new();
@@ -145,15 +123,9 @@ impl SdpHandler {
                 for remote_format in &remote_audio.formats {
                     if local_format.encoding.to_uppercase() == remote_format.encoding.to_uppercase() {
                         // Codec match found
-                        let codec_type = match local_format.encoding.to_uppercase().as_str() {
-                            "PCMU" => CodecType::PCMU,
-                            "PCMA" => CodecType::PCMA,
-                            "G722" => CodecType::G722,
-                            "G729" => CodecType::G729,
-                            "OPUS" => CodecType::OPUS,
-                            // Add other codec types as needed
-                            _ => continue, // Skip unsupported codecs
-                        };
+                        let codec_name = local_format.encoding.to_uppercase();
+                        let codec_type = SdpHandler::parse_codec_type(codec_name.as_str())
+                            .ok_or_else(|| Error::SdpParsing(format!("Unsupported codec: {}", codec_name)))?;
                         
                         // Add codec to common codecs
                         common_codecs.push((codec_type, local_format.payload_type, remote_format.payload_type));
@@ -167,12 +139,12 @@ impl SdpHandler {
             }
             
             // Check for ICE attributes in remote SDP
-            let has_ice = remote_sdp.attributes.contains_key("ice-ufrag") || 
+            let has_ice = sdp.attributes.contains_key("ice-ufrag") || 
                           remote_audio.attributes.contains_key("ice-ufrag");
             
             // Extract ICE candidates from remote SDP if ICE is in use
             let remote_candidates = if has_ice {
-                self.extract_ice_candidates(remote_sdp)
+                self.extract_ice_candidates(sdp)
             } else {
                 Vec::new()
             };
@@ -182,7 +154,7 @@ impl SdpHandler {
                 MediaType::Audio,
                 local_rtp_addr,
                 remote_rtp_addr,
-                common_codecs[0].0, // Use first matching codec
+                common_codecs[0].0.into(), // Convert media-core CodecType to our ConfigCodecType
                 self.call_config.enable_rtcp(),
                 has_ice && self.call_config.enable_ice(),
             ).await?;
@@ -272,7 +244,7 @@ impl SdpHandler {
     }
     
     /// Extract SDP content from a SIP message body
-    pub fn extract_sdp_from_message(body: &[u8], content_type: Option<&str>) -> Option<&[u8]> {
+    pub fn extract_sdp_from_message<'a>(body: &'a [u8], content_type: Option<&str>) -> Option<&'a [u8]> {
         // If content type is application/sdp, the entire body is SDP
         if let Some(ct) = content_type {
             if ct.to_lowercase().contains("application/sdp") {
@@ -394,7 +366,6 @@ impl SdpHandler {
         // Convert transport string to TransportType enum
         let transport = match transport_str.as_str() {
             "udp" => crate::ice::TransportType::Udp,
-            "tcp" => crate::ice::TransportType::Tcp,
             "tcp-active" => crate::ice::TransportType::TcpActive,
             "tcp-passive" => crate::ice::TransportType::TcpPassive,
             _ => crate::ice::TransportType::Udp, // Default
@@ -419,8 +390,8 @@ impl SdpHandler {
         // Convert candidate type string to CandidateType enum
         let candidate_type = match candidate_type_str.as_str() {
             "host" => crate::ice::CandidateType::Host,
-            "srflx" => crate::ice::CandidateType::Srflx,
-            "prflx" => crate::ice::CandidateType::Prflx,
+            "srflx" => crate::ice::CandidateType::ServerReflexive,
+            "prflx" => crate::ice::CandidateType::PeerReflexive,
             "relay" => crate::ice::CandidateType::Relay,
             _ => crate::ice::CandidateType::Host, // Default
         };
@@ -448,8 +419,6 @@ impl SdpHandler {
             candidate_type,
             related_address,
             related_port,
-            network_type: None,
-            generation: None,
         })
     }
     
@@ -496,6 +465,18 @@ impl SdpHandler {
         }
         
         None
+    }
+    
+    fn parse_codec_type(codec_name: &str) -> Option<rvoip_media_core::codec::CodecType> {
+        // Match codec name to our internal codec type
+        match codec_name.to_uppercase().as_str() {
+            "PCMU" => Some(rvoip_media_core::codec::CodecType::Pcmu),
+            "PCMA" => Some(rvoip_media_core::codec::CodecType::Pcma),
+            "G722" => Some(rvoip_media_core::codec::CodecType::G729), // Use G729 as fallback
+            "G729" => Some(rvoip_media_core::codec::CodecType::G729),
+            "OPUS" => Some(rvoip_media_core::codec::CodecType::Opus),
+            _ => None,
+        }
     }
 }
 

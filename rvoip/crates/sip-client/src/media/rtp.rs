@@ -59,11 +59,11 @@ impl RtpSession {
     ) -> Result<Self> {
         // Set up codec-specific parameters
         let (payload_type, sampling_rate, samples_per_packet) = match codec {
-            CodecType::PCMU => (0, 8000, 160),   // G.711 μ-law, 20ms at 8kHz
-            CodecType::PCMA => (8, 8000, 160),   // G.711 A-law, 20ms at 8kHz
+            CodecType::Pcmu => (0, 8000, 160),   // G.711 μ-law, 20ms at 8kHz
+            CodecType::Pcma => (8, 8000, 160),   // G.711 A-law, 20ms at 8kHz
             CodecType::G722 => (9, 16000, 320),  // G.722, 20ms at 16kHz
             CodecType::G729 => (18, 8000, 160),  // G.729, 20ms at 8kHz
-            CodecType::OPUS => (111, 48000, 960), // Opus, 20ms at 48kHz
+            CodecType::Opus => (111, 48000, 960), // Opus, 20ms at 48kHz
         };
         
         // Configure core RTP session
@@ -79,7 +79,7 @@ impl RtpSession {
         // Create the core RTP session
         let core_session = CoreRtpSession::new(config)
             .await
-            .map_err(|e| Error::Media(format!("Failed to create RTP session: {}", e)))?;
+            .map_err(|e| Error::Media(rvoip_media_core::Error::Other(format!("Failed to create RTP session: {}", e))))?;
         
         // Get receiver channel
         let packet_rx = Some(core_session.get_receiver_channel());
@@ -109,7 +109,7 @@ impl RtpSession {
     
     /// Stop the RTP session
     pub async fn stop(&mut self) -> Result<()> {
-        self.core_session.close().await.map_err(|e| Error::Media(e.to_string()))?;
+        self.core_session.close().await;
         Ok(())
     }
     
@@ -119,21 +119,22 @@ impl RtpSession {
         let timestamp = self.core_session.get_timestamp();
         
         // Send the packet
-        self.core_session.send_packet(
+        match self.core_session.send_packet(
             timestamp, 
             payload,
             self.marker, // Use current marker value
-        )
-        .await
-        .map_err(|e| Error::Media(e.to_string()))?;
-        
-        // Clear marker after first packet
-        self.marker = false;
-        
-        // Update last send time
-        *self.last_send_time.lock().await = Some(Instant::now());
-        
-        Ok(())
+        ).await {
+            Ok(_) => {
+                // Clear marker after first packet
+                self.marker = false;
+                
+                // Update last send time
+                *self.last_send_time.lock().await = Some(Instant::now());
+                
+                Ok(())
+            },
+            Err(e) => Err(Error::Media(rvoip_media_core::Error::Other(e.to_string())))
+        }
     }
     
     /// Receive the next RTP packet
@@ -208,5 +209,16 @@ impl RtpSession {
     /// Set new remote address (legacy method)
     pub async fn set_remote_addr(&mut self, remote_addr: SocketAddr) -> Result<()> {
         self.update_remote_addr(remote_addr).await
+    }
+
+    /// Get the payload type, sample rate, and frame size for a codec
+    fn get_codec_params(&self, codec: CodecType) -> (u8, u32, usize) {
+        match codec {
+            CodecType::Pcmu => (0, 8000, 160),   // G.711 μ-law, 20ms at 8kHz
+            CodecType::Pcma => (8, 8000, 160),   // G.711 A-law, 20ms at 8kHz
+            CodecType::G722 => (9, 16000, 320),  // G.722, 20ms at 16kHz
+            CodecType::G729 => (18, 8000, 160),  // G.729, 20ms at 8kHz
+            CodecType::Opus => (111, 48000, 960), // Opus, 20ms at 48kHz
+        }
     }
 } 

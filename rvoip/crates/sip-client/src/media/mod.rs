@@ -26,10 +26,13 @@ use tokio::net::UdpSocket;
 use uuid::Uuid;
 use tracing::{debug, error, warn};
 
-use crate::config::CodecType as ClientCodecType;
+use crate::config::CodecType as ConfigCodecType;
 use crate::error::{Error, Result};
 use crate::media::rtcp::{RtcpSession, RtcpStats};
-use crate::ice::{IceSession, IceSessionState, IceConfig};
+use crate::ice::{IceSession, IceSessionState, IceConfig, IceConfigExt};
+use crate::config::{MediaConfig};
+use rvoip_session_core::sdp::SessionDescription;
+use crate::ice::SipIceCandidate;
 
 /// Type of media stream
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,7 +73,7 @@ pub struct MediaSession {
     remote_rtcp_addr: Option<SocketAddr>,
     
     /// Active codec
-    codec: ClientCodecType,
+    codec: ConfigCodecType,
     
     /// Muted state
     muted: Arc<RwLock<bool>>,
@@ -88,7 +91,7 @@ impl MediaSession {
         media_type: MediaType,
         local_rtp_addr: SocketAddr,
         remote_rtp_addr: SocketAddr,
-        codec: ClientCodecType,
+        codec: ConfigCodecType,
         enable_rtcp: bool,
         enable_ice: bool,
     ) -> Result<Self> {
@@ -190,7 +193,7 @@ impl MediaSession {
     }
     
     /// Get active codec
-    pub fn codec(&self) -> ClientCodecType {
+    pub fn codec(&self) -> ConfigCodecType {
         self.codec
     }
     
@@ -262,7 +265,10 @@ impl MediaSession {
             match ice_state {
                 IceSessionState::Connected => {
                     // If we have a selected candidate pair, use those addresses
-                    if let Some((local, remote)) = ice_session.selected_pair().await {
+                    if let Some((_local, remote)) = ice_session.selected_pair().await {
+                        // Use SipIceCandidate trait to get the socket address
+                        use crate::ice::SipIceCandidate;
+                        
                         // Update RTP session with ICE-selected addresses
                         let mut rtp_session = self.rtp_session.write().await;
                         rtp_session.update_remote_addr(remote.socket_addr()).await?;

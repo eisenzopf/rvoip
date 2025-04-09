@@ -539,17 +539,19 @@ async fn handle_incoming_request(
         }
 
         // Create call config from client config
-        let call_config = CallConfig {
+        let call_config = crate::config::CallConfig {
             audio_enabled: config.media.rtp_enabled,
             video_enabled: false,
             dtmf_enabled: true,
-            auto_answer: config.media.rtp_enabled,
-            auto_answer_delay: Duration::from_secs(0),
-            call_timeout: Duration::from_secs(60),
-            media: None,
+            auto_answer: false,
+            auto_answer_delay: std::time::Duration::from_secs(0),
+            call_timeout: std::time::Duration::from_secs(60),
+            media: Some(config.media.clone()),
             auth_username: None,
             auth_password: None,
             display_name: None,
+            rtp_port_range_start: config.media.rtp_port_min.into(),
+            rtp_port_range_end: config.media.rtp_port_max.into(),
         };
 
         // Create call with auto-generated ID

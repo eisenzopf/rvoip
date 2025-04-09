@@ -34,7 +34,7 @@ impl SipIceCandidate for IceCandidate {
         let transport = if addr.is_ipv4() {
             TransportType::Udp
         } else {
-            TransportType::Udp6
+            TransportType::Udp // Use UDP for both IPv4 and IPv6
         };
         
         Self {
@@ -47,8 +47,6 @@ impl SipIceCandidate for IceCandidate {
             candidate_type: CandidateType::Host,
             related_address: None,
             related_port: None,
-            network_type: None,
-            generation: None,
         }
     }
     
@@ -68,8 +66,8 @@ pub fn compute_priority(
 ) -> u32 {
     let type_preference = match candidate_type {
         CandidateType::Host => 126,
-        CandidateType::Srflx => 100,
-        CandidateType::Prflx => 110,
+        CandidateType::ServerReflexive => 100, // Use correct enum variant name
+        CandidateType::PeerReflexive => 110,   // Use correct enum variant name
         CandidateType::Relay => 0,
     };
     

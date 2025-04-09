@@ -3,11 +3,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut, Buf, BufMut};
 use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Mutex};
+use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};
 use crate::stun::StunMessage;
@@ -520,26 +521,31 @@ impl Candidate for UdpCandidate {
         let (tx, rx) = mpsc::channel(100);
         
         // Try to take the original receiver from the factory
-        let mut receiver_guard = self.receiver_factory.lock().unwrap();
-        if let Some(mut original_rx) = receiver_guard.take() {
-            // Start a task that forwards messages from the original to the new receiver
-            let tx_clone = tx.clone();
-            tokio::spawn(async move {
-                while let Some(msg) = original_rx.recv().await {
-                    if tx_clone.send(msg).await.is_err() {
-                        break;
+        let factory = self.receiver_factory.clone();
+        let receiver_tx = self.receiver_tx.clone();
+        
+        tokio::spawn(async move {
+            let mut receiver_guard = factory.lock().await;
+            if let Some(mut original_rx) = receiver_guard.take() {
+                // Start a task that forwards messages from the original to the new receiver
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = original_rx.recv().await {
+                        if tx_clone.send(msg).await.is_err() {
+                            break;
+                        }
                     }
-                }
-            });
-        } else {
-            // If the receiver has already been taken, connect to the original tx
-            let receiver_tx = self.receiver_tx.clone();
-            tokio::spawn(async move {
-                // Just observe that this task exists - data will be forwarded
-                // through the shared sender
-                let _ = receiver_tx;
-            });
-        }
+                });
+            } else {
+                // If the receiver has already been taken, connect to the original tx
+                let receiver_tx = receiver_tx.clone();
+                tokio::spawn(async move {
+                    // Just observe that this task exists - data will be forwarded
+                    // through the shared sender
+                    let _ = receiver_tx;
+                });
+            }
+        });
         
         rx
     }
@@ -665,26 +671,31 @@ impl Candidate for TcpCandidate {
         let (tx, rx) = mpsc::channel(100);
         
         // Try to take the original receiver from the factory
-        let mut receiver_guard = self.receiver_factory.lock().unwrap();
-        if let Some(mut original_rx) = receiver_guard.take() {
-            // Start a task that forwards messages from the original to the new receiver
-            let tx_clone = tx.clone();
-            tokio::spawn(async move {
-                while let Some(msg) = original_rx.recv().await {
-                    if tx_clone.send(msg).await.is_err() {
-                        break;
+        let factory = self.receiver_factory.clone();
+        let receiver_tx = self.receiver_tx.clone();
+        
+        tokio::spawn(async move {
+            let mut receiver_guard = factory.lock().await;
+            if let Some(mut original_rx) = receiver_guard.take() {
+                // Start a task that forwards messages from the original to the new receiver
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = original_rx.recv().await {
+                        if tx_clone.send(msg).await.is_err() {
+                            break;
+                        }
                     }
-                }
-            });
-        } else {
-            // If the receiver has already been taken, connect to the original tx
-            let receiver_tx = self.receiver_tx.clone();
-            tokio::spawn(async move {
-                // Just observe that this task exists - data will be forwarded
-                // through the shared sender
-                let _ = receiver_tx;
-            });
-        }
+                });
+            } else {
+                // If the receiver has already been taken, connect to the original tx
+                let receiver_tx = receiver_tx.clone();
+                tokio::spawn(async move {
+                    // Just observe that this task exists - data will be forwarded
+                    // through the shared sender
+                    let _ = receiver_tx;
+                });
+            }
+        });
         
         rx
     }

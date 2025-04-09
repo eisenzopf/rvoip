@@ -16,4 +16,36 @@ pub use rvoip_ice_core::{
     IceAgent, IceAgentState, IceAgentEvent, IceCandidate, 
     CandidateType, TransportType, IceConfig, IceServerConfig, 
     IceRole, IceComponent, GatheringPolicy
-}; 
+};
+
+// Extension traits for IceConfig
+pub trait IceConfigExt {
+    /// Add multiple STUN servers at once
+    fn with_stun_servers(self, servers: Vec<String>) -> Self;
+    
+    /// Set the gathering policy
+    fn with_gathering_policy(self, policy: GatheringPolicy) -> Self;
+}
+
+impl IceConfigExt for IceConfig {
+    fn with_stun_servers(mut self, servers: Vec<String>) -> Self {
+        // Clear existing servers
+        self.servers.clear();
+        
+        // Add each STUN server
+        for url in servers {
+            self.servers.push(IceServerConfig {
+                url,
+                username: None,
+                credential: None,
+            });
+        }
+        
+        self
+    }
+    
+    fn with_gathering_policy(mut self, policy: GatheringPolicy) -> Self {
+        self.gathering_policy = policy;
+        self
+    }
+} 

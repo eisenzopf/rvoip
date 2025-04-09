@@ -249,5 +249,8 @@ pub use ice::{IceSession, IceSessionState, SipIceCandidate};
 mod user_agent;
 pub use user_agent::UserAgent;
 
+// Re-export sip_core for internal use
+pub use rvoip_sip_core as sip_core;
+
 /// Version of the crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION"); 

@@ -282,7 +282,7 @@ impl Default for MediaConfig {
             jitter_buffer_ms: 60,
             audio_sample_rate: 8000,
             audio_ptime: 20,
-            preferred_codecs: vec![CodecType::PCMU, CodecType::PCMA],
+            preferred_codecs: vec![CodecType::Pcmu, CodecType::Pcma],
             srtp_enabled: false,  // Default to disabled for backward compatibility
             dtls_srtp_enabled: false,  // Default to disabled for backward compatibility
             ice_enabled: false,  // Default to disabled for backward compatibility
@@ -405,6 +405,12 @@ pub struct CallConfig {
 
     /// Display name
     pub display_name: Option<String>,
+    
+    /// RTP port range start (default: 10000)
+    pub rtp_port_range_start: Option<u16>,
+    
+    /// RTP port range end (default: 20000)
+    pub rtp_port_range_end: Option<u16>,
 }
 
 impl Default for CallConfig {
@@ -420,6 +426,8 @@ impl Default for CallConfig {
             auth_username: None,
             auth_password: None,
             display_name: None,
+            rtp_port_range_start: None,
+            rtp_port_range_end: None,
         }
     }
 }
@@ -489,30 +497,55 @@ impl CallConfig {
         self.display_name = Some(name.into());
         self
     }
+    
+    /// Set RTP port range
+    pub fn with_rtp_port_range(mut self, start: u16, end: u16) -> Self {
+        self.rtp_port_range_start = Some(start);
+        self.rtp_port_range_end = Some(end);
+        self
+    }
+    
+    /// Check if RTCP is enabled
+    pub fn enable_rtcp(&self) -> bool {
+        if let Some(media_config) = &self.media {
+            media_config.rtcp_enabled
+        } else {
+            true // Default to enabled
+        }
+    }
+    
+    /// Check if ICE is enabled
+    pub fn enable_ice(&self) -> bool {
+        if let Some(media_config) = &self.media {
+            media_config.ice_enabled
+        } else {
+            true // Default to enabled
+        }
+    }
 }
 
 /// Supported audio codecs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CodecType {
     /// G.711 μ-law
-    PCMU,
+    Pcmu,
     /// G.711 A-law
-    PCMA,
+    Pcma,
     /// G.722
     G722,
     /// G.729
     G729,
     /// Opus
-    OPUS,
+    Opus,
 }
 
 impl From<CodecType> for MediaCodecType {
     fn from(codec: CodecType) -> Self {
         match codec {
-            CodecType::PCMU => MediaCodecType::Pcmu,
-            CodecType::PCMA => MediaCodecType::Pcma,
+            CodecType::Pcmu => MediaCodecType::Pcmu,
+            CodecType::Pcma => MediaCodecType::Pcma,
             CodecType::G729 => MediaCodecType::G729,
-            CodecType::OPUS => MediaCodecType::Opus,
+            CodecType::Opus => MediaCodecType::Opus,
             // If G722 doesn't have a direct equivalent, use a placeholder or default
             _ => MediaCodecType::Pcmu, // Default for now
         }
@@ -522,10 +555,10 @@ impl From<CodecType> for MediaCodecType {
 impl From<MediaCodecType> for CodecType {
     fn from(codec: MediaCodecType) -> Self {
         match codec {
-            MediaCodecType::Pcmu => CodecType::PCMU,
-            MediaCodecType::Pcma => CodecType::PCMA,
+            MediaCodecType::Pcmu => CodecType::Pcmu,
+            MediaCodecType::Pcma => CodecType::Pcma,
             MediaCodecType::G729 => CodecType::G729,
-            MediaCodecType::Opus => CodecType::OPUS,
+            MediaCodecType::Opus => CodecType::Opus,
         }
     }
 } 

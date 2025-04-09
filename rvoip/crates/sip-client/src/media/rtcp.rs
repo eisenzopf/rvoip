@@ -93,13 +93,15 @@ impl RtcpSession {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Result<Self> {
-        // Create UDP socket
-        let socket = UdpSocket::bind(local_addr).await
-            .map_err(|e| Error::Network(e))?;
+        // Start receiver task
+        let socket = UdpSocket::bind(local_addr)
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
         
-        // Connect socket to remote address
-        socket.connect(remote_addr).await
-            .map_err(|e| Error::Network(e))?;
+        // Connect to remote to simplify send/recv
+        socket.connect(remote_addr)
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
         
         debug!("RTCP session created - local: {}, remote: {}", local_addr, remote_addr);
         
@@ -288,7 +290,58 @@ impl RtcpSession {
         
         // Reconnect socket
         self.socket.connect(remote_addr).await
-            .map_err(|e| Error::Network(e))?;
+            .map_err(|e| Error::Network(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// Process and handle an RTCP packet
+    pub async fn handle_packet(&mut self, data: &[u8]) -> Result<()> {
+        // If we have a socket, send the packet
+        if let Some(socket) = &self.socket {
+            socket.send(data)
+                .await
+                .map_err(|e| Error::Network(e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Send a receiver report
+    pub async fn send_receiver_report(&self) -> Result<()> {
+        // Process the RTCP report if we have a socket
+        let socket = match &self.socket {
+            Some(s) => s,
+            None => return Err(Error::Media(rvoip_media_core::Error::Other("RTCP socket not available".into()))),
+        };
+        
+        // Create receiver report
+        let stats = self.stats.read().await;
+        let rr = rvoip_rtp_core::rtcp::RtcpReceiverReport {
+            ssrc: self.ssrc,
+            report_blocks: vec![
+                rvoip_rtp_core::rtcp::RtcpReportBlock {
+                    ssrc: stats.packets_lost as u32, // Use as remote SSRC for now
+                    fraction_lost: stats.fraction_lost,
+                    cumulative_lost: stats.packets_lost as u32,
+                    highest_seq: stats.jitter, // Use jitter as seq num for now
+                    jitter: stats.jitter,
+                    last_sr: stats.last_sr_timestamp.unwrap_or(0) as u32,
+                    delay_since_last_sr: stats.last_sr_delay.unwrap_or(0),
+                }
+            ]
+        };
+        
+        // For now, just use a simple method to create RTCP data
+        let rtcp_data = create_simple_receiver_report(self.ssrc);
+        
+        // Send the packet
+        if let Err(e) = socket.send(&rtcp_data).await {
+            return Err(Error::Network(e.to_string()));
+        }
+        
+        // Update timestamp for last report sent
+        *self.last_send_time.lock().await = Some(Instant::now());
         
         Ok(())
     }

@@ -53,6 +53,46 @@ pub enum Error {
     #[error("Feature not available: {0}")]
     FeatureNotAvailable(String),
     
+    /// Transport errors
+    #[error("Transport error: {0}")]
+    Transport(String),
+    
+    /// Protocol errors
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+    
+    /// SIP protocol errors
+    #[error("SIP protocol error: {0}")]
+    SipProtocol(String),
+    
+    /// Call-related errors
+    #[error("Call error: {0}")]
+    Call(String),
+    
+    /// Storage errors
+    #[error("Storage error: {0}")]
+    Storage(String),
+    
+    /// SDP parsing errors
+    #[error("SDP parsing error: {0}")]
+    SdpParsing(String),
+    
+    /// Configuration errors
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    
+    /// Registration errors
+    #[error("Registration error: {0}")]
+    Registration(String),
+    
+    /// Timeout errors
+    #[error("Timeout: {0}")]
+    Timeout(String),
+    
+    /// Client errors
+    #[error("Client error: {0}")]
+    Client(String),
+    
     /// Other error
     #[error("{0}")]
     Other(String),

@@ -62,6 +62,9 @@ pub struct Call {
 
     /// Remote address
     remote_addr: SocketAddr,
+    
+    /// Local address
+    local_addr: SocketAddr,
 
     /// SIP transaction manager
     transaction_manager: Arc<TransactionManager>,
@@ -131,6 +134,13 @@ impl Call {
         // Generate a unique ID for the call
         let id = Uuid::new_v4().to_string();
         
+        // Get local address from transaction manager or use a fallback
+        let local_addr = transaction_manager.transport().local_addr()
+            .unwrap_or_else(|_| {
+                warn!("Could not get local address from transport, using 127.0.0.1:5060");
+                "127.0.0.1:5060".parse().unwrap()
+            });
+        
         // Create the call instance
         let call = Self {
             id,
@@ -144,6 +154,7 @@ impl Call {
             remote_uri,
             remote_display_name: Arc::new(RwLock::new(None)),
             remote_addr,
+            local_addr,
             transaction_manager,
             state: Arc::new(RwLock::new(CallState::Initial)),
             state_watcher: state_watcher.clone(),
@@ -169,17 +180,14 @@ impl Call {
     pub(crate) async fn setup_local_sdp(&self) -> Result<()> {
         debug!("Setting up local SDP for call {}", self.id);
         
-        // Get local IP from configuration or use a reasonable default
-        let local_ip = self.config.local_ip.unwrap_or_else(|| {
-            // Use the IP from our bound socket or a fallback
-            match self.transaction_manager.transport().local_addr() {
-                Ok(addr) => addr.ip(),
-                Err(_) => {
-                    warn!("Could not get local IP from transport, using 127.0.0.1");
-                    "127.0.0.1".parse().unwrap()
-                }
+        // Get local IP from transaction manager or use a reasonable default
+        let local_ip = match self.transaction_manager.transport().local_addr() {
+            Ok(addr) => addr.ip(),
+            Err(_) => {
+                warn!("Could not get local IP from transport, using 127.0.0.1");
+                "127.0.0.1".parse().unwrap()
             }
-        });
+        };
         
         // Get port range from config or use defaults
         let rtp_port_range_start = self.config.rtp_port_range_start.unwrap_or(10000);
@@ -311,25 +319,32 @@ impl Call {
             }
         }
         
-        // Get local IP from configuration or use a reasonable default
-        let local_ip = self.config.local_ip.unwrap_or_else(|| {
-            // Use the IP from our bound socket or a fallback
-            match self.transaction_manager.transport().local_addr() {
-                Ok(addr) => addr.ip(),
-                Err(_) => {
-                    warn!("Could not get local IP from transport, using 127.0.0.1");
-                    "127.0.0.1".parse().unwrap()
-                }
+        // Get local IP from transaction manager or use a reasonable default
+        let local_ip = match self.transaction_manager.transport().local_addr() {
+            Ok(addr) => addr.ip(),
+            Err(_) => {
+                warn!("Could not get local IP from transport, using 127.0.0.1");
+                "127.0.0.1".parse().unwrap()
             }
-        });
+        };
         
         // Process SDP if it exists in the INVITE
         let mut media_session = None;
-        if let Some(body) = &invite.body {
+        if !invite.body.is_empty() {
             // Extract content type
             let content_type = invite.header(&HeaderName::ContentType)
                 .and_then(|h| h.value.as_text());
                 
+            // Parse the SDP
+            let sdp_str = std::str::from_utf8(&invite.body)
+                .map_err(|_| Error::SipProtocol("Invalid UTF-8 in SDP".into()))?;
+                
+            let remote_sdp = SessionDescription::parse(sdp_str)
+                .map_err(|e| Error::SdpParsing(format!("Invalid SDP: {}", e)))?;
+            
+            // Store remote SDP
+            *self.remote_sdp.write().await = Some(remote_sdp.clone());
+            
             // Create SDP handler
             let sdp_handler = SdpHandler::new(
                 local_ip,
@@ -340,43 +355,22 @@ impl Call {
                 self.remote_sdp.clone(),
             );
             
-            // Check if the body contains SDP
-            if let Some(sdp_data) = SdpHandler::extract_sdp_from_message(body, content_type) {
-                debug!("INVITE contains SDP, generating response SDP");
-                
-                // Get username for SDP
-                let username = match self.local_uri.username() {
-                    Some(username) => username.to_string(),
-                    None => "anonymous".to_string(),
-                };
-                
-                // Generate response SDP
-                match sdp_handler.generate_response_sdp(sdp_data, &username).await {
-                    Ok(local_sdp) => {
-                        // Convert SDP to string
-                        let sdp_string = local_sdp.to_string();
-                        
-                        // Add Content-Type and Content-Length headers
-                        response.headers.push(Header::text(HeaderName::ContentType, "application/sdp"));
-                        response.headers.push(Header::text(HeaderName::ContentLength, sdp_string.len().to_string()));
-                        
-                        // Set response body
-                        response.body = Some(sdp_string.into_bytes());
-                        
-                        // Process remote SDP to create media session
-                        if let Ok(Some(session)) = sdp_handler.process_remote_sdp(sdp_data).await {
-                            media_session = Some(session);
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Failed to generate response SDP: {}", e);
-                        // Add empty Content-Length
-                        response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                    }
+            // Setup media from SDP
+            if let Err(e) = self.setup_media_from_sdp(&remote_sdp).await {
+                warn!("Error setting up media from SDP: {}", e);
+            }
+            
+            // Process using SDP handler for response
+            match sdp_handler.process_remote_sdp(&remote_sdp).await {
+                Ok(Some(session)) => {
+                    media_session = Some(session);
+                },
+                Ok(None) => {
+                    warn!("No compatible media found in SDP");
+                },
+                Err(e) => {
+                    warn!("Failed to process remote SDP: {}", e);
                 }
-            } else {
-                // No SDP in INVITE, add empty Content-Length
-                response.headers.push(Header::text(HeaderName::ContentLength, "0"));
             }
         } else {
             // No body in INVITE, add empty Content-Length
@@ -678,7 +672,7 @@ impl Call {
             },
             
             // Handle failure responses to INVITE
-            (Method::Invite, status) if status.is_failure() => {
+            (Method::Invite, status) if (400..700).contains(&status.as_u16()) => {
                 warn!("INVITE failed with status {}", status);
                 self.transition_to(CallState::Failed).await?;
             },
@@ -722,11 +716,8 @@ impl Call {
     }
     
     /// Get the call registry
-    pub fn registry(&self) -> Option<Arc<dyn CallRegistryInterface + Send + Sync>> {
-        match self.registry.try_read() {
-            Ok(guard) => guard.clone(),
-            Err(_) => None,
-        }
+    pub async fn registry(&self) -> Option<Arc<dyn CallRegistryInterface + Send + Sync>> {
+        self.registry.read().await.clone()
     }
     
     /// Set the call registry
@@ -801,11 +792,46 @@ impl Call {
         Ok(())
     }
     
-    /// Setup media from SDP
+    /// Setup media session from SDP
     pub async fn setup_media_from_sdp(&self, sdp: &SessionDescription) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
-        Ok(())
+        debug!("Setting up media from SDP for call {}", self.id);
+        
+        // Store the remote SDP
+        *self.remote_sdp.write().await = Some(sdp.clone());
+        
+        // Create an SDP handler
+        let local_ip = if let Ok(addr) = self.transaction_manager.transport().local_addr() {
+            addr.ip()
+        } else {
+            "127.0.0.1".parse().unwrap()
+        };
+        
+        let sdp_handler = SdpHandler::new(
+            local_ip,
+            self.config.rtp_port_range_start.unwrap_or(10000),
+            self.config.rtp_port_range_end.unwrap_or(20000),
+            self.config.clone(),
+            self.local_sdp.clone(),
+            self.remote_sdp.clone(),
+        );
+        
+        // Process the remote SDP
+        match sdp_handler.process_remote_sdp(sdp).await {
+            Ok(Some(session)) => {
+                // Add the media session
+                debug!("Adding media session for call {}", self.id);
+                self.media_sessions.write().await.push(session);
+                Ok(())
+            },
+            Ok(None) => {
+                debug!("No media session created from SDP");
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to process SDP: {}", e);
+                Err(e)
+            }
+        }
     }
     
     /// Get the remote tag
@@ -843,69 +869,44 @@ impl Call {
         }
     }
     
-    /// Save call dialog to registry
+    /// Save dialog information to the registry
     async fn save_dialog_to_registry(&self) -> Result<()> {
-        // First check if we have a registry
-        let registry_lock = self.registry.read().await;
-        let registry = match &*registry_lock {
-            Some(reg) => reg.clone(),
-            None => {
-                debug!("No registry available to save dialog");
+        if let Some(registry) = self.registry.read().await.clone() {
+            if let Some(dialog) = self.dialog.read().await.clone() {
+                debug!("Saving dialog {} to registry", dialog.id);
+                
+                // Get dialog sequence numbers and target
+                let local_seq = *self.cseq.lock().await;
+                let remote_seq = 0; // TODO: Get remote sequence number from dialog
+                
+                // Use remote target from dialog or fall back to remote URI
+                let remote_target = dialog.remote_uri.clone(); // No optional remote_target field
+
+                // Find call registry interface to update dialog
+                registry.update_dialog_info(
+                    &dialog.id.to_string(),
+                    Some(dialog.call_id.clone()),
+                    dialog.local_tag.clone(),
+                    dialog.remote_tag.clone(),
+                    Some(dialog.state.to_string()),
+                    Some(dialog.local_uri.to_string()),
+                    Some(dialog.remote_uri.to_string()),
+                    Some(remote_target.to_string()),
+                    Some(local_seq.to_string()),
+                    Some(remote_seq.to_string())
+                ).await?;
+                
                 return Ok(());
             }
-        };
-        
-        // Check if we have a dialog
-        let dialog_lock = self.dialog.read().await;
-        let dialog = match &*dialog_lock {
-            Some(dlg) => dlg.clone(),
-            None => {
-                debug!("No dialog to save");
-                return Ok(());
-            }
-        };
-        
-        // Extract dialog information
-        let dialog_id = dialog.id.to_string();
-        let dialog_state = dialog.state.to_string();
-        let local_tag = dialog.local_tag.clone();
-        let remote_tag = dialog.remote_tag.clone();
-        let local_seq = dialog.local_seq;
-        let remote_seq = dialog.remote_seq;
-        
-        // Convert route set to strings
-        let route_set = if dialog.route_set.is_empty() {
-            None
+            
+            // No dialog found for this call
+            debug!("No dialog found for call {}, not saving to registry", self.id);
+            Ok(())
         } else {
-            let routes: Vec<String> = dialog.route_set.iter()
-                .map(|uri| uri.to_string())
-                .collect();
-            Some(routes)
-        };
-        
-        // Get remote target
-        let remote_target = if let Some(target) = &dialog.remote_target {
-            Some(target.to_string())
-        } else {
-            None
-        };
-        
-        // Save to registry
-        registry.update_dialog_info(
-            &self.id,
-            Some(dialog_id),
-            Some(dialog_state),
-            local_tag,
-            remote_tag,
-            Some(local_seq),
-            remote_seq,
-            route_set,
-            remote_target,
-            Some(dialog.secure)
-        ).await?;
-        
-        debug!("Saved dialog information to registry for call {}", self.id);
-        Ok(())
+            // No registry set
+            debug!("No registry set for call {}, not saving dialog", self.id);
+            Ok(())
+        }
     }
     
     /// Set the dialog for this call and save it to the registry

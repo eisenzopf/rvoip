@@ -95,6 +95,11 @@ impl Uri {
         Self::new(Scheme::Tel, number)
     }
 
+    /// Get the username part of the URI, if present
+    pub fn username(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
     /// Set the user part of the URI
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());

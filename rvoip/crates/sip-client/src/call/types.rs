@@ -17,6 +17,8 @@ pub enum CallState {
     /// Outgoing call: INVITE sent, waiting for response
     /// Incoming call: Ringing, 180 Ringing sent
     Ringing,
+    /// Outgoing call: Provisional responses (180+) received, not ringing
+    Progress,
     /// Outgoing call: Received final response, waiting for ACK
     /// Incoming call: 200 OK sent, waiting for ACK
     Connecting,
@@ -50,6 +52,7 @@ impl std::fmt::Display for CallState {
         match self {
             CallState::Initial => write!(f, "Initial"),
             CallState::Ringing => write!(f, "Ringing"),
+            CallState::Progress => write!(f, "Progress"),
             CallState::Connecting => write!(f, "Connecting"),
             CallState::Established => write!(f, "Established"),
             CallState::Terminating => write!(f, "Terminating"),
