@@ -3,10 +3,11 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use tokio::task::JoinHandle;
-use tracing::{error, warn, debug};
+use tracing::{error, warn, debug, trace};
 
 use crate::error::Error;
 use crate::packet::{RtpHeader, RtpPacket, RTP_MIN_HEADER_SIZE};
@@ -218,8 +219,8 @@ impl Default for RtpSessionConfig {
     }
 }
 
-/// Event from the RTP session
-#[derive(Debug)]
+/// Events emitted by the RTP session
+#[derive(Debug, Clone)]
 pub enum RtpSessionEvent {
     /// New packet received
     PacketReceived(RtpPacket),
@@ -236,14 +237,8 @@ pub struct RtpSession {
     /// UDP socket for sending/receiving packets
     socket: Arc<UdpSocket>,
     
-    /// Event sender channel
-    event_tx: mpsc::Sender<RtpSessionEvent>,
-    
-    /// Event receiver channel
-    event_rx: mpsc::Receiver<RtpSessionEvent>,
-    
-    /// Current sequence number for outgoing packets
-    sequence_number: RtpSequenceNumber,
+    /// Event sender channel (using broadcast instead of mpsc)
+    event_tx: broadcast::Sender<RtpSessionEvent>,
     
     /// Session statistics
     stats: Arc<Mutex<RtpSessionStats>>,
@@ -258,53 +253,44 @@ pub struct RtpSession {
 impl RtpSession {
     /// Create a new RTP session
     pub async fn new(config: RtpSessionConfig) -> Result<Self> {
-        // Generate SSRC if not provided
-        let _ssrc = config.ssrc.unwrap_or_else(|| rand::thread_rng().gen());
-        
-        // Generate initial sequence number
-        let sequence_number = rand::thread_rng().gen();
-        
-        // Create UDP socket
+        // Create the socket
         let socket = UdpSocket::bind(config.local_addr).await
-            .map_err(|e| Error::IoError(e))?;
+            .map_err(|e| Error::Transport(format!("Failed to bind socket: {}", e)))?;
         
-        // Connect socket to remote address if provided
-        // This will help validate that packets are sent/received from the expected address
-        if let Some(remote_addr) = config.remote_addr {
-            socket.connect(remote_addr).await
-                .map_err(|e| Error::IoError(e))?;
-            
-            debug!("Socket connected to remote address: {}", remote_addr);
-        }
+        // Create the socket arc
+        let socket_arc = Arc::new(socket);
         
-        let socket = Arc::new(socket);
+        // Create event channels (using broadcast with capacity 100)
+        let (event_tx, _) = broadcast::channel(100);
+                
+        // Create statistics
+        let stats = Arc::new(Mutex::new(RtpSessionStats::default()));
         
-        // Create event channels with sufficient capacity to avoid dropping packets
-        let (event_tx, event_rx) = mpsc::channel(1000);
-        
-        // Create jitter buffer if enabled
+        // Create the jitter buffer if enabled
         let jitter_buffer = if config.enable_jitter_buffer {
+            let size = config.jitter_buffer_size.unwrap_or(10);
+            let max_age = config.max_packet_age_ms.unwrap_or(100);
+            
             Some(Arc::new(Mutex::new(JitterBuffer::new(
-                config.jitter_buffer_size.unwrap_or(DEFAULT_JITTER_BUFFER_SIZE),
-                config.max_packet_age_ms.unwrap_or(DEFAULT_MAX_PACKET_AGE_MS),
+                size,
+                max_age,
                 config.clock_rate,
             ))))
         } else {
             None
         };
         
+        // Create the session
         let mut session = Self {
             config,
-            socket,
+            socket: socket_arc,
             event_tx,
-            event_rx,
-            sequence_number,
-            stats: Arc::new(Mutex::new(RtpSessionStats::default())),
+            stats,
             jitter_buffer,
             receiver_handle: None,
         };
         
-        // Start receiver task
+        // Start the receiver
         session.start_receiver();
         
         Ok(session)
@@ -312,10 +298,18 @@ impl RtpSession {
     
     /// Send an RTP packet with payload
     pub async fn send_packet(&mut self, timestamp: RtpTimestamp, payload: Bytes, marker: bool) -> Result<()> {
+        // Check if we have a remote address to send to
+        if self.config.remote_addr.is_none() {
+            return Err(Error::SessionError("Remote address not set".to_string()));
+        }
+        
+        // Generate sequence number
+        let sequence_number = rand::thread_rng().gen();
+        
         // Create RTP header
         let mut header = RtpHeader::new(
             self.config.payload_type,
-            self.sequence_number,
+            sequence_number,
             timestamp,
             self.config.ssrc.unwrap_or(0),
         );
@@ -331,17 +325,14 @@ impl RtpSession {
         if self.socket.peer_addr().is_ok() {
             // Socket is connected, use send()
             self.socket.send(&data).await
-                .map_err(|e| Error::IoError(e))?;
+                .map_err(|e| Error::IoError(e.to_string()))?;
         } else if let Some(remote_addr) = self.config.remote_addr {
             // Socket is not connected, use send_to() with the remote address
             self.socket.send_to(&data, remote_addr).await
-                .map_err(|e| Error::IoError(e))?;
+                .map_err(|e| Error::IoError(e.to_string()))?;
         } else {
             return Err(Error::SessionError("Remote address not set".to_string()));
         }
-        
-        // Update sequence number
-        self.sequence_number = self.sequence_number.wrapping_add(1);
         
         // Update stats
         if let Ok(mut stats) = self.stats.lock() {
@@ -352,18 +343,22 @@ impl RtpSession {
         Ok(())
     }
     
-    /// Receive an RTP packet (blocks until a packet is available)
+    /// Receive an RTP packet
     pub async fn receive_packet(&mut self) -> Result<RtpPacket> {
+        // Subscribe to the broadcast channel
+        let mut rx = self.event_tx.subscribe();
+        
+        // Wait for a packet event
         loop {
-            match self.event_rx.recv().await {
-                Some(RtpSessionEvent::PacketReceived(packet)) => {
+            match rx.recv().await {
+                Ok(RtpSessionEvent::PacketReceived(packet)) => {
                     return Ok(packet);
-                }
-                Some(RtpSessionEvent::Error(e)) => {
-                    return Err(e);
-                }
-                None => {
-                    return Err(Error::SessionError("Event channel closed".to_string()));
+                },
+                Ok(RtpSessionEvent::Error(err)) => {
+                    return Err(err);
+                },
+                Err(e) => {
+                    return Err(Error::Transport(format!("Failed to receive event: {}", e)));
                 }
             }
         }
@@ -381,116 +376,64 @@ impl RtpSession {
     
     /// Get the local address
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().map_err(|e| Error::IoError(e))
+        self.socket.local_addr().map_err(|e| Error::IoError(e.to_string()))
     }
     
     /// Start the receiver task
     fn start_receiver(&mut self) {
+        // Clone resources for the receiver task
         let socket = self.socket.clone();
         let event_tx = self.event_tx.clone();
         let stats = self.stats.clone();
         let jitter_buffer = self.jitter_buffer.clone();
-        let payload_type = self.config.payload_type;
         
+        // Start receiver task
         let handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
+            let mut buf = vec![0; 2048];
             
             loop {
-                let result = if socket.peer_addr().is_ok() {
-                    // Socket is connected, use recv()
-                    socket.recv(&mut buf).await.map(|len| (len, socket.peer_addr().unwrap()))
-                } else {
-                    // Socket is not connected, use recv_from()
-                    socket.recv_from(&mut buf).await
-                };
-                
-                match result {
-                    Ok((len, addr)) => {
-                        debug!("Received {} bytes from {}", len, addr);
+                match socket.recv_from(&mut buf).await {
+                    Ok((size, addr)) => {
+                        trace!("Received {} bytes from {}", size, addr);
                         
-                        // Make sure we have enough data for a valid RTP packet
-                        if len < RTP_MIN_HEADER_SIZE {
-                            error!("Received data too small for RTP packet: {} bytes, min header size is {}", 
-                                  len, RTP_MIN_HEADER_SIZE);
-                            
-                            if len > 0 {
-                                let prefix = if len > 16 { 16 } else { len };
-                                let hex_data = hex_dump(&buf[..prefix]);
-                                error!("Invalid packet data prefix: {}", hex_data);
-                            }
-                            
-                            continue;
-                        }
-                    
-                        // Ensure we only use the actual received bytes
-                        let packet_data = &buf[..len];
-                        
-                        // Process received packet
-                        match RtpPacket::parse(packet_data) {
+                        // Parse the packet
+                        match RtpPacket::parse(&buf[..size]) {
                             Ok(packet) => {
-                                debug!("Successfully parsed RTP packet: seq={}, ts={}, pt={}, len={}",
-                                      packet.header.sequence_number, 
-                                      packet.header.timestamp,
-                                      packet.header.payload_type,
-                                      packet.payload.len());
-                                
                                 // Update stats
-                                if let Ok(mut stats) = stats.lock() {
-                                    stats.packets_received += 1;
-                                    stats.bytes_received += len as u64;
+                                {
+                                    let mut stats_guard = stats.lock().unwrap();
+                                    stats_guard.packets_received += 1;
+                                    stats_guard.bytes_received += size as u64;
                                 }
                                 
-                                // Check if packet payload type matches expected
-                                if packet.header.payload_type != payload_type {
-                                    warn!("Received packet with unexpected payload type: {}, expected: {}", 
-                                          packet.header.payload_type, payload_type);
-                                    continue;
+                                // Send event
+                                if let Err(e) = event_tx.send(RtpSessionEvent::PacketReceived(packet.clone())) {
+                                    warn!("Failed to send RTP packet event: {}", e);
                                 }
                                 
-                                // Add to jitter buffer if enabled
+                                // Process with jitter buffer if enabled
                                 if let Some(jitter_buffer) = &jitter_buffer {
-                                    if let Ok(mut buffer) = jitter_buffer.lock() {
-                                        let added = buffer.add_packet(&packet.header, packet.payload.clone());
-                                        
-                                        if !added {
-                                            // Packet discarded by jitter buffer
-                                            if let Ok(mut stats) = stats.lock() {
-                                                stats.packets_discarded_by_jitter += 1;
-                                            }
-                                            continue;
-                                        }
-                                    }
+                                    let mut jb_guard = jitter_buffer.lock().unwrap();
+                                    jb_guard.add_packet(&packet.header, packet.payload.clone());
                                 }
-                                
-                                // Forward packet to event handler
-                                if event_tx.send(RtpSessionEvent::PacketReceived(packet)).await.is_err() {
-                                    error!("Failed to send RTP packet event, channel closed");
-                                    break;
-                                }
-                            }
+                            },
                             Err(e) => {
-                                error!("Failed to parse RTP packet ({} bytes): {}", len, e);
+                                error!("Failed to parse RTP packet: {}", e);
                                 
-                                // Log more details about the packet for debugging
-                                if len > 0 {
-                                    let prefix = if len > 16 { 16 } else { len };
-                                    let hex_data = hex_dump(&packet_data[..prefix]);
-                                    error!("Packet data prefix: {}", hex_data);
-                                }
-                                
-                                if event_tx.send(RtpSessionEvent::Error(e)).await.is_err() {
-                                    error!("Failed to send RTP error event, channel closed");
-                                    break;
-                                }
+                                // Try to send error event
+                                let _ = event_tx.send(
+                                    RtpSessionEvent::Error(Error::ParseError(format!("Failed to parse RTP packet: {}", e)))
+                                );
                             }
                         }
-                    }
+                    },
                     Err(e) => {
-                        error!("Failed to receive from socket: {}", e);
-                        if event_tx.send(RtpSessionEvent::Error(Error::IoError(e))).await.is_err() {
-                            error!("Failed to send RTP error event, channel closed");
-                            break;
-                        }
+                        warn!("Error receiving RTP packet: {}", e);
+                        
+                        // Try to send error event
+                        let _ = event_tx.send(
+                            RtpSessionEvent::Error(Error::Transport(format!("Failed to receive packet: {}", e)))
+                        );
                     }
                 }
             }
@@ -522,15 +465,15 @@ impl RtpSession {
     
     /// Get the receiver channel for incoming packets
     pub fn get_receiver_channel(&self) -> mpsc::Receiver<RtpPacket> {
-        // Create a new channel
+        // Create a new channel for this subscriber
         let (tx, rx) = mpsc::channel(100);
         
-        // Clone the event receiver
-        let mut event_rx = self.event_rx.clone();
+        // Subscribe to broadcast events
+        let mut event_rx = self.event_tx.subscribe();
         
         // Forward events to the new channel
         tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
+            while let Ok(event) = event_rx.recv().await {
                 match event {
                     RtpSessionEvent::PacketReceived(packet) => {
                         if tx.send(packet).await.is_err() {

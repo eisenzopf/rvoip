@@ -35,6 +35,10 @@ pub enum Error {
     /// Parser error
     #[error("Parser error: {0}")]
     Parser(String),
+    
+    /// Parse error
+    #[error("Parse error: {0}")]
+    ParseError(String),
 
     /// Input/output error
     #[error("I/O error: {0}")]

@@ -1,7 +1,8 @@
 use thiserror::Error;
+use std::io;
 
 /// Error type for RTP operations
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum Error {
     /// Error when encoding RTP packet
     #[error("Failed to encode RTP packet: {0}")]
@@ -28,7 +29,7 @@ pub enum Error {
 
     /// IO error when sending/receiving RTP packets
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
 
     /// RTCP error
     #[error("RTCP error: {0}")]
@@ -37,4 +38,18 @@ pub enum Error {
     /// Session error
     #[error("RTP session error: {0}")]
     SessionError(String),
+    
+    /// Transport error
+    #[error("Transport error: {0}")]
+    Transport(String),
+    
+    /// Parsing error
+    #[error("Parse error: {0}")]
+    ParseError(String),
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::IoError(err.to_string())
+    }
 } 

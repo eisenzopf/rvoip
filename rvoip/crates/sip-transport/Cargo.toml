@@ -24,9 +24,9 @@ bytes = { workspace = true }
 tracing = { workspace = true }
 
 # TLS support
-tokio-rustls = "0.24"
-rustls = "0.21"
-rustls-pemfile = "1.0"
+tokio-rustls = { version = "0.24", optional = true }
+rustls = { version = "0.21", optional = true }
+rustls-pemfile = { version = "1.0", optional = true }
 
 [features]
 default = ["udp", "tls"]

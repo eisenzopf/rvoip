@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
             // Wait for call to be established before sending DTMF
             info!("Waiting for call to be established before sending DTMF...");
             
-            // Set a reasonable timeout for the entire call
+            // Wait a reasonable timeout for the entire call
             let timeout = tokio::time::sleep(Duration::from_secs(15));
             
             tokio::select! {

@@ -4,6 +4,8 @@ use std::io;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::net::{TcpListener, TcpStream};
@@ -18,7 +20,7 @@ use bytes::Bytes;
 use crate::{Transport, TransportEvent};
 use crate::error::{Error, Result};
 
-/// TLS transport for SIP
+/// TLS transport implementation for SIP
 pub struct TlsTransport {
     /// Local address
     local_addr: SocketAddr,
@@ -31,6 +33,19 @@ pub struct TlsTransport {
     
     /// Transport event sender
     event_tx: Option<mpsc::Sender<TransportEvent>>,
+    
+    /// Closed flag
+    closed: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for TlsTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsTransport")
+            .field("local_addr", &self.local_addr)
+            .field("connections", &self.connections)
+            .field("closed", &self.closed)
+            .finish()
+    }
 }
 
 impl TlsTransport {
@@ -68,6 +83,7 @@ impl TlsTransport {
             acceptor,
             connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_tx: Some(tx),
+            closed: Arc::new(AtomicBool::new(false)),
         };
         
         // Start listening
@@ -92,7 +108,10 @@ impl TlsTransport {
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
-                error!("Failed to bind TLS listener: {}", e);
+                error!("Failed to bind TLS listener to {}: {}", addr, e);
+                let _ = event_tx.send(TransportEvent::Error {
+                    error: format!("Failed to bind TLS listener: {}", e),
+                }).await;
                 return;
             }
         };
@@ -100,22 +119,35 @@ impl TlsTransport {
         info!("TLS transport listening on {}", addr);
         
         // Accept connections
-        while let Ok((tcp_stream, remote_addr)) = listener.accept().await {
-            let acceptor = acceptor.clone();
-            let connections = connections.clone();
-            let event_tx = event_tx.clone();
-            
-            // Handle connection in a separate task
-            tokio::spawn(async move {
-                match acceptor.accept(tcp_stream).await {
-                    Ok(tls_stream) => {
-                        Self::handle_connection(tls_stream, remote_addr, connections, event_tx).await;
-                    },
-                    Err(e) => {
-                        error!("TLS handshake failed: {}", e);
-                    }
+        loop {
+            match listener.accept().await {
+                Ok((stream, remote_addr)) => {
+                    debug!("New TCP connection from {}", remote_addr);
+                    
+                    // Clone resources for the connection handler
+                    let acceptor = acceptor.clone();
+                    let connections = connections.clone();
+                    let event_tx = event_tx.clone();
+                    let local_addr = addr;
+                    
+                    // Handle the connection in a new task
+                    tokio::spawn(async move {
+                        // Perform TLS handshake
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => {
+                                debug!("TLS handshake with {} successful", remote_addr);
+                                Self::handle_connection(tls_stream, remote_addr, local_addr, connections, event_tx).await;
+                            },
+                            Err(e) => {
+                                error!("TLS handshake with {} failed: {}", remote_addr, e);
+                            }
+                        }
+                    });
+                },
+                Err(e) => {
+                    error!("Failed to accept TCP connection: {}", e);
                 }
-            });
+            }
         }
     }
     
@@ -123,6 +155,7 @@ impl TlsTransport {
     async fn handle_connection(
         tls_stream: TlsStream<TcpStream>,
         remote_addr: SocketAddr,
+        local_addr: SocketAddr,
         connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
         event_tx: mpsc::Sender<TransportEvent>,
     ) {
@@ -162,8 +195,15 @@ impl TlsTransport {
                     
                     // Forward the data as a transport event
                     let _ = event_tx.send(TransportEvent::MessageReceived {
-                        data: data.into(),
+                        message: match rvoip_sip_core::Message::parse(&data) {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                error!("Failed to parse SIP message: {}", e);
+                                continue;
+                            }
+                        },
                         source: remote_addr,
+                        destination: local_addr,
                     }).await;
                 },
                 Err(e) => {
@@ -220,22 +260,29 @@ impl TlsTransport {
 #[async_trait]
 impl Transport for TlsTransport {
     /// Send a message
-    async fn send_message(&self, message: rvoip_sip_core::Message, destination: SocketAddr) -> io::Result<()> {
+    async fn send_message(&self, message: rvoip_sip_core::Message, destination: SocketAddr) -> crate::error::Result<()> {
         // Convert message to bytes
         let bytes = message.to_string().into_bytes();
         
         // Send to destination
         self.send_to_addr(bytes.into(), destination).await
+            .map_err(|e| crate::error::Error::IoError(e.to_string()))
     }
     
     /// Get the local address
-    fn local_addr(&self) -> io::Result<SocketAddr> {
+    fn local_addr(&self) -> crate::error::Result<SocketAddr> {
         Ok(self.local_addr)
     }
     
-    /// Send raw data
-    async fn send_data(&self, data: Bytes, destination: SocketAddr) -> io::Result<()> {
-        self.send_to_addr(data, destination).await
+    /// Close the transport
+    async fn close(&self) -> crate::error::Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    
+    /// Check if the transport is closed
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 }
 

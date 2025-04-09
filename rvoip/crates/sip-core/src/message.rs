@@ -765,6 +765,154 @@ impl Message {
         
         bytes
     }
+
+    /// Parse a SIP message from bytes
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        // Convert bytes to string for parsing
+        let text = match std::str::from_utf8(data) {
+            Ok(text) => text,
+            Err(e) => return Err(Error::ParseError(format!("Invalid UTF-8 data: {}", e))),
+        };
+        
+        // Split the message into lines
+        let mut lines = text.lines();
+        
+        // Parse the first line (request-line or status-line)
+        let first_line = match lines.next() {
+            Some(line) => line,
+            None => return Err(Error::ParseError("Empty message".to_string())),
+        };
+        
+        // Check if it's a request or response
+        if first_line.starts_with("SIP/") {
+            // It's a response
+            Self::parse_response(first_line, lines, data)
+        } else {
+            // It's a request
+            Self::parse_request(first_line, lines, data)
+        }
+    }
+    
+    // Parse a SIP request
+    fn parse_request<'a, I>(request_line: &str, lines: I, data: &[u8]) -> Result<Self> 
+    where
+        I: Iterator<Item = &'a str>,
+    {
+        // Parse request line
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(Error::ParseError(format!("Invalid request line: {}", request_line)));
+        }
+        
+        // Parse method
+        let method = Method::from_str(parts[0])?;
+        
+        // Parse URI
+        let uri = Uri::from_str(parts[1])?;
+        
+        // Parse version
+        let version = Version::from_str(parts[2])?;
+        
+        // Parse headers and body
+        let (headers, body) = Self::parse_headers_and_body(lines, data)?;
+        
+        Ok(Message::Request(Request {
+            method,
+            uri,
+            version,
+            headers,
+            body,
+        }))
+    }
+    
+    // Parse a SIP response
+    fn parse_response<'a, I>(status_line: &str, lines: I, data: &[u8]) -> Result<Self> 
+    where
+        I: Iterator<Item = &'a str>,
+    {
+        // Parse status line
+        let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
+        if parts.len() < 3 {
+            return Err(Error::ParseError(format!("Invalid status line: {}", status_line)));
+        }
+        
+        // Parse version
+        let version = Version::from_str(parts[0])?;
+        
+        // Parse status code
+        let status_code = parts[1].parse::<u16>()
+            .map_err(|_| Error::ParseError(format!("Invalid status code: {}", parts[1])))?;
+        let status = StatusCode::from_u16(status_code)?;
+        
+        // Parse reason phrase
+        let reason = Some(parts[2].to_string());
+        
+        // Parse headers and body
+        let (headers, body) = Self::parse_headers_and_body(lines, data)?;
+        
+        Ok(Message::Response(Response {
+            version,
+            status,
+            reason,
+            headers,
+            body,
+        }))
+    }
+    
+    // Parse headers and body
+    fn parse_headers_and_body<'a, I>(mut lines: I, data: &[u8]) -> Result<(Vec<Header>, Bytes)> 
+    where
+        I: Iterator<Item = &'a str>,
+    {
+        let mut headers = Vec::new();
+        let mut header_lines = Vec::new();
+        
+        // Collect header lines
+        for line in &mut lines {
+            if line.is_empty() {
+                // Empty line marks the end of headers
+                break;
+            }
+            header_lines.push(line);
+        }
+        
+        // Parse headers
+        for line in header_lines {
+            if let Some(pos) = line.find(':') {
+                let name = &line[..pos].trim();
+                let value = &line[pos+1..].trim();
+                
+                let header_name = HeaderName::from_str(name)?;
+                let header_value = HeaderValue::text(value.to_string());
+                
+                headers.push(Header::new(header_name, header_value));
+            } else {
+                return Err(Error::ParseError(format!("Invalid header line: {}", line)));
+            }
+        }
+        
+        // Find body in original data
+        let body = if let Some(body_pos) = find_body_position(data) {
+            Bytes::copy_from_slice(&data[body_pos..])
+        } else {
+            Bytes::new()
+        };
+        
+        Ok((headers, body))
+    }
+}
+
+// Helper function to find the start of the body in the raw data
+fn find_body_position(data: &[u8]) -> Option<usize> {
+    // Look for double CRLF which marks the end of headers
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == b'\r' && data[i+1] == b'\n' && data[i+2] == b'\r' && data[i+3] == b'\n' {
+            return Some(i + 4);
+        }
+        i += 1;
+    }
+    None
 }
 
 impl fmt::Display for Message {
