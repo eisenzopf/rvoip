@@ -7,6 +7,10 @@ authors = ["rvoip team"]
 repository = "https://github.com/rudeless/rvoip"
 license = "MIT"
 
+# Turn off specific warnings
+[lints.rust]
+unused_imports = "allow"
+
 [dependencies]
 # Core crates
 rvoip-sip-core = { path = "../sip-core" }

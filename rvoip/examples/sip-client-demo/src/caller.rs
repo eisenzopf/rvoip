@@ -4,9 +4,10 @@ use std::time::Duration;
 use tracing::{info, error, debug, Level, warn};
 use tracing_subscriber::FmtSubscriber;
 
+// Updated imports from the refactored SIP client library
 use rvoip_sip_client::{
     SipClient, ClientConfig, SipClientEvent,
-    CallConfig, CallState,
+    CallConfig, CallState, CallEvent,
     Result,
     call_registry::CallRegistry,
 };
@@ -129,7 +130,7 @@ async fn main() -> Result<()> {
     let dtmf_task = if args.dtmf {
         let weak_call = call.weak_clone();
         Some(tokio::spawn(async move {
-            // Instead of just waiting a fixed time, actually wait for call to be established
+            // Wait for call to be established before sending DTMF
             info!("Waiting for call to be established before sending DTMF...");
             
             // Set a reasonable timeout for the entire call
@@ -166,8 +167,8 @@ async fn main() -> Result<()> {
                                 
                                 // Wait for current call state
                                 let current_state = weak_call.state().await;
-                                if current_state == rvoip_sip_client::CallState::Failed || 
-                                   current_state == rvoip_sip_client::CallState::Terminated {
+                                if current_state == CallState::Failed || 
+                                   current_state == CallState::Terminated {
                                     error!("Call ended (state: {}), stopping DTMF sending", current_state);
                                     break;
                                 }
@@ -197,24 +198,24 @@ async fn main() -> Result<()> {
     // Process client events in the foreground
     while let Ok(event) = client_events.recv().await {
         match event {
-            SipClientEvent::Call(ref call_event) => {
+            SipClientEvent::Call(call_event) => {
                 debug!("Call event: {:?}", call_event);
                 
                 // Check for call state changes
-                if let SipClientEvent::Call(rvoip_sip_client::CallEvent::StateChanged { 
+                if let CallEvent::StateChanged { 
                     call, 
                     previous, 
                     current 
-                }) = &event {
+                } = call_event {
                     info!("Call state changed: {} -> {}", previous, current);
                     
                     // If call established, print info
-                    if current == &CallState::Established {
+                    if current == CallState::Established {
                         info!("Call established with {}", call.remote_uri());
                     }
                     
                     // If call terminated, exit
-                    if current == &CallState::Terminated {
+                    if current == CallState::Terminated {
                         info!("Call terminated, exiting");
                         break;
                     }

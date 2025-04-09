@@ -1,16 +1,15 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 use std::str::FromStr;
-use std::env;
 use std::fmt::Write;
 
 use clap::Parser;
-use tokio::sync::mpsc;
 use tracing::{info, debug, error, warn};
 
+// Updated imports from the refactored SIP client library
 use rvoip_sip_client::{
-    UserAgent, ClientConfig, CallConfig, CallEvent, Call, CallState, CallDirection,
-    CallRegistry, CallRecord, CallStateRecord, CallFilter, CallStatistics, SerializableCallLookupResult
+    UserAgent, ClientConfig, CallEvent, CallState, CallDirection,
+    call_registry::{CallRegistry, CallRecord, CallFilter, CallStatistics, SerializableCallLookupResult}
 };
 
 /// Command-line arguments for the call history demo
@@ -150,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
                     info!("  Call {}: {} {} {}, {}",
                         record.id,
                         match record.direction {
-                            rvoip_sip_client::CallDirection::Incoming => "from",
-                            rvoip_sip_client::CallDirection::Outgoing => "to",
+                            CallDirection::Incoming => "from",
+                            CallDirection::Outgoing => "to",
                         },
                         record.remote_uri,
                         record.state,
@@ -214,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
                         
                         // Demonstrate using the weak call reference (safer)
                         if let Some(weak_call) = lookup_clone.weak_call {
-                            info!("  Call weak reference available, state: {}", weak_call.current_state());
+                            info!("  Call weak reference available, state: {}", weak_call.state().await);
                         }
                         
                         // Demonstrate creating a serializable version for API responses
@@ -251,8 +250,8 @@ async fn main() -> anyhow::Result<()> {
                     info!("Call record: {} {} -> {}, duration: {:?}", 
                           record.id, 
                           match record.direction {
-                              rvoip_sip_client::CallDirection::Incoming => "from",
-                              rvoip_sip_client::CallDirection::Outgoing => "to",
+                              CallDirection::Incoming => "from",
+                              CallDirection::Outgoing => "to",
                           },
                           record.remote_uri,
                           record.duration);

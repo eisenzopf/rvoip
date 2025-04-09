@@ -3,10 +3,10 @@ use std::net::SocketAddr;
 use tracing::{info, debug, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+// Updated imports from the refactored SIP client library
 use rvoip_sip_client::{
     UserAgent, ClientConfig, 
-    CallEvent, Result,
-    CallState,
+    CallEvent, CallState, Result,
     call_registry::CallRegistry,
 };
 
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     let mut user_agent = UserAgent::new(config).await?;
     
     // Set the call registry to enable persistence
-    user_agent.set_call_registry(registry);
+    user_agent.set_call_registry(registry).await;
     info!("Call registry configured for user agent");
     
     // Get call events
@@ -106,25 +106,25 @@ async fn main() -> Result<()> {
                     info!("Call ringing - auto-answer is disabled");
                 }
             },
-            CallEvent::StateChanged { call: _, previous, current } => {
+            CallEvent::StateChanged { call, previous, current } => {
                 info!("Call state changed: {} -> {}", previous, current);
             },
-            CallEvent::MediaAdded { call: _, media_type } => {
+            CallEvent::MediaAdded { call, media_type } => {
                 info!("Media added to call: {:?}", media_type);
             },
-            CallEvent::MediaRemoved { call: _, media_type } => {
+            CallEvent::MediaRemoved { call, media_type } => {
                 info!("Media removed from call: {:?}", media_type);
             },
-            CallEvent::DtmfReceived { call: _, digit } => {
+            CallEvent::DtmfReceived { call, digit } => {
                 info!("DTMF received: {}", digit);
             },
-            CallEvent::ResponseReceived { call: _, response, transaction_id } => {
+            CallEvent::ResponseReceived { call, response, transaction_id } => {
                 info!("Response received: {} (transaction ID: {})", response.status, transaction_id);
             },
-            CallEvent::Terminated { call: _, reason } => {
+            CallEvent::Terminated { call, reason } => {
                 info!("Call terminated: {}", reason);
             },
-            CallEvent::Error { call: _, error } => {
+            CallEvent::Error { call, error } => {
                 error!("Call error: {}", error);
             },
         }

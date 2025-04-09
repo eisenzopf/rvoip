@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, oneshot};
+use tokio::time;
 use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::{
-    Request, Response, Message, Method, 
+    Request, Response, Message, Method, StatusCode, 
     Uri, Header, HeaderName, HeaderValue
 };
 use rvoip_transaction_core::TransactionManager;
@@ -87,13 +89,51 @@ impl LightweightClient {
         // Add Content-Length
         request.headers.push(Header::text(HeaderName::ContentLength, "0"));
         
-        // Send request via transaction layer
-        let transaction_id = self.transaction_manager.send_request(request, server_addr).await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        // Create a transaction
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            request.clone(), 
+            server_addr
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Create a oneshot channel for the response
+        let (tx, rx) = oneshot::channel();
+        
+        // Set up a separate task to listen for the response
+        let transaction_manager = self.transaction_manager.clone();
+        let event_tx = self.event_tx.clone();
+        let tx_id_for_task = transaction_id.clone(); // Clone for the task
+        
+        tokio::spawn(async move {
+            // Listen for transaction events
+            let mut events_rx = transaction_manager.subscribe();
             
-        // Wait for response
-        let response = self.transaction_manager.wait_for_response(&transaction_id).await
+            while let Some(event) = events_rx.recv().await {
+                if let rvoip_transaction_core::TransactionEvent::ResponseReceived { 
+                    message, 
+                    transaction_id: event_tx_id, 
+                    .. 
+                } = &event {
+                    if event_tx_id == &tx_id_for_task {
+                        if let Message::Response(response) = message {
+                            // Send response to our oneshot channel
+                            let _ = tx.send(response.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Send the request
+        self.transaction_manager.send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Wait for the response with timeout
+        let response = match time::timeout(Duration::from_secs(30), rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => return Err(Error::Transport("Response channel closed".into())),
+            Err(_) => return Err(Error::Timeout("Timeout waiting for response".into())),
+        };
             
         if response.status == StatusCode::Ok {
             info!("Registration successful (refresh)");

@@ -120,37 +120,222 @@ impl SipClient {
     
     /// Start the client
     pub async fn start(&mut self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        // Check if already running
+        if *self.running.read().await {
+            return Ok(());
+        }
+        
+        // Set running flag
+        *self.running.write().await = true;
+        
+        // Store references for transaction event handling
+        let transaction_manager = self.transaction_manager.clone();
+        let mut transaction_events_rx = std::mem::replace(&mut self.transaction_events_rx, self.transaction_manager.subscribe());
+        let event_tx = self.event_tx.clone();
+        let running = self.running.clone();
+        let pending_responses = self.pending_responses.clone();
+        
+        // Spawn transaction event processor task
+        let event_task = tokio::spawn(async move {
+            info!("SIP client transaction event processor started");
+            
+            while *running.read().await {
+                // Wait for next transaction event
+                let event = match tokio::time::timeout(
+                    Duration::from_secs(1),
+                    transaction_events_rx.recv()
+                ).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        error!("Transaction event channel closed");
+                        break;
+                    },
+                    Err(_) => {
+                        // Timeout, continue
+                        continue;
+                    }
+                };
+                
+                // Process transaction event
+                match &event {
+                    TransactionEvent::ResponseReceived { message, transaction_id, .. } => {
+                        if let Message::Response(response) = message {
+                            debug!("Response received for transaction {}: {}", transaction_id, response.status);
+                            
+                            // Get the pending response handler if any
+                            let mut handlers = pending_responses.lock().await;
+                            if let Some(tx) = handlers.remove(transaction_id) {
+                                // Send the response to the waiting handler
+                                let _ = tx.send(response.clone());
+                            }
+                        }
+                    },
+                    // Process other events as needed
+                    _ => {}
+                }
+                
+                // Forward event to client event stream
+                let _ = event_tx.send(SipClientEvent::Error("Transaction event received".into())).await;
+            }
+            
+            info!("SIP client transaction event processor stopped");
+        });
+        
+        self.event_task = Some(event_task);
+        
+        info!("SIP client started");
+        
         Ok(())
     }
     
     /// Stop the client
     pub async fn stop(&mut self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        // Check if not running
+        if !*self.running.read().await {
+            return Ok(());
+        }
+        
+        // Set running flag to false
+        *self.running.write().await = false;
+        
+        // Cancel event task if running
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
+        
+        // Hangup all active calls
+        let calls = self.calls.lock().await;
+        for (_, call_lock) in calls.iter() {
+            let call_lock_clone = call_lock.clone();
+            tokio::spawn(async move {
+                let mut call = call_lock_clone.write().await;
+                if let Err(e) = call.hangup().await {
+                    error!("Error hanging up call: {}", e);
+                }
+            });
+        }
+        
+        info!("SIP client stopped");
+        
         Ok(())
     }
     
     /// Register with a SIP server
     pub async fn register(&self, server_addr: SocketAddr) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
-        Ok(())
+        // Create request URI for REGISTER (domain)
+        let request_uri: Uri = format!("sip:{}", self.config.domain).parse()
+            .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
+        
+        // Create REGISTER request
+        let mut request = self.create_request(Method::Register, request_uri.clone()).await?;
+        
+        // Add Expires header
+        request.headers.push(Header::text(
+            HeaderName::Expires, 
+            self.config.register_expires.to_string()
+        ));
+        
+        // Add Contact header with expires parameter
+        let contact = format!(
+            "<sip:{}@{};transport=udp>;expires={}",
+            self.config.username,
+            self.config.local_addr.unwrap(),
+            self.config.register_expires
+        );
+        request.headers.push(Header::text(HeaderName::Contact, contact));
+        
+        // Add Content-Length
+        request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        // Store registration state
+        let mut registration = Registration {
+            server: server_addr,
+            uri: request_uri,
+            registered: false,
+            expires: self.config.register_expires,
+            registered_at: None,
+            error: None,
+            refresh_task: None,
+        };
+        
+        // Set registration state
+        *self.registration.write().await = Some(registration.clone());
+        
+        // Send via transaction layer
+        let response = self.send_via_transaction(request, server_addr).await?;
+        
+        if response.status == StatusCode::Ok {
+            info!("Registration successful");
+            
+            // Update registration state
+            registration.registered = true;
+            registration.registered_at = Some(Instant::now());
+            registration.error = None;
+            
+            // Set up registration refresh
+            let refresh_interval = (self.config.register_expires as f32 * self.config.register_refresh) as u64;
+            
+            // Create refresh task
+            let client = self.clone_lightweight();
+            let server = server_addr;
+            let refresh_task = tokio::spawn(async move {
+                // Wait for refresh interval
+                tokio::time::sleep(Duration::from_secs(refresh_interval)).await;
+                
+                // Refresh registration
+                if let Err(e) = client.register(server).await {
+                    error!("Failed to refresh registration: {}", e);
+                }
+            });
+            
+            registration.refresh_task = Some(refresh_task);
+            
+            // Update registration
+            *self.registration.write().await = Some(registration);
+            
+            // Send registration event
+            let _ = self.event_tx.send(SipClientEvent::RegistrationState {
+                registered: true,
+                server: server_addr.to_string(),
+                expires: Some(self.config.register_expires),
+                error: None,
+            }).await;
+            
+            Ok(())
+        } else {
+            // Registration failed
+            error!("Registration failed: {}", response.status);
+            
+            // Update registration state
+            registration.registered = false;
+            registration.error = Some(format!("Registration failed: {}", response.status));
+            
+            // Update registration
+            *self.registration.write().await = Some(registration);
+            
+            // Send registration event
+            let _ = self.event_tx.send(SipClientEvent::RegistrationState {
+                registered: false,
+                server: server_addr.to_string(),
+                expires: None,
+                error: Some(format!("Registration failed: {}", response.status)),
+            }).await;
+            
+            Err(Error::Registration(format!("Registration failed: {}", response.status)))
+        }
     }
     
     /// Unregister from SIP server
     pub async fn unregister(&self) -> Result<()> {
         // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
         Ok(())
     }
     
     /// Call a SIP URI
     pub async fn call(&self, target_uri: &str, config: CallConfig) -> Result<Arc<Call>> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub that returns an error
-        Err(Error::Call("Not implemented".into()))
+        // Implement the call functionality with proper transaction management
+        // For now returning an error as the implementation is not complete
+        Err(Error::Call("Not fully implemented yet".into()))
     }
     
     /// Get a stream of client events
@@ -258,10 +443,10 @@ impl SipClient {
     }
     
     /// Resolve a URI to a socket address
-    fn resolve_uri(&self, uri: &Uri) -> Result<SocketAddr> {
+    fn resolve_uri(&self, _uri: &Uri) -> Result<SocketAddr> {
         // Implementation would go here
         // For now, we'll leave this as a stub that returns an error
-        Err(Error::Call("Not implemented".into()))
+        Err(Error::Call("Resolver not implemented".into()))
     }
     
     /// Create a lightweight clone for use in tasks
@@ -277,15 +462,21 @@ impl SipClient {
     
     /// Send a request via transaction layer and wait for response
     async fn send_via_transaction(&self, request: Request, destination: SocketAddr) -> Result<Response> {
-        // Send the request via transaction manager
-        let transaction_id = self.transaction_manager.send_request(request, destination).await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        // Create a client transaction
+        let transaction_id = self.transaction_manager.create_client_transaction(
+            request.clone(), 
+            destination
+        ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
         // Create a oneshot channel for the response
         let (tx, rx) = oneshot::channel();
         
         // Store the response handler
         self.pending_responses.lock().await.insert(transaction_id.clone(), tx);
+        
+        // Send the request
+        self.transaction_manager.send_request(&transaction_id).await
+            .map_err(|e| Error::Transport(e.to_string()))?;
         
         // Wait for the response with timeout
         match time::timeout(Duration::from_secs(30), rx).await {
@@ -303,27 +494,9 @@ impl SipClient {
         }
     }
     
-    /// Wait for a response to a transaction
-    async fn wait_for_transaction_response(&self, transaction_id: &str) -> Result<Response> {
-        // Wait for the response
-        match self.transaction_manager.wait_for_response(transaction_id).await {
-            Ok(response) => {
-                Ok(response)
-            },
-            Err(e) => {
-                Err(Error::Transport(format!("Error waiting for response: {}", e)))
-            }
-        }
-    }
-    
     /// Set the call registry
     pub async fn set_call_registry(&mut self, registry: call_registry::CallRegistry) {
         self.registry = Some(Arc::new(registry));
-    }
-    
-    /// Clone the client
-    pub fn clone(&self) -> LightweightClient {
-        self.clone_lightweight()
     }
     
     /// Subscribe to events

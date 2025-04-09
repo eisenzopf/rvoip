@@ -5,6 +5,10 @@ edition = "2021"
 description = "Demo application for the RVOIP SIP client library"
 publish = false
 
+# Turn off specific warnings
+[lints.rust]
+unused_imports = "allow"
+
 [dependencies]
 # Use our new SIP client library
 rvoip-sip-client = { path = "../../crates/sip-client" }
