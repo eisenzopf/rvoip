@@ -409,6 +409,17 @@ impl Call {
             self.media_sessions.write().await.push(session);
         }
         
+        // Update call state in registry if available
+        if let Some(registry) = self.registry.read().await.clone() {
+            debug!("Updating call state in registry after answer");
+            let call_id = self.sip_call_id.clone();
+            if let Err(e) = registry.update_call_state(&call_id, CallState::Ringing, CallState::Established).await {
+                warn!("Failed to update call state in registry: {}", e);
+            } else {
+                debug!("Successfully updated call state in registry to Established");
+            }
+        }
+        
         Ok(())
     }
     
@@ -421,8 +432,94 @@ impl Call {
     
     /// Hang up a call
     pub async fn hangup(&self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        debug!("Starting to hang up call {}", self.id);
+        
+        // Check current state
+        let current_state = self.state.read().await.clone();
+        debug!("Current call state before hangup: {}", current_state);
+        
+        // Only established calls can be hung up
+        if current_state != CallState::Established {
+            return Err(Error::Call(format!("Cannot hang up call in {} state", current_state)));
+        }
+        
+        // Get the dialog
+        let dialog = match self.dialog.read().await.clone() {
+            Some(dialog) => dialog,
+            None => {
+                warn!("No dialog found for hanging up call");
+                return Err(Error::Call("Cannot hang up: no dialog found".into()));
+            }
+        };
+        
+        debug!("Dialog found for hangup: id={}, state={:?}", dialog.id, dialog.state);
+        
+        // Create BYE request
+        let mut bye = Request::new(Method::Bye, dialog.remote_target.clone());
+        
+        // Copy Call-ID from dialog
+        bye.headers.push(Header::text(HeaderName::CallId, dialog.call_id.clone()));
+        
+        // Create CSeq header
+        let cseq = *self.cseq.lock().await;
+        let cseq_header = format!("{} BYE", cseq);
+        bye.headers.push(Header::text(HeaderName::CSeq, cseq_header));
+        
+        // Add From header with tag - use unwrap_or_default for Option
+        let from = format!("<{}>;tag={}", self.local_uri, dialog.local_tag.clone().unwrap_or_default());
+        bye.headers.push(Header::text(HeaderName::From, from));
+        
+        // Add To header with tag - use unwrap_or_default for Option
+        let to = format!("<{}>;tag={}", dialog.remote_uri, dialog.remote_tag.clone().unwrap_or_default());
+        bye.headers.push(Header::text(HeaderName::To, to));
+        
+        // Add Via header
+        let via = format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4());
+        bye.headers.push(Header::text(HeaderName::Via, via));
+        
+        // Add Max-Forwards
+        bye.headers.push(Header::text(HeaderName::MaxForwards, "70"));
+        
+        // Add Contact header
+        let contact = format!("<sip:{}@{}>", 
+            self.local_uri.username().unwrap_or("anonymous"),
+            self.local_addr
+        );
+        bye.headers.push(Header::text(HeaderName::Contact, contact));
+        
+        // Add Content-Length (0 for BYE)
+        bye.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        // Update call state to terminating
+        self.transition_to(CallState::Terminating).await?;
+        
+        // Send the BYE request directly through the transport
+        debug!("Sending BYE request");
+        self.transaction_manager.transport()
+            .send_message(Message::Request(bye), self.remote_addr)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        debug!("BYE request sent successfully");
+        
+        // Set a timeout to wait for response
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
+        
+        tokio::pin!(timeout);
+        
+        // We're not going to wait for the response - just transition to terminated
+        self.transition_to(CallState::Terminated).await?;
+        
+        // Set end time
+        *self.end_time.write().await = Some(Instant::now());
+        
+        // Update dialog state
+        let mut updated_dialog = dialog.clone();
+        updated_dialog.state = DialogState::Terminated;
+        self.set_dialog(updated_dialog).await?;
+        
+        debug!("Call {} successfully terminated", self.id);
+        
         Ok(())
     }
     
@@ -568,6 +665,8 @@ impl Call {
         // Get the original INVITE request if this is a response to an INVITE
         let original_invite = self.original_invite.read().await.clone();
         
+        debug!("Handling response: status={}, headers={:?}", response.status, response.headers);
+        
         // Extract CSeq to determine what we're handling
         let cseq_header = match response.header(&HeaderName::CSeq) {
             Some(h) => h,
@@ -596,35 +695,62 @@ impl Call {
             Error::Protocol(format!("Invalid method in CSeq: {}", method_str))
         })?;
         
+        debug!("Processing response for method: {}, status: {}", method, response.status);
+        
         // Handle based on method and response code
         match (method, response.status) {
             // Handle 200 OK to INVITE - establish dialog
             (Method::Invite, status) if status.is_success() => {
-                info!("Handling 200 OK response to INVITE");
+                info!("Handling 200 OK response to INVITE for call {}", self.sip_call_id);
+                debug!("Response content: body_len={}, call_id={}, complete response={:?}", 
+                       response.body.len(), self.sip_call_id, response);
                 
                 // If we have the original INVITE, create a dialog
                 if let Some(invite) = original_invite {
+                    debug!("Original INVITE found for call {}, creating dialog", self.sip_call_id);
                     // Try to create a dialog from the response
                     match Dialog::from_2xx_response(&invite, response, true) {
                         Some(dialog) => {
-                            info!("Created dialog from 2xx response: {}", dialog.id);
+                            info!("Created dialog from 2xx response: {} for call {}", dialog.id, self.sip_call_id);
+                            debug!("Dialog details: local_tag={:?}, remote_tag={:?}, state={:?}", 
+                                  dialog.local_tag, dialog.remote_tag, dialog.state);
                             
                             // Set the dialog
-                            self.set_dialog(dialog).await?;
+                            if let Err(e) = self.set_dialog(dialog).await {
+                                error!("Failed to set dialog: {}", e);
+                                return Err(e);
+                            }
+                            debug!("Dialog set successfully for call {}", self.sip_call_id);
                             
                             // Transition call state to Established
-                            self.transition_to(CallState::Established).await?;
+                            info!("Transitioning call {} state to Established", self.sip_call_id);
+                            if let Err(e) = self.transition_to(CallState::Established).await {
+                                error!("Failed to transition to Established state: {}", e);
+                                return Err(e);
+                            }
+                            debug!("State successfully transitioned to Established for call {}", self.sip_call_id);
                             
                             // Set connection time
                             *self.connect_time.write().await = Some(Instant::now());
+                            debug!("Set connection time for established call {}", self.sip_call_id);
+                            
+                            // Check if we need to send an ACK
+                            debug!("Sending ACK for 200 OK response for call {}", self.sip_call_id);
+                            if let Err(e) = self.send_ack().await {
+                                error!("Failed to send ACK: {}", e);
+                                return Err(e);
+                            }
+                            info!("ACK sent successfully for call {}", self.sip_call_id);
                         },
                         None => {
-                            warn!("Failed to create dialog from 2xx response");
+                            warn!("Failed to create dialog from 2xx response for call {}", self.sip_call_id);
+                            debug!("Dialog creation failed. Response: {:?}", response);
                             // We can still proceed with the call, but it will be dialog-less
                         }
                     }
                 } else {
-                    warn!("No original INVITE stored, cannot create dialog");
+                    warn!("No original INVITE stored, cannot create dialog for call {}", self.sip_call_id);
+                    debug!("Original INVITE missing. Call ID: {}", self.sip_call_id);
                 }
             },
             
@@ -702,8 +828,127 @@ impl Call {
     
     /// Send ACK for a response
     pub(crate) async fn send_ack(&self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        debug!("Starting to send ACK for call {}", self.id);
+        
+        // Get the dialog
+        let dialog = match self.dialog.read().await.clone() {
+            Some(dialog) => dialog,
+            None => {
+                warn!("No dialog found for sending ACK");
+                return Err(Error::Call("No dialog found for sending ACK".into()));
+            }
+        };
+        
+        // Make sure we have the original INVITE
+        let invite = match self.original_invite.read().await.clone() {
+            Some(invite) => invite,
+            None => {
+                warn!("No original INVITE found for sending ACK");
+                return Err(Error::Call("No original INVITE found for sending ACK".into()));
+            }
+        };
+        
+        // Get the last response
+        let response = match self.last_response.read().await.clone() {
+            Some(response) => response,
+            None => {
+                warn!("No response found for sending ACK");
+                return Err(Error::Call("No response found for sending ACK".into()));
+            }
+        };
+        
+        // Create ACK request
+        let mut ack = Request::new(Method::Ack, dialog.remote_target.clone());
+        
+        // Copy Call-ID from dialog
+        ack.headers.push(Header::text(HeaderName::CallId, dialog.call_id.clone()));
+        
+        // Create CSeq header
+        // For ACK, we use the same CSeq number as the INVITE
+        let cseq_header = match invite.header(&HeaderName::CSeq) {
+            Some(header) => {
+                if let Some(text) = header.value.as_text() {
+                    if let Some(value) = text.split_whitespace().next() {
+                        format!("{} ACK", value)
+                    } else {
+                        "1 ACK".to_string()
+                    }
+                } else {
+                    "1 ACK".to_string()
+                }
+            },
+            None => "1 ACK".to_string(),
+        };
+        ack.headers.push(Header::text(HeaderName::CSeq, cseq_header));
+        
+        // Add From header with tag
+        let from = match invite.header(&HeaderName::From) {
+            Some(header) => {
+                if let Some(text) = header.value.as_text() {
+                    text.to_string()
+                } else {
+                    format!("<sip:{}@{}>", self.local_uri.username().unwrap_or("anonymous"), "127.0.0.1")
+                }
+            },
+            None => format!("<sip:{}@{}>", self.local_uri.username().unwrap_or("anonymous"), "127.0.0.1"),
+        };
+        ack.headers.push(Header::text(HeaderName::From, from));
+        
+        // Add To header with tag from the dialog
+        let to = match response.header(&HeaderName::To) {
+            Some(header) => {
+                if let Some(text) = header.value.as_text() {
+                    text.to_string()
+                } else {
+                    format!("<{}>", dialog.remote_uri)
+                }
+            },
+            None => format!("<{}>", dialog.remote_uri),
+        };
+        ack.headers.push(Header::text(HeaderName::To, to));
+        
+        // Add Via header
+        let via = match invite.header(&HeaderName::Via) {
+            Some(header) => {
+                if let Some(text) = header.value.as_text() {
+                    let parts: Vec<&str> = text.splitn(2, ';').collect();
+                    if parts.len() > 1 {
+                        // Replace branch parameter
+                        format!("{};branch=z9hG4bK-{}", parts[0], uuid::Uuid::new_v4())
+                    } else {
+                        // Add branch parameter
+                        format!("{};branch=z9hG4bK-{}", text, uuid::Uuid::new_v4())
+                    }
+                } else {
+                    format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4())
+                }
+            },
+            None => format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4()),
+        };
+        ack.headers.push(Header::text(HeaderName::Via, via));
+        
+        // Add Max-Forwards
+        ack.headers.push(Header::text(HeaderName::MaxForwards, "70"));
+        
+        // Add Contact header
+        let contact = format!("<sip:{}@{}>", 
+            self.local_uri.username().unwrap_or("anonymous"),
+            self.local_addr
+        );
+        ack.headers.push(Header::text(HeaderName::Contact, contact));
+        
+        // Add Content-Length (0 for ACK)
+        ack.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        // Send the ACK
+        debug!("Sending ACK request");
+        self.transaction_manager.transport()
+            .send_message(Message::Request(ack), self.remote_addr)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+            
+        debug!("ACK sent successfully for call {}", self.id);
+            
         Ok(())
     }
     

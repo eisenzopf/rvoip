@@ -8,8 +8,9 @@ pub(crate) fn is_valid_state_transition(from: CallState, to: CallState) -> bool 
         (CallState::Initial, CallState::Terminating) => true,
         (CallState::Initial, CallState::Failed) => true,
         
-        // Ringing can transition to Connecting, Terminating or Failed
+        // Ringing can transition to Connecting, Established, Terminating or Failed
         (CallState::Ringing, CallState::Connecting) => true,
+        (CallState::Ringing, CallState::Established) => true,
         (CallState::Ringing, CallState::Terminating) => true,
         (CallState::Ringing, CallState::Failed) => true,
         

@@ -45,24 +45,28 @@ pub struct WeakCall {
 
 impl WeakCall {
     /// Get the call registry
-    pub fn registry(&self) -> Option<Arc<dyn CallRegistryInterface + Send + Sync>> {
+    pub async fn registry(&self) -> Result<Option<Arc<dyn CallRegistryInterface + Send + Sync>>> {
         // Try to upgrade the weak reference
         match self.registry.upgrade() {
             Some(registry_lock) => {
                 // Try to acquire the read lock
-                match registry_lock.try_read() {
-                    Ok(registry_guard) => registry_guard.clone(),
-                    Err(_) => None,
+                match registry_lock.read().await.clone() {
+                    Some(registry) => Ok(Some(registry)),
+                    None => Ok(None),
                 }
             },
-            None => None,
+            None => Ok(None),
         }
     }
     
     /// Get the current call state
-    pub async fn state(&self) -> CallState {
-        // Use the state_watcher which we keep a strong reference to
-        *self.state_watcher.borrow()
+    pub async fn state(&self) -> Result<CallState> {
+        Ok(*self.state_watcher.borrow())
+    }
+    
+    /// Get the SIP call ID
+    pub fn sip_call_id(&self) -> String {
+        self.sip_call_id.clone()
     }
     
     /// Hang up the call

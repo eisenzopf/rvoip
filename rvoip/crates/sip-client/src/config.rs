@@ -172,6 +172,12 @@ impl ClientConfig {
         self.rtp_port_range_end = Some(end);
         self
     }
+    
+    /// Set auto-answer behavior
+    pub fn with_auto_answer(mut self, enabled: bool) -> Self {
+        self.media.auto_answer = enabled;
+        self
+    }
 }
 
 /// Transport configuration
@@ -238,6 +244,9 @@ pub struct MediaConfig {
     
     /// ICE servers (STUN/TURN)
     pub ice_servers: Vec<IceServerConfig>,
+    
+    /// Auto-answer incoming calls
+    pub auto_answer: bool,
 }
 
 /// ICE server configuration
@@ -302,6 +311,7 @@ impl Default for MediaConfig {
                     credential: None,
                 }
             ],
+            auto_answer: false,  // Default to not auto-answering
         }
     }
 }
@@ -338,6 +348,12 @@ impl MediaConfig {
             username,
             credential,
         });
+        self
+    }
+    
+    /// Set auto-answer behavior
+    pub fn with_auto_answer(mut self, enabled: bool) -> Self {
+        self.auto_answer = enabled;
         self
     }
 }

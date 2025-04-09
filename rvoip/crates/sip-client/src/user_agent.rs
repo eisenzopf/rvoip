@@ -101,15 +101,18 @@ impl UserAgent {
                 // Process event to update call registry
                 match &event {
                     CallEvent::IncomingCall(call) => {
-                        debug!("Registering incoming call {} in registry", call.id());
+                        let call_id = call.sip_call_id().to_string();
+                        debug!("Registering incoming call in registry: id={}, sip_call_id={}", call.id(), call_id);
                         if let Err(e) = registry_clone.register_call(call.clone()).await {
                             error!("Failed to register incoming call: {}", e);
                         }
                     },
                     CallEvent::StateChanged { call, previous, current } => {
-                        debug!("Updating call state in registry: {} {} -> {}", call.id(), previous, current);
-                        if let Err(e) = registry_clone.update_call_state(call.id(), *previous, *current).await {
-                            error!("Failed to update call state in registry: {}", e);
+                        let call_id = call.sip_call_id().to_string();
+                        debug!("Updating call state in registry: id={}, sip_call_id={}, {} -> {}", 
+                               call.id(), call_id, previous, current);
+                        if let Err(e) = registry_clone.update_call_state(&call_id, *previous, *current).await {
+                            error!("Failed to update call state in registry (sip_call_id={}): {}", call_id, e);
                         }
                     },
                     CallEvent::Terminated { call, .. } => {
@@ -120,7 +123,7 @@ impl UserAgent {
                         };
                         
                         if let Err(e) = registry_clone.update_call_state(
-                            call.id(), CallState::Terminating, current_state
+                            &call.sip_call_id(), CallState::Terminating, current_state
                         ).await {
                             if !e.to_string().contains("not found") {
                                 error!("Failed to record call termination: {}", e);
@@ -481,9 +484,17 @@ async fn handle_incoming_request(
     // Log message receipt for debugging
     debug!("Received {} for call {}: {:?}", request.method, call_id, request);
     
-    // Check for existing call
+    // Check for existing call using the SIP call ID
     let calls_read = active_calls.read().await;
     let existing_call = calls_read.get(&call_id).cloned();
+    
+    if existing_call.is_none() {
+        debug!("No existing call found with call_id={}, known calls: {:?}", 
+               call_id, calls_read.keys().collect::<Vec<_>>());
+    } else {
+        debug!("Found existing call with call_id={}", call_id);
+    }
+    
     drop(calls_read);
     
     // Handling INVITE requests
@@ -595,11 +606,12 @@ async fn handle_incoming_request(
         }
 
         // Store call - important that we register the call before sending events
-        // First add to active calls
-        active_calls.write().await.insert(call_id.clone(), call.clone());
+        // First add to active calls - use SIP call ID for consistent lookup
+        let sip_call_id = call.sip_call_id().to_string();
+        active_calls.write().await.insert(sip_call_id.clone(), call.clone());
 
         // Before sending the IncomingCall event, manually register with call registry to avoid race conditions
-        debug!("Registering call {} directly with registry to avoid race conditions", call_id);
+        debug!("Registering call with registry: id={}, sip_call_id={}", call.id(), sip_call_id);
         if let Err(e) = call_registry.register_call(call.clone()).await {
             error!("Failed to register call in registry: {}", e);
         }
@@ -612,17 +624,19 @@ async fn handle_incoming_request(
         }
 
         // Send event - this will trigger registry update via event handler
+        debug!("About to send IncomingCall event for call {} to application", call_id);
         if let Err(e) = event_tx.send(CallEvent::IncomingCall(call.clone())).await
             .map_err(|_| Error::Call("Failed to send call event".into())) {
             error!("Failed to send IncomingCall event: {}", e);
         } else {
+            debug!("Sent IncomingCall event for call {} to application", call_id);
             debug!("Storing weak reference to call {}", call_id);
             let weak_call = call.weak_clone();
         }
 
-        // If auto-answer is enabled, answer the call
-        if config.media.rtp_enabled {
-            debug!("Auto-answer is enabled, proceeding to answer call {}", call_id);
+        // If auto-answer is enabled, answer the call after sending the event
+        if config.media.auto_answer {
+            debug!("Auto-answer is enabled in config, will proceed to answer call {}", call_id);
             
             // Extract remote SDP
             if !request.body.is_empty() {
@@ -649,11 +663,65 @@ async fn handle_incoming_request(
                 debug!("No SDP body in INVITE, skipping SDP parsing");
             }
             
-            // Store the call info for later - we don't want to answer until the IncomingCall event is processed
-            // Instead of handling auto-answer here directly, let the application handle it
-            // based on the IncomingCall event and the current call state
+            // Give application a chance to handle the IncomingCall event first
+            debug!("Waiting before auto-answering to allow application time to process event");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             
-            return Ok(());
+            // Check if call is still in ringing state (not answered or rejected by application)
+            let current_state = call.state().await;
+            debug!("Pre-answer call state: {}", current_state);
+            
+            if current_state == CallState::Ringing {
+                debug!("Call still in Ringing state, proceeding with auto-answer");
+                
+                // Ensure we have the SIP call ID before answering
+                let sip_call_id = call.sip_call_id().to_string();
+                debug!("About to auto-answer call with SIP ID: {}", sip_call_id);
+                
+                // Directly answer the call ourselves
+                match call.answer().await {
+                    Ok(_) => {
+                        info!("Call {} auto-answered by user agent", call_id);
+                        debug!("Auto-answer succeeded, 200 OK sent to {}", source);
+                        
+                        // Double-check the call state after answering
+                        match call.state().await {
+                            CallState::Established => {
+                                info!("Call successfully established at {}", call.id());
+                            },
+                            other_state => {
+                                warn!("Call not in expected Established state after auto-answer, state: {}", other_state);
+                                // Force state transition to established if needed
+                                if other_state != CallState::Established {
+                                    info!("Forcing transition to Established state");
+                                    if let Err(e) = call.transition_to(CallState::Established).await {
+                                        error!("Failed to force transition to Established: {}", e);
+                                    } else {
+                                        info!("Successfully forced transition to Established");
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Emit another state change event to ensure client is updated
+                        debug!("Emitting explicit state change event");
+                        if let Err(e) = event_tx.send(CallEvent::StateChanged {
+                            call: call.clone(),
+                            previous: CallState::Ringing,
+                            current: CallState::Established,
+                        }).await {
+                            error!("Failed to send state change event: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        error!("User agent auto-answer failed: {}", e);
+                    }
+                }
+            } else {
+                debug!("Call not in Ringing state (current: {}), not auto-answering", current_state);
+            }
+        } else {
+            debug!("Auto-answer not enabled in config for call {}", call_id);
         }
         
         return Ok(());

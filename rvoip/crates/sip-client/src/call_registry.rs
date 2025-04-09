@@ -289,11 +289,13 @@ impl CallRegistry {
 
     /// Register an active call
     pub async fn register_call(&self, call: Arc<Call>) -> Result<()> {
-        let call_id = call.id().to_string();
+        // Use SIP call ID consistently throughout registry operations
+        let call_id = call.sip_call_id().to_string();
+        debug!("Registering call in registry: id={}, sip_call_id={}", call.id(), call_id);
         
         // Create an initial call record
         let call_record = CallRecord {
-            id: call_id.clone(),
+            id: call_id.clone(), // Use the SIP call ID as the record ID
             direction: call.direction(),
             remote_uri: call.remote_uri().to_string(),
             start_time: SystemTime::now(),
@@ -323,7 +325,8 @@ impl CallRegistry {
         self.weak_calls.write().await.insert(call_id.clone(), weak_call);
         
         // Add to call history
-        self.call_history.write().await.insert(call_id, call_record);
+        self.call_history.write().await.insert(call_id.clone(), call_record);
+        debug!("Call registered successfully with ID: {}", call_id);
         
         // Try to save to storage if configured
         if self.storage_path.is_some() {
@@ -341,6 +344,8 @@ impl CallRegistry {
 
     /// Update call state
     pub async fn update_call_state(&self, call_id: &str, previous_state: CallState, new_state: CallState) -> Result<()> {
+        debug!("Updating call state in registry: call_id={}, {} -> {}", call_id, previous_state, new_state);
+        
         // Add state change to history
         let mut history = self.call_history.write().await;
         
@@ -385,8 +390,57 @@ impl CallRegistry {
                 });
             }
             
+            debug!("Call state updated successfully: call_id={}, new_state={}", call_id, new_state);
             Ok(())
         } else {
+            // Try to check active calls map directly
+            let active_calls = self.active_calls.read().await;
+            if active_calls.contains_key(call_id) {
+                warn!("Call record not found but active call exists, creating new record: {}", call_id);
+                // We have the call but no record - create a minimal record from what we know
+                drop(history); // Release the write lock before recursive call
+                
+                if let Some(call) = active_calls.get(call_id) {
+                    // Create a call record for this active call
+                    let new_record = CallRecord {
+                        id: call_id.to_string(),
+                        direction: call.direction(),
+                        remote_uri: call.remote_uri().to_string(),
+                        start_time: SystemTime::now(),
+                        end_time: None,
+                        state: new_state,
+                        state_history: vec![CallStateRecord {
+                            timestamp: SystemTime::now(),
+                            previous_state,
+                            new_state,
+                        }],
+                        duration: None,
+                        sip_call_id: call.sip_call_id().to_string(),
+                        transactions: Vec::new(),
+                        invite_transaction_id: None,
+                        dialog_id: None,
+                        dialog_state: None,
+                        local_tag: None,
+                        remote_tag: None,
+                        local_seq: None,
+                        remote_seq: None,
+                        route_set: None,
+                        remote_target: None,
+                        secure: None,
+                    };
+                    
+                    // Add record to history
+                    self.call_history.write().await.insert(call_id.to_string(), new_record);
+                    debug!("Created new call record for existing active call: {}", call_id);
+                    return Ok(());
+                }
+            }
+            
+            // Log all known call IDs to help debugging
+            // Get a new read lock on the history after dropping the previous one
+            let history_read = self.call_history.read().await;
+            let all_keys: Vec<String> = history_read.keys().cloned().collect();
+            error!("Call record not found: {}. Known call IDs: {:?}", call_id, all_keys);
             Err(Error::Call(format!("Call record not found: {}", call_id)))
         }
     }
@@ -1138,5 +1192,10 @@ impl CallRegistryInterface for CallRegistry {
             remote_target,
             secure
         ).await
+    }
+
+    /// Update call state in the registry
+    async fn update_call_state(&self, call_id: &str, previous_state: CallState, new_state: CallState) -> Result<()> {
+        self.update_call_state(call_id, previous_state, new_state).await
     }
 } 

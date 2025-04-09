@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::call::types::CallState;
 
 /// Interface for call registry methods needed by Call
 #[async_trait]
@@ -17,6 +18,9 @@ pub trait CallRegistryInterface: std::fmt::Debug + Send + Sync {
     
     /// Get transaction destination (SocketAddr) from the registry, used for ACK fallback
     async fn get_transaction_destination(&self, call_id: &str) -> Result<Option<SocketAddr>>;
+    
+    /// Update call state in the registry
+    async fn update_call_state(&self, call_id: &str, previous_state: CallState, new_state: CallState) -> Result<()>;
     
     /// Update dialog information for a call
     async fn update_dialog_info(&self, 

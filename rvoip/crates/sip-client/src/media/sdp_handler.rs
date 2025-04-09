@@ -283,21 +283,31 @@ impl SdpHandler {
     async fn allocate_rtp_port(&self) -> Result<u16> {
         let mut next_port = self.next_port.lock().await;
         
-        // Get current port
-        let port = *next_port;
+        // Try up to 20 different ports in the range before giving up
+        for _ in 0..20 {
+            // Get current port (ensuring it's even)
+            let port = if *next_port % 2 == 0 { *next_port } else { *next_port + 1 };
+            
+            // Update to next port
+            *next_port = if *next_port + 2 > self.rtp_port_range_end {
+                // Wrap around to start of range
+                self.rtp_port_range_start + (*next_port + 2) % self.rtp_port_range_end
+            } else {
+                *next_port + 2
+            };
+            
+            // Try binding to the port to see if it's available
+            if let Ok(socket) = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port)) {
+                // Port is available, immediately close the socket
+                drop(socket);
+                return Ok(port);
+            }
+            
+            debug!("Port {} is in use, trying next port", port);
+        }
         
-        // Update to next port (ensuring it's even)
-        *next_port = if *next_port + 2 > self.rtp_port_range_end {
-            // Wrap around to start of range
-            self.rtp_port_range_start + (*next_port + 2) % self.rtp_port_range_end
-        } else {
-            *next_port + 2
-        };
-        
-        // Ensure port is even (as per RTP standards)
-        let port = if port % 2 == 0 { port } else { port + 1 };
-        
-        Ok(port)
+        // If we get here, we couldn't find an available port
+        Err(Error::Media("Could not allocate an available RTP port after multiple attempts".into()))
     }
     
     /// Add ICE candidates to local SDP

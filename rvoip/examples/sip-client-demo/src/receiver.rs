@@ -64,8 +64,10 @@ async fn main() -> Result<()> {
         .with_local_addr(local_addr)
         .with_username(args.username)
         .with_domain(args.domain)
+        // Enable auto-answer
+        .with_auto_answer(args.auto_answer)
         // Set a custom RTP port range to avoid port conflicts
-        .with_rtp_port_range(50000, 50100);
+        .with_rtp_port_range(51000, 51100);
     
     // Create user agent
     let mut user_agent = UserAgent::new(config).await?;
@@ -85,16 +87,20 @@ async fn main() -> Result<()> {
     
     // Process call events in the foreground
     while let Some(event) = call_events.recv().await {
+        debug!("Received event: {:?}", event);
         match event {
             CallEvent::Ready => {
                 info!("SIP call event system ready");
             },
             CallEvent::IncomingCall(call) => {
                 info!("Incoming call from {}", call.remote_uri());
+                debug!("Call ID: {}, SIP Call ID: {}", call.id(), call.sip_call_id());
+                debug!("Current call state: {:?}", call.state().await);
                 
                 if args.auto_answer {
                     // Check call state before answering
                     let state = call.state().await;
+                    debug!("Auto-answer is enabled, call state is: {}", state);
                     if state == CallState::Ringing {
                         info!("Auto-answering call in Ringing state");
                         match call.answer().await {
