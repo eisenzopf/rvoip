@@ -6,17 +6,17 @@ use rvoip_session_core::dialog::{Dialog, DialogState};
 
 use crate::error::{Error, Result};
 
-use super::struct::Call;
+use super::call_struct::Call;
 
 impl Call {
     /// Save dialog information to the registry
     async fn save_dialog_to_registry(&self) -> Result<()> {
-        if let Some(registry) = self.registry.read().await.clone() {
-            if let Some(dialog) = self.dialog.read().await.clone() {
+        if let Some(registry) = self.registry_ref().read().await.clone() {
+            if let Some(dialog) = self.dialog_ref().read().await.clone() {
                 debug!("Saving dialog {} to registry", dialog.id);
                 
                 // Get dialog sequence numbers and target
-                let local_seq = *self.cseq.lock().await;
+                let local_seq = *self.cseq_ref().lock().await;
                 let remote_seq = 0; // TODO: Get remote sequence number from dialog
                 
                 // Use remote target from dialog or fall back to remote URI
@@ -52,7 +52,7 @@ impl Call {
     /// Set the dialog for this call and save it to the registry
     pub async fn set_dialog(&self, dialog: Dialog) -> Result<()> {
         // Update the dialog field
-        *self.dialog.write().await = Some(dialog);
+        *self.dialog_ref().write().await = Some(dialog);
         
         // Save dialog to registry
         self.save_dialog_to_registry().await?;

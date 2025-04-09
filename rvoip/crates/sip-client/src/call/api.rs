@@ -15,19 +15,19 @@ use crate::media::SdpHandler;
 use crate::config::{DEFAULT_RTP_PORT_MIN, DEFAULT_RTP_PORT_MAX};
 use crate::DEFAULT_SIP_PORT;
 
-use super::struct::Call;
+use super::call_struct::Call;
 use super::types::CallState;
 
 impl Call {
     /// Answer an incoming call
     pub async fn answer(&self) -> Result<()> {
         // Verify this is an incoming call
-        if self.direction != super::types::CallDirection::Incoming {
+        if self.direction() != super::types::CallDirection::Incoming {
             return Err(Error::Call("Cannot answer an outgoing call".into()));
         }
         
         // Get the original INVITE request
-        let invite = match self.original_invite.read().await.clone() {
+        let invite = match self.original_invite_ref().read().await.clone() {
             Some(invite) => invite,
             None => {
                 return Err(Error::Call("No INVITE request found to answer".into()));
@@ -54,14 +54,14 @@ impl Call {
                 let to_with_tag = if to_value.contains("tag=") {
                     to_value.to_string()
                 } else {
-                    format!("{};tag={}", to_value, self.local_tag)
+                    format!("{};tag={}", to_value, self.local_tag_str())
                 };
                 response.headers.push(Header::text(HeaderName::To, to_with_tag));
             }
         }
         
         // Get local IP from transaction manager or use a reasonable default
-        let local_ip = match self.transaction_manager.transport().local_addr() {
+        let local_ip = match self.transaction_manager_ref().transport().local_addr() {
             Ok(addr) => addr.ip(),
             Err(_) => {
                 warn!("Could not get local IP from transport, using 127.0.0.1");
@@ -84,16 +84,16 @@ impl Call {
                 .map_err(|e| Error::SdpParsing(format!("Invalid SDP: {}", e)))?;
             
             // Store remote SDP
-            *self.remote_sdp.write().await = Some(remote_sdp.clone());
+            *self.remote_sdp_ref().write().await = Some(remote_sdp.clone());
             
             // Create SDP handler
             let sdp_handler = SdpHandler::new(
                 local_ip,
-                self.config.rtp_port_range_start.unwrap_or(DEFAULT_RTP_PORT_MIN),
-                self.config.rtp_port_range_end.unwrap_or(DEFAULT_RTP_PORT_MAX),
-                self.config.clone(),
-                self.local_sdp.clone(),
-                self.remote_sdp.clone(),
+                self.config_ref().rtp_port_range_start.unwrap_or(DEFAULT_RTP_PORT_MIN),
+                self.config_ref().rtp_port_range_end.unwrap_or(DEFAULT_RTP_PORT_MAX),
+                self.config_ref().clone(),
+                self.local_sdp_ref().clone(),
+                self.remote_sdp_ref().clone(),
             );
             
             // Setup media from SDP
@@ -120,8 +120,8 @@ impl Call {
         
         // Add Contact header
         let contact = format!("<sip:{}@{}>", 
-            self.local_uri.username().unwrap_or("anonymous"),
-            match self.transaction_manager.transport().local_addr() {
+            self.local_uri_ref().username().unwrap_or("anonymous"),
+            match self.transaction_manager_ref().transport().local_addr() {
                 Ok(addr) => addr.to_string(),
                 Err(_) => format!("{}:{}", local_ip, DEFAULT_SIP_PORT)
             }
@@ -140,8 +140,8 @@ impl Call {
         }
         
         // Send the response
-        self.transaction_manager.transport()
-            .send_message(Message::Response(response), self.remote_addr)
+        self.transaction_manager_ref().transport()
+            .send_message(Message::Response(response), *self.remote_addr_ref())
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
@@ -149,17 +149,17 @@ impl Call {
         self.transition_to(CallState::Established).await?;
         
         // Set connection time
-        *self.connect_time.write().await = Some(Instant::now());
+        *self.connect_time_ref().write().await = Some(Instant::now());
         
         // If we have a media session, save it
         if let Some(session) = media_session {
             debug!("Starting media session for call {}", self.id());
             // Save the media session
-            self.media_sessions.write().await.push(session);
+            self.media_sessions_ref().write().await.push(session);
         }
         
         // Update call state in registry if available
-        if let Some(registry) = self.registry.read().await.clone() {
+        if let Some(registry) = self.registry_ref().read().await.clone() {
             debug!("Updating call state in registry after answer");
             let call_id = self.sip_call_id().to_string();
             if let Err(e) = registry.update_call_state(&call_id, CallState::Ringing, CallState::Established).await {
@@ -184,7 +184,7 @@ impl Call {
         debug!("Starting to hang up call {}", self.id());
         
         // Check current state
-        let current_state = self.state.read().await.clone();
+        let current_state = self.state_ref().read().await.clone();
         debug!("Current call state before hangup: {}", current_state);
         
         // Only established calls can be hung up
@@ -193,7 +193,7 @@ impl Call {
         }
         
         // Get the dialog
-        let dialog = match self.dialog.read().await.clone() {
+        let dialog = match self.dialog_ref().read().await.clone() {
             Some(dialog) => dialog,
             None => {
                 warn!("No dialog found for hanging up call");
@@ -210,12 +210,12 @@ impl Call {
         bye.headers.push(Header::text(HeaderName::CallId, dialog.call_id.clone()));
         
         // Create CSeq header
-        let cseq = *self.cseq.lock().await;
+        let cseq = *self.cseq_ref().lock().await;
         let cseq_header = format!("{} BYE", cseq);
         bye.headers.push(Header::text(HeaderName::CSeq, cseq_header));
         
         // Add From header with tag - use unwrap_or_default for Option
-        let from = format!("<{}>;tag={}", self.local_uri, dialog.local_tag.clone().unwrap_or_default());
+        let from = format!("<{}>;tag={}", self.local_uri_ref(), dialog.local_tag.clone().unwrap_or_default());
         bye.headers.push(Header::text(HeaderName::From, from));
         
         // Add To header with tag - use unwrap_or_default for Option
@@ -223,7 +223,7 @@ impl Call {
         bye.headers.push(Header::text(HeaderName::To, to));
         
         // Add Via header
-        let via = format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4());
+        let via = format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr_ref(), uuid::Uuid::new_v4());
         bye.headers.push(Header::text(HeaderName::Via, via));
         
         // Add Max-Forwards
@@ -231,8 +231,8 @@ impl Call {
         
         // Add Contact header
         let contact = format!("<sip:{}@{}>", 
-            self.local_uri.username().unwrap_or("anonymous"),
-            self.local_addr
+            self.local_uri_ref().username().unwrap_or("anonymous"),
+            self.local_addr_ref()
         );
         bye.headers.push(Header::text(HeaderName::Contact, contact));
         
@@ -244,8 +244,8 @@ impl Call {
         
         // Send the BYE request directly through the transport
         debug!("Sending BYE request");
-        self.transaction_manager.transport()
-            .send_message(Message::Request(bye), self.remote_addr)
+        self.transaction_manager_ref().transport()
+            .send_message(Message::Request(bye), *self.remote_addr_ref())
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
@@ -260,7 +260,7 @@ impl Call {
         self.transition_to(CallState::Terminated).await?;
         
         // Set end time
-        *self.end_time.write().await = Some(Instant::now());
+        *self.end_time_ref().write().await = Some(Instant::now());
         
         // Update dialog state
         let mut updated_dialog = dialog.clone();

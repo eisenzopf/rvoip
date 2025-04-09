@@ -10,7 +10,7 @@ use rvoip_session_core::dialog::{Dialog, DialogState, extract_tag, extract_uri};
 
 use crate::error::{Error, Result};
 
-use super::struct::Call;
+use super::call_struct::Call;
 use super::types::CallState;
 
 impl Call {
@@ -45,7 +45,7 @@ impl Call {
                         let to_with_tag = if to_value.contains("tag=") {
                             to_value.to_string()
                         } else {
-                            format!("{};tag={}", to_value, self.local_tag)
+                            format!("{};tag={}", to_value, self.local_tag_str())
                         };
                         response.headers.push(Header::text(HeaderName::To, to_with_tag));
                     }
@@ -53,8 +53,8 @@ impl Call {
                 
                 // Add Contact header
                 let contact = format!("<sip:{}@{}>", 
-                    self.local_uri.username().unwrap_or("anonymous"),
-                    self.local_addr.to_string()
+                    self.local_uri_ref().username().unwrap_or("anonymous"),
+                    self.local_addr_ref().to_string()
                 );
                 response.headers.push(Header::text(HeaderName::Contact, contact));
                 
@@ -69,7 +69,7 @@ impl Call {
             },
             Method::Ack => {
                 // ACK for a 2xx response confirms dialog establishment
-                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                if let Some(mut dialog) = self.dialog_ref().read().await.clone() {
                     if dialog.state == DialogState::Early {
                         // Update dialog state to confirmed
                         dialog.state = DialogState::Confirmed;
@@ -77,7 +77,7 @@ impl Call {
                         // Update the dialog
                         self.set_dialog(dialog).await?;
                     }
-                } else if self.state.read().await.clone() == CallState::Established {
+                } else if self.state_ref().read().await.clone() == CallState::Established {
                     // We may have received an ACK for a dialog-less call (unusual but possible)
                     debug!("Received ACK for a dialog-less established call");
                 }
@@ -93,10 +93,10 @@ impl Call {
                 self.transition_to(CallState::Terminated).await?;
                 
                 // Set end time
-                *self.end_time.write().await = Some(Instant::now());
+                *self.end_time_ref().write().await = Some(Instant::now());
                 
                 // Update dialog state if we have one
-                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                if let Some(mut dialog) = self.dialog_ref().read().await.clone() {
                     dialog.state = DialogState::Terminated;
                     self.set_dialog(dialog).await?;
                 }
@@ -133,7 +133,7 @@ impl Call {
         self.store_last_response(response.clone()).await?;
         
         // Get the original INVITE request if this is a response to an INVITE
-        let original_invite = self.original_invite.read().await.clone();
+        let original_invite = self.original_invite_ref().read().await.clone();
         
         debug!("Handling response: status={}, headers={:?}", response.status, response.headers);
         
@@ -201,7 +201,7 @@ impl Call {
                             debug!("State successfully transitioned to Established for call {}", self.sip_call_id());
                             
                             // Set connection time
-                            *self.connect_time.write().await = Some(Instant::now());
+                            *self.connect_time_ref().write().await = Some(Instant::now());
                             debug!("Set connection time for established call {}", self.sip_call_id());
                             
                             // Check if we need to send an ACK
@@ -237,7 +237,7 @@ impl Call {
                                 info!("Created early dialog from {} response: {}", status, dialog.id);
                                 
                                 // Check if we already have a dialog
-                                let existing_dialog = self.dialog.read().await.clone();
+                                let existing_dialog = self.dialog_ref().read().await.clone();
                                 
                                 if existing_dialog.is_none() {
                                     // Set the early dialog
@@ -271,10 +271,10 @@ impl Call {
                 self.transition_to(CallState::Terminated).await?;
                 
                 // Set end time
-                *self.end_time.write().await = Some(Instant::now());
+                *self.end_time_ref().write().await = Some(Instant::now());
                 
                 // Update the dialog state to terminated if we have one
-                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                if let Some(mut dialog) = self.dialog_ref().read().await.clone() {
                     dialog.state = DialogState::Terminated;
                     self.set_dialog(dialog).await?;
                 }
@@ -301,7 +301,7 @@ impl Call {
         debug!("Starting to send ACK for call {}", self.id());
         
         // Get the dialog
-        let dialog = match self.dialog.read().await.clone() {
+        let dialog = match self.dialog_ref().read().await.clone() {
             Some(dialog) => dialog,
             None => {
                 warn!("No dialog found for sending ACK");
@@ -310,7 +310,7 @@ impl Call {
         };
         
         // Make sure we have the original INVITE
-        let invite = match self.original_invite.read().await.clone() {
+        let invite = match self.original_invite_ref().read().await.clone() {
             Some(invite) => invite,
             None => {
                 warn!("No original INVITE found for sending ACK");
@@ -319,7 +319,7 @@ impl Call {
         };
         
         // Get the last response
-        let response = match self.last_response.read().await.clone() {
+        let response = match self.last_response_ref().read().await.clone() {
             Some(response) => response,
             None => {
                 warn!("No response found for sending ACK");
@@ -357,10 +357,10 @@ impl Call {
                 if let Some(text) = header.value.as_text() {
                     text.to_string()
                 } else {
-                    format!("<sip:{}@{}>", self.local_uri.username().unwrap_or("anonymous"), "127.0.0.1")
+                    format!("<sip:{}@{}>", self.local_uri_ref().username().unwrap_or("anonymous"), "127.0.0.1")
                 }
             },
-            None => format!("<sip:{}@{}>", self.local_uri.username().unwrap_or("anonymous"), "127.0.0.1"),
+            None => format!("<sip:{}@{}>", self.local_uri_ref().username().unwrap_or("anonymous"), "127.0.0.1"),
         };
         ack.headers.push(Header::text(HeaderName::From, from));
         
@@ -390,10 +390,10 @@ impl Call {
                         format!("{};branch=z9hG4bK-{}", text, uuid::Uuid::new_v4())
                     }
                 } else {
-                    format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4())
+                    format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr_ref(), uuid::Uuid::new_v4())
                 }
             },
-            None => format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr, uuid::Uuid::new_v4()),
+            None => format!("SIP/2.0/UDP {};branch=z9hG4bK-{}", self.local_addr_ref(), uuid::Uuid::new_v4()),
         };
         ack.headers.push(Header::text(HeaderName::Via, via));
         
@@ -402,8 +402,8 @@ impl Call {
         
         // Add Contact header
         let contact = format!("<sip:{}@{}>", 
-            self.local_uri.username().unwrap_or("anonymous"),
-            self.local_addr
+            self.local_uri_ref().username().unwrap_or("anonymous"),
+            self.local_addr_ref()
         );
         ack.headers.push(Header::text(HeaderName::Contact, contact));
         
@@ -412,8 +412,8 @@ impl Call {
         
         // Send the ACK
         debug!("Sending ACK request");
-        self.transaction_manager.transport()
-            .send_message(Message::Request(ack), self.remote_addr)
+        self.transaction_manager_ref().transport()
+            .send_message(Message::Request(ack), *self.remote_addr_ref())
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
             

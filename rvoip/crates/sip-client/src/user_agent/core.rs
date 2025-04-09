@@ -66,6 +66,21 @@ pub struct UserAgent {
 }
 
 impl UserAgent {
+    /// Get a reference to the configuration
+    pub fn config_ref(&self) -> &ClientConfig {
+        &self.config
+    }
+    
+    /// Get a reference to the transaction manager
+    pub fn transaction_manager_ref(&self) -> &Arc<TransactionManager> {
+        &self.transaction_manager
+    }
+    
+    /// Get the local address
+    pub fn local_addr_ref(&self) -> &SocketAddr {
+        &self.local_addr
+    }
+    
     /// Create a new user agent
     pub async fn new(config: ClientConfig) -> Result<Self> {
         // Get local address from config or use default
@@ -365,7 +380,7 @@ impl UserAgent {
             self.start().await?;
         }
         
-        info!("SIP user agent {} started, waiting for requests on {}...", self.username, self.local_addr);
+        info!("SIP user agent {} started, waiting for requests on {}...", self.username, self.local_addr_ref());
         
         // Wait for termination signal
         match tokio::signal::ctrl_c().await {

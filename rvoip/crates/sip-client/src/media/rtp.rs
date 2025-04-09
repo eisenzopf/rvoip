@@ -190,12 +190,12 @@ impl RtpSession {
     
     /// Update remote address (used after ICE negotiation)
     pub async fn update_remote_addr(&mut self, remote_addr: SocketAddr) -> Result<()> {
-        if remote_addr == self.remote_addr {
+        if remote_addr == self.remote_addr() {
             debug!("RTP remote address unchanged: {}", remote_addr);
             return Ok(());
         }
         
-        debug!("Updating RTP remote address from {} to {}", self.remote_addr, remote_addr);
+        debug!("Updating RTP remote address from {} to {}", self.remote_addr(), remote_addr);
         
         // Update remote address
         self.remote_addr = remote_addr;

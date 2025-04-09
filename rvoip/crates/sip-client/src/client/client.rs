@@ -19,7 +19,8 @@ use rvoip_session_core::sdp::SessionDescription;
 
 use crate::config::{ClientConfig, CallConfig};
 use crate::error::{Error, Result};
-use crate::call::{Call, CallState, CallEvent, CallDirection};
+use crate::call::{CallState, CallEvent, CallDirection};
+use crate::call::call_struct::Call;
 use crate::call_registry;
 use crate::DEFAULT_SIP_PORT;
 
@@ -74,6 +75,21 @@ pub struct SipClient {
 }
 
 impl SipClient {
+    /// Get a reference to the client configuration
+    pub fn config_ref(&self) -> &ClientConfig {
+        &self.config
+    }
+    
+    /// Get a reference to the transaction manager
+    pub fn transaction_manager_ref(&self) -> &Arc<TransactionManager> {
+        &self.transaction_manager
+    }
+    
+    /// Get a reference to the CSeq counter
+    pub fn cseq_ref(&self) -> &Arc<Mutex<u32>> {
+        &self.cseq
+    }
+    
     /// Create a new SIP client
     pub async fn new(config: ClientConfig) -> Result<Self> {
         // Get local address from config or use default
@@ -131,7 +147,8 @@ impl SipClient {
         
         // Store references for transaction event handling
         let transaction_manager = self.transaction_manager.clone();
-        let mut transaction_events_rx = std::mem::replace(&mut self.transaction_events_rx, self.transaction_manager.subscribe());
+        let subscription = transaction_manager.subscribe();
+        let mut transaction_events_rx = std::mem::replace(&mut self.transaction_events_rx, subscription);
         let event_tx = self.event_tx.clone();
         let running = self.running.clone();
         let pending_responses = self.pending_responses.clone();
@@ -224,7 +241,7 @@ impl SipClient {
     /// Register with a SIP server
     pub async fn register(&self, server_addr: SocketAddr) -> Result<()> {
         // Create request URI for REGISTER (domain)
-        let request_uri: Uri = format!("sip:{}", self.config.domain).parse()
+        let request_uri: Uri = format!("sip:{}", self.config_ref().domain).parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
         
         // Create REGISTER request
@@ -233,15 +250,15 @@ impl SipClient {
         // Add Expires header
         request.headers.push(Header::text(
             HeaderName::Expires, 
-            self.config.register_expires.to_string()
+            self.config_ref().register_expires.to_string()
         ));
         
         // Add Contact header with expires parameter
         let contact = format!(
             "<sip:{}@{};transport=udp>;expires={}",
-            self.config.username,
-            self.config.local_addr.unwrap(),
-            self.config.register_expires
+            self.config_ref().username,
+            self.config_ref().local_addr.unwrap(),
+            self.config_ref().register_expires
         );
         request.headers.push(Header::text(HeaderName::Contact, contact));
         
@@ -253,7 +270,7 @@ impl SipClient {
             server: server_addr,
             uri: request_uri,
             registered: false,
-            expires: self.config.register_expires,
+            expires: self.config_ref().register_expires,
             registered_at: None,
             error: None,
             refresh_task: None,
@@ -274,7 +291,7 @@ impl SipClient {
             registration.error = None;
             
             // Set up registration refresh
-            let refresh_interval = (self.config.register_expires as f32 * self.config.register_refresh) as u64;
+            let refresh_interval = (self.config_ref().register_expires as f32 * self.config_ref().register_refresh) as u64;
             
             // Create refresh task
             let client = self.clone_lightweight();
@@ -298,7 +315,7 @@ impl SipClient {
             let _ = self.event_tx.send(SipClientEvent::RegistrationState {
                 registered: true,
                 server: server_addr.to_string(),
-                expires: Some(self.config.register_expires),
+                expires: Some(self.config_ref().register_expires),
                 error: None,
             }).await;
             
@@ -339,11 +356,11 @@ impl SipClient {
             .map_err(|e| Error::SipProtocol(format!("Invalid target URI: {}", e)))?;
         
         // Get local address from config
-        let local_addr = self.config.local_addr
+        let local_addr = self.config_ref().local_addr
             .ok_or_else(|| Error::Configuration("Local address not configured".into()))?;
         
         // Create a call ID (UUID)
-        let call_id = format!("{}@{}", uuid::Uuid::new_v4(), self.config.domain);
+        let call_id = format!("{}@{}", uuid::Uuid::new_v4(), self.config_ref().domain);
         
         // Create a random tag
         let local_tag = format!("{}", uuid::Uuid::new_v4().as_simple());
@@ -366,7 +383,7 @@ impl SipClient {
         let (call_event_tx, _call_event_rx) = mpsc::channel(10);
         
         // Create From URI
-        let from_uri = format!("sip:{}@{}", self.config.username, self.config.domain).parse::<Uri>()
+        let from_uri = format!("sip:{}@{}", self.config_ref().username, self.config_ref().domain).parse::<Uri>()
             .map_err(|e| Error::SipProtocol(format!("Invalid From URI: {}", e)))?;
         
         // Create a new call
@@ -378,7 +395,7 @@ impl SipClient {
             from_uri,
             uri.clone(),
             remote_addr,
-            self.transaction_manager.clone(),
+            self.transaction_manager_ref().clone(),
             call_event_tx,
         );
         
@@ -387,14 +404,14 @@ impl SipClient {
         
         // Add headers
         invite.headers.push(Header::text(HeaderName::From, 
-            format!("<sip:{}@{}>;tag={}", self.config.username, self.config.domain, local_tag)));
+            format!("<sip:{}@{}>;tag={}", self.config_ref().username, self.config_ref().domain, local_tag)));
         invite.headers.push(Header::text(HeaderName::To, 
             format!("<{}>", uri)));
         invite.headers.push(Header::text(HeaderName::CallId, call_id));
         
         // Get next CSeq
         let cseq = {
-            let mut cseq_lock = self.cseq.lock().await;
+            let mut cseq_lock = self.cseq_ref().lock().await;
             let current = *cseq_lock;
             *cseq_lock += 1;
             current
@@ -403,7 +420,7 @@ impl SipClient {
         invite.headers.push(Header::text(HeaderName::CSeq, 
             format!("{} INVITE", cseq)));
         invite.headers.push(Header::text(HeaderName::Contact, 
-            format!("<sip:{}@{}>", self.config.username, local_addr)));
+            format!("<sip:{}@{}>", self.config_ref().username, local_addr)));
         invite.headers.push(Header::text(HeaderName::MaxForwards, "70"));
         
         // Store the request
@@ -426,13 +443,13 @@ impl SipClient {
         self.calls.lock().await.insert(call.id().to_string(), Arc::new(RwLock::new(call.as_ref().clone())));
         
         // Send the INVITE request via transaction layer
-        let transaction_id = self.transaction_manager.create_client_transaction(
+        let transaction_id = self.transaction_manager_ref().create_client_transaction(
             invite.clone(), 
             remote_addr
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
         // Send the request
-        self.transaction_manager.send_request(&transaction_id).await
+        self.transaction_manager_ref().send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
         // Store the transaction ID
@@ -538,14 +555,14 @@ impl SipClient {
         // Add From header
         let from = format!(
             "<sip:{}@{}>",
-            self.config.username, self.config.domain
+            self.config_ref().username, self.config_ref().domain
         );
         request.headers.push(Header::text(HeaderName::From, from));
         
         // Add Via header
         let via = format!(
             "SIP/2.0/UDP {};branch=z9hG4bK{}",
-            self.config.local_addr.unwrap(),
+            self.config_ref().local_addr.unwrap(),
             uuid::Uuid::new_v4().to_string()
         );
         request.headers.push(Header::text(HeaderName::Via, via));
@@ -575,7 +592,7 @@ impl SipClient {
     
     /// Get the next CSeq value
     async fn next_cseq(&self) -> u32 {
-        let mut cseq = self.cseq.lock().await;
+        let mut cseq = self.cseq_ref().lock().await;
         *cseq += 1;
         *cseq
     }
@@ -590,9 +607,9 @@ impl SipClient {
     /// Create a lightweight clone for use in tasks
     fn clone_lightweight(&self) -> LightweightClient {
         LightweightClient {
-            transaction_manager: self.transaction_manager.clone(),
-            config: self.config.clone(),
-            cseq: self.cseq.clone(),
+            transaction_manager: self.transaction_manager_ref().clone(),
+            config: self.config_ref().clone(),
+            cseq: self.cseq_ref().clone(),
             registration: self.registration.clone(),
             event_tx: self.event_tx.clone(),
         }
@@ -601,7 +618,7 @@ impl SipClient {
     /// Send a request via transaction layer and wait for response
     async fn send_via_transaction(&self, request: Request, destination: SocketAddr) -> Result<Response> {
         // Create a client transaction
-        let transaction_id = self.transaction_manager.create_client_transaction(
+        let transaction_id = self.transaction_manager_ref().create_client_transaction(
             request.clone(), 
             destination
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -613,7 +630,7 @@ impl SipClient {
         self.pending_responses.lock().await.insert(transaction_id.clone(), tx);
         
         // Send the request
-        self.transaction_manager.send_request(&transaction_id).await
+        self.transaction_manager_ref().send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
         // Wait for the response with timeout

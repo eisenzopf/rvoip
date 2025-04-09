@@ -27,10 +27,25 @@ pub(crate) struct LightweightClient {
 }
 
 impl LightweightClient {
+    /// Get the config reference
+    pub fn config_ref(&self) -> &ClientConfig {
+        &self.config
+    }
+    
+    /// Get the transaction manager reference
+    pub fn transaction_manager_ref(&self) -> &Arc<TransactionManager> {
+        &self.transaction_manager
+    }
+    
+    /// Get the cseq reference
+    pub fn cseq_ref(&self) -> &Arc<Mutex<u32>> {
+        &self.cseq
+    }
+    
     /// Register with a SIP server (used for refreshing registration)
     pub async fn register(&self, server_addr: SocketAddr) -> Result<()> {
         // Create request URI for REGISTER (domain)
-        let request_uri: Uri = format!("sip:{}", self.config.domain).parse()
+        let request_uri: Uri = format!("sip:{}", self.config_ref().domain).parse()
             .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
         
         // Create REGISTER request - simplified version
@@ -39,18 +54,18 @@ impl LightweightClient {
         // Add From header with user information
         request.headers.push(Header::text(
             HeaderName::From,
-            format!("<sip:{}@{}>", self.config.username, self.config.domain)
+            format!("<sip:{}@{}>", self.config_ref().username, self.config_ref().domain)
         ));
         
         // Add To header (same as From for REGISTER)
         request.headers.push(Header::text(
             HeaderName::To,
-            format!("<sip:{}@{}>", self.config.username, self.config.domain)
+            format!("<sip:{}@{}>", self.config_ref().username, self.config_ref().domain)
         ));
         
         // Add CSeq header
         let cseq = {
-            let mut lock = self.cseq.lock().await;
+            let mut lock = self.cseq_ref().lock().await;
             *lock += 1;
             *lock
         };
@@ -74,15 +89,15 @@ impl LightweightClient {
         // Add Expires header
         request.headers.push(Header::text(
             HeaderName::Expires, 
-            self.config.register_expires.to_string()
+            self.config_ref().register_expires.to_string()
         ));
         
         // Add Contact header with expires parameter
         let contact = format!(
             "<sip:{}@{};transport=udp>;expires={}",
-            self.config.username,
-            self.config.local_addr.unwrap(),
-            self.config.register_expires
+            self.config_ref().username,
+            self.config_ref().local_addr.unwrap(),
+            self.config_ref().register_expires
         );
         request.headers.push(Header::text(HeaderName::Contact, contact));
         
@@ -90,7 +105,7 @@ impl LightweightClient {
         request.headers.push(Header::text(HeaderName::ContentLength, "0"));
         
         // Create a transaction
-        let transaction_id = self.transaction_manager.create_client_transaction(
+        let transaction_id = self.transaction_manager_ref().create_client_transaction(
             request.clone(), 
             server_addr
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -99,7 +114,7 @@ impl LightweightClient {
         let (tx, rx) = oneshot::channel();
         
         // Set up a separate task to listen for the response
-        let transaction_manager = self.transaction_manager.clone();
+        let transaction_manager = self.transaction_manager_ref().clone();
         let event_tx = self.event_tx.clone();
         let tx_id_for_task = transaction_id.clone(); // Clone for the task
         
@@ -125,7 +140,7 @@ impl LightweightClient {
         });
         
         // Send the request
-        self.transaction_manager.send_request(&transaction_id).await
+        self.transaction_manager_ref().send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
         // Wait for the response with timeout
@@ -142,7 +157,7 @@ impl LightweightClient {
             let _ = self.event_tx.send(SipClientEvent::RegistrationState {
                 registered: true,
                 server: server_addr.to_string(),
-                expires: Some(self.config.register_expires),
+                expires: Some(self.config_ref().register_expires),
                 error: None,
             }).await;
             

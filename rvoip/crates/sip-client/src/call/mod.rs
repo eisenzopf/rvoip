@@ -12,7 +12,7 @@ mod weak_call;
 pub use weak_call::WeakCall;
 
 // Core Call implementation split into separate modules
-mod struct;
+pub mod call_struct;
 mod api;
 mod sip_handlers;
 mod state;
@@ -21,7 +21,7 @@ mod dialog;
 
 // Re-export the Call struct
 mod call;
-pub use call::Call;
+pub use call_struct::Call;
 
 // Module for utility functions
 mod utils;

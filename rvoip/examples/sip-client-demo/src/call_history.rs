@@ -213,7 +213,10 @@ async fn main() -> anyhow::Result<()> {
                         
                         // Demonstrate using the weak call reference (safer)
                         if let Some(weak_call) = lookup_clone.weak_call {
-                            info!("  Call weak reference available, state: {}", weak_call.state().await);
+                            match weak_call.state().await {
+                                Ok(state) => info!("  Call weak reference available, state: {}", state),
+                                Err(e) => info!("  Call weak reference available, error getting state: {}", e),
+                            }
                         }
                         
                         // Demonstrate creating a serializable version for API responses

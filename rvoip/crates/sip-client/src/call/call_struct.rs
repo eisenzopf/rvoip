@@ -225,11 +225,11 @@ impl Call {
     pub fn weak_clone(&self) -> WeakCall {
         WeakCall {
             id: self.id.clone(),
-            direction: self.direction,
+            direction: self.direction(),
             sip_call_id: self.sip_call_id.clone(),
-            local_uri: self.local_uri.clone(),
+            local_uri: self.local_uri_ref().clone(),
             remote_uri: self.remote_uri.clone(),
-            remote_addr: self.remote_addr,
+            remote_addr: *self.remote_addr_ref(),
             state_watcher: self.state_watcher.clone(),
             
             // Create weak references
@@ -242,7 +242,112 @@ impl Call {
             registry: Arc::downgrade(&self.registry),
             
             // Transaction manager reference (keep strong reference)
-            transaction_manager: self.transaction_manager.clone(),
+            transaction_manager: self.transaction_manager_ref().clone(),
         }
+    }
+
+    /// Get the original invite
+    pub fn original_invite_ref(&self) -> &Arc<RwLock<Option<Request>>> {
+        &self.original_invite
+    }
+    
+    /// Get the local tag
+    pub fn local_tag_str(&self) -> &str {
+        &self.local_tag
+    }
+    
+    /// Get the remote tag
+    pub fn remote_tag_ref(&self) -> &Arc<RwLock<Option<String>>> {
+        &self.remote_tag
+    }
+    
+    /// Get the CSeq counter
+    pub fn cseq_ref(&self) -> &Arc<Mutex<u32>> {
+        &self.cseq
+    }
+    
+    /// Get the local URI
+    pub fn local_uri_ref(&self) -> &Uri {
+        &self.local_uri
+    }
+    
+    /// Get the local address
+    pub fn local_addr_ref(&self) -> &SocketAddr {
+        &self.local_addr
+    }
+    
+    /// Get the remote address
+    pub fn remote_addr_ref(&self) -> &SocketAddr {
+        &self.remote_addr
+    }
+    
+    /// Get the transaction manager
+    pub fn transaction_manager_ref(&self) -> &Arc<TransactionManager> {
+        &self.transaction_manager
+    }
+    
+    /// Get the call state
+    pub fn state_ref(&self) -> &Arc<RwLock<CallState>> {
+        &self.state
+    }
+    
+    /// Get the state sender
+    pub fn state_sender_ref(&self) -> &Arc<watch::Sender<CallState>> {
+        &self.state_sender
+    }
+    
+    /// Get the connect time
+    pub fn connect_time_ref(&self) -> &Arc<RwLock<Option<Instant>>> {
+        &self.connect_time
+    }
+    
+    /// Get the end time
+    pub fn end_time_ref(&self) -> &Arc<RwLock<Option<Instant>>> {
+        &self.end_time
+    }
+    
+    /// Get the media sessions
+    pub fn media_sessions_ref(&self) -> &Arc<RwLock<Vec<MediaSession>>> {
+        &self.media_sessions
+    }
+    
+    /// Get the event transmitter
+    pub fn event_tx_ref(&self) -> &mpsc::Sender<CallEvent> {
+        &self.event_tx
+    }
+    
+    /// Get the local SDP
+    pub fn local_sdp_ref(&self) -> &Arc<RwLock<Option<SessionDescription>>> {
+        &self.local_sdp
+    }
+    
+    /// Get the remote SDP
+    pub fn remote_sdp_ref(&self) -> &Arc<RwLock<Option<SessionDescription>>> {
+        &self.remote_sdp
+    }
+    
+    /// Get the dialog
+    pub fn dialog_ref(&self) -> &Arc<RwLock<Option<Dialog>>> {
+        &self.dialog
+    }
+    
+    /// Get the last response
+    pub fn last_response_ref(&self) -> &Arc<RwLock<Option<Response>>> {
+        &self.last_response
+    }
+    
+    /// Get the invite transaction ID
+    pub fn invite_transaction_id_ref(&self) -> &Arc<RwLock<Option<String>>> {
+        &self.invite_transaction_id
+    }
+    
+    /// Get the call registry
+    pub fn registry_ref(&self) -> &Arc<RwLock<Option<Arc<dyn CallRegistryInterface + Send + Sync>>>> {
+        &self.registry
+    }
+    
+    /// Get the call config
+    pub fn config_ref(&self) -> &CallConfig {
+        &self.config
     }
 } 

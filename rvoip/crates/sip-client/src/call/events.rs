@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rvoip_sip_core::Response;
 
-use super::Call;
+use super::call_struct::Call;
 use crate::media::MediaType;
 use super::types::CallState;
 

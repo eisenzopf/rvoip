@@ -10,7 +10,7 @@ use rvoip_sip_core::{Request, Response, Message, Method, StatusCode};
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
 
 use crate::error::{Error, Result};
-use crate::call::{Call, CallEvent, CallDirection};
+use crate::call::{CallEvent, CallDirection};
 use super::events::SipClientEvent;
 
 /// Trait to transform channels

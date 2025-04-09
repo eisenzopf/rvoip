@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use super::CallRegistryInterface;
 use super::types::CallState;
 use super::types::CallDirection;
-use super::Call;
+use super::call_struct::Call;
 
 /// A weak reference to a Call, safe to pass around without keeping the call alive
 #[derive(Debug, Clone)]
