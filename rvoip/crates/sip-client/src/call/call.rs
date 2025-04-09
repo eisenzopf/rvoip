@@ -235,8 +235,79 @@ impl Call {
     
     /// Answer an incoming call
     pub async fn answer(&self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        // Verify this is an incoming call
+        if self.direction != CallDirection::Incoming {
+            return Err(Error::Call("Cannot answer an outgoing call".into()));
+        }
+        
+        // Get the original INVITE request
+        let invite = match self.original_invite.read().await.clone() {
+            Some(invite) => invite,
+            None => {
+                return Err(Error::Call("No INVITE request found to answer".into()));
+            }
+        };
+        
+        // Create a 200 OK response
+        let mut response = Response::new(StatusCode::Ok);
+        
+        // Copy necessary headers from request
+        for header in &invite.headers {
+            match header.name {
+                HeaderName::CallId | HeaderName::From | HeaderName::CSeq | HeaderName::Via => {
+                    response.headers.push(header.clone());
+                },
+                _ => {},
+            }
+        }
+        
+        // Add To header with tag for dialog establishment
+        if let Some(to_header) = invite.header(&HeaderName::To) {
+            if let Some(to_value) = to_header.value.as_text() {
+                // Use our local tag for the To header
+                let to_with_tag = if to_value.contains("tag=") {
+                    to_value.to_string()
+                } else {
+                    format!("{};tag={}", to_value, self.local_tag)
+                };
+                response.headers.push(Header::text(HeaderName::To, to_with_tag));
+            }
+        }
+        
+        // Add Contact header
+        let contact = format!("<sip:{}@{}>", 
+            self.local_uri.username().unwrap_or("anonymous"),
+            self.local_addr.to_string()
+        );
+        response.headers.push(Header::text(HeaderName::Contact, contact));
+        
+        // Add Content-Type and Content-Length
+        // In a real implementation, we would add SDP here
+        response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        // Create dialog from 2xx response
+        let dialog = Dialog::from_2xx_response(&invite, &response, false);
+        
+        if let Some(dialog) = dialog {
+            info!("Created dialog for incoming call: {}", dialog.id);
+            // Save dialog to call and registry
+            self.set_dialog(dialog).await?;
+        } else {
+            warn!("Failed to create dialog for incoming call");
+        }
+        
+        // Send the response
+        self.transaction_manager.transport()
+            .send_message(Message::Response(response), self.remote_addr)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Update call state
+        self.transition_to(CallState::Established).await?;
+        
+        // Set connection time
+        *self.connect_time.write().await = Some(Instant::now());
+        
         Ok(())
     }
     
@@ -277,15 +348,247 @@ impl Call {
     
     /// Handle an incoming SIP request
     pub(crate) async fn handle_request(&self, request: Request) -> Result<Option<Response>> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
-        Ok(None)
+        match request.method {
+            Method::Invite => {
+                // Store the original INVITE request
+                self.store_invite_request(request.clone()).await?;
+                
+                // For an incoming call, we don't create the dialog yet - it will be created 
+                // when we send a 2xx response during answer()
+                
+                // For now, just acknowledge receipt of INVITE
+                // In a real implementation, we would generate a provisional response (e.g., 180 Ringing)
+                let mut response = Response::new(StatusCode::Ringing);
+                
+                // Copy necessary headers
+                for header in &request.headers {
+                    match header.name {
+                        HeaderName::CallId | HeaderName::From | HeaderName::Via => {
+                            response.headers.push(header.clone());
+                        },
+                        _ => {},
+                    }
+                }
+                
+                // Add To header with tag for dialog establishment
+                if let Some(to_header) = request.header(&HeaderName::To) {
+                    if let Some(to_value) = to_header.value.as_text() {
+                        // Use our local tag for the To header
+                        let to_with_tag = if to_value.contains("tag=") {
+                            to_value.to_string()
+                        } else {
+                            format!("{};tag={}", to_value, self.local_tag)
+                        };
+                        response.headers.push(Header::text(HeaderName::To, to_with_tag));
+                    }
+                }
+                
+                // Add Contact header
+                let contact = format!("<sip:{}@{}>", 
+                    self.local_uri.username().unwrap_or("anonymous"),
+                    self.local_addr.to_string()
+                );
+                response.headers.push(Header::text(HeaderName::Contact, contact));
+                
+                // Add Content-Length (0 for provisional response)
+                response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+                
+                // Update call state
+                self.transition_to(CallState::Ringing).await?;
+                
+                // Return the provisional response
+                Ok(Some(response))
+            },
+            Method::Ack => {
+                // ACK for a 2xx response confirms dialog establishment
+                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                    if dialog.state == DialogState::Early {
+                        // Update dialog state to confirmed
+                        dialog.state = DialogState::Confirmed;
+                        
+                        // Update the dialog
+                        self.set_dialog(dialog).await?;
+                    }
+                } else if self.state.read().await.clone() == CallState::Established {
+                    // We may have received an ACK for a dialog-less call (unusual but possible)
+                    debug!("Received ACK for a dialog-less established call");
+                }
+                
+                // ACK doesn't have a response in SIP
+                Ok(None)
+            },
+            Method::Bye => {
+                // Other side is hanging up
+                info!("Received BYE request, terminating call");
+                
+                // Update call state
+                self.transition_to(CallState::Terminated).await?;
+                
+                // Set end time
+                *self.end_time.write().await = Some(Instant::now());
+                
+                // Update dialog state if we have one
+                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                    dialog.state = DialogState::Terminated;
+                    self.set_dialog(dialog).await?;
+                }
+                
+                // Acknowledge BYE with 200 OK
+                let mut response = Response::new(StatusCode::Ok);
+                
+                // Copy necessary headers
+                for header in &request.headers {
+                    match header.name {
+                        HeaderName::CallId | HeaderName::CSeq | HeaderName::From | HeaderName::Via | HeaderName::To => {
+                            response.headers.push(header.clone());
+                        },
+                        _ => {},
+                    }
+                }
+                
+                // Add Content-Length
+                response.headers.push(Header::text(HeaderName::ContentLength, "0"));
+                
+                Ok(Some(response))
+            },
+            // For other request methods, add handling as needed
+            _ => {
+                debug!("Received {} request, not handled", request.method);
+                Ok(None)
+            }
+        }
     }
     
     /// Handle a SIP response
     pub(crate) async fn handle_response(&self, response: &Response) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        // Store the last response
+        self.store_last_response(response.clone()).await?;
+        
+        // Get the original INVITE request if this is a response to an INVITE
+        let original_invite = self.original_invite.read().await.clone();
+        
+        // Extract CSeq to determine what we're handling
+        let cseq_header = match response.header(&HeaderName::CSeq) {
+            Some(h) => h,
+            None => {
+                error!("Response missing CSeq header");
+                return Err(Error::Protocol("Response missing CSeq header".into()));
+            }
+        };
+        
+        let cseq_text = match cseq_header.value.as_text() {
+            Some(t) => t,
+            None => {
+                error!("CSeq header value is not text");
+                return Err(Error::Protocol("CSeq header value is not text".into()));
+            }
+        };
+        
+        let cseq_parts: Vec<&str> = cseq_text.splitn(2, ' ').collect();
+        if cseq_parts.len() < 2 {
+            error!("Invalid CSeq format: {}", cseq_text);
+            return Err(Error::Protocol(format!("Invalid CSeq format: {}", cseq_text)));
+        }
+        
+        let method_str = cseq_parts[1];
+        let method = Method::from_str(method_str).map_err(|_| {
+            Error::Protocol(format!("Invalid method in CSeq: {}", method_str))
+        })?;
+        
+        // Handle based on method and response code
+        match (method, response.status) {
+            // Handle 200 OK to INVITE - establish dialog
+            (Method::Invite, status) if status.is_success() => {
+                info!("Handling 200 OK response to INVITE");
+                
+                // If we have the original INVITE, create a dialog
+                if let Some(invite) = original_invite {
+                    // Try to create a dialog from the response
+                    match Dialog::from_2xx_response(&invite, response, true) {
+                        Some(dialog) => {
+                            info!("Created dialog from 2xx response: {}", dialog.id);
+                            
+                            // Set the dialog
+                            self.set_dialog(dialog).await?;
+                            
+                            // Transition call state to Established
+                            self.transition_to(CallState::Established).await?;
+                            
+                            // Set connection time
+                            *self.connect_time.write().await = Some(Instant::now());
+                        },
+                        None => {
+                            warn!("Failed to create dialog from 2xx response");
+                            // We can still proceed with the call, but it will be dialog-less
+                        }
+                    }
+                } else {
+                    warn!("No original INVITE stored, cannot create dialog");
+                }
+            },
+            
+            // Handle 1xx responses to INVITE - early dialog
+            (Method::Invite, status) if (100..200).contains(&status.as_u16()) => {
+                debug!("Handling 1xx response to INVITE: {}", status);
+                
+                // If we have the original INVITE and status > 100, create an early dialog
+                if let Some(invite) = original_invite.clone() {
+                    if status.as_u16() > 100 {
+                        // Try to create an early dialog from the provisional response
+                        match Dialog::from_provisional_response(&invite, response, true) {
+                            Some(dialog) => {
+                                info!("Created early dialog from {} response: {}", status, dialog.id);
+                                
+                                // Check if we already have a dialog
+                                let existing_dialog = self.dialog.read().await.clone();
+                                
+                                if existing_dialog.is_none() {
+                                    // Set the early dialog
+                                    self.set_dialog(dialog).await?;
+                                }
+                                
+                                // Update call state based on response
+                                if status == StatusCode::Ringing {
+                                    self.transition_to(CallState::Ringing).await?;
+                                } else if status.as_u16() >= 180 {
+                                    self.transition_to(CallState::Progress).await?;
+                                }
+                            },
+                            None => {
+                                debug!("Could not create early dialog from {} response", status);
+                            }
+                        }
+                    }
+                }
+            },
+            
+            // Handle failure responses to INVITE
+            (Method::Invite, status) if status.is_failure() => {
+                warn!("INVITE failed with status {}", status);
+                self.transition_to(CallState::Failed).await?;
+            },
+            
+            // Handle success responses to BYE
+            (Method::Bye, status) if status.is_success() => {
+                info!("BYE completed successfully with status {}", status);
+                self.transition_to(CallState::Terminated).await?;
+                
+                // Set end time
+                *self.end_time.write().await = Some(Instant::now());
+                
+                // Update the dialog state to terminated if we have one
+                if let Some(mut dialog) = self.dialog.read().await.clone() {
+                    dialog.state = DialogState::Terminated;
+                    self.set_dialog(dialog).await?;
+                }
+            },
+            
+            // Other responses
+            (method, status) => {
+                debug!("Received {} response to {}", status, method);
+            }
+        }
+        
         Ok(())
     }
     
@@ -427,8 +730,77 @@ impl Call {
     
     /// Save call dialog to registry
     async fn save_dialog_to_registry(&self) -> Result<()> {
-        // Implementation would go here
-        // For now, we'll leave this as a stub to be filled in later
+        // First check if we have a registry
+        let registry_lock = self.registry.read().await;
+        let registry = match &*registry_lock {
+            Some(reg) => reg.clone(),
+            None => {
+                debug!("No registry available to save dialog");
+                return Ok(());
+            }
+        };
+        
+        // Check if we have a dialog
+        let dialog_lock = self.dialog.read().await;
+        let dialog = match &*dialog_lock {
+            Some(dlg) => dlg.clone(),
+            None => {
+                debug!("No dialog to save");
+                return Ok(());
+            }
+        };
+        
+        // Extract dialog information
+        let dialog_id = dialog.id.to_string();
+        let dialog_state = dialog.state.to_string();
+        let local_tag = dialog.local_tag.clone();
+        let remote_tag = dialog.remote_tag.clone();
+        let local_seq = dialog.local_seq;
+        let remote_seq = dialog.remote_seq;
+        
+        // Convert route set to strings
+        let route_set = if dialog.route_set.is_empty() {
+            None
+        } else {
+            let routes: Vec<String> = dialog.route_set.iter()
+                .map(|uri| uri.to_string())
+                .collect();
+            Some(routes)
+        };
+        
+        // Get remote target
+        let remote_target = if let Some(target) = &dialog.remote_target {
+            Some(target.to_string())
+        } else {
+            None
+        };
+        
+        // Save to registry
+        registry.update_dialog_info(
+            &self.id,
+            Some(dialog_id),
+            Some(dialog_state),
+            local_tag,
+            remote_tag,
+            Some(local_seq),
+            remote_seq,
+            route_set,
+            remote_target,
+            Some(dialog.secure)
+        ).await?;
+        
+        debug!("Saved dialog information to registry for call {}", self.id);
+        Ok(())
+    }
+    
+    /// Set the dialog for this call and save it to the registry
+    pub async fn set_dialog(&self, dialog: Dialog) -> Result<()> {
+        // Update the dialog field
+        *self.dialog.write().await = Some(dialog);
+        
+        // Save dialog to registry
+        self.save_dialog_to_registry().await?;
+        
         Ok(())
     }
 } 

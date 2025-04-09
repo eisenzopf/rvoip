@@ -17,4 +17,18 @@ pub trait CallRegistryInterface: std::fmt::Debug + Send + Sync {
     
     /// Get transaction destination (SocketAddr) from the registry, used for ACK fallback
     async fn get_transaction_destination(&self, call_id: &str) -> Result<Option<SocketAddr>>;
+    
+    /// Update dialog information for a call
+    async fn update_dialog_info(&self, 
+        call_id: &str,
+        dialog_id: Option<String>,
+        dialog_state: Option<String>,
+        local_tag: Option<String>,
+        remote_tag: Option<String>,
+        local_seq: Option<u32>,
+        remote_seq: Option<u32>,
+        route_set: Option<Vec<String>>,
+        remote_target: Option<String>,
+        secure: Option<bool>
+    ) -> Result<()>;
 } 

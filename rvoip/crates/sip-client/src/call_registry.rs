@@ -12,6 +12,8 @@ use serde::{Serialize, Deserialize};
 use tracing::{debug, error, warn};
 use async_trait::async_trait;
 
+use rvoip_session_core::dialog::{DialogState, DialogId};
+
 use crate::call::{Call, CallState, CallDirection, WeakCall, CallRegistryInterface};
 use crate::error::{Result, Error};
 
@@ -70,6 +72,24 @@ pub struct CallRecord {
     pub transactions: Vec<TransactionRecord>,
     /// Initial INVITE transaction ID (if known)
     pub invite_transaction_id: Option<String>,
+    /// Dialog ID (if dialog is established)
+    pub dialog_id: Option<String>,
+    /// Dialog state (if dialog is established)
+    pub dialog_state: Option<String>,
+    /// Local tag for dialog
+    pub local_tag: Option<String>,
+    /// Remote tag for dialog
+    pub remote_tag: Option<String>,
+    /// Local sequence number
+    pub local_seq: Option<u32>,
+    /// Remote sequence number 
+    pub remote_seq: Option<u32>,
+    /// Dialog route set (list of route URIs)
+    pub route_set: Option<Vec<String>>,
+    /// Remote target URI
+    pub remote_target: Option<String>,
+    /// Secure flag (indicates if dialog uses TLS)
+    pub secure: Option<bool>,
 }
 
 /// Call filter criteria
@@ -284,6 +304,15 @@ impl CallRegistry {
             sip_call_id: call.sip_call_id().to_string(),
             transactions: Vec::new(),
             invite_transaction_id: None,
+            dialog_id: None,
+            dialog_state: None,
+            local_tag: None,
+            remote_tag: None,
+            local_seq: None,
+            remote_seq: None,
+            route_set: None,
+            remote_target: None,
+            secure: None,
         };
         
         // Add to active calls (strong reference)
@@ -817,6 +846,15 @@ impl CallRegistry {
                             sip_call_id: call.sip_call_id().to_string(),
                             transactions: Vec::new(),
                             invite_transaction_id: None,
+                            dialog_id: None,
+                            dialog_state: None,
+                            local_tag: None,
+                            remote_tag: None,
+                            local_seq: None,
+                            remote_seq: None,
+                            route_set: None,
+                            remote_target: None,
+                            secure: None,
                         };
                         return Some(CallLookupResult {
                             record,
@@ -960,6 +998,72 @@ impl CallRegistry {
         debug!("Call {} not found in registry", call_id);
         Ok(None)
     }
+
+    /// Update dialog information for a call
+    pub async fn update_dialog_info(&self, call_id: &str, 
+        dialog_id: Option<String>,
+        dialog_state: Option<String>,
+        local_tag: Option<String>,
+        remote_tag: Option<String>,
+        local_seq: Option<u32>,
+        remote_seq: Option<u32>,
+        route_set: Option<Vec<String>>,
+        remote_target: Option<String>,
+        secure: Option<bool>
+    ) -> Result<()> {
+        let mut history = self.call_history.write().await;
+        
+        if let Some(record) = history.get_mut(call_id) {
+            // Update dialog information
+            if let Some(id) = dialog_id {
+                record.dialog_id = Some(id);
+            }
+            
+            if let Some(state) = dialog_state {
+                record.dialog_state = Some(state);
+            }
+            
+            if let Some(tag) = local_tag {
+                record.local_tag = Some(tag);
+            }
+            
+            if let Some(tag) = remote_tag {
+                record.remote_tag = Some(tag);
+            }
+            
+            if let Some(seq) = local_seq {
+                record.local_seq = Some(seq);
+            }
+            
+            if let Some(seq) = remote_seq {
+                record.remote_seq = Some(seq);
+            }
+            
+            if let Some(routes) = route_set {
+                record.route_set = Some(routes);
+            }
+            
+            if let Some(target) = remote_target {
+                record.remote_target = Some(target);
+            }
+            
+            if let Some(is_secure) = secure {
+                record.secure = Some(is_secure);
+            }
+            
+            // Try to save to storage if configured
+            if self.storage_path.is_some() {
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    let _ = self_clone.save_to_storage().await;
+                });
+            }
+            
+            Ok(())
+        } else {
+            Err(Error::Call(format!("Call record not found: {}", call_id)))
+        }
+    }
 }
 
 impl Clone for CallRegistry {
@@ -1007,5 +1111,32 @@ impl CallRegistryInterface for CallRegistry {
     
     async fn get_transaction_destination(&self, call_id: &str) -> Result<Option<SocketAddr>> {
         self.get_transaction_destination(call_id).await
+    }
+    
+    /// Update dialog information for a call
+    async fn update_dialog_info(&self, 
+        call_id: &str,
+        dialog_id: Option<String>,
+        dialog_state: Option<String>,
+        local_tag: Option<String>,
+        remote_tag: Option<String>,
+        local_seq: Option<u32>,
+        remote_seq: Option<u32>,
+        route_set: Option<Vec<String>>,
+        remote_target: Option<String>,
+        secure: Option<bool>
+    ) -> Result<()> {
+        self.update_dialog_info(
+            call_id,
+            dialog_id,
+            dialog_state,
+            local_tag,
+            remote_tag,
+            local_seq,
+            remote_seq,
+            route_set,
+            remote_target,
+            secure
+        ).await
     }
 } 
