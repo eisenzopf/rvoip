@@ -1,11 +1,4 @@
 [workspace]
-name = "rvoip"
-version = "0.1.0"
-edition = "2021"
-authors = ["RVOIP Team"]
-description = "A modern pure-Rust VoIP stack"
-repository = "https://github.com/rudelessventures/rvoip"
-license = "MIT OR Apache-2.0"
 resolver = "2"
 
 members = [

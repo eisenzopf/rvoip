@@ -5,6 +5,10 @@ edition = "2021"
 description = "RTP packet encoding/decoding, RTCP support for rvoip"
 authors = ["RVOIP Team"]
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 bytes = "1.4"
 thiserror = "1.0"

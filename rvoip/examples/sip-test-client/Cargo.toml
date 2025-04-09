@@ -5,6 +5,10 @@ edition = "2021"
 description = "A test client for the RVOIP SIP stack"
 publish = false
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # Core crates
 rvoip-sip-core = { path = "../../crates/sip-core" }

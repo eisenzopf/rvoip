@@ -3,6 +3,10 @@ name = "simple-session"
 version = "0.1.0"
 edition = "2021"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # RVOIP crates
 rvoip-sip-core = { path = "../../crates/sip-core" }

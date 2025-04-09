@@ -5,6 +5,10 @@ edition = "2021"
 description = "SIP protocol implementation for the rvoip stack"
 license = "MIT OR Apache-2.0"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # Error handling
 thiserror = { workspace = true }

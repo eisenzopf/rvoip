@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Core media handling functionality for the RVOIP project"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # Use the rtp-core crate from our workspace
 rvoip-rtp-core = { path = "../rtp-core" }

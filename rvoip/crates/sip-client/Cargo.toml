@@ -7,10 +7,9 @@ authors = ["rvoip team"]
 repository = "https://github.com/rudeless/rvoip"
 license = "MIT"
 
-# Turn off specific warnings
+# Silence all Rust warnings
 [lints.rust]
-unused_imports = "allow"
-warnings = "allow"  # Ignore all warnings
+warnings = "allow"
 
 [dependencies]
 # Core crates

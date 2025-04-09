@@ -25,11 +25,11 @@ struct Args {
     username: String,
     
     /// Domain
-    #[arg(short, long, default_value = "rvoip.local")]
+    #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
     
     /// Target URI to call
-    #[arg(short, long, default_value = "sip:bob@rvoip.local")]
+    #[arg(short, long, default_value = "sip:bob@127.0.0.1")]
     target_uri: String,
     
     /// Server address to send calls to

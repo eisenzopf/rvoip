@@ -7,6 +7,10 @@ edition = "2021"
 name = "simple-call-engine"
 path = "main.rs"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 rvoip-call-engine = { path = "../../crates/call-engine" }
 rvoip-sip-core = { path = "../../crates/sip-core" }

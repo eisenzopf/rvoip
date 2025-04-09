@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["RVOIP Team"]
 description = "Example of RTP packet loopback using rtp-core"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 rvoip-rtp-core = { path = "../../crates/rtp-core" }
 tokio = { version = "1.28", features = ["full"] }

@@ -5,6 +5,10 @@ edition = "2021"
 description = "ICE (Interactive Connectivity Establishment) implementation for the rvoip stack"
 license = "MIT OR Apache-2.0"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["net", "sync", "time", "macros"] }

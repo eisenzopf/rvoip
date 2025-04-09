@@ -63,7 +63,9 @@ async fn main() -> Result<()> {
     let config = ClientConfig::new()
         .with_local_addr(local_addr)
         .with_username(args.username)
-        .with_domain(args.domain);
+        .with_domain(args.domain)
+        // Set a custom RTP port range to avoid port conflicts
+        .with_rtp_port_range(50000, 50100);
     
     // Create user agent
     let mut user_agent = UserAgent::new(config).await?;

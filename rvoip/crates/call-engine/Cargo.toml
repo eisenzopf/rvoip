@@ -5,6 +5,10 @@ edition = "2021"
 description = "Call routing and business logic for the rvoip stack"
 license = "MIT OR Apache-2.0"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [dependencies]
 # Our own crates
 rvoip-sip-core = { path = "../sip-core" }

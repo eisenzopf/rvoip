@@ -73,7 +73,7 @@ echo "Waiting for receiver to start up..."
 sleep 5
 
 # Start caller 
-run_client "SIP Caller (Alice)" "caller" "--local-addr 127.0.0.1:5070 --username alice --server-addr 127.0.0.1:5071 --target-uri sip:bob@rvoip.local"
+run_client "SIP Caller (Alice)" "caller" "--local-addr 127.0.0.1:5070 --username alice --server-addr 127.0.0.1:5071 --target-uri sip:bob@127.0.0.1:5071"
 
 echo ""
 echo "Demo started! You should see a call being established."

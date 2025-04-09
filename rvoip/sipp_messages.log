@@ -1,0 +1,138 @@
+----------------------------------------------- 2025-04-09 00:55:01.355168
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-04-09 00:55:01.856334
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-04-09 00:55:02.858806
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-04-09 00:55:04.859806
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-04-09 00:55:08.861667
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-04-09 00:55:16.862946
+UDP message sent (495 bytes):
+
+INVITE sip:bob@127.0.0.1:5071 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-3693-1-0
+From: sipp <sip:sipp@127.0.0.1:5060>;tag=3693SIPpTag001
+To: bob <sip:bob@127.0.0.1:5071>
+Call-ID: 1-3693@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5060
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 25000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+

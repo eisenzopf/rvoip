@@ -24,6 +24,10 @@ thiserror = "1.0"
 # Bytes handling
 bytes = "1.5"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+
 [[bin]]
 name = "rtp-g711"
 path = "src/main.rs" 

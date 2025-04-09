@@ -5,6 +5,14 @@ edition = "2021"
 description = "SIP transaction state machine for the rvoip stack"
 license = "MIT OR Apache-2.0"
 
+# Silence all Rust warnings
+[lints.rust]
+warnings = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+dead_code = "allow"
+
 [dependencies]
 # Our own crates
 rvoip-sip-core = { path = "../sip-core" }

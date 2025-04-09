@@ -5,10 +5,9 @@ edition = "2021"
 description = "Demo application for the RVOIP SIP client library"
 publish = false
 
-# Turn off specific warnings
+# Silence all Rust warnings
 [lints.rust]
-unused_imports = "allow"
-warnings = "allow"  # Ignore all warnings
+warnings = "allow"
 
 [dependencies]
 # Use our SIP client library with default features (including ICE)
