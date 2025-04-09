@@ -370,12 +370,28 @@ impl SipClient {
         let port = uri.port.unwrap_or(DEFAULT_SIP_PORT);
         
         // Create a socket address from host and port
-        let remote_addr = match host.parse::<IpAddr>() {
-            Ok(ip) => SocketAddr::new(ip, port),
-            Err(_) => {
-                // Hostname instead of IP, need to resolve
-                // For now, just return an error, in practice would use DNS
-                return Err(Error::Call(format!("Could not parse host: {}", host)));
+        let remote_addr = match &host {
+            rvoip_sip_core::Host::IPv4(ip) => {
+                match ip.parse::<std::net::Ipv4Addr>() {
+                    Ok(ip_addr) => SocketAddr::new(std::net::IpAddr::V4(ip_addr), port),
+                    Err(_) => return Err(Error::Call(format!("Could not parse IPv4 host: {}", ip))),
+                }
+            },
+            rvoip_sip_core::Host::IPv6(ip) => {
+                match ip.parse::<std::net::Ipv6Addr>() {
+                    Ok(ip_addr) => SocketAddr::new(std::net::IpAddr::V6(ip_addr), port),
+                    Err(_) => return Err(Error::Call(format!("Could not parse IPv6 host: {}", ip))),
+                }
+            },
+            rvoip_sip_core::Host::Domain(domain) => {
+                // Try to parse as IP address first
+                if let Ok(ip) = domain.parse::<IpAddr>() {
+                    SocketAddr::new(ip, port)
+                } else {
+                    // Hostname instead of IP, need to resolve
+                    // For now, just return an error, in practice would use DNS
+                    return Err(Error::Call(format!("Could not resolve domain: {}", domain)));
+                }
             }
         };
         

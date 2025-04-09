@@ -790,14 +790,31 @@ impl TransactionManager {
                         
                         if let Ok(uri) = rvoip_sip_core::Uri::from_str(uri_str) {
                             // Determine destination address from URI
-                            let host = uri.host.clone();
+                            let host = uri.host;
                             let port = uri.port.unwrap_or(5060);
                             info!("URI host: {}, port: {}", host, port);
                             
                             // Try to resolve host as an IP address
-                            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                                destination_from_contact = Some(std::net::SocketAddr::new(ip, port));
-                                info!("Successfully extracted destination from Contact: {}", destination_from_contact.unwrap());
+                            match &host {
+                                rvoip_sip_core::Host::IPv4(ip) => {
+                                    if let Ok(ip_addr) = ip.parse::<std::net::Ipv4Addr>() {
+                                        destination_from_contact = Some(std::net::SocketAddr::new(std::net::IpAddr::V4(ip_addr), port));
+                                        info!("Successfully extracted IPv4 destination from Contact: {}", destination_from_contact.unwrap());
+                                    }
+                                },
+                                rvoip_sip_core::Host::IPv6(ip) => {
+                                    if let Ok(ip_addr) = ip.parse::<std::net::Ipv6Addr>() {
+                                        destination_from_contact = Some(std::net::SocketAddr::new(std::net::IpAddr::V6(ip_addr), port));
+                                        info!("Successfully extracted IPv6 destination from Contact: {}", destination_from_contact.unwrap());
+                                    }
+                                },
+                                rvoip_sip_core::Host::Domain(domain) => {
+                                    // Try DNS resolution (or simple parse if it's actually an IP address in string form)
+                                    if let Ok(ip_addr) = domain.parse::<std::net::IpAddr>() {
+                                        destination_from_contact = Some(std::net::SocketAddr::new(ip_addr, port));
+                                        info!("Successfully extracted domain destination from Contact: {}", destination_from_contact.unwrap());
+                                    }
+                                }
                             }
                         }
                     }
