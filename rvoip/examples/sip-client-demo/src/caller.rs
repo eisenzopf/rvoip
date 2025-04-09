@@ -8,6 +8,7 @@ use rvoip_sip_client::{
     SipClient, ClientConfig, SipClientEvent,
     CallConfig, CallState,
     Result,
+    call_registry::CallRegistry,
 };
 
 /// SIP Call Maker - Makes outgoing calls
@@ -70,6 +71,10 @@ async fn main() -> Result<()> {
     info!("Server address: {}", server_addr);
     info!("Call duration: {} seconds", args.duration);
     
+    // Create a call registry for persisting call and dialog state
+    let registry = CallRegistry::new(100);
+    info!("Created call registry for persistence");
+    
     // Create client configuration
     let config = ClientConfig::new()
         .with_local_addr(local_addr)
@@ -79,6 +84,10 @@ async fn main() -> Result<()> {
     
     // Create SIP client
     let mut client = SipClient::new(config).await?;
+    
+    // Set the call registry to enable persistence
+    client.set_call_registry(registry);
+    info!("Call registry configured for SIP client");
     
     // Get client events
     let mut client_events = client.event_stream();
@@ -135,6 +144,37 @@ async fn main() -> Result<()> {
                     match result {
                         Ok(_) => {
                             info!("Call established successfully, proceeding with DTMF");
+                            
+                            // Send DTMF digits '1', '2', '3' with 1 second interval between them
+                            for digit in &['1', '2', '3'] {
+                                info!("Sending DTMF digit: {}", digit);
+                                match weak_call.send_dtmf(*digit).await {
+                                    Ok(_) => {
+                                        info!("Successfully sent DTMF digit: {}", digit);
+                                    },
+                                    Err(e) => {
+                                        // Check if call failed or just DTMF failed
+                                        if e.to_string().contains("Failed state") {
+                                            error!("Call failed, stopping DTMF sending: {}", e);
+                                            break;
+                                        } else {
+                                            // Just log the error but continue with next digit
+                                            error!("Failed to send DTMF digit {}, but continuing: {}", digit, e);
+                                        }
+                                    }
+                                }
+                                
+                                // Wait for current call state
+                                let current_state = weak_call.state().await;
+                                if current_state == rvoip_sip_client::CallState::Failed || 
+                                   current_state == rvoip_sip_client::CallState::Terminated {
+                                    error!("Call ended (state: {}), stopping DTMF sending", current_state);
+                                    break;
+                                }
+                                
+                                // Wait a bit between digits
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
                         },
                         Err(e) => {
                             error!("Failed to establish call: {}", e);

@@ -1,8 +1,8 @@
 [package]
 name = "rvoip-sip-client"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
-description = "A client library for the RVOIP SIP stack"
+description = "High-level SIP client library for the RVOIP SIP stack - Recently restructured for better maintainability"
 authors = ["rvoip team"]
 repository = "https://github.com/rudeless/rvoip"
 license = "MIT"

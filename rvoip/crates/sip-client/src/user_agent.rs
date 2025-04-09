@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use std::fmt;
 
 use tokio::sync::{mpsc, RwLock, Mutex, broadcast};
 use tokio::time::Instant;
@@ -20,8 +21,8 @@ use rvoip_session_core::dialog::DialogState;
 use crate::config::{ClientConfig, CallConfig};
 use crate::error::{Error, Result};
 use crate::call::{Call, CallState, CallEvent, CallDirection};
-use crate::media::MediaSession;
 use crate::call_registry::{CallRegistry, CallRecord};
+use crate::media::MediaSession;
 
 /// User agent for receiving SIP calls
 pub struct UserAgent {
@@ -432,6 +433,13 @@ impl UserAgent {
         // Placeholder for creating a new outgoing call
         Err(Error::Call("Not implemented yet".into()))
     }
+    
+    /// Set the call registry for persistence
+    pub async fn set_call_registry(&mut self, registry: CallRegistry) {
+        let registry_arc = Arc::new(registry);
+        self.call_registry = registry_arc;
+        info!("Call registry set for UserAgent");
+    }
 }
 
 /// Add common headers to a response based on a request
@@ -652,6 +660,51 @@ async fn handle_incoming_request(
     // Handle request for existing call
     if let Some(call) = existing_call {
         debug!("Processing {} request for existing call {}", request.method, call_id);
+        
+        // For INFO requests, verify dialog parameters match
+        if request.method == Method::Info {
+            debug!("Verifying dialog parameters for INFO request");
+            
+            // Extract From tag
+            let from_tag = request.headers.iter()
+                .find(|h| h.name == HeaderName::From)
+                .and_then(|h| h.value.as_text())
+                .and_then(|v| rvoip_session_core::dialog::extract_tag(v));
+                
+            // Extract To tag
+            let to_tag = request.headers.iter()
+                .find(|h| h.name == HeaderName::To)
+                .and_then(|h| h.value.as_text())
+                .and_then(|v| rvoip_session_core::dialog::extract_tag(v));
+                
+            // Get current dialog parameters from call
+            let call_has_dialog = call.dialog().await.is_some();
+            let remote_tag = call.remote_tag().await;
+            
+            debug!("INFO request tags - From: {:?}, To: {:?}", from_tag, to_tag);
+            debug!("Call dialog info - Has dialog: {}, Remote tag: {:?}", call_has_dialog, remote_tag);
+            
+            // If call is in Established state, allow INFO even with dialog issues
+            // This helps with implementations that might not follow dialog rules strictly
+            let current_state = call.state().await;
+            if current_state == CallState::Established {
+                debug!("Call is Established, proceeding with INFO request despite potential dialog issues");
+            }
+            // Only enforce dialog validation if the call is not established or we have no remote tag
+            else if !call_has_dialog || remote_tag.is_none() {
+                debug!("Call has no dialog established, rejecting INFO with 481");
+                let mut response = Response::new(StatusCode::CallOrTransactionDoesNotExist);
+                add_response_headers(&request, &mut response);
+                
+                // Send response
+                transaction_manager.transport().send_message(
+                    Message::Response(response),
+                    source
+                ).await.map_err(|e| Error::Transport(e.to_string()))?;
+                
+                return Ok(());
+            }
+        }
         
         // Handle ACK to 200 OK specially for state transition
         if request.method == Method::Ack {

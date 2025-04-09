@@ -7,6 +7,7 @@ use rvoip_sip_client::{
     UserAgent, ClientConfig, 
     CallEvent, Result,
     CallState,
+    call_registry::CallRegistry,
 };
 
 /// SIP Call Receiver - Listens for incoming calls
@@ -54,6 +55,10 @@ async fn main() -> Result<()> {
     info!("Username: {}, Domain: {}", args.username, args.domain);
     info!("Auto-answer: {}", args.auto_answer);
     
+    // Create a call registry for persisting call and dialog state
+    let registry = CallRegistry::new(100);
+    info!("Created call registry for persistence");
+    
     // Create client configuration
     let config = ClientConfig::new()
         .with_local_addr(local_addr)
@@ -62,6 +67,10 @@ async fn main() -> Result<()> {
     
     // Create user agent
     let mut user_agent = UserAgent::new(config).await?;
+    
+    // Set the call registry to enable persistence
+    user_agent.set_call_registry(registry);
+    info!("Call registry configured for user agent");
     
     // Get call events
     let mut call_events = user_agent.event_stream();

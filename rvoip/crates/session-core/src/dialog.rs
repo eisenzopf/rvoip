@@ -60,7 +60,7 @@ impl fmt::Display for DialogState {
 }
 
 /// A SIP dialog as defined in RFC 3261
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dialog {
     /// Unique identifier for this dialog
     pub id: DialogId,

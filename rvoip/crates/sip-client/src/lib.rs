@@ -124,11 +124,8 @@ pub use config::{ClientConfig, CallConfig};
 
 // Client implementation
 mod client;
-pub use client::{SipClient, SipClientEvent};
-
-// User agent implementation
-mod user_agent;
-pub use user_agent::UserAgent;
+pub use client::SipClient;
+pub use client::SipClientEvent;
 
 // Call management
 mod call;
@@ -237,12 +234,16 @@ pub use call::{Call, CallState, CallEvent, CallDirection, WeakCall};
 /// }
 /// ```
 // Call history and registry
-mod call_registry;
+pub mod call_registry;
 pub use call_registry::{CallRegistry, CallRecord, CallStateRecord, CallFilter, CallStatistics, CallLookupResult, SerializableCallLookupResult};
 
 // Media handling
 pub mod media;
 pub use media::{MediaSession, MediaType};
+
+// User agent implementation (will be needed for backward compatibility)
+mod user_agent;
+pub use user_agent::UserAgent;
 
 /// Version of the crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION"); 

@@ -5,28 +5,52 @@ use thiserror::Error;
 /// Result type for sip-client operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error types for sip-client operations
-#[derive(Error, Debug)]
+/// Error types for the SIP client
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// SIP protocol errors
+    /// Transport error
+    #[error("Transport error: {0}")]
+    Transport(String),
+    
+    /// SIP protocol error
     #[error("SIP protocol error: {0}")]
     SipProtocol(String),
+    
+    /// SDP protocol error
+    #[error("SDP protocol error: {0}")]
+    SdpProtocol(String),
+    
+    /// Call error
+    #[error("Call error: {0}")]
+    Call(String),
+    
+    /// Media error
+    #[error("Media error: {0}")]
+    Media(String),
+    
+    /// Authentication error
+    #[error("Authentication error: {0}")]
+    Authentication(String),
+    
+    /// Registration error
+    #[error("Registration error: {0}")]
+    Registration(String),
+    
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    
+    /// Client error
+    #[error("Client error: {0}")]
+    Client(String),
+    
+    /// Unknown error
+    #[error("Unknown error: {0}")]
+    Unknown(String),
 
     /// SDP negotiation errors
     #[error("SDP negotiation error: {0}")]
     SdpNegotiation(String),
-
-    /// Media errors
-    #[error("Media error: {0}")]
-    Media(String),
-
-    /// Registration errors
-    #[error("Registration error: {0}")]
-    Registration(String),
-
-    /// Call errors
-    #[error("Call error: {0}")]
-    Call(String),
 
     /// Network errors
     #[error("Network error: {0}")]
@@ -35,18 +59,6 @@ pub enum Error {
     /// Address parsing errors
     #[error("Address parse error: {0}")]
     AddrParse(#[from] AddrParseError),
-
-    /// Transport errors
-    #[error("Transport error: {0}")]
-    Transport(String),
-
-    /// Authentication errors
-    #[error("Authentication error: {0}")]
-    Authentication(String),
-
-    /// Configuration errors
-    #[error("Configuration error: {0}")]
-    Configuration(String),
 
     /// Timeout errors
     #[error("Operation timed out: {0}")]

@@ -1,3 +1,12 @@
+// WARNING: This file is deprecated and will be removed in a future version.
+// The code has been restructured to more manageable modules in the client/ directory.
+// Please update your imports to use the new module structure.
+
+// Re-export from the new module structure for backward compatibility
+
+pub use crate::client::SipClientEvent;
+pub use crate::client::SipClient;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::net::{SocketAddr, IpAddr};
@@ -16,12 +25,14 @@ use rvoip_sip_core::{
     Request, Response, Message, Method, StatusCode, 
     Uri, Header, HeaderName, HeaderValue
 };
-use rvoip_sip_transport::UdpTransport;
+use rvoip_sip_transport::{Transport, UdpTransport};
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+use rvoip_session_core::sdp::SessionDescription;
 
 use crate::config::{ClientConfig, CallConfig};
 use crate::error::{Error, Result};
 use crate::call::{Call, CallState, CallEvent, CallDirection};
+use crate::call_registry;
 
 /// Event types emitted by the SIP client
 #[derive(Debug, Clone)]
@@ -88,42 +99,47 @@ impl Clone for Registration {
 
 /// SIP client for managing calls and registrations
 pub struct SipClient {
-    /// Client configuration
+    /// Configuration for the client
     config: ClientConfig,
+    
+    /// Transport to use
+    transport: Arc<dyn Transport>,
     
     /// Transaction manager
     transaction_manager: Arc<TransactionManager>,
     
-    /// Event receiver from transaction manager
+    /// Transaction events receiver
     transaction_events_rx: mpsc::Receiver<TransactionEvent>,
     
-    /// Event sender for client events
+    /// Active calls
+    calls: Mutex<HashMap<String, Arc<RwLock<Call>>>>,
+    
+    /// Event sender
     event_tx: mpsc::Sender<SipClientEvent>,
     
-    /// Event receiver for client events
-    event_rx: mpsc::Receiver<SipClientEvent>,
+    /// Event receiver
+    event_rx: Option<mpsc::Receiver<SipClientEvent>>,
     
-    /// Broadcast channel for client events
+    /// Event broadcast channel
     event_broadcast: broadcast::Sender<SipClientEvent>,
-    
-    /// Active calls
-    calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
     
     /// CSeq counter for requests
     cseq: Arc<Mutex<u32>>,
     
+    /// Running flag
+    running: Arc<RwLock<bool>>,
+    
     /// Registration state
     registration: Arc<RwLock<Option<Registration>>>,
     
-    /// Is the client running
-    running: Arc<RwLock<bool>>,
-    
-    /// Background task handle - not included in Clone
-    #[allow(dead_code)]
+    /// Event processing task
     event_task: Option<tokio::task::JoinHandle<()>>,
-
-    /// Pending transaction responses
+    
+    /// Pending response handlers
     pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<Response>>>>,
+    
+    /// Call registry for persistence
+    registry: Option<Arc<call_registry::CallRegistry>>,
 }
 
 impl SipClient {
@@ -133,18 +149,17 @@ impl SipClient {
         let local_addr = config.local_addr
             .ok_or_else(|| Error::Configuration("Local address must be specified".into()))?;
         
-        // Create UDP transport
         let (udp_transport, transport_rx) = UdpTransport::bind(local_addr, None).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
         info!("SIP client UDP transport bound to {}", local_addr);
         
-        // Wrap transport in Arc
-        let arc_transport = Arc::new(udp_transport);
+        // Create transaction manager
+        let arc_transport = Arc::new(udp_transport as UdpTransport);
         
         // Create transaction manager
         let (transaction_manager, transaction_events_rx) = TransactionManager::new(
-            arc_transport,
+            arc_transport.clone(),
             transport_rx,
             Some(config.transaction.max_events),
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
@@ -157,17 +172,19 @@ impl SipClient {
         
         Ok(Self {
             config,
+            transport: arc_transport,
             transaction_manager: Arc::new(transaction_manager),
             transaction_events_rx,
             event_tx,
-            event_rx,
-            event_broadcast: broadcast_tx,  // Add this field
-            calls: Arc::new(RwLock::new(HashMap::new())),
+            event_rx: Some(event_rx),
+            event_broadcast: broadcast_tx,
+            calls: Mutex::new(HashMap::new()),
             cseq: Arc::new(Mutex::new(1)),
             registration: Arc::new(RwLock::new(None)),
             running: Arc::new(RwLock::new(false)),
             event_task: None,
             pending_responses: Arc::new(Mutex::new(HashMap::new())),
+            registry: None,
         })
     }
     
@@ -180,40 +197,22 @@ impl SipClient {
         
         // Set running flag
         *self.running.write().await = true;
-
-        // Set up event processing task
-        let mut transaction_events = std::mem::replace(
-            &mut self.transaction_events_rx,
-            mpsc::channel(1).1
-        );
-        let running = self.running.clone();
+        
+        // Store references for event handling
         let transaction_manager = self.transaction_manager.clone();
-        let calls = self.calls.clone();
+        let mut transaction_events_rx = std::mem::replace(&mut self.transaction_events_rx, self.transaction_manager.subscribe());
         let event_tx = self.event_tx.clone();
-        let pending_responses = self.pending_responses.clone();
-        let client_events_tx = self.event_tx.clone();
-
-        // Create a client events channel
-        let (client_events_tx, mut client_events_rx) = mpsc::channel(32);
-        let broadcast_tx = self.event_broadcast.clone();
-
-        // Create a task to forward events from client_events to broadcast
-        tokio::spawn(async move {
-            while let Some(event) = client_events_rx.recv().await {
-                // Forward to broadcast channel
-                let _ = broadcast_tx.send(event);
-            }
-        });
-
-        // Process transaction events in a background task
+        let running = self.running.clone();
+        
+        // Spawn event processor task
         let event_task = tokio::spawn(async move {
             info!("SIP client event processor started");
             
             while *running.read().await {
-                // Wait for transaction event with timeout
+                // Wait for next transaction event
                 let event = match tokio::time::timeout(
                     Duration::from_secs(1),
-                    transaction_events.recv()
+                    transaction_events_rx.recv()
                 ).await {
                     Ok(Some(event)) => event,
                     Ok(None) => {
@@ -226,14 +225,8 @@ impl SipClient {
                     }
                 };
                 
-                // Process transaction event
-                handle_transaction_event(
-                    event,
-                    transaction_manager.clone(),
-                    calls.clone(),
-                    event_tx.clone(),
-                    pending_responses.clone(),
-                ).await;
+                // Process transaction event without passing calls and pending_responses
+                handle_transaction_event(event, transaction_manager.clone(), event_tx.clone()).await;
             }
             
             info!("SIP client event processor stopped");
@@ -256,24 +249,25 @@ impl SipClient {
         // Set running flag to false
         *self.running.write().await = false;
         
-        // Wait for event task to end
+        // Cancel event task if running
         if let Some(task) = self.event_task.take() {
             task.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(100), task).await;
         }
         
-        // Hang up all active calls
-        let calls = self.calls.read().await;
-        for (_, call) in calls.iter() {
-            let _ = call.hangup().await;
+        // Hangup all active calls
+        let calls = self.calls.lock().await;
+        for (_, call_lock) in calls.iter() {
+            let call_lock_clone = call_lock.clone();
+            // Need to get a write lock on the Call to use hangup
+            tokio::spawn(async move {
+                let mut call = call_lock_clone.write().await;
+                if let Err(e) = call.hangup().await {
+                    error!("Error hanging up call: {}", e);
+                }
+            });
         }
         
-        // Unregister if registered
-        if let Some(registration) = self.registration.read().await.clone() {
-            if registration.registered {
-                let _ = self.unregister().await;
-            }
-        }
+        info!("SIP client stopped");
         
         Ok(())
     }
@@ -285,7 +279,7 @@ impl SipClient {
             .map_err(|e| Error::SipProtocol(format!("Invalid domain URI: {}", e)))?;
         
         // Create REGISTER request
-        let mut request = self.create_request(Method::Register, request_uri.clone());
+        let mut request = self.create_request(Method::Register, request_uri.clone()).await?;
         
         // Add Expires header
         request.headers.push(Header::text(
@@ -406,145 +400,47 @@ impl SipClient {
     /// Unregister from SIP server
     pub async fn unregister(&self) -> Result<()> {
         // Get current registration
-        let registration = match self.registration.read().await.clone() {
-            Some(r) => r,
-            None => return Err(Error::Registration("Not registered".into())),
-        };
+        let registration = self.registration.read().await.clone()
+            .ok_or_else(|| Error::Registration("No active registration".into()))?;
         
         // Cancel refresh task if any
-        if let Some(task) = registration.refresh_task {
+        if let Some(task) = &registration.refresh_task {
             task.abort();
         }
         
         // Create REGISTER request with expires=0
-        let mut request = self.create_request(Method::Register, registration.uri);
+        let mut request = self.create_request(Method::Register, registration.uri).await?;
         
-        // Add Expires header with 0
+        // Add zero Expires header
         request.headers.push(Header::text(HeaderName::Expires, "0"));
         
-        // Add Contact header with expires=0
-        let contact = format!(
-            "<sip:{}@{};transport=udp>;expires=0",
-            self.config.username,
-            self.config.local_addr.unwrap()
-        );
-        request.headers.push(Header::text(HeaderName::Contact, contact));
-        
-        // Add Content-Length
-        request.headers.push(Header::text(HeaderName::ContentLength, "0"));
-        
-        // Send REGISTER request via transaction
-        let response = self.send_via_transaction(request, registration.server).await?;
-        
-        if response.status == StatusCode::Ok {
-            info!("Unregistration successful");
-            
-            // Clear registration state
-            *self.registration.write().await = None;
-            
-            // Send registration event
-            let _ = self.event_tx.send(SipClientEvent::RegistrationState {
-                registered: false,
-                server: registration.server.to_string(),
-                expires: None,
-                error: None,
-            }).await;
-            
-            Ok(())
-        } else {
-            // Unregistration failed
-            error!("Unregistration failed: {}", response.status);
-            
-            // Send registration event
-            let _ = self.event_tx.send(SipClientEvent::RegistrationState {
-                registered: true, // Still registered
-                server: registration.server.to_string(),
-                expires: Some(registration.expires),
-                error: Some(format!("Unregistration failed: {}", response.status)),
-            }).await;
-            
-            Err(Error::Registration(format!("Unregistration failed: {}", response.status)))
-        }
-    }
-    
-    /// Make a call
-    pub async fn call(&self, target: &str, config: CallConfig) -> Result<Arc<Call>> {
-        info!("Making outgoing call to {}", target);
-        
-        // Parse target URI
-        let target_uri: Uri = target.parse()
-            .map_err(|e| Error::SipProtocol(format!("Failed to parse target URI: {}", e)))?;
-        
-        // Get remote address
-        let remote_addr = self.resolve_uri(&target_uri)?;
-        
-        // Generate call ID and tag
-        let call_id = format!("{}-{}", self.config.username, Uuid::new_v4());
-        let local_tag = format!("tag-{}", Uuid::new_v4());
-        
-        // Create local URI from username and domain
-        let local_uri = format!("sip:{}@{}", self.config.username, self.config.domain).parse()
-            .map_err(|e| Error::SipProtocol(format!("Invalid local URI: {}", e)))?;
-        
-        // Create call object
-        let (call, _) = Call::new(
-            CallDirection::Outgoing,
-            config,
-            call_id.clone(),
-            local_tag,
-            local_uri,
-            target_uri.clone(),
-            remote_addr,
-            self.transaction_manager.clone(),
-            self.event_tx.clone().with_transformer(|event| SipClientEvent::Call(event)),
-        );
-        
-        // Get original INVITE request
-        let invite_request = call.create_invite_request().await?;
-        
-        // Create client transaction to send INVITE
+        // Send request via transaction
         let transaction_id = self.transaction_manager.create_client_transaction(
-            invite_request.clone(), 
-            remote_addr
+            request,
+            registration.server,
         ).await.map_err(|e| Error::Transport(e.to_string()))?;
         
-        // Store the transaction ID in the call
-        call.store_invite_transaction_id(transaction_id.clone()).await?;
+        debug!("Created unregister transaction: {}", transaction_id);
         
-        // Log the transaction in the call registry
-        if let Some(registry) = call.registry() {
-            // Create transaction record
-            let transaction = crate::call_registry::TransactionRecord {
-                transaction_id: transaction_id.clone(),
-                transaction_type: "INVITE".to_string(),
-                timestamp: std::time::SystemTime::now(),
-                direction: CallDirection::Outgoing,
-                status: "created".to_string(),
-                info: None,
-                destination: Some(remote_addr.to_string()),
-            };
-            
-            debug!("Logging INVITE transaction {} in registry", transaction_id);
-            if let Err(e) = registry.log_transaction(&call.id(), transaction).await {
-                error!("Failed to log transaction in registry: {}", e);
-            }
-        }
-        
-        // Send INVITE via transaction
-        debug!("Sending INVITE via transaction: {}", transaction_id);
+        // Send via transaction manager
         self.transaction_manager.send_request(&transaction_id).await
             .map_err(|e| Error::Transport(e.to_string()))?;
         
-        // Register call in active calls
-        {
-            let mut calls = self.calls.write().await;
-            calls.insert(call.id().to_string(), call.clone());
-        }
+        // Clear registration
+        let mut reg_write = self.registration.write().await;
+        *reg_write = None;
         
-        // Update call state to ringing
-        call.transition_to(CallState::Ringing).await?;
+        info!("Unregistered from {} successfully", registration.server);
         
-        Ok(call)
+        Ok(())
+    }
+    
+    /// Make an outgoing call to a target URI
+    pub async fn call_to(&self, target_uri: Uri, remote_addr: SocketAddr) -> Result<Arc<RwLock<Call>>> {
+        info!("Call to {} is not fully implemented yet", target_uri);
+        
+        // Create a proper error to inform the user
+        Err(Error::Client("The call_to method is not fully implemented yet. A more complete implementation will be provided in a future update.".into()))
     }
     
     /// Get event stream for client events
@@ -553,14 +449,14 @@ impl SipClient {
         self.event_broadcast.subscribe()
     }
     
-    /// Get active calls
-    pub async fn calls(&self) -> HashMap<String, Arc<Call>> {
-        self.calls.read().await.clone()
+    /// Get all active calls
+    pub async fn calls(&self) -> HashMap<String, Arc<RwLock<Call>>> {
+        self.calls.lock().await.clone()
     }
     
     /// Get call by ID
-    pub async fn call_by_id(&self, call_id: &str) -> Option<Arc<Call>> {
-        self.calls.read().await.get(call_id).cloned()
+    pub async fn call_by_id(&self, call_id: &str) -> Option<Arc<RwLock<Call>>> {
+        self.calls.lock().await.get(call_id).cloned()
     }
     
     /// Get registration state
@@ -595,54 +491,45 @@ impl SipClient {
         }
     }
     
-    /// Create a new SIP request
-    fn create_request(&self, method: Method, uri: Uri) -> Request {
-        let mut request = Request::new(method.clone(), uri.clone());
+    /// Create a SIP request with common headers
+    pub async fn create_request(&self, method: Method, target_uri: Uri) -> Result<Request> {
+        debug!("Creating {} request to {}", method, target_uri);
+        
+        // Get next CSeq value
+        let cseq_value = self.next_cseq().await;
+        
+        // Create request with basic headers
+        let method_clone = method.clone();
+        let target_uri_clone = target_uri.clone();
+        let mut request = Request::new(method_clone, target_uri_clone);
         
         // Add Via header with branch parameter
-        let branch = format!("z9hG4bK-{}", Uuid::new_v4());
-        let via_value = format!(
-            "SIP/2.0/UDP {};branch={}",
-            self.config.local_addr.unwrap(),
-            branch
-        );
+        let branch = format!("z9hG4bK-{}", Uuid::new_v4().to_string());
+        let via_value = format!("SIP/2.0/UDP {};branch={}", self.config.local_addr.unwrap(), branch);
         request.headers.push(Header::text(HeaderName::Via, via_value));
         
-        // Add Max-Forwards
-        request.headers.push(Header::integer(HeaderName::MaxForwards, 70));
-        
         // Add From header with tag
-        let from_tag = format!("tag-{}", Uuid::new_v4());
-        let from_value = format!(
-            "<sip:{}@{}>;tag={}",
-            self.config.username,
-            self.config.domain,
-            from_tag
-        );
-        request.headers.push(Header::text(HeaderName::From, from_value));
+        let tag = format!("{}", Uuid::new_v4().to_string().split_at(8).0);
+        let from_value = format!("<sip:{}@{}>", self.config.username, self.config.domain);
+        let from_value_tagged = format!("{};tag={}", from_value, tag);
+        request.headers.push(Header::text(HeaderName::From, from_value_tagged));
         
         // Add To header
-        let to_value = format!("<{}>", uri);
+        let to_value = format!("<{}>", target_uri);
         request.headers.push(Header::text(HeaderName::To, to_value));
         
-        // Add Call-ID
-        let call_id = format!("{}-{}", self.config.username, Uuid::new_v4());
+        // Add Call-ID header
+        let call_id = format!("{}", Uuid::new_v4().to_string());
         request.headers.push(Header::text(HeaderName::CallId, call_id));
         
         // Add CSeq
-        let cseq = self.next_cseq();
         request.headers.push(Header::text(
             HeaderName::CSeq,
-            format!("{} {}", cseq, method)
+            format!("{} {}", cseq_value, method)
         ));
         
-        // Add Contact
-        let contact_value = format!(
-            "<sip:{}@{};transport=udp>",
-            self.config.username,
-            self.config.local_addr.unwrap()
-        );
-        request.headers.push(Header::text(HeaderName::Contact, contact_value));
+        // Add Max-Forwards
+        request.headers.push(Header::text(HeaderName::MaxForwards, "70"));
         
         // Add User-Agent
         request.headers.push(Header::text(
@@ -650,12 +537,15 @@ impl SipClient {
             self.config.user_agent.clone()
         ));
         
-        request
+        // Add Content-Length
+        request.headers.push(Header::text(HeaderName::ContentLength, "0"));
+        
+        Ok(request)
     }
     
     /// Get next CSeq value
-    fn next_cseq(&self) -> u32 {
-        let mut cseq = self.cseq.try_lock().unwrap();
+    async fn next_cseq(&self) -> u32 {
+        let mut cseq = self.cseq.lock().await;
         let value = *cseq;
         *cseq += 1;
         value
@@ -784,6 +674,140 @@ impl SipClient {
             }
         }
     }
+
+    /// Set the call registry for call persistence
+    pub async fn set_call_registry(&mut self, registry: call_registry::CallRegistry) {
+        // Create an Arc for the registry
+        let arc_registry = Arc::new(registry);
+        
+        // Check if we're replacing an existing registry
+        let replacing = self.registry.is_some();
+        if replacing {
+            debug!("Replacing existing call registry");
+        } else {
+            debug!("Setting new call registry");
+        }
+        
+        // Set the registry
+        self.registry = Some(arc_registry.clone());
+        
+        // Update all existing calls
+        let calls = self.calls.lock().await;
+        for (_, call) in calls.iter() {
+            let call_clone = call.clone();
+            let registry_clone = arc_registry.clone();
+            tokio::spawn(async move {
+                let mut call_lock = call_clone.write().await;
+                call_lock.set_registry(registry_clone).await;
+            });
+        }
+        
+        info!("Call registry set for SIP client");
+    }
+
+    /// Get the client's event broadcast channel
+    pub fn subscribe(&self) -> broadcast::Receiver<SipClientEvent> {
+        self.event_broadcast.subscribe()
+    }
+
+    /// Make a call to a specific URI with given configuration
+    pub async fn call(&self, target_uri: &str, config: CallConfig) -> Result<Arc<Call>> {
+        use tracing::{info, debug};
+        
+        debug!("Making call to {}", target_uri);
+        
+        // Parse target URI
+        let target_uri = Uri::from_str(target_uri)
+            .map_err(|e| Error::Client(format!("Invalid target URI: {}", e)))?;
+        
+        // Resolve target URI to address
+        let remote_addr = self.resolve_uri(&target_uri)?;
+        
+        // Make the call
+        let call = self.call_to(target_uri, remote_addr, config).await?;
+        Ok(call)
+    }
+
+    /// Make a call to a specific URI and address with given configuration
+    pub async fn call_to(&self, target_uri: Uri, remote_addr: SocketAddr, config: CallConfig) -> Result<Arc<Call>> {
+        use tracing::{info, debug};
+        
+        debug!("Making call to {} at {}", target_uri, remote_addr);
+        
+        // Generate a unique ID for this call
+        let call_id = format!("call-{}", Uuid::new_v4());
+        
+        // Generate a random tag for this call
+        let local_tag = format!("tag-{}", Uuid::new_v4());
+        
+        // Get local URI
+        let local_uri = Uri::from_str(&format!("sip:{}@{}", 
+            self.config.username, self.config.domain))
+            .map_err(|e| Error::Client(format!("Failed to create local URI: {}", e)))?;
+        
+        // Create a new call
+        let call = Call::new(
+            CallDirection::Outgoing,
+            config.clone(),
+            call_id.clone(),
+            local_tag,
+            local_uri.clone(),
+            target_uri.clone(),
+            remote_addr,
+            self.transaction_manager.clone(),
+            self.event_tx.clone(),
+        ).0;
+        
+        // Store the call
+        let mut calls = self.calls.lock().await;
+        calls.insert(call_id.clone(), Arc::new(RwLock::new(call.clone())));
+        drop(calls);
+        
+        // If we have a registry, associate it with the call
+        if let Some(registry) = &self.registry {
+            call.set_registry(registry.clone()).await;
+        }
+        
+        // Start the call
+        let mut invite_req = call.create_invite_request().await?;
+        
+        // Create INVITE transaction
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        
+        // Log this transaction to the call log
+        log_transaction(
+            &call_id,
+            &transaction_id,
+            "invite",
+            CallDirection::Outgoing,
+            "created",
+            Some("Initial INVITE created".to_string()),
+            &self.calls
+        ).await;
+        
+        // Send via transaction
+        let response = match self.send_via_transaction(invite_req.clone(), remote_addr).await {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to send INVITE: {}", e);
+                call.update_state(CallState::Failed).await?;
+                return Err(Error::Call(format!("Failed to send INVITE: {}", e)));
+            }
+        };
+        
+        info!("INVITE sent, initial response: {}", response.status);
+        
+        // Store original INVITE for later use (ACK, etc.)
+        call.store_invite_request(invite_req).await?;
+        
+        // Store the last response
+        call.store_last_response(response.clone()).await?;
+        
+        // Process the response
+        call.handle_response(&response).await?;
+        
+        Ok(call)
+    }
 }
 
 /// Lightweight clone of SIP client for use in tasks
@@ -881,17 +905,19 @@ impl Clone for SipClient {
         
         Self {
             config: self.config.clone(),
+            transport: self.transport.clone(),
             transaction_manager: self.transaction_manager.clone(),
             transaction_events_rx,
             event_tx,
-            event_rx,
+            event_rx: Some(event_rx),
             event_broadcast: self.event_broadcast.clone(),
-            calls: self.calls.clone(),
-            cseq: self.cseq.clone(),
+            calls: Mutex::new(HashMap::new()),
+            cseq: Arc::new(Mutex::new(1)),
             registration: self.registration.clone(),
             running: self.running.clone(),
             event_task: None,
-            pending_responses: self.pending_responses.clone(),
+            pending_responses: Arc::new(Mutex::new(HashMap::new())),
+            registry: self.registry.clone(),
         }
     }
 }
@@ -934,306 +960,35 @@ where
 async fn handle_transaction_event(
     event: TransactionEvent,
     transaction_manager: Arc<TransactionManager>,
-    calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
     event_tx: mpsc::Sender<SipClientEvent>,
-    pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<Response>>>>,
 ) -> Result<()> {
     use tracing::{info, debug, error, warn};
     
+    // Currently, this is a simplified placeholder implementation
     match event {
-        TransactionEvent::TransactionCreated { transaction_id } => {
-            debug!("Transaction created: {}", transaction_id);
-            
-            // We don't know which call this belongs to yet, it will be associated later
-            // when we get a response or when explicit transaction logging is done
+        TransactionEvent::Completed { transaction_id, .. } => {
+            debug!("Transaction completed: {}", transaction_id);
         },
-        TransactionEvent::ResponseReceived { message, source: _, transaction_id } => {
-            if let Message::Response(response) = message {
-                debug!("Response received for transaction {}: {} ({:?})", 
-                    transaction_id, response.status, response.status);
-                
-                // Extract Call-ID to find the call
-                if let Some(call_id) = response.call_id() {
-                    debug!("Found Call-ID {} in response for transaction {}", call_id, transaction_id);
-                    
-                    // Look up the call
-                    let calls_read = calls.read().await;
-                    if let Some(call) = calls_read.get(call_id) {
-                        debug!("Found call for Call-ID {}, handling response with transaction ID {}", 
-                               call_id, transaction_id);
-                        
-                        // Store transaction ID for the response
-                        store_transaction_id(call.clone(), &transaction_id).await;
-                        
-                        // Let call handle the response
-                        if let Err(e) = call.handle_response(&response.clone()).await {
-                            error!("Error handling response: {}", e);
-                        }
-                    } else {
-                        warn!("Call not found for Call-ID {}", call_id);
-                    }
-                    drop(calls_read);  // Explicitly release lock
-                }
-                
-                // Also handle pending response channels
-                let mut pending = pending_responses.lock().await;
-                if let Some(tx) = pending.remove(&transaction_id) {
-                    debug!("Found pending channel for transaction {}", transaction_id);
-                    if let Err(e) = tx.send(response) {
-                        error!("Failed to send response to pending channel: {:?}", e);
-                    }
-                }
-            }
-        },
-        TransactionEvent::TransactionCompleted { transaction_id, response } => {
-            if let Some(response) = response {
-                debug!("Transaction {} completed with response {} ({:?})", 
-                    transaction_id, response.status, response.status);
-                
-                // Extract Call-ID to find the call
-                if let Some(call_id) = response.call_id() {
-                    debug!("Found Call-ID {} in response", call_id);
-                    
-                    // Look up the call
-                    let calls_read = calls.read().await;
-                    if let Some(call) = calls_read.get(call_id) {
-                        debug!("Found call for Call-ID {}, handling response", call_id);
-                        
-                        // Store transaction ID for the response
-                        store_transaction_id(call.clone(), &transaction_id).await;
-                        
-                        // Let call handle the response
-                        if let Err(e) = call.handle_response(&response.clone()).await {
-                            error!("Error handling response: {}", e);
-                        }
-                        
-                        // For 2xx responses to INVITE, store the transaction ID for later ACK
-                        if response.status.is_success() {
-                            if let Some((_, method)) = rvoip_transaction_core::utils::extract_cseq(&Message::Response(response.clone())) {
-                                if method == Method::Invite {
-                                    debug!("Storing transaction ID {} for 2xx response to INVITE", transaction_id);
-                                    if let Err(e) = call.store_invite_transaction_id(transaction_id.clone()).await {
-                                        error!("Failed to store transaction ID: {}", e);
-                                    }
-                                    
-                                    // Log/update transaction in registry
-                                    if let Some(registry) = call.registry() {
-                                        // Update transaction status
-                                        if let Err(e) = registry.update_transaction_status(
-                                            call_id,
-                                            &transaction_id,
-                                            "completed",
-                                            Some(format!("Completed with status: {}", response.status))
-                                        ).await {
-                                            error!("Failed to update transaction status: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        warn!("Call not found for Call-ID {}", call_id);
-                    }
-                    drop(calls_read);  // Explicitly release lock
-                }
-                
-                // Also handle pending response channels
-                let mut pending = pending_responses.lock().await;
-                if let Some(tx) = pending.remove(&transaction_id) {
-                    debug!("Found pending channel for transaction {}", transaction_id);
-                    if let Err(e) = tx.send(response) {
-                        error!("Failed to send response to pending channel: {:?}", e);
-                    }
-                }
-            }
-        },
-        TransactionEvent::TransactionTerminated { transaction_id } => {
+        TransactionEvent::Terminated { transaction_id, .. } => {
             debug!("Transaction terminated: {}", transaction_id);
+        },
+        TransactionEvent::Error { transaction_id, error } => {
+            error!("Transaction error: {}: {}", transaction_id, error);
             
-            // Remove any pending channel
-            let mut pending = pending_responses.lock().await;
-            if pending.remove(&transaction_id).is_some() {
-                debug!("Removed pending channel for terminated transaction {}", transaction_id);
-            }
+            // Send error event to client
+            let _ = event_tx.send(SipClientEvent::Error(
+                format!("Transaction error: {}: {}", transaction_id, error)
+            )).await;
         },
-        TransactionEvent::UnmatchedMessage { message, source } => {
-            match message {
-                Message::Request(request) => {
-                    debug!("Unmatched request from {}: {}", source, request.method);
-                    
-                    // Extract Call-ID and to/from to determine if this is for an existing call
-                    if let Some(call_id) = request.call_id() {
-                        debug!("Request has Call-ID: {}", call_id);
-                        
-                        // First, look for an existing call
-                        let calls_read = calls.read().await;
-                        if let Some(call) = calls_read.get(call_id) {
-                            debug!("Found call for Call-ID {}, handling request", call_id);
-                            
-                            // Handle the request
-                            match call.handle_request(request.clone()).await {
-                                Ok(Some(response)) => {
-                                    debug!("Sending response {} to request", response.status);
-                                    // Send the response via transport
-                                    if let Err(e) = transaction_manager.transport().send_message(
-                                        Message::Response(response),
-                                        source
-                                    ).await {
-                                        error!("Failed to send response: {}", e);
-                                    }
-                                },
-                                Ok(None) => {
-                                    debug!("No response needed for request");
-                                },
-                                Err(e) => {
-                                    error!("Error handling request: {}", e);
-                                    
-                                    // Send 500 Server Internal Error
-                                    let mut error_response = Response::new(StatusCode::ServerInternalError);
-                                    
-                                    // Add basic headers
-                                    for header in &request.headers {
-                                        match header.name {
-                                            HeaderName::Via | HeaderName::From | HeaderName::To |
-                                            HeaderName::CallId | HeaderName::CSeq => {
-                                                error_response.headers.push(header.clone());
-                                            },
-                                            _ => {},
-                                        }
-                                    }
-                                    
-                                    // Add Content-Length
-                                    error_response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                                    
-                                    // Send the error response
-                                    if let Err(e) = transaction_manager.transport().send_message(
-                                        Message::Response(error_response),
-                                        source
-                                    ).await {
-                                        error!("Failed to send error response: {}", e);
-                                    }
-                                }
-                            }
-                        } else if request.method == Method::Invite {
-                            // For INVITE, this is a new call
-                            info!("New incoming call from {}", source);
-                            
-                            // Create a new call and handle it
-                            if let Err(e) = handle_new_call(
-                                request,
-                                source,
-                                transaction_manager.clone(),
-                                calls.clone(),
-                                event_tx.clone(),
-                            ).await {
-                                error!("Failed to handle new call: {}", e);
-                            }
-                        } else {
-                            // For other methods, send 481 Call/Transaction Does Not Exist
-                            warn!("Received {} for non-existent call {}", request.method, call_id);
-                            
-                            let mut response = Response::new(StatusCode::CallOrTransactionDoesNotExist);
-                            
-                            // Add basic headers
-                            for header in &request.headers {
-                                match header.name {
-                                    HeaderName::Via | HeaderName::From | HeaderName::To |
-                                    HeaderName::CallId | HeaderName::CSeq => {
-                                        response.headers.push(header.clone());
-                                    },
-                                    _ => {},
-                                }
-                            }
-                            
-                            // Add Content-Length
-                            response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                            
-                            // Send the response
-                            if let Err(e) = transaction_manager.transport().send_message(
-                                Message::Response(response),
-                                source
-                            ).await {
-                                error!("Failed to send response: {}", e);
-                            }
-                        }
-                        
-                        drop(calls_read);  // Explicitly release lock
-                    } else {
-                        warn!("Request missing Call-ID header");
-                        
-                        // Create a 400 Bad Request response
-                        let mut response = Response::new(StatusCode::BadRequest);
-                        
-                        // Add basic headers that we can find
-                        for header in &request.headers {
-                            match header.name {
-                                HeaderName::Via | HeaderName::From | HeaderName::To |
-                                HeaderName::CSeq => {
-                                    response.headers.push(header.clone());
-                                },
-                                _ => {},
-                            }
-                        }
-                        
-                        // Add Content-Length
-                        response.headers.push(Header::text(HeaderName::ContentLength, "0"));
-                        
-                        // Send the response
-                        if let Err(e) = transaction_manager.transport().send_message(
-                            Message::Response(response),
-                            source
-                        ).await {
-                            error!("Failed to send response: {}", e);
-                        }
-                    }
-                },
-                Message::Response(response) => {
-                    // This is an unmatched response
-                    debug!("Unmatched response from {}: {}", source, response.status);
-                    
-                    // Log but ignore - we don't have a transaction for this
-                    if let Some(call_id) = response.call_id() {
-                        debug!("Response has Call-ID: {}", call_id);
-                        
-                        // Look for an existing call
-                        let calls_read = calls.read().await;
-                        if let Some(call) = calls_read.get(call_id) {
-                            debug!("Found call for Call-ID {}, but no matching transaction", call_id);
-                            
-                            // Handle the response at call level
-                            if let Err(e) = call.handle_response(&response.clone()).await {
-                                error!("Error handling unmatched response: {}", e);
-                            }
-                        } else {
-                            debug!("Call not found for unmatched response with Call-ID {}", call_id);
-                        }
-                    }
-                },
-            }
+        TransactionEvent::NewClientTransaction { .. } => {
+            debug!("New client transaction");
         },
-        TransactionEvent::Error { error, transaction_id } => {
-            if let Some(id) = transaction_id {
-                warn!("Transaction error in {}: {}", id, error);
-                
-                // Remove any pending channel
-                let mut pending = pending_responses.lock().await;
-                if pending.remove(&id).is_some() {
-                    debug!("Removed pending channel for failed transaction {}", id);
-                }
-                
-                // Forward error to application
-                if let Err(e) = event_tx.send(SipClientEvent::Error(error.to_string())).await {
-                    error!("Failed to send error event: {}", e);
-                }
-            } else {
-                warn!("General transaction error: {}", error);
-                
-                // Forward error to application
-                if let Err(e) = event_tx.send(SipClientEvent::Error(error.to_string())).await {
-                    error!("Failed to send error event: {}", e);
-                }
-            }
+        TransactionEvent::NewServerTransaction { .. } => {
+            debug!("New server transaction");
         },
+        _ => {
+            debug!("Unhandled transaction event: {:?}", event);
+        }
     }
     
     Ok(())
@@ -1244,7 +999,7 @@ async fn handle_new_call(
     request: Request,
     source: SocketAddr,
     transaction_manager: Arc<TransactionManager>,
-    calls: Arc<RwLock<HashMap<String, Arc<Call>>>>,
+    calls: Arc<Mutex<HashMap<String, Arc<Call>>>>,
     event_tx: mpsc::Sender<SipClientEvent>,
 ) -> Result<()> {
     use tracing::{debug, info, warn, error};
@@ -1321,7 +1076,7 @@ async fn handle_new_call(
     
     // Store call and extract SDP if present
     {
-        let mut calls_write = calls.write().await;
+        let mut calls_write = calls.lock().await;
         calls_write.insert(call.id().to_string(), call.clone());
         
         // Process SDP if present
@@ -1397,7 +1152,7 @@ async fn log_transaction(
     direction: CallDirection,
     status: &str,
     info: Option<String>,
-    calls: &Arc<RwLock<HashMap<String, Arc<Call>>>>,
+    calls: &Arc<Mutex<HashMap<String, Arc<Call>>>>,
 ) {
     use tracing::{debug, error};
     
@@ -1415,7 +1170,7 @@ async fn log_transaction(
     };
     
     // Find the call
-    let calls_read = calls.read().await;
+    let calls_read = calls.lock().await;
     if let Some(call) = calls_read.get(call_id) {
         // If the call has a registry, log the transaction
         if let Some(registry) = call.registry() {
