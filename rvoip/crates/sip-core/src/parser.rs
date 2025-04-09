@@ -1,6 +1,15 @@
 use std::str::FromStr;
 
 use bytes::Bytes;
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_till, take_until, take_while1},
+    character::complete::{char, digit1, line_ending, space0, space1},
+    combinator::{map, map_res, opt, recognize},
+    multi::{many0, many1},
+    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    IResult,
+};
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
@@ -9,159 +18,160 @@ use crate::method::Method;
 use crate::uri::Uri;
 use crate::version::Version;
 
-/// Parses a SIP message from raw bytes
+/// Parse a SIP message from raw bytes
 pub fn parse_message(data: &Bytes) -> Result<Message> {
-    // Convert bytes to string
+    // Convert bytes to string for parsing
     let data_str = std::str::from_utf8(data).map_err(|_| {
         Error::InvalidFormat("Message contains invalid UTF-8".to_string())
     })?;
     
-    // Split message into lines
-    let mut lines = data_str.lines();
-    
-    // Parse the first line (request-line or status-line)
-    let first_line = lines.next().ok_or_else(|| {
-        Error::InvalidFormat("Empty message".to_string())
-    })?;
-    
-    // Determine if this is a request or response
-    if first_line.starts_with("SIP/") {
-        // This is a response
-        parse_response(first_line, lines)
-    } else {
-        // This is a request
-        parse_request(first_line, lines)
+    // Use nom to parse the full message
+    match sip_message(data_str) {
+        Ok((_, message)) => Ok(message),
+        Err(_) => Err(Error::InvalidFormat("Failed to parse SIP message".to_string())),
     }
 }
 
-/// Parses a SIP request from the given lines
-fn parse_request<'a, I>(request_line: &str, lines: I) -> Result<Message>
-where
-    I: Iterator<Item = &'a str>,
-{
-    // Parse the request line: METHOD URI SIP/VERSION
-    let mut parts = request_line.split_whitespace();
-    
-    let method_str = parts.next().ok_or_else(|| {
-        Error::InvalidFormat("Missing method in request line".to_string())
-    })?;
-    
-    let uri_str = parts.next().ok_or_else(|| {
-        Error::InvalidFormat("Missing URI in request line".to_string())
-    })?;
-    
-    let version_str = parts.next().ok_or_else(|| {
-        Error::InvalidFormat("Missing version in request line".to_string())
-    })?;
-    
-    // Parse the components
-    let method = Method::from_str(method_str)?;
-    let uri = Uri::from_str(uri_str)?;
-    let version = Version::from_str(version_str)?;
-    
-    // Parse headers and body
-    let (headers, body) = parse_headers_and_body(lines)?;
-    
-    // Create the request
-    let request = Request {
-        method,
-        uri,
-        version,
-        headers,
-        body,
-    };
-    
-    Ok(Message::Request(request))
+// Parser for a complete SIP message
+fn sip_message(input: &str) -> IResult<&str, Message> {
+    alt((
+        map(sip_request, Message::Request),
+        map(sip_response, Message::Response),
+    ))(input)
 }
 
-/// Parses a SIP response from the given lines
-fn parse_response<'a, I>(status_line: &str, lines: I) -> Result<Message>
-where
-    I: Iterator<Item = &'a str>,
-{
-    // Parse the status line: SIP/VERSION STATUS REASON
-    let mut parts = status_line.split_whitespace();
+// Parser for a SIP request
+fn sip_request(input: &str) -> IResult<&str, Request> {
+    // Parse method
+    let (input, method) = method_parser(input)?;
+    // Parse space
+    let (input, _) = space1(input)?;
+    // Parse URI
+    let (input, uri) = uri_parser(input)?;
+    // Parse space
+    let (input, _) = space1(input)?;
+    // Parse version
+    let (input, version) = version_parser(input)?;
     
-    let version_str = parts.next().ok_or_else(|| {
-        Error::InvalidFormat("Missing version in status line".to_string())
-    })?;
+    let (input, _) = crlf(input)?;
+    let (input, headers) = headers_parser(input)?;
+    let (input, _) = crlf(input)?;
+    let (input, body) = body_parser(input)?;
     
-    let status_str = parts.next().ok_or_else(|| {
-        Error::InvalidFormat("Missing status code in status line".to_string())
-    })?;
-    
-    // The reason phrase can contain spaces, so we need to join the remaining parts
-    let reason = parts.collect::<Vec<&str>>().join(" ");
-    
-    // Parse the components
-    let version = Version::from_str(version_str)?;
-    let status = StatusCode::from_str(status_str)?;
-    
-    // Parse headers and body
-    let (headers, body) = parse_headers_and_body(lines)?;
-    
-    // Create the response
-    let response = Response {
-        version,
-        status,
-        reason: if reason.is_empty() { None } else { Some(reason) },
-        headers,
-        body,
-    };
-    
-    Ok(Message::Response(response))
+    Ok((
+        input,
+        Request {
+            method,
+            uri,
+            version,
+            headers,
+            body: Bytes::from(body),
+        },
+    ))
 }
 
-/// Parses headers and body from the given lines
-fn parse_headers_and_body<'a, I>(lines: I) -> Result<(Vec<Header>, Bytes)>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut headers = Vec::new();
-    let mut body_lines = Vec::new();
-    let mut in_body = false;
+// Parser for a SIP response
+fn sip_response(input: &str) -> IResult<&str, Response> {
+    // Parse version
+    let (input, version) = version_parser(input)?;
+    let (input, _) = space1(input)?;
+    let (input, status) = status_code_parser(input)?;
+    let (input, _) = space1(input)?;
+    let (input, reason) = reason_phrase_parser(input)?;
     
-    // Process each line
-    for line in lines {
-        if in_body {
-            // We're in the body, collect all remaining lines
-            body_lines.push(line);
-        } else if line.is_empty() {
-            // Empty line marks the end of headers
-            in_body = true;
-        } else {
-            // This is a header line
-            let header = parse_header(line)?;
-            headers.push(header);
+    let (input, _) = crlf(input)?;
+    let (input, headers) = headers_parser(input)?;
+    let (input, _) = crlf(input)?;
+    let (input, body) = body_parser(input)?;
+    
+    Ok((
+        input,
+        Response {
+            version,
+            status,
+            reason: if reason.is_empty() { None } else { Some(reason.to_string()) },
+            headers,
+            body: Bytes::from(body),
+        },
+    ))
+}
+
+// Parser for SIP method
+fn method_parser(input: &str) -> IResult<&str, Method> {
+    map_res(
+        take_while1(|c: char| c.is_ascii_alphabetic()),
+        |s: &str| Method::from_str(s)
+    )(input)
+}
+
+// Parser for SIP URI
+fn uri_parser(input: &str) -> IResult<&str, Uri> {
+    // For now, we'll just capture the URI as a string and parse it with FromStr
+    map_res(
+        take_while1(|c: char| !c.is_whitespace()),
+        |s: &str| Uri::from_str(s)
+    )(input)
+}
+
+// Parser for SIP version
+fn version_parser(input: &str) -> IResult<&str, Version> {
+    map_res(
+        recognize(tuple((
+            tag("SIP/"),
+            digit1,
+            char('.'),
+            digit1,
+        ))),
+        |s: &str| Version::from_str(s)
+    )(input)
+}
+
+// Parser for status code
+fn status_code_parser(input: &str) -> IResult<&str, StatusCode> {
+    map_res(
+        digit1,
+        |s: &str| {
+            let code = s.parse::<u16>().unwrap_or(0);
+            StatusCode::from_u16(code)
         }
-    }
-    
-    // Convert body lines to bytes
-    let body = if body_lines.is_empty() {
-        Bytes::new()
-    } else {
-        Bytes::from(body_lines.join("\r\n"))
-    };
-    
-    Ok((headers, body))
+    )(input)
 }
 
-/// Parses a single header line
-fn parse_header(line: &str) -> Result<Header> {
-    // Split the line at the first colon
-    let parts: Vec<&str> = line.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(Error::InvalidHeader(format!("Invalid header format: {}", line)));
-    }
+// Parser for reason phrase
+fn reason_phrase_parser(input: &str) -> IResult<&str, &str> {
+    take_till(|c| c == '\r' || c == '\n')(input)
+}
+
+// Parser for headers
+fn headers_parser(input: &str) -> IResult<&str, Vec<Header>> {
+    many0(terminated(header_parser, crlf))(input)
+}
+
+// Parser for a single header
+fn header_parser(input: &str) -> IResult<&str, Header> {
+    let (input, (name, value)) = separated_pair(
+        map_res(
+            take_till(|c| c == ':'),
+            |s: &str| HeaderName::from_str(s.trim())
+        ),
+        tuple((char(':'), space0)),
+        map_res(
+            take_till(|c| c == '\r' || c == '\n'),
+            |s: &str| Ok::<_, Error>(HeaderValue::from_str(s.trim())?)
+        )
+    )(input)?;
     
-    let name_str = parts[0].trim();
-    let value_str = parts[1].trim();
-    
-    // Parse header name and value
-    let name = HeaderName::from_str(name_str)?;
-    let value = HeaderValue::from_str(value_str)?;
-    
-    Ok(Header::new(name, value))
+    Ok((input, Header::new(name, value)))
+}
+
+// Parse the body of the message
+fn body_parser(input: &str) -> IResult<&str, String> {
+    Ok((input, input.to_string()))  // Convert to owned String to avoid lifetime issues
+}
+
+// Parser for CRLF
+fn crlf(input: &str) -> IResult<&str, &str> {
+    alt((tag("\r\n"), tag("\n")))(input)
 }
 
 #[cfg(test)]

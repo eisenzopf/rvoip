@@ -2,6 +2,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_till, take_until, take_while, take_while1},
+    character::complete::{char, digit1},
+    combinator::{map, map_res, opt, recognize},
+    multi::{many0, separated_list0},
+    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    IResult,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -191,95 +200,122 @@ impl fmt::Display for Uri {
     }
 }
 
-// Note: For now we'll just implement a simple parsing
-// In a full implementation, we'd use the nom parser
+// Parse the scheme of a URI (sip, sips, tel)
+fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
+    map_res(
+        alt((
+            tag("sip"),
+            tag("sips"),
+            tag("tel"),
+        )),
+        |s: &str| Scheme::from_str(s)
+    )(input)
+}
+
+// Parse the userinfo part (user:password@)
+fn userinfo_parser(input: &str) -> IResult<&str, (Option<&str>, Option<&str>)> {
+    match opt(terminated(
+        pair(
+            take_till(|c| c == ':' || c == '@'),
+            opt(preceded(char(':'), take_till(|c| c == '@')))
+        ),
+        char('@')
+    ))(input) {
+        Ok((remaining, Some((user, password)))) => Ok((remaining, (Some(user), password))),
+        Ok((remaining, None)) => Ok((remaining, (None, None))),
+        Err(e) => Err(e),
+    }
+}
+
+// Parse the host part
+fn host_parser(input: &str) -> IResult<&str, &str> {
+    take_while1(|c: char| c.is_alphanumeric() || c == '.' || c == '-' || c == '+')(input)
+}
+
+// Parse the port part
+fn port_parser(input: &str) -> IResult<&str, u16> {
+    map_res(
+        preceded(char(':'), digit1),
+        |s: &str| s.parse::<u16>()
+    )(input)
+}
+
+// Parse a single parameter
+fn parameter_parser(input: &str) -> IResult<&str, (String, Option<String>)> {
+    preceded(
+        char(';'),
+        pair(
+            map(take_till(|c| c == '=' || c == ';' || c == '?'), String::from),
+            opt(preceded(
+                char('='),
+                map(take_till(|c| c == ';' || c == '?'), String::from)
+            ))
+        )
+    )(input)
+}
+
+// Parse all parameters
+fn parameters_parser(input: &str) -> IResult<&str, HashMap<String, Option<String>>> {
+    map(
+        many0(parameter_parser),
+        |params| params.into_iter().collect()
+    )(input)
+}
+
+// Parse a single header
+fn header_parser(input: &str) -> IResult<&str, (String, String)> {
+    separated_pair(
+        map(take_till(|c| c == '=' || c == '&'), String::from),
+        char('='),
+        map(take_till(|c| c == '&'), String::from)
+    )(input)
+}
+
+// Parse all headers
+fn headers_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
+    preceded(
+        char('?'),
+        map(
+            separated_list0(char('&'), header_parser),
+            |headers| headers.into_iter().collect()
+        )
+    )(input)
+}
+
+// Parser for a complete URI
+fn uri_parser(input: &str) -> IResult<&str, Uri> {
+    let (input, scheme) = terminated(scheme_parser, char(':'))(input)?;
+    let (input, (user, password)) = userinfo_parser(input)?;
+    let (input, host) = host_parser(input)?;
+    let (input, port) = opt(port_parser)(input)?;
+    
+    let (input, parameters) = opt(parameters_parser)(input)?;
+    let (input, headers) = opt(headers_parser)(input)?;
+    
+    let mut uri = Uri::new(scheme, host);
+    
+    uri.user = user.map(String::from);
+    uri.password = password.map(String::from);
+    uri.port = port;
+    
+    if let Some(params) = parameters {
+        uri.parameters = params;
+    }
+    
+    if let Some(hdrs) = headers {
+        uri.headers = hdrs;
+    }
+    
+    Ok((input, uri))
+}
+
 impl FromStr for Uri {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Very basic implementation for now
-        if let Some((scheme_str, rest)) = s.split_once(':') {
-            let scheme = Scheme::from_str(scheme_str)?;
-            
-            let mut uri = Uri::new(scheme, "");
-            
-            // Check if we have user info
-            let (authority, extra) = if let Some((authority, extra)) = rest.split_once(|c| c == ';' || c == '?') {
-                (authority, Some(extra))
-            } else {
-                (rest, None)
-            };
-            
-            // Parse user/host part
-            if let Some((user_info, host_port)) = authority.split_once('@') {
-                // User part exists
-                if let Some((user, password)) = user_info.split_once(':') {
-                    uri.user = Some(user.to_string());
-                    uri.password = Some(password.to_string());
-                } else {
-                    uri.user = Some(user_info.to_string());
-                }
-                
-                // Parse host:port
-                if let Some((host, port_str)) = host_port.split_once(':') {
-                    uri.host = host.to_string();
-                    uri.port = Some(port_str.parse().map_err(|_| Error::InvalidUri("Invalid port".into()))?);
-                } else {
-                    uri.host = host_port.to_string();
-                }
-            } else {
-                // No user part
-                if let Some((host, port_str)) = authority.split_once(':') {
-                    uri.host = host.to_string();
-                    uri.port = Some(port_str.parse().map_err(|_| Error::InvalidUri("Invalid port".into()))?);
-                } else {
-                    uri.host = authority.to_string();
-                }
-            }
-            
-            // Handle parameters and headers
-            if let Some(extra) = extra {
-                if extra.contains('?') {
-                    let (params_str, headers_str) = extra.split_once('?').unwrap();
-                    
-                    // Parse parameters
-                    if !params_str.is_empty() {
-                        for param in params_str.split(';') {
-                            if !param.is_empty() {
-                                if let Some((key, value)) = param.split_once('=') {
-                                    uri.parameters.insert(key.to_string(), Some(value.to_string()));
-                                } else {
-                                    uri.parameters.insert(param.to_string(), None);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Parse headers
-                    for header in headers_str.split('&') {
-                        if !header.is_empty() {
-                            if let Some((key, value)) = header.split_once('=') {
-                                uri.headers.insert(key.to_string(), value.to_string());
-                            }
-                        }
-                    }
-                } else {
-                    // Only parameters, no headers
-                    for param in extra.split(';') {
-                        if !param.is_empty() {
-                            if let Some((key, value)) = param.split_once('=') {
-                                uri.parameters.insert(key.to_string(), Some(value.to_string()));
-                            } else {
-                                uri.parameters.insert(param.to_string(), None);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            Ok(uri)
-        } else {
-            Err(Error::InvalidUri("Missing scheme".into()))
+        match uri_parser(s) {
+            Ok((_, uri)) => Ok(uri),
+            Err(_) => Err(Error::InvalidUri(format!("Failed to parse URI: {s}"))),
         }
     }
 }
