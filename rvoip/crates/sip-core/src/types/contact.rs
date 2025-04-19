@@ -5,6 +5,8 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::parser::headers::parse_contact; // For FromStr
 use std::ops::Deref;
+use crate::types::param::Param;
+use ordered_float::NotNan;
 
 /// Typed Contact header.
 /// Note: RFC 3261 allows multiple Contact values in a single header line (comma-separated)
@@ -34,19 +36,18 @@ impl Contact {
     }
 
     /// Gets the q parameter value, if present.
-    pub fn q(&self) -> Option<f32> {
+    pub fn q(&self) -> Option<NotNan<f32>> {
         self.0.params.iter().find_map(|p| match p {
-            Param::Q(val) => Some(*val),
+            Param::Q(val) => Some(val),
             _ => None,
-        })
+        }).copied()
     }
     
     /// Sets or replaces the q parameter.
     pub fn set_q(&mut self, q: f32) {
-        // Clamp q value between 0.0 and 1.0
         let clamped_q = q.max(0.0).min(1.0);
         self.0.params.retain(|p| !matches!(p, Param::Q(_)));
-        self.0.params.push(Param::Q(clamped_q));
+        self.0.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
     }
     
     // Delegate other Address methods if needed (e.g., tag)

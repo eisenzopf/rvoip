@@ -77,6 +77,10 @@ pub enum Error {
         message: String, 
     },
 
+    /// Error related to SDP processing
+    #[error("SDP error: {0}")]
+    SdpError(String), // Generic SDP error
+
     /// Transport-specific error
     #[error("Transport error: {0}")]
     Transport(String),
@@ -104,6 +108,11 @@ pub enum Error {
     /// Other error with message
     #[error("{0}")]
     Other(String),
+
+    /// Invalid input value
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
 }
 
 impl From<nom::Err<nom::error::Error<&str>>> for Error {

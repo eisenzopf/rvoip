@@ -52,6 +52,20 @@ pub enum HeaderName {
     RAck,
     /// WWW-Authenticate: Challenge for authentication
     WwwAuthenticate,
+    /// Accept: Media types acceptable for the response
+    Accept,
+    /// Content-Disposition: Presentation style for the message body
+    ContentDisposition,
+    /// Warning: Additional information about the status of a response
+    Warning,
+    /// Proxy-Authenticate: Challenge for proxy authentication
+    ProxyAuthenticate,
+    /// Proxy-Authorization: Credentials for proxy authentication
+    ProxyAuthorization,
+    /// Authentication-Info: Information related to authentication
+    AuthenticationInfo,
+    /// Reply-To: Address for replies
+    ReplyTo,
     /// Custom header name
     Other(String),
 }
@@ -82,6 +96,13 @@ impl HeaderName {
             HeaderName::ReferredBy => "Referred-By",
             HeaderName::RAck => "RAck",
             HeaderName::WwwAuthenticate => "WWW-Authenticate",
+            HeaderName::Accept => "Accept",
+            HeaderName::ContentDisposition => "Content-Disposition",
+            HeaderName::Warning => "Warning",
+            HeaderName::ProxyAuthenticate => "Proxy-Authenticate",
+            HeaderName::ProxyAuthorization => "Proxy-Authorization",
+            HeaderName::AuthenticationInfo => "Authentication-Info",
+            HeaderName::ReplyTo => "Reply-To",
             HeaderName::Other(s) => s,
         }
     }
@@ -120,6 +141,13 @@ impl FromStr for HeaderName {
             "referred-by" | "b" => Ok(HeaderName::ReferredBy),
             "rack" => Ok(HeaderName::RAck),
             "www-authenticate" => Ok(HeaderName::WwwAuthenticate),
+            "accept" => Ok(HeaderName::Accept),
+            "content-disposition" => Ok(HeaderName::ContentDisposition),
+            "warning" => Ok(HeaderName::Warning),
+            "proxy-authenticate" => Ok(HeaderName::ProxyAuthenticate),
+            "proxy-authorization" => Ok(HeaderName::ProxyAuthorization),
+            "authentication-info" => Ok(HeaderName::AuthenticationInfo),
+            "reply-to" => Ok(HeaderName::ReplyTo),
             _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
             _ => Err(Error::InvalidHeader("Empty header name".to_string())),
         }

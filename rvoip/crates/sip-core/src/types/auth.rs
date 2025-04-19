@@ -4,9 +4,10 @@ use std::fmt;
 use crate::parser::headers::{parse_www_authenticate, parse_authorization, parse_proxy_authenticate, parse_proxy_authorization, parse_authentication_info}; // Parsers
 use crate::error::Result;
 use std::str::FromStr;
+use serde::{Deserialize, Serialize};
 
 /// Authentication Scheme (Digest, Basic, etc.)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scheme {
     Digest,
     Basic, // Less common in SIP, but possible
@@ -23,8 +24,21 @@ impl fmt::Display for Scheme {
     }
 }
 
+impl FromStr for Scheme {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "digest" => Ok(Scheme::Digest),
+            "basic" => Ok(Scheme::Basic),
+            _ if !s.is_empty() => Ok(Scheme::Other(s.to_string())),
+            _ => Err(crate::error::Error::InvalidInput("Empty scheme name".to_string())),
+        }
+    }
+}
+
 /// Digest Algorithm (MD5, SHA-256, etc.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Algorithm {
     Md5,
     Md5Sess,
@@ -49,8 +63,25 @@ impl fmt::Display for Algorithm {
     }
 }
 
+impl FromStr for Algorithm {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "md5" => Ok(Algorithm::Md5),
+            "md5-sess" => Ok(Algorithm::Md5Sess),
+            "sha-256" => Ok(Algorithm::Sha256),
+            "sha-256-sess" => Ok(Algorithm::Sha256Sess),
+            "sha-512-256" => Ok(Algorithm::Sha512),
+            "sha-512-256-sess" => Ok(Algorithm::Sha512Sess),
+            _ if !s.is_empty() => Ok(Algorithm::Other(s.to_string())),
+            _ => Err(crate::error::Error::InvalidInput("Empty algorithm name".to_string())),
+        }
+    }
+}
+
 /// Quality of Protection (auth, auth-int)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Qop {
     Auth,
     AuthInt,
@@ -63,6 +94,19 @@ impl fmt::Display for Qop {
             Qop::Auth => write!(f, "auth"),
             Qop::AuthInt => write!(f, "auth-int"),
             Qop::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl FromStr for Qop {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "auth" => Ok(Qop::Auth),
+            "auth-int" => Ok(Qop::AuthInt),
+            _ if !s.is_empty() => Ok(Qop::Other(s.to_string())),
+            _ => Err(crate::error::Error::InvalidInput("Empty qop value".to_string())),
         }
     }
 }

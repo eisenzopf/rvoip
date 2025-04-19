@@ -4,6 +4,7 @@ use crate::parser::headers::parse_address;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use ordered_float::NotNan;
 
 /// Represents a SIP Name Address (Display Name <URI>; params).
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -90,21 +91,25 @@ impl Address {
         self.params.push(Param::Expires(expires));
     }
 
-    /// Gets the q parameter value, if present and valid.
-    pub fn q(&self) -> Option<f32> {
+    /// Get the q parameter value, if present.
+    pub fn q(&self) -> Option<NotNan<f32>> {
         self.params.iter().find_map(|p| match p {
             Param::Q(val) => Some(*val),
              // Check Other as fallback
-            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => val.parse().ok(),
+            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => {
+                val.parse::<f32>().ok().and_then(|f| NotNan::try_from(f).ok())
+            },
             _ => None,
         })
     }
 
-    /// Sets or replaces the q parameter (value clamped between 0.0 and 1.0).
+    /// Set the q parameter value, clamping between 0.0 and 1.0.
     pub fn set_q(&mut self, q: f32) {
+        // Clamp the value
         let clamped_q = q.max(0.0).min(1.0);
-        self.params.retain(|p| !matches!(p, Param::Q(_) | Param::Other(k, _) if k.eq_ignore_ascii_case("q")));
-        self.params.push(Param::Q(clamped_q));
+        // Remove existing q param before adding new one
+        self.params.retain(|p| !matches!(p, Param::Q(_)));
+        self.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
     }
 
     /// Checks if a parameter with the given key exists (case-insensitive).

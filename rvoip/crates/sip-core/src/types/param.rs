@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
+use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
 
@@ -8,7 +10,7 @@ use crate::error::{Error, Result};
 // e.g., Branch(String), Tag(String), Expires(u32), etc.
 
 /// Represents a generic URI parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Param {
     /// The `branch` parameter, typically used in Via headers.
     Branch(String),
@@ -25,7 +27,7 @@ pub enum Param {
     /// The `lr` parameter (loose routing), a flag parameter used in Via/Route.
     Lr,
     /// The `q` parameter (quality value), used in Contact headers.
-    Q(f32),
+    Q(NotNan<f32>),
     /// Transport parameter.
     Transport(String), // Consider using a Transport enum later
     /// User parameter.
@@ -46,7 +48,7 @@ impl fmt::Display for Param {
             Param::Maddr(val) => write!(f, ";maddr={}", val),
             Param::Ttl(val) => write!(f, ";ttl={}", val),
             Param::Lr => write!(f, ";lr"),
-            Param::Q(val) => write!(f, ";q={:.1}", val), // Format q value appropriately
+            Param::Q(val) => write!(f, ";q={:.1}", val.into_inner()),
             Param::Transport(val) => write!(f, ";transport={}", val),
             Param::User(val) => write!(f, ";user={}", val),
             Param::Method(val) => write!(f, ";method={}", val),

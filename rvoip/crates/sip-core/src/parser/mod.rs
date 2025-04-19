@@ -4,8 +4,7 @@
 //! All parsers use the nom parser combinator library.
 
 // Core parsing modules
-mod headers;
-mod message; // Keep for common utilities, incremental parser?
+mod message;
 mod multipart;
 mod request;
 mod response;
@@ -22,14 +21,6 @@ pub use message::{
     MAX_HEADER_COUNT,
     MAX_BODY_SIZE,
 };
-pub use headers::{
-    parse_header, // Keep generic header parser
-    parse_headers, // Keep generic headers parser
-                  // Specific header parsers might be moved internal to headers.rs or called differently
-                  // parse_auth_params, parse_contact, parse_address,
-                  // parse_cseq, parse_content_type,
-};
-// pub use via::{Via, parse_via, parse_multiple_vias}; // Via struct moved to types, parser moved to headers.rs
 pub use uri::parse_uri; // Keep URI parser export
 pub use multipart::{parse_multipart, MimePart, MultipartBody}; // Keep multipart exports
 
@@ -42,8 +33,6 @@ pub mod prelude {
     pub use super::message::{
         IncrementalParser, ParseState, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
     };
-    pub use super::headers::{parse_header, parse_headers};
-    // pub use super::via::Via; // Via struct will be in types module
     pub use super::uri::parse_uri;
     pub use super::multipart::{parse_multipart, MimePart, MultipartBody};
 
@@ -51,4 +40,48 @@ pub mod prelude {
     // pub use super::parse_message;
     // pub use super::request::parse_request;
     // pub use super::response::parse_response;
-} 
+}
+
+// Export necessary parsers
+pub mod common;
+pub mod request;
+pub mod response;
+pub mod message;
+pub mod uri;
+pub mod utils;
+pub mod multipart;
+pub mod headers; // Ensure this is public
+
+// Re-export top-level parsers
+pub use message::parse_message;
+pub use request::request_parser;
+pub use response::response_parser;
+pub use uri::{parse_uri, parse_uri_params, parse_host_port};
+
+// Re-export specific header parsers needed by types/header.rs
+pub use headers::{
+    parse_via,
+    parse_address,
+    parse_contact,
+    parse_cseq,
+    parse_content_type,
+    parse_allow,
+    parse_accept,
+    parse_content_disposition,
+    parse_warning,
+    parse_call_id,
+    parse_content_length,
+    parse_expires,
+    parse_max_forwards,
+    parse_www_authenticate,
+    parse_authorization,
+    parse_proxy_authenticate,
+    parse_proxy_authorization,
+    parse_authentication_info,
+    parse_route,
+    parse_record_route,
+    parse_reply_to,
+};
+
+// Maybe re-export specific header parsers if needed directly?
+// pub use headers::{parse_via, parse_cseq, ...}; 

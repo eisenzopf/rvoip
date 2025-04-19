@@ -3,9 +3,9 @@ use std::str::{FromStr, from_utf8_lossy};
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_till, take_until, take_while, take_while1},
+    bytes::complete::{tag, take_till, take_until, take_while, take_while1, crlf as bytes_crlf},
     character::complete::{char, line_ending, multispace0, space0, space1},
-    combinator::{map, map_res, opt, recognize, value, verify},
+    combinator::{map, map_res, opt, recognize, value, verify, eof},
     multi::{many0, many1, many_till, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
@@ -183,13 +183,13 @@ fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str)
         // Check for the end boundary immediately after the normal boundary
         if let Ok((i, _)) = tag::<_, _, nom::error::Error<&[u8]>>(b"--")(input) {
              // This is the final boundary marker
-            let (i, _) = alt((crlf, nom::combinator::eof))(i)?; // Consume trailing CRLF or EOF
+            let (i, _) = alt((bytes_crlf, eof))(i)?; // Consume trailing CRLF or EOF, use bytes_crlf
             input = i;
             break; // End of multipart body
         }
 
         // Expect CRLF after boundary
-        let (i, _) = crlf(input)?;
+        let (i, _) = bytes_crlf(input)?;// use bytes_crlf
         input = i;
 
         // Parse headers for the part
@@ -205,7 +205,7 @@ fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str)
                 Err(_) => break, // Error or no more headers
             }
             // Check for the empty line (end of headers)
-            if let Ok((rest_bytes, _)) = crlf(header_input) {
+            if let Ok((rest_bytes, _)) = bytes_crlf(header_input) {
                 header_input = rest_bytes;
                 break;
             }

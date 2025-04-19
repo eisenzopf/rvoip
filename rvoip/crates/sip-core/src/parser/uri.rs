@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::uri::{Uri, Scheme, Host};
 use super::utils::clone_str;
 use crate::types::Param;
+use ordered_float::NotNan;
 
 // Parse the scheme of a URI (sip, sips, tel)
 fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
@@ -148,8 +149,9 @@ fn parameter_parser(input: &str) -> IResult<&str, Param> {
         "q" => {
              opt_val
                  .and_then(|v| v.parse::<f32>().ok())
+                 .and_then(|f| NotNan::try_from(f).ok())
                  .map(Param::Q)
-                 .unwrap_or_else(|| Param::Other(key, opt_val))
+                 .unwrap_or_else(|| Param::Other(key, opt_val.clone()))
         }
         "transport" => Param::Transport(opt_val.unwrap_or_default()),
         "user" => Param::User(opt_val.unwrap_or_default()),

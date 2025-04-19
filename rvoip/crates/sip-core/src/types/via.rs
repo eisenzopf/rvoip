@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::net::IpAddr;
+use ordered_float::NotNan;
 
 use crate::error::{Error, Result};
 use crate::types::Param;
@@ -107,7 +108,7 @@ impl Via {
             "maddr" => Param::Maddr(value_opt_string.unwrap_or_default()),
             "ttl" => value_opt_string.and_then(|v| v.parse().ok()).map(Param::Ttl).unwrap_or_else(|| Param::Other(key_string, value_opt_string)),
             "lr" => Param::Lr,
-            "q" => value_opt_string.and_then(|v| v.parse().ok()).map(Param::Q).unwrap_or_else(|| Param::Other(key_string, value_opt_string)),
+            "q" => value_opt_string.and_then(|v| v.parse::<f32>().ok()).and_then(|f| NotNan::try_from(f).ok()).map(Param::Q).unwrap_or_else(|| Param::Other(key_string, value_opt_string)),
             "transport" => Param::Transport(value_opt_string.unwrap_or_default()),
             "user" => Param::User(value_opt_string.unwrap_or_default()),
             "method" => Param::Method(value_opt_string.unwrap_or_default()),
