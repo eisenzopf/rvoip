@@ -9,6 +9,9 @@ use nom::{
 };
 // Use the enum defined in types::sdp
 use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, MediaDirection, SsrcAttribute};
+use serde::{Deserialize, Serialize};
+use std::fmt; // Import fmt
+use std::net::IpAddr;
 
 // --- Placeholder Attribute Structs (Consider moving to types/sdp_attributes.rs later) ---
 
@@ -26,13 +29,25 @@ pub struct FmtpAttribute {
     pub parameters: String, // Keep as raw string for now
 }
 
-/// Represents SDP media directionality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// SDP Media Direction attribute (e.g., sendrecv, sendonly)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MediaDirection {
     SendRecv,
     SendOnly,
     RecvOnly,
     Inactive,
+}
+
+// Add Display implementation for MediaDirection
+impl fmt::Display for MediaDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MediaDirection::SendRecv => write!(f, "sendrecv"),
+            MediaDirection::SendOnly => write!(f, "sendonly"),
+            MediaDirection::RecvOnly => write!(f, "recvonly"),
+            MediaDirection::Inactive => write!(f, "inactive"),
+        }
+    }
 }
 
 // Add MediaDirection to ParsedAttribute enum
