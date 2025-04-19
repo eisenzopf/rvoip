@@ -6,7 +6,7 @@ use crate::uri::Uri;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
-use crate::parser::sdp::parse_sdp;
+use crate::sdp::parser::parse_sdp;
 
 // Import attribute structs/enums from the correct location
 use crate::sdp::attributes::MediaDirection; // Keep this
@@ -315,7 +315,7 @@ impl FromStr for SdpSession {
 
     fn from_str(s: &str) -> Result<Self> {
         // Convert string to owned Bytes and parse
-        crate::parser::sdp::parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
+        parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
     }
 }
 

@@ -7,6 +7,7 @@ use nom::{
     bytes::complete::{tag, take_till, take_until, take_while, take_while1},
     character::complete::{char, line_ending, multispace0, space0, space1, crlf},
     combinator::{map, map_res, opt, recognize, value, verify, eof},
+    error::Error as NomError,
     multi::{many0, many1, many_till, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
@@ -15,9 +16,9 @@ use bytes::Bytes;
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue}; // Use core Header type
-use crate::types::SdpSession; // Placeholder for parsed SDP
-use super::utils::{crlf};
-use super::headers::header_parser; // Use the header parser
+use crate::types::sdp::SdpSession; // Placeholder for parsed SDP
+use crate::types::multipart::{MimePart, ParsedBody, MultipartBody}; // Import multipart types
+use crate::parser::headers::header_parser; // Use absolute path
 
 /// Represents potentially parsed body content types.
 #[derive(Debug, Clone, PartialEq)]
@@ -206,7 +207,7 @@ fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str)
                 Err(_) => break, // Error or no more headers
             }
             // Check for the empty line (end of headers)
-            if let Ok((rest_bytes, _)) = crlf::<_, NomError<&[u8]>>(header_input) {
+            if let Ok((rest_bytes, _)) = crlf::<_, nom::error::Error<&[u8]>>(header_input) {
                 header_input = rest_bytes;
                 break;
             }

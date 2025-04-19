@@ -14,6 +14,7 @@ pub mod status;
 pub mod types;
 pub mod uri;
 pub mod sdp;
+pub mod version;
 
 // Re-export key public items
 pub use error::{Error, Result};

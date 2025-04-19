@@ -16,8 +16,9 @@ use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
-use crate::types::{Message, Request, Response, StatusCode, Method, Version};
-use crate::types::uri::Uri;
+use crate::types::{Message, Request, Response, StatusCode, Method};
+use crate::uri::Uri;
+use crate::version::Version;
 
 // Now use the new parser modules
 use crate::parser::headers::{parse_header, parse_headers};

@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 /// SIP protocol version, as defined in RFC 3261.
 ///
 /// The current version is "SIP/2.0".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Version {
     /// Major version (currently 2)
     pub major: u8,
@@ -49,18 +49,11 @@ impl FromStr for Version {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if s.to_uppercase().starts_with("SIP/") {
-            let version = &s[4..]; // Skip "SIP/"
-            let parts: Vec<&str> = version.split('.').collect();
-            
-            if parts.len() == 2 {
-                let major = parts[0].parse::<u8>().map_err(|_| Error::InvalidVersion)?;
-                let minor = parts[1].parse::<u8>().map_err(|_| Error::InvalidVersion)?;
-                return Ok(Version { major, minor });
-            }
+        if s == "SIP/2.0" {
+            Ok(Version::sip_2_0())
+        } else {
+            Err(Error::InvalidVersion)
         }
-        
-        Err(Error::InvalidVersion)
     }
 }
 
