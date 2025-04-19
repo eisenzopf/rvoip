@@ -7,7 +7,7 @@
 mod common;
 pub mod headers;
 mod message;
-mod multipart;
+pub mod multipart;
 mod request;
 mod response;
 pub mod uri;
