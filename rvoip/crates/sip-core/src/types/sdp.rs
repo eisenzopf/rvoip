@@ -140,6 +140,49 @@ impl SdpSession {
         self.generic_attributes.push(attr);
         self
     }
+
+    /// Gets the session-level direction attribute, if set.
+    pub fn get_direction(&self) -> Option<MediaDirection> {
+        self.direction
+    }
+
+    /// Finds all session-level rtpmap attributes.
+    pub fn rtpmaps(&self) -> impl Iterator<Item = &RtpMapAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::RtpMap(rtpmap) => Some(rtpmap),
+            _ => None,
+        })
+    }
+
+    /// Finds the first session-level rtpmap attribute for a given payload type.
+    pub fn get_rtpmap(&self, payload_type: u8) -> Option<&RtpMapAttribute> {
+        self.rtpmaps().find(|r| r.payload_type == payload_type)
+    }
+    
+    /// Finds all session-level fmtp attributes.
+    pub fn fmtps(&self) -> impl Iterator<Item = &FmtpAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::Fmtp(fmtp) => Some(fmtp),
+            _ => None,
+        })
+    }
+
+     /// Finds the first session-level fmtp attribute for a given format.
+    pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
+        self.fmtps().find(|f| f.format == format)
+    }
+    
+    /// Gets the value of a generic session-level attribute by key.
+    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
+        self.generic_attributes.iter().find_map(|a| match a {
+            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
+            ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
+            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
+             // Add checks for dedicated fields if applicable at session level
+             ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
+            _ => None
+        })
+    }
 }
 
 /// Represents an SDP Media Description section (m=...)
@@ -196,6 +239,71 @@ impl MediaDescription {
             _ => self.generic_attributes.push(attr),
         }
         self
+    }
+
+    /// Gets the media-level direction attribute, if set.
+    pub fn get_direction(&self) -> Option<MediaDirection> {
+        self.direction
+    }
+    
+    /// Gets the media-level ptime attribute, if set.
+    pub fn get_ptime(&self) -> Option<u32> {
+        self.ptime
+    }
+
+    /// Finds all media-level rtpmap attributes.
+    pub fn rtpmaps(&self) -> impl Iterator<Item = &RtpMapAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::RtpMap(rtpmap) => Some(rtpmap),
+            _ => None,
+        })
+    }
+    
+    /// Finds the first media-level rtpmap attribute for a given payload type.
+    pub fn get_rtpmap(&self, payload_type: u8) -> Option<&RtpMapAttribute> {
+        self.rtpmaps().find(|r| r.payload_type == payload_type)
+    }
+
+    /// Finds all media-level fmtp attributes.
+    pub fn fmtps(&self) -> impl Iterator<Item = &FmtpAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::Fmtp(fmtp) => Some(fmtp),
+            _ => None,
+        })
+    }
+
+     /// Finds the first media-level fmtp attribute for a given format.
+    pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
+        self.fmtps().find(|f| f.format == format)
+    }
+    
+    /// Finds all media-level candidate attributes.
+    pub fn candidates(&self) -> impl Iterator<Item = &CandidateAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::Candidate(candidate) => Some(candidate),
+            _ => None,
+        })
+    }
+    
+    /// Finds all media-level ssrc attributes.
+    pub fn ssrcs(&self) -> impl Iterator<Item = &SsrcAttribute> {
+        self.generic_attributes.iter().filter_map(|a| match a {
+            ParsedAttribute::Ssrc(ssrc) => Some(ssrc),
+            _ => None,
+        })
+    }
+    
+     /// Gets the value of a generic media-level attribute by key.
+    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
+        self.generic_attributes.iter().find_map(|a| match a {
+            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
+            ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
+            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
+             // Add checks for dedicated fields
+             ParsedAttribute::Ptime(v) if key.eq_ignore_ascii_case("ptime") => Some(Some(Box::leak(v.to_string().into_boxed_str()))), // Leak! Needs better way
+             ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
+            _ => None
+        })
     }
 }
 

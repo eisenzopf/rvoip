@@ -1,7 +1,7 @@
 // Tests for SDP types (SdpSession, MediaDescription, etc.)
 
 use crate::common::{assert_display_parses_back}; // Use helper
-use rvoip_sip_core::types::sdp::{SdpSession, MediaDescription, ParsedAttribute, RtpMapAttribute, MediaDirection, Origin, ConnectionData, TimeDescription};
+use rvoip_sip_core::types::sdp::{SdpSession, MediaDescription, ParsedAttribute, RtpMapAttribute, MediaDirection, Origin, ConnectionData, TimeDescription, SsrcAttribute};
 use std::str::FromStr;
 use std::collections::HashMap;
 
@@ -91,4 +91,71 @@ fn test_sdp_session_display_parse_roundtrip() {
                      + "a=framerate:25\r\n";
       
     assert_eq!(sdp_string, expected_sdp);
+}
+
+#[test]
+fn test_sdp_helpers() {
+    let mut session = SdpSession::new(
+        Origin {
+            username: "testuser".into(), sess_id: "1".into(), sess_version: "1".into(),
+            net_type: "IN".into(), addr_type: "IP4".into(), unicast_address: "1.1.1.1".into()
+        },
+        "Helper Test"
+    );
+    session.direction = Some(MediaDirection::SendOnly);
+    session.generic_attributes.push(ParsedAttribute::Value("tool".into(), "HelperTool".into()));
+
+    let mut media1 = MediaDescription::new("audio", 5004, "RTP/AVP", vec!["0".into()]);
+    media1.ptime = Some(20);
+    media1.generic_attributes.push(ParsedAttribute::RtpMap(RtpMapAttribute{
+        payload_type: 0, encoding_name: "PCMU".into(), clock_rate: 8000, encoding_params: None
+    }));
+    media1.generic_attributes.push(ParsedAttribute::Fmtp(FmtpAttribute{
+        format: "0".into(), parameters: "".into() // Example empty fmtp
+    }));
+
+    let mut media2 = MediaDescription::new("video", 5006, "RTP/AVP", vec!["99".into()]);
+    media2.direction = Some(MediaDirection::Inactive);
+    media2.generic_attributes.push(ParsedAttribute::Ssrc(SsrcAttribute{
+        ssrc_id: 1234, attribute: "cname".into(), value: Some("video@example.com".into())
+    }));
+    media2.generic_attributes.push(ParsedAttribute::Ssrc(SsrcAttribute{
+        ssrc_id: 1234, attribute: "msid".into(), value: Some("stream1 track1".into())
+    }));
+    
+    session.add_media(media1);
+    session.add_media(media2);
+
+    // Test Session Helpers
+    assert_eq!(session.get_direction(), Some(MediaDirection::SendOnly));
+    assert!(session.get_rtpmap(0).is_none()); // rtpmap is media-level
+    assert_eq!(session.get_generic_attribute_value("tool"), Some(Some("HelperTool")));
+    assert_eq!(session.get_generic_attribute_value("sendonly"), Some(None)); // Check direction via generic (matches dedicated field)
+    assert_eq!(session.get_generic_attribute_value("unknown"), None);
+
+    // Test Media Helpers
+    let audio = &session.media_descriptions[0];
+    let video = &session.media_descriptions[1];
+
+    assert_eq!(audio.get_ptime(), Some(20));
+    assert_eq!(audio.get_direction(), None);
+    assert!(audio.get_rtpmap(0).is_some());
+    assert_eq!(audio.get_rtpmap(0).unwrap().encoding_name, "PCMU");
+    assert!(audio.get_rtpmap(8).is_none());
+    assert!(audio.get_fmtp("0").is_some());
+    assert_eq!(audio.fmtps().count(), 1);
+    assert_eq!(audio.candidates().count(), 0);
+    assert_eq!(audio.ssrcs().count(), 0);
+
+    assert_eq!(video.get_ptime(), None);
+    assert_eq!(video.get_direction(), Some(MediaDirection::Inactive));
+    assert!(video.get_rtpmap(99).is_none()); // rtpmap is in generic attributes
+    assert!(video.get_fmtp("99").is_none());
+    assert_eq!(video.candidates().count(), 0);
+    assert_eq!(video.ssrcs().count(), 2);
+    let ssrc_attrs: Vec<_> = video.ssrcs().collect();
+    assert_eq!(ssrc_attrs[0].ssrc_id, 1234);
+    assert_eq!(ssrc_attrs[0].attribute, "cname");
+     assert_eq!(ssrc_attrs[1].attribute, "msid");
+
 } 

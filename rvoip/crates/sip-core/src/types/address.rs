@@ -22,7 +22,7 @@ fn needs_quoting(display_name: &str) -> bool {
     }
     // Check for characters that *require* quoting or are not part of a token
     display_name.chars().any(|c| {
-        !c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\\'' | '~')
+        !c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\'' | '~')
     }) || display_name.contains('"') || display_name.contains('\\')
 }
 

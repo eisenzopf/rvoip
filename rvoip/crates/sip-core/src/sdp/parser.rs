@@ -297,4 +297,3 @@ fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
          generic_attributes: Vec::new(), // Initialize new Vec
      })
 } 
-} 
