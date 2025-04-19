@@ -47,7 +47,7 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 }
 
 // Rename original parser
-fn response_parser_inner(input: &str) -> IResult<&str, Response> {
+fn response_parser_inner(input: &str) -> IResult<&str, Response, nom::error::Error<&str>> {
     // Parse the response line and consume the following CRLF
     let (input, (version, status, reason)) = terminated(parse_response_line, super::utils::crlf)(input)?;
 
@@ -78,6 +78,6 @@ fn response_parser_inner(input: &str) -> IResult<&str, Response> {
 }
 
 /// Parser for a complete SIP response, mapped to Message enum
-pub fn response_parser(input: &str) -> IResult<&str, Message> {
+pub fn response_parser(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
     map(response_parser_inner, Message::Response)(input)
 } 

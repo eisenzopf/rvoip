@@ -4,7 +4,7 @@ use std::str::FromStr;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while, take_while1},
-    character::complete::{char, digit1, space0, space1, lws, token},
+    character::complete::{char, digit1, space0, space1},
     combinator::{map, map_res, opt, recognize},
     multi::{fold_many0, many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -27,7 +27,7 @@ use crate::types::record_route::RecordRoute;
 use crate::types::reply_to::ReplyTo;
 use crate::types::uri_with_params::UriWithParams;
 use crate::types::uri_with_params_list::UriWithParamsList;
-use crate::types::auth::{AuthScheme, AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate, Scheme, Algorithm, Qop};
+use crate::types::auth::{/*AuthScheme,*/ Scheme, AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate, Algorithm, Qop};
 use crate::uri::Uri;
 use super::uri::{parse_uri, parameters_parser};
 
