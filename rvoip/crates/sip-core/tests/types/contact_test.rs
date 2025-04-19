@@ -28,6 +28,12 @@ fn test_contact_display_parse_roundtrip() {
     let contact2 = Contact(addr2);
     assert_display_parses_back(&contact2);
     
+    // Test wildcard
+    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let contact_wc = Contact::new(wc_addr);
+    assert_eq!(contact_wc.to_string(), "*");
+    assert_display_parses_back(&contact_wc);
+    
     // Test FromStr directly
     assert_parses_ok(
         "\"Contact Name\" <sip:contact@host.com>;expires=60;instance=abc", 
@@ -37,6 +43,8 @@ fn test_contact_display_parse_roundtrip() {
             vec![param_expires(60), param_other("instance", Some("abc"))]
         ))
     );
+    
+    assert_parses_ok("*", contact_wc);
     
     assert_parse_fails::<Contact>(""); // Empty fails Address parsing
 }
@@ -60,6 +68,12 @@ fn test_contact_display() {
     let contact2 = Contact(addr2);
     assert_display_parses_back(&contact2);
     
+    // Test wildcard
+    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let contact_wc = Contact::new(wc_addr);
+    assert_eq!(contact_wc.to_string(), "*");
+    assert_display_parses_back(&contact_wc);
+    
     // Test FromStr directly
     assert_parses_ok(
         "\"Contact Name\" <sip:contact@host.com>;expires=60;instance=abc", 
@@ -69,6 +83,8 @@ fn test_contact_display() {
             vec![param_expires(60), param_other("instance", Some("abc"))]
         ))
     );
+    
+    assert_parses_ok("*", contact_wc);
     
     assert_parse_fails::<Contact>(""); // Empty fails Address parsing
 }
@@ -81,6 +97,7 @@ fn test_contact_helpers() {
     assert_eq!(contact.expires(), None);
     assert_eq!(contact.q(), None);
     assert_eq!(contact.tag(), None);
+    assert!(!contact.is_wildcard());
     
     contact.set_expires(3600);
     assert_eq!(contact.expires(), Some(3600));
@@ -107,6 +124,11 @@ fn test_contact_helpers() {
     contact.set_tag("newtag");
     assert_eq!(contact.tag(), Some("newtag"));
     assert!(contact.0.params.contains(&Param::Tag("newtag".to_string())));
+    
+    // Test wildcard check
+    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let contact_wc = Contact::new(wc_addr);
+    assert!(contact_wc.is_wildcard());
 
 }
 

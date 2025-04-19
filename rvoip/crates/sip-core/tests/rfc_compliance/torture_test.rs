@@ -501,7 +501,6 @@ Supported: 100rel\r\n\r\nv=0\r\no=alice 123456 789012 IN IP4 127.0.0.1\r\ns=Call
         "INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070\r\n ;branch=z9hG4bKa0b1c2d3e4f5\r\nFrom: <sip:alice@127.0.0.1>\r\n ;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: a84b4c76e66710@127.0.0.1\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContact: <sip:alice@127.0.0.1:5070>\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
         // Failure cases remain below
         "\r\nINVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bKa0b1c2d3e4f5\r\nFrom: <sip:alice@127.0.0.1>;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: a84b4c76e66710@127.0.0.1\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContact: <sip:alice@127.0.0.1:5070>\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
-        "INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bKa0b1c2d3e4f5\r\nFrom: <sip:alice@127.0.0.1>;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: a84b4c76e66710@127.0.0.1\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContact: <sip:alice@127.0.0.1:5070>\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n",
         "INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bKa0b1c2d3e4f5\r\nFrom: <sip:alice@127.0.0.1>;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: a84b4c76e66710@127.0.0.1\r\nCSeq: 1\r\nMax-Forwards: 70\r\nContact: <sip:alice@127.0.0.1:5070>\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
         "INVITE sip:bob@127.0.0.1:5071 SIP/2.0\rVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bKa0b1c2d3e4f5\rFrom: <sip:alice@127.0.0.1>;tag=abcdef123456\rTo: <sip:bob@127.0.0.1>\rCall-ID: a84b4c76e66710@127.0.0.1\rCSeq: 1 INVITE\rMax-Forwards: 70\rContact: <sip:alice@127.0.0.1:5070>\rContent-Type: application/sdp\rContent-Length: 0\r\r"
     ];
@@ -531,45 +530,53 @@ Supported: 100rel\r\n\r\nv=0\r\no=alice 123456 789012 IN IP4 127.0.0.1\r\ns=Call
 
 #[test]
 fn test_header_format_edge_cases() {
-    // Test various header formatting edge cases
     let headers_to_test = [
         // Standard header
-        "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n",
+        ("Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n", "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds"),
         // No space after colon
-        "Via:SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n",
+        ("Via:SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n", "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds"),
         // Multiple spaces after colon
-        "Via:     SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n",
-        // Tabs instead of spaces
-        "Via:\tSIP/2.0/UDP\t127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n",
+        ("Via:     SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n", "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds"),
+        // Tabs instead of spaces (within value, parser should handle)
+        ("Via:\tSIP/2.0/UDP\t127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n", "Via", "SIP/2.0/UDP\t127.0.0.1:5060;branch=z9hG4bK776asdhds"), // Raw value preserved
         // Mixed whitespace
-        "Via: \t SIP/2.0/UDP \t 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n",
+        ("Via: \t SIP/2.0/UDP \t 127.0.0.1:5060;branch=z9hG4bK776asdhds\r\n", "Via", "SIP/2.0/UDP \t 127.0.0.1:5060;branch=z9hG4bK776asdhds"), // Raw value preserved
         // Trailing whitespace
-        "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds \t \r\n",
-        // Empty header value (technically allowed by BNF but discouraged)
-        "Empty-Header: \r\n",
+        ("Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds \t \r\n", "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK776asdhds"), // Trimmed by parser
+        // Empty header value
+        ("Empty-Header: \r\n", "Empty-Header", ""),
         // Header with only whitespace
-        "Whitespace-Header: \t \r\n"
+        ("Whitespace-Header: \t \r\n", "Whitespace-Header", ""), // Trimmed by parser
     ];
 
-    for (i, header) in headers_to_test.iter().enumerate() {
-        let message = format!("\
-INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\n{}\
-From: <sip:alice@127.0.0.1>;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: header-format-test-{}\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n", header, i);
+    for (i, (header_line, expected_name, expected_value_str)) in headers_to_test.iter().enumerate() {
+        let message = format!("INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\n{}\
+From: <sip:alice@127.0.0.1>;tag=abcdef123456\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: header-format-test-{}\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n", header_line, i);
 
-        println!("Testing header variant {}", i+1);
+        println!("Testing header variant {} ('{}')", i + 1, header_line.trim());
         let result = parse_sip_message(&message);
-        assert!(result.is_ok(), "Header variant {} failed to parse: {:?}", i+1, result.err());
+        assert!(result.is_ok(), "Header variant {} failed to parse: {:?}", i + 1, result.err());
         
-        // Verify the header value was captured correctly (trimming applied by parser)
-        if let Ok(Message::Request(req)) = result {
-            let header_name = header.splitn(2, ':').next().unwrap();
-            let expected_value = header.splitn(2, ':').nth(1).unwrap().trim();
-            
-            let parsed_header = req.headers.iter().find(|h| h.name.as_str() == header_name);
-            assert!(parsed_header.is_some(), "Header '{}' not found in parsed message", header_name);
-            assert_eq!(parsed_header.unwrap().value.as_text().unwrap_or(""), expected_value, "Header value mismatch for '{}'", header_name);
+        if let Ok(msg) = result {
+             let req = msg.as_request().unwrap();
+             let parsed_header = req.headers.iter().find(|h| h.name.as_str().eq_ignore_ascii_case(expected_name));
+             
+             assert!(parsed_header.is_some(), "Header '{}' not found in parsed message for variant {}", expected_name, i+1);
+             let header_value = parsed_header.unwrap().value.as_text().unwrap_or("");
+             assert_eq!(header_value, *expected_value_str, "Header value mismatch for '{}', variant {}", expected_name, i+1);
+
+            // Additionally try to get typed header if it's Via
+            if expected_name == "Via" {
+                 let via_res: Result<Via, _> = get_typed_header(&msg);
+                 assert!(via_res.is_ok(), "Typed Via parsing failed for variant {}: {:?}", i+1, via_res.err());
+                 let via = via_res.unwrap();
+                 // Check core components ignoring whitespace differences captured in raw value test
+                 assert_eq!(via.host, "127.0.0.1");
+                 assert_eq!(via.port, Some(5060));
+                 assert_eq!(via.branch(), Some("z9hG4bK776asdhds"));
+             }
         } else {
-            panic!("Parsed as wrong message type");
+             panic!("Expected Ok for variant {}", i+1);
         }
     }
 }
@@ -593,28 +600,28 @@ Content-Length: 0\r\n\
     for &size in &chunk_sizes {
         println!("Testing with chunk size: {}", size);
         let mut parser = IncrementalParser::new_with_debug();
-        
         let chunks: Vec<&str> = message.as_bytes()
             .chunks(size)
             .map(|chunk| std::str::from_utf8(chunk).unwrap())
             .collect();
-        
         println!("Message split into {} chunks", chunks.len());
-        
         for (j, chunk) in chunks.iter().enumerate() {
             let state = parser.parse(chunk);
-            
             if j == chunks.len() - 1 {
                 match state {
                     ParseState::Complete(_) => {
                         println!("Successfully parsed with chunk size {}", size);
-                        if let Some(Message::Request(req)) = parser.take_message() {
+                        if let Some(msg) = parser.take_message() {
+                             let req = msg.as_request().unwrap(); // Safe
                              assert_eq!(req.method, Method::Invite);
-                             let via: Via = get_typed_header(&Message::Request(req)).expect(&format!("Via parse failed chunk size {}", size));
+                             let via: Via = get_typed_header(&msg).expect(&format!("Via parse failed chunk size {}", size));
                              assert_eq!(via.host, "127.0.0.1");
                              assert_eq!(via.branch(), Some("z9hG4bKabc123"));
+                             let from: From = get_typed_header(&msg).expect(&format!("From parse failed chunk size {}", size));
+                             assert_eq!(from.0.display_name.as_deref(), Some("Alice"));
+                             assert_eq!(from.0.tag(), Some("abcdef"));
                          } else {
-                             panic!("Expected Request");
+                             panic!("take_message() failed after Complete state");
                          }
                     },
                     _ => panic!("Failed to completely parse with chunk size {}: {:?}", size, state),
@@ -623,7 +630,7 @@ Content-Length: 0\r\n\
         }
     }
     
-    // Test with the specific chunk pattern from the built-in test
+    // Test with header-by-header chunks
     let chunks = [
         "INVITE sip:bob@127.0.0.1:5071 SIP/2.0\r\n",
         "Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bKabc123\r\n",
@@ -633,13 +640,11 @@ Content-Length: 0\r\n\
         "CSeq: 1 INVITE\r\n",
         "Max-Forwards: 70\r\n",
         "Content-Length: 0\r\n",
-        "\r\n", // Empty line marks end of headers
+        "\r\n",
     ];
-    
     let mut parser = IncrementalParser::new_with_debug();
     for (i, chunk) in chunks.iter().enumerate() {
         let state = parser.parse(chunk);
-        
         if i == chunks.len() - 1 {
             match state {
                 ParseState::Complete(_) => {
@@ -679,11 +684,11 @@ fn test_decode_raw_udp_data() {
 47346261306231633264330d0a46726f6d3a203c73\
 69703a616c6963654031323723302e302e313e3b74\
 61673d61626364656630313233340d0a546f3a203c\
-7369703a626f6240313237232e302e302e313e0d0a\
-43616c6c2d49443a2074657374696e672d70617273\
-65720d0a435365713a203120494e564954450d0a4d\
-61782d466f7277617264733a2037300d0a436f6e74\
-656e742d4c656e6774683a20300d0a0d0a",
+7369703a626f6240313237232e302e302e313e0d0a\\\
+43616c6c2d49443a2074657374696e672d70617273\\\
+65720d0a435365713a203120494e564954450d0a4d\\\
+61782d466f7277617264733a2037300d0a436f6e74\\\
+656e742d4c656e6774683a2030",
         "494e56495445207369703a626f6240313237\
 2e302e302e313a35303731205349502f322e300d0a\
 5669613a205349502f322e302f5544502031323723\

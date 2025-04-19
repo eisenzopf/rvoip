@@ -40,6 +40,7 @@ fn test_from_display_parse_roundtrip() {
 fn test_from_helpers() {
     let mut from_hdr = From::from_str("<sip:user@host>").unwrap();
     assert_eq!(from_hdr.tag(), None);
+    assert_eq!(from_hdr.expires(), None); // Via Deref
     
     from_hdr.set_tag("abc");
     assert_eq!(from_hdr.tag(), Some("abc"));
@@ -51,7 +52,9 @@ fn test_from_helpers() {
     assert_eq!(from_hdr.0.params.iter().filter(|p| matches!(p, Param::Tag(_))).count(), 1);
 
     // Test Deref
-    assert!(from_hdr.display_name.is_none()); // Accessing Address field via Deref
+    assert!(from_hdr.display_name.is_none()); 
+    from_hdr.0.display_name = Some("Test".to_string()); // Modify via deref
+    assert!(from_hdr.display_name.is_some());
 }
 
 // TODO: Add tests for From-specific helpers if any are added 

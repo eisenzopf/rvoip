@@ -46,6 +46,7 @@ fn test_to_display_parse_roundtrip() {
 fn test_to_helpers() {
     let mut to_hdr = To::from_str("<sip:user@host>").unwrap();
     assert_eq!(to_hdr.tag(), None);
+    assert_eq!(to_hdr.q(), None); // Via Deref
     
     to_hdr.set_tag("abc");
     assert_eq!(to_hdr.tag(), Some("abc"));
@@ -57,7 +58,7 @@ fn test_to_helpers() {
     assert_eq!(to_hdr.0.params.iter().filter(|p| matches!(p, Param::Tag(_))).count(), 1);
 
     // Test Deref
-    assert!(to_hdr.display_name.is_none()); // Accessing Address field via Deref
+    assert!(to_hdr.display_name.is_none()); 
 }
 
 // TODO: Add tests for To-specific helpers 
