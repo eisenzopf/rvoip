@@ -8,9 +8,11 @@ use nom::{
     IResult,
 };
 use crate::error::{Error, Result};
-use crate::types::{StatusCode, Message, Response, Header};
+use crate::types::{StatusCode, Message, Response};
+use crate::header::Header;
 use crate::version::Version;
 use bytes::Bytes;
+use std::result::Result as StdResult;
 
 /// Parser for a SIP response line
 /// Returns components needed by IncrementalParser
@@ -46,12 +48,14 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 
 /// Helper to parse headers and body
 fn parse_headers_and_body(input: &str) -> IResult<&str, (Vec<Header>, Bytes), nom::error::Error<&str>> {
-    map(
+    map_res(
         tuple((
             terminated(many0(super::headers::header_parser), super::utils::crlf),
             rest
         )),
-        |(headers, body_str)| (headers, Bytes::from(body_str))
+        |(headers, body_str)| -> StdResult<(Vec<Header>, Bytes), nom::error::Error<&str>> {
+            Ok((headers, Bytes::from(body_str)))
+        }
     )(input)
 }
 
