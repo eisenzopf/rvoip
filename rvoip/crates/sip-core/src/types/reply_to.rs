@@ -8,6 +8,13 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
 pub struct ReplyTo(pub Address); // Or UriWithParams
 
+impl ReplyTo {
+    /// Creates a new ReplyTo header.
+    pub fn new(address: Address) -> Self {
+        Self(address)
+    }
+}
+
 impl fmt::Display for ReplyTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to Address display

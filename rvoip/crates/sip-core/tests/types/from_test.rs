@@ -36,4 +36,22 @@ fn test_from_display_parse_roundtrip() {
     assert_parse_fails::<From>("sip:bob@host"); // Missing tag (usually required)
 }
 
+#[test]
+fn test_from_helpers() {
+    let mut from_hdr = From::from_str("<sip:user@host>").unwrap();
+    assert_eq!(from_hdr.tag(), None);
+    
+    from_hdr.set_tag("abc");
+    assert_eq!(from_hdr.tag(), Some("abc"));
+    assert!(from_hdr.0.params.contains(&Param::Tag("abc".to_string())));
+
+    // Test replacement
+    from_hdr.set_tag("def");
+    assert_eq!(from_hdr.tag(), Some("def"));
+    assert_eq!(from_hdr.0.params.iter().filter(|p| matches!(p, Param::Tag(_))).count(), 1);
+
+    // Test Deref
+    assert!(from_hdr.display_name.is_none()); // Accessing Address field via Deref
+}
+
 // TODO: Add tests for From-specific helpers if any are added 

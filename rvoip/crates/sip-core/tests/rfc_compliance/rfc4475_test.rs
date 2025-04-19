@@ -159,21 +159,13 @@ Via  : SIP  /   2.0\r
   192.0.2.2;branch=390skdjuw\r
 s :\r
 \r
-v=0\r
-o=mhandley 29739 7272939 IN IP4 192.0.2.3\r
-s=-\r
-c=IN IP4 192.0.2.4\r
-t=0 0\r
-m=audio 49217 RTP/AVP 0 12\r
-m=video 3227 RTP/AVP 31\r
+v=0\r\no=mhandley 29739 7272939 IN IP4 192.0.2.3\r
+s=-\r\nc=IN IP4 192.0.2.4\r\nt=0 0\r\nm=audio 49217 RTP/AVP 0 12\r\nm=video 3227 RTP/AVP 31\r
 a=rtpmap:31 LPC\r
 ";
     
-    let result = parse_sip_message(message);
-    // Current parser likely fails due to bare LF folding and complex spacing
-    // Expect an error, perhaps related to header parsing or unexpected format.
-    assert!(result.is_err(), "Parser unexpectedly succeeded on complex folding/LF message");
-    // If we wanted precise error checking: assert!(expect_parse_error(message, Some("header")));
+    // Expect error due to non-standard folding/spacing in headers
+    assert!(expect_parse_error(message, None));
 }
 
 // Section 3.1.2 - Invalid Messages
@@ -194,17 +186,19 @@ Via: SIP/2.0/TLS t3.example.com;branch=z9hG4bK2980unddj\r
 Call-ID: transports.kijh4akdnaqjkwendsasfdj\r
 \r\n";
 
-    // This message has a duplicate Call-ID header which is invalid according to strict interpretation,
-    // though some parsers might allow the last one to override. Let's expect success but only one Call-ID.
+    // Parser should succeed but only store one Call-ID (the last one usually)
     let result = parse_sip_message(message);
-     assert!(result.is_ok(), "Parser failed on duplicate header: {:?}", result.err());
-     if let Ok(Message::Request(req)) = result {
-        let call_ids: Vec<_> = req.headers.iter().filter(|h| h.name == rvoip_sip_core::header::HeaderName::CallId).collect();
-        assert_eq!(call_ids.len(), 1, "Parser did not handle duplicate Call-ID correctly");
-        assert_eq!(call_ids[0].value.as_text(), Some("transports.kijh4akdnaqjkwendsasfdj"));
-     } else {
-         panic!("Parsed as wrong message type");
-     }
+    assert!(result.is_ok(), "Parser failed on duplicate header: {:?}", result.err());
+    if let Ok(msg) = result {
+        let call_id : Result<CallId, _> = get_typed_header(&msg);
+        assert!(call_id.is_ok(), "Could not get typed Call-ID");
+        assert_eq!(call_id.unwrap().0, "transports.kijh4akdnaqjkwendsasfdj");
+        // Also check header count
+        let call_ids_raw: Vec<_> = msg.headers().iter().filter(|h| h.name == rvoip_sip_core::header::HeaderName::CallId).collect();
+        assert_eq!(call_ids_raw.len(), 1, "Parser stored multiple Call-ID headers");
+    } else {
+         panic!("Expected Ok");
+    }
 }
 
 #[test]

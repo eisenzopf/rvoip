@@ -14,5 +14,7 @@ pub mod content_disposition_test;
 pub mod warning_test;
 pub mod media_type_test;
 pub mod simple_types_test;
+pub mod sdp_test;
+pub mod uri_params_list_test;
 
 // Add mods for other type tests (SDP etc.) 

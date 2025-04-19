@@ -12,6 +12,13 @@ pub struct Warning {
     pub text: String,
 }
 
+impl Warning {
+    /// Creates a new Warning header.
+    pub fn new(code: u16, agent: Uri, text: impl Into<String>) -> Self {
+        Self { code, agent, text: text.into() }
+    }
+}
+
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Agent should be host or pseudo-host, URI display might be too much?

@@ -107,6 +107,62 @@ impl fmt::Display for WwwAuthenticate {
     }
 }
 
+impl WwwAuthenticate {
+    /// Creates a new WwwAuthenticate header with mandatory fields.
+    pub fn new(scheme: Scheme, realm: impl Into<String>, nonce: impl Into<String>) -> Self {
+        Self {
+            scheme,
+            realm: realm.into(),
+            nonce: nonce.into(),
+            domain: None,
+            opaque: None,
+            stale: None,
+            algorithm: None,
+            qop: Vec::new(),
+        }
+    }
+
+    /// Sets the domain parameter.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
+        self
+    }
+
+    /// Sets the opaque parameter.
+    pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
+        self.opaque = Some(opaque.into());
+        self
+    }
+
+    /// Sets the stale parameter.
+    pub fn with_stale(mut self, stale: bool) -> Self {
+        self.stale = Some(stale);
+        self
+    }
+
+    /// Sets the algorithm parameter.
+    pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
+        self.algorithm = Some(algorithm);
+        self
+    }
+
+    /// Adds a Qop value.
+    pub fn with_qop(mut self, qop: Qop) -> Self {
+        if !self.qop.contains(&qop) { // Avoid duplicates
+             self.qop.push(qop);
+        }
+        self
+    }
+
+    /// Sets multiple Qop values.
+    pub fn with_qops(mut self, qops: Vec<Qop>) -> Self {
+        self.qop = qops;
+        self
+    }
+
+    // TODO: Add with_charset, with_userhash if needed
+}
+
 impl FromStr for WwwAuthenticate {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> { parse_www_authenticate(s) }
@@ -157,6 +213,62 @@ impl fmt::Display for Authorization {
     }
 }
 
+impl Authorization {
+    /// Creates a new Authorization header with mandatory fields.
+    pub fn new(
+        scheme: Scheme,
+        username: impl Into<String>,
+        realm: impl Into<String>,
+        nonce: impl Into<String>,
+        uri: Uri,
+        response: impl Into<String>
+    ) -> Self {
+        Self {
+            scheme,
+            username: username.into(),
+            realm: realm.into(),
+            nonce: nonce.into(),
+            uri,
+            response: response.into(),
+            algorithm: None,
+            cnonce: None,
+            opaque: None,
+            message_qop: None,
+            nonce_count: None,
+        }
+    }
+
+    /// Sets the algorithm parameter.
+    pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
+        self.algorithm = Some(algorithm);
+        self
+    }
+
+    /// Sets the cnonce parameter.
+    pub fn with_cnonce(mut self, cnonce: impl Into<String>) -> Self {
+        self.cnonce = Some(cnonce.into());
+        self
+    }
+
+    /// Sets the opaque parameter.
+    pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
+        self.opaque = Some(opaque.into());
+        self
+    }
+
+    /// Sets the message_qop parameter.
+    pub fn with_qop(mut self, qop: Qop) -> Self {
+        self.message_qop = Some(qop);
+        self
+    }
+
+    /// Sets the nonce_count parameter.
+    pub fn with_nonce_count(mut self, nc: u32) -> Self {
+        self.nonce_count = Some(nc);
+        self
+    }
+}
+
 impl FromStr for Authorization {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> { parse_authorization(s) }
@@ -170,6 +282,11 @@ impl fmt::Display for ProxyAuthenticate {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to WwwAuthenticate display
     }
+}
+
+impl ProxyAuthenticate {
+    /// Creates a new ProxyAuthenticate header.
+    pub fn new(auth: WwwAuthenticate) -> Self { Self(auth) }
 }
 
 impl FromStr for ProxyAuthenticate {
@@ -187,13 +304,18 @@ impl fmt::Display for ProxyAuthorization {
     }
 }
 
+impl ProxyAuthorization {
+    /// Creates a new ProxyAuthorization header.
+    pub fn new(auth: Authorization) -> Self { Self(auth) }
+}
+
 impl FromStr for ProxyAuthorization {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> { parse_proxy_authorization(s) }
 }
 
 /// Typed Authentication-Info header.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)] // Add Default
 pub struct AuthenticationInfo {
     pub nextnonce: Option<String>,
     pub qop: Option<Qop>,
@@ -222,6 +344,43 @@ impl fmt::Display for AuthenticationInfo {
             parts.push(format!("nc={:08o}", nc)); 
         }
         write!(f, "{}", parts.join(", "))
+    }
+}
+
+impl AuthenticationInfo {
+    /// Creates a new empty AuthenticationInfo header.
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Sets the nextnonce parameter.
+    pub fn with_nextnonce(mut self, nextnonce: impl Into<String>) -> Self {
+        self.nextnonce = Some(nextnonce.into());
+        self
+    }
+
+    /// Sets the qop parameter.
+    pub fn with_qop(mut self, qop: Qop) -> Self {
+        self.qop = Some(qop);
+        self
+    }
+
+    /// Sets the rspauth parameter.
+    pub fn with_rspauth(mut self, rspauth: impl Into<String>) -> Self {
+        self.rspauth = Some(rspauth.into());
+        self
+    }
+
+    /// Sets the cnonce parameter.
+    pub fn with_cnonce(mut self, cnonce: impl Into<String>) -> Self {
+        self.cnonce = Some(cnonce.into());
+        self
+    }
+
+    /// Sets the nc (nonce count) parameter.
+    pub fn with_nonce_count(mut self, nc: u32) -> Self {
+        self.nc = Some(nc);
+        self
     }
 }
 

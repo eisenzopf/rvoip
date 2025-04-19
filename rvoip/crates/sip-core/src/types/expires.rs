@@ -7,6 +7,13 @@ use crate::parser::headers::parse_expires;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
 pub struct Expires(pub u32);
 
+impl Expires {
+    /// Creates a new Expires header value.
+    pub fn new(seconds: u32) -> Self {
+        Self(seconds)
+    }
+}
+
 impl fmt::Display for Expires {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

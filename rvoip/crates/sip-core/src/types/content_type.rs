@@ -8,6 +8,13 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
 pub struct ContentType(pub MediaType);
 
+impl ContentType {
+    /// Creates a new Content-Type header.
+    pub fn new(media_type: MediaType) -> Self {
+        Self(media_type)
+    }
+}
+
 impl fmt::Display for ContentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to MediaType display

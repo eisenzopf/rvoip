@@ -11,6 +11,13 @@ pub struct CSeq {
     pub method: Method,
 }
 
+impl CSeq {
+    /// Creates a new CSeq header.
+    pub fn new(seq: u32, method: Method) -> Self {
+        Self { seq, method }
+    }
+}
+
 impl fmt::Display for CSeq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.seq, self.method) // Method already implements Display

@@ -19,6 +19,23 @@ pub struct MediaType {
     pub params: HashMap<String, String>, // More efficient lookup than Vec<(K,V)>
 }
 
+impl MediaType {
+    /// Creates a new MediaType.
+    pub fn new(type_: impl Into<String>, subtype: impl Into<String>) -> Self {
+        Self {
+            type_: type_.into(),
+            subtype: subtype.into(),
+            params: HashMap::new(),
+        }
+    }
+
+    /// Builder method to add a parameter.
+    pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params.insert(key.into(), value.into());
+        self
+    }
+}
+
 impl fmt::Display for MediaType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.type_)?;

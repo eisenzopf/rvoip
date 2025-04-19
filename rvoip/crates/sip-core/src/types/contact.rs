@@ -1,11 +1,20 @@
 use crate::types::address::Address;
 use crate::types::Param;
+use std::fmt;
+use std::str::FromStr;
+use crate::error::Result;
+use crate::parser::headers::parse_contact; // For FromStr
 
 /// Typed Contact header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
 pub struct Contact(pub Address);
 
 impl Contact {
+    /// Creates a new Contact header.
+    pub fn new(address: Address) -> Self {
+        Self(address)
+    }
+
     /// Gets the expires parameter value, if present.
     pub fn expires(&self) -> Option<u32> {
         self.0.params.iter().find_map(|p| match p {
@@ -45,5 +54,7 @@ impl Contact {
         self.0.set_tag(tag)
     }
 }
+
+// TODO: Implement Display and FromStr for Contact
 
 // TODO: Implement specific Contact logic/helpers (e.g., getting expires, q) 

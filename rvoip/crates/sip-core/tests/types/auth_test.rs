@@ -141,4 +141,50 @@ fn test_authentication_info_display_parse_roundtrip() {
      assert_parse_fails::<AuthenticationInfo>("nc=bad");
 }
 
+#[test]
+fn test_auth_builder_methods() {
+    // Test WwwAuthenticate builders
+    let www_auth = WwwAuthenticate::new(Scheme::Digest, "realm1", "nonce1")
+        .with_algorithm(Algorithm::Sha256)
+        .with_qop(Qop::Auth)
+        .with_qop(Qop::AuthInt) // Add multiple
+        .with_opaque("opaque1")
+        .with_stale(true)
+        .with_domain("domain1");
+        
+    assert_eq!(www_auth.algorithm, Some(Algorithm::Sha256));
+    assert_eq!(www_auth.qop, vec![Qop::Auth, Qop::AuthInt]);
+    assert_eq!(www_auth.opaque.as_deref(), Some("opaque1"));
+    assert_eq!(www_auth.stale, Some(true));
+    assert_eq!(www_auth.domain.as_deref(), Some("domain1"));
+
+    // Test Authorization builders
+    let authz = Authorization::new(Scheme::Digest, "user", "realm", "nonce", uri("sip:a@b"), "resp")
+        .with_algorithm(Algorithm::Md5Sess)
+        .with_qop(Qop::AuthInt)
+        .with_cnonce("cnonce1")
+        .with_opaque("opaque2")
+        .with_nonce_count(5);
+        
+    assert_eq!(authz.algorithm, Some(Algorithm::Md5Sess));
+    assert_eq!(authz.message_qop, Some(Qop::AuthInt));
+    assert_eq!(authz.cnonce.as_deref(), Some("cnonce1"));
+    assert_eq!(authz.opaque.as_deref(), Some("opaque2"));
+    assert_eq!(authz.nonce_count, Some(5));
+
+    // Test AuthenticationInfo builders
+    let auth_info = AuthenticationInfo::new()
+        .with_nextnonce("nextnonce1")
+        .with_qop(Qop::Auth)
+        .with_rspauth("rspauth1")
+        .with_cnonce("cnonce2")
+        .with_nonce_count(8); // Decimal 8
+        
+    assert_eq!(auth_info.nextnonce.as_deref(), Some("nextnonce1"));
+    assert_eq!(auth_info.qop, Some(Qop::Auth));
+    assert_eq!(auth_info.rspauth.as_deref(), Some("rspauth1"));
+    assert_eq!(auth_info.cnonce.as_deref(), Some("cnonce2"));
+    assert_eq!(auth_info.nc, Some(8));
+}
+
 // Removed old separate display/from_str tests 

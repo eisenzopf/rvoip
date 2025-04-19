@@ -89,18 +89,59 @@ fn test_address_from_str() {
 fn test_address_helpers() {
      let mut addr = addr(None, "sip:user@host", vec![]);
      assert_eq!(addr.tag(), None);
+     assert_eq!(addr.expires(), None);
+     assert_eq!(addr.q(), None);
+     assert!(!addr.has_param("tag"));
+     assert!(!addr.has_param("expires"));
+     assert!(!addr.has_param("q"));
+     assert!(!addr.has_param("custom"));
+     assert_eq!(addr.get_param("tag"), None);
      
      addr.set_tag("tag1");
      assert_eq!(addr.tag(), Some("tag1"));
-     assert!(addr.params.contains(&Param::Tag("tag1".to_string())));
+     assert!(addr.has_param("tag"));
+     assert_eq!(addr.get_param("tag"), Some(Some("tag1")));
      
+     addr.set_expires(3600);
+     assert_eq!(addr.expires(), Some(3600));
+     assert!(addr.has_param("expires"));
+     assert!(addr.get_param("expires").flatten().unwrap_or("").contains("3600"));
+     
+     addr.set_q(0.5);
+     assert_eq!(addr.q(), Some(0.5));
+     assert!(addr.has_param("q"));
+     assert!(addr.get_param("q").flatten().unwrap_or("").contains("0.5"));
+
      // Test replacement
-     addr.params.push(param_transport("udp"));
      addr.set_tag("tag2");
      assert_eq!(addr.tag(), Some("tag2"));
-     assert_eq!(addr.params.len(), 2); // Should contain transport and new tag
-     assert!(addr.params.contains(&Param::Tag("tag2".to_string())));
-     assert!(addr.params.contains(&Param::Transport("udp".to_string())));
+     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Tag(_))).count(), 1);
+     
+     addr.set_expires(60);
+     assert_eq!(addr.expires(), Some(60));
+     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Expires(_))).count(), 1);
+     
+     addr.set_q(1.1); // Clamping
+     assert_eq!(addr.q(), Some(1.0));
+     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Q(_))).count(), 1);
+     
+     // Test generic set_param
+     addr.set_param("custom", Some("value"));
+     assert!(addr.has_param("custom"));
+     assert_eq!(addr.get_param("custom"), Some(Some("value")));
+     
+     addr.set_param("flag", None::<String>);
+     assert!(addr.has_param("flag"));
+     assert_eq!(addr.get_param("flag"), Some(None));
+
+     // Test set_param replaces typed param
+     addr.set_param("expires", Some("override"));
+     assert!(addr.has_param("expires"));
+     assert_eq!(addr.expires(), None); // Typed getter fails
+     assert_eq!(addr.get_param("expires"), Some(Some("override"))); // Generic getter works
+     assert!(addr.params.contains(&Param::Other("expires".to_string(), Some("override".to_string()))));
+     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Expires(_) | Param::Other(k,_) if k.eq_ignore_ascii_case("expires"))).count(), 1);
+
 }
 
 // TODO: Add tests for From/To/Contact Display and specific helper methods (like expires(), q())

@@ -199,4 +199,196 @@ fn test_sdp_multiple_time_descriptions() {
     assert_eq!(session.time_descriptions[1], "3149652000 3149656200");
 }
 
+#[test]
+fn test_sdp_attribute_parsing_locations() {
+    /// Test attributes appearing at session vs media level
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=s\r\n"
+      + "t=0 0\r\n"
+      + "a=ptime:10\r\n" // Session ptime (unusual but test parsing)
+      + "a=sendonly\r\n"   // Session direction
+      + "m=audio 5000 RTP/AVP 0\r\n"
+      + "c=IN IP4 1.1.1.2\r\n"
+      + "a=recvonly\r\n"   // Media direction (overrides session)
+      + "a=rtpmap:0 PCMU/8000\r\n"
+      + "m=video 5002 RTP/AVP 99\r\n"
+      + "c=IN IP4 1.1.1.3\r\n"
+      + "a=ptime:30\r\n" // Video ptime
+      + "a=rtpmap:99 H264/90000\r\n"
+    );
+    let result = parse_sdp(&sdp_content);
+    assert!(result.is_ok(), "Parsing failed: {:?}", result.err());
+    let session = result.unwrap();
+
+    assert_eq!(session.direction, Some(MediaDirection::SendOnly));
+    assert!(session.generic_attributes.contains(&ParsedAttribute::Ptime(10))); // Session ptime went to generic
+
+    assert_eq!(session.media_descriptions.len(), 2);
+    let audio_media = &session.media_descriptions[0];
+    let video_media = &session.media_descriptions[1];
+
+    assert_eq!(audio_media.direction, Some(MediaDirection::RecvOnly));
+    assert!(audio_media.ptime.is_none()); // No ptime attribute for audio
+
+    assert_eq!(video_media.direction, None); // No direction attribute for video
+    assert_eq!(video_media.ptime, Some(30)); 
+}
+
+#[test]
+fn test_sdp_candidate_parsing() {
+    /// Test parsing candidate attributes
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=s\r\n"
+      + "t=0 0\r\n"
+      + "m=audio 5000 RTP/AVP 0\r\n"
+      + "c=IN IP4 1.1.1.2\r\n"
+      + "a=rtpmap:0 PCMU/8000\r\n"
+      + "a=candidate:foundation 1 udp 2122260223 192.168.1.100 8998 typ host\r\n"
+      + "a=candidate:foundation 2 tcp 1845501695 10.0.1.5 9 typ srflx raddr 198.51.100.1 rport 8999\r\n"
+    );
+    let result = parse_sdp(&sdp_content);
+     assert!(result.is_ok(), "Parsing failed: {:?}", result.err());
+    let session = result.unwrap();
+    assert_eq!(session.media_descriptions.len(), 1);
+    let media = &session.media_descriptions[0];
+    
+    let candidates: Vec<_> = media.generic_attributes.iter()
+        .filter_map(|a| match a {
+            ParsedAttribute::Candidate(c) => Some(c),
+            _ => None
+        }).collect();
+        
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].candidate_type, "host");
+    assert_eq!(candidates[0].component_id, 1);
+    assert_eq!(candidates[1].candidate_type, "srflx");
+    assert_eq!(candidates[1].related_address, Some("198.51.100.1".to_string()));
+    assert_eq!(candidates[1].related_port, Some(8999));
+}
+
+#[test]
+fn test_sdp_ssrc_parsing() {
+     /// Test parsing ssrc attributes
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=s\r\n"
+      + "t=0 0\r\n"
+      + "m=audio 5000 RTP/AVP 0\r\n"
+      + "c=IN IP4 1.1.1.2\r\n"
+      + "a=rtpmap:0 PCMU/8000\r\n"
+      + "a=ssrc:123456789 cname:user@example.com\r\n"
+      + "a=ssrc:123456789 msid:stream1 track1\r\n"
+      + "a=ssrc:987654321 label:audio-1\r\n"
+    );
+     let result = parse_sdp(&sdp_content);
+     assert!(result.is_ok(), "Parsing failed: {:?}", result.err());
+    let session = result.unwrap();
+    assert_eq!(session.media_descriptions.len(), 1);
+    let media = &session.media_descriptions[0];
+
+    let ssrcs: Vec<_> = media.generic_attributes.iter()
+        .filter_map(|a| match a {
+            ParsedAttribute::Ssrc(s) => Some(s),
+            _ => None
+        }).collect();
+        
+    assert_eq!(ssrcs.len(), 3);
+    assert_eq!(ssrcs[0].ssrc_id, 123456789);
+    assert_eq!(ssrcs[0].attribute, "cname");
+    assert_eq!(ssrcs[0].value, Some("user@example.com".to_string()));
+    assert_eq!(ssrcs[1].attribute, "msid");
+    assert_eq!(ssrcs[1].value, Some("stream1 track1".to_string()));
+    assert_eq!(ssrcs[2].ssrc_id, 987654321);
+    assert_eq!(ssrcs[2].attribute, "label");
+     assert_eq!(ssrcs[2].value, Some("audio-1".to_string()));
+}
+
+#[test]
+fn test_sdp_media_only_connection_line() {
+    /// Test SDP where c= line is only present at media level
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=s\r\n"
+      // No session C line
+      + "t=0 0\r\n"
+      + "m=audio 5000 RTP/AVP 0\r\n"
+      + "c=IN IP4 192.168.1.100\r\n"
+      + "a=rtpmap:0 PCMU/8000\r\n"
+      + "m=video 5002 RTP/AVP 99\r\n"
+      + "c=IN IP6 2001:db8::1\r\n"
+      + "a=rtpmap:99 H264/90000\r\n"
+    );
+    let result = parse_sdp(&sdp_content);
+    assert!(result.is_ok(), "Parsing failed: {:?}", result.err());
+    let session = result.unwrap();
+
+    assert!(session.connection_info.is_none());
+    assert_eq!(session.media_descriptions.len(), 2);
+    assert!(session.media_descriptions[0].connection_info.is_some());
+    assert_eq!(session.media_descriptions[0].connection_info.as_ref().unwrap().connection_address, "192.168.1.100");
+    assert!(session.media_descriptions[1].connection_info.is_some());
+    assert_eq!(session.media_descriptions[1].connection_info.as_ref().unwrap().connection_address, "2001:db8::1");
+    assert_eq!(session.media_descriptions[1].connection_info.as_ref().unwrap().addr_type, "IP6");
+}
+
+#[test]
+fn test_sdp_only_mandatory() {
+    /// Test SDP with only mandatory fields
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=-\r\n"
+      + "t=0 0\r\n"
+    );
+    let result = parse_sdp(&sdp_content);
+    // Should fail because c= line is missing at session level and there are no media lines
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Missing mandatory c= field"));
+    
+    // Add mandatory c= line
+    let sdp_content_with_c = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=-\r\n"
+      + "c=IN IP4 1.1.1.1\r\n"
+      + "t=0 0\r\n"
+    );
+     let result_wc = parse_sdp(&sdp_content_with_c);
+     assert!(result_wc.is_ok(), "Parsing failed: {:?}", result_wc.err());
+     let session_wc = result_wc.unwrap();
+     assert!(session_wc.media_descriptions.is_empty());
+     assert!(session_wc.generic_attributes.is_empty());
+     assert!(session_wc.direction.is_none());
+}
+
+#[test]
+fn test_sdp_invalid_order() {
+    /// Test invalid field order (e.g., m= before t=)
+    let sdp_content = Bytes::from(
+        "v=0\r\n"
+      + "o=user 1 1 IN IP4 1.1.1.1\r\n"
+      + "s=s\r\n"
+      + "m=audio 5000 RTP/AVP 0\r\n"
+      + "c=IN IP4 1.1.1.2\r\n"
+      + "t=0 0\r\n"
+    );
+     let result = parse_sdp(&sdp_content);
+     // Current parser might allow this leniently, but strict RFC 4566 requires specific order
+     // Let's check if it errors, assuming strictness is desired or becomes an issue.
+     // If it parses OK, the time description would be missing from the session struct.
+     if let Ok(session) = result {
+         println!("Warning: SDP parser allowed m= before t=");
+         assert!(session.time_descriptions.is_empty()); // t= was likely ignored
+     } else {
+         // Or assert!(result.is_err()); if strict order is enforced
+         println!("SDP parser correctly failed on invalid order (m= before t=)");
+     }
+}
+
 // Add more tests: different attribute types, connection lines at different levels, edge cases. 

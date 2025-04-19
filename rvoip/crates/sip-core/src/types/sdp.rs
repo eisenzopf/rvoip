@@ -107,6 +107,41 @@ pub struct SdpSession {
     pub generic_attributes: Vec<ParsedAttribute>,
 }
 
+impl SdpSession {
+    /// Creates a new SdpSession with mandatory origin and session name.
+    /// Version defaults to 0, TimeDescription defaults to t=0 0.
+    pub fn new(origin: Origin, session_name: impl Into<String>) -> Self {
+        Self {
+            version: "0".to_string(),
+            origin,
+            session_name: session_name.into(),
+            connection_info: None,
+            time_descriptions: vec![TimeDescription { start_time: "0".to_string(), stop_time: "0".to_string()}],
+            media_descriptions: Vec::new(),
+            direction: None,
+            generic_attributes: Vec::new(),
+        }
+    }
+
+    /// Adds a media description.
+    pub fn add_media(&mut self, media: MediaDescription) {
+        self.media_descriptions.push(media);
+    }
+    
+    /// Builder method to set session-level connection data.
+    pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
+        self.connection_info = Some(conn);
+        self
+    }
+    
+    /// Builder method to add a session-level attribute.
+     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
+        // TODO: Handle setting dedicated fields vs adding to generic?
+        self.generic_attributes.push(attr);
+        self
+    }
+}
+
 /// Represents an SDP Media Description section (m=...)
 #[derive(Debug, Clone, PartialEq)] 
 pub struct MediaDescription {
@@ -124,6 +159,44 @@ pub struct MediaDescription {
     
     // Vector for repeatable or less common/generic attributes
     pub generic_attributes: Vec<ParsedAttribute>,
+}
+
+impl MediaDescription {
+    /// Creates a new MediaDescription.
+    pub fn new(
+        media: impl Into<String>, 
+        port: u16, 
+        protocol: impl Into<String>, 
+        formats: Vec<String>
+    ) -> Self {
+        Self {
+            media: media.into(),
+            port,
+            protocol: protocol.into(),
+            formats,
+            connection_info: None,
+            ptime: None,
+            direction: None,
+            generic_attributes: Vec::new(),
+        }
+    }
+
+     /// Builder method to set media-level connection data.
+    pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
+        self.connection_info = Some(conn);
+        self
+    }
+    
+    /// Builder method to add a media-level attribute.
+     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
+        // TODO: Handle setting dedicated fields vs adding to generic?
+         match attr {
+            ParsedAttribute::Ptime(v) => { self.ptime = Some(v); }
+            ParsedAttribute::Direction(d) => { self.direction = Some(d); }
+            _ => self.generic_attributes.push(attr),
+        }
+        self
+    }
 }
 
 impl FromStr for SdpSession {
