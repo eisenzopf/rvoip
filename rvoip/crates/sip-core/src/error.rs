@@ -81,6 +81,10 @@ pub enum Error {
     #[error("SDP error: {0}")]
     SdpError(String), // Generic SDP error
 
+    /// Specific SDP parsing error
+    #[error("SDP parsing error: {0}")]
+    SdpParsingError(String),
+
     /// Transport-specific error
     #[error("Transport error: {0}")]
     Transport(String),

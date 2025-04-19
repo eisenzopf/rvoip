@@ -118,7 +118,7 @@ pub fn header_parser(input: &str) -> IResult<&str, Header> {
 }
 
 // Helper function to parse continuation lines with CRLF
-fn continuation_line_crlf(input: &str) -> IResult<&str, String> {
+pub fn continuation_line_crlf(input: &str) -> IResult<&str, String> {
     // A continuation line starts with whitespace after CRLF
     let result = tuple((
         tag("\r\n"),   // CRLF line ending
@@ -135,7 +135,7 @@ fn continuation_line_crlf(input: &str) -> IResult<&str, String> {
 }
 
 // Helper function to parse continuation lines with LF
-fn continuation_line_lf(input: &str) -> IResult<&str, String> {
+pub fn continuation_line_lf(input: &str) -> IResult<&str, String> {
     // A continuation line starts with whitespace after LF
     let result = tuple((
         tag("\n"),     // LF line ending
@@ -152,7 +152,7 @@ fn continuation_line_lf(input: &str) -> IResult<&str, String> {
 }
 
 /// Parser for multiple headers
-fn headers_parser(input: &str) -> IResult<&str, Vec<Header>> {
+pub fn headers_parser(input: &str) -> IResult<&str, Vec<Header>> {
     terminated(
         many0(header_parser),
         alt((
@@ -171,7 +171,7 @@ pub fn parse_auth_params(input: &str) -> Result<HashMap<String, String>> {
 }
 
 /// Parser for authentication parameters
-fn auth_params_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
+pub fn auth_params_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
     // Extract auth scheme
     let (input, scheme) = parse_token(input)?;
     let (input, _) = space1(input)?;
@@ -195,7 +195,7 @@ fn auth_params_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
 }
 
 /// Parser for a single auth parameter
-fn auth_param_parser(input: &str) -> IResult<&str, (String, String)> {
+pub fn auth_param_parser(input: &str) -> IResult<&str, (String, String)> {
     separated_pair(
         map(parse_param_name, |s| s.to_string()),
         tuple((space0, char('='), space0)),
@@ -294,7 +294,7 @@ pub fn parse_cseq(input: &str) -> Result<CSeq> {
 }
 
 /// nom parser for a CSeq header value
-fn cseq_parser(input: &str) -> IResult<&str, CSeq> {
+pub fn cseq_parser(input: &str) -> IResult<&str, CSeq> {
     let (input, seq_str) = map_res(
         take_while1(|c: char| c.is_ascii_digit()),
         |s: &str| s.parse::<u32>() // Parse directly to u32
@@ -328,7 +328,7 @@ pub fn parse_content_type(input: &str) -> Result<MediaType> {
 }
 
 /// nom parser for a Content-Type header value
-fn content_type_parser(input: &str) -> IResult<&str, MediaType> {
+pub fn content_type_parser(input: &str) -> IResult<&str, MediaType> {
     // Parse type/subtype
     let (input, (type_, subtype)) = separated_pair(
         map(parse_token, |s: &str| s.to_string()),
@@ -376,7 +376,7 @@ pub fn parse_multiple_vias(input: &str) -> Result<Vec<Via>> {
 }
 
 /// Parser for a Via header's protocol part (SIP/2.0/UDP)
-fn protocol_parser(input: &str) -> IResult<&str, (String, String, String)> {
+pub fn protocol_parser(input: &str) -> IResult<&str, (String, String, String)> {
     tuple((
         // Protocol name (SIP)
         map(
@@ -401,7 +401,7 @@ fn protocol_parser(input: &str) -> IResult<&str, (String, String, String)> {
 }
 
 /// Parser for host:port
-fn host_port_parser(input: &str) -> IResult<&str, (String, Option<u16>)> {
+pub fn host_port_parser(input: &str) -> IResult<&str, (String, Option<u16>)> {
     let (input, host_port) = take_till(|c| c == ';' || c == ',' || c == '\r' || c == '\n')(input)?;
 
     let host_port_parts: Vec<&str> = host_port.trim().split(':').collect();
@@ -416,7 +416,7 @@ fn host_port_parser(input: &str) -> IResult<&str, (String, Option<u16>)> {
 }
 
 /// Parser for a complete Via header
-fn via_parser(input: &str) -> IResult<&str, Via> {
+pub fn via_parser(input: &str) -> IResult<&str, Via> {
     let (input, (protocol, version, transport)) = protocol_parser(input)?;
     let (input, _) = space1(input)?;
     let (input, (host, port)) = host_port_parser(input)?;
@@ -434,7 +434,7 @@ fn via_parser(input: &str) -> IResult<&str, Via> {
 }
 
 /// Parser for multiple Via headers
-fn multiple_vias_parser(input: &str) -> IResult<&str, Vec<Via>> {
+pub fn multiple_vias_parser(input: &str) -> IResult<&str, Vec<Via>> {
     separated_list1(
         pair(char(','), space0),
         via_parser
@@ -451,7 +451,7 @@ pub fn parse_www_authenticate(input: &str) -> Result<WwwAuthenticate> {
 }
 
 /// nom parser for a WWW-Authenticate header value
-fn www_authenticate_parser(input: &str) -> IResult<&str, WwwAuthenticate> {
+pub fn www_authenticate_parser(input: &str) -> IResult<&str, WwwAuthenticate> {
     // Parse the scheme (e.g., "Digest")
     let (input, scheme_str) = parse_token(input)?;
     let scheme = Scheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
@@ -518,7 +518,7 @@ pub fn parse_allow(input: &str) -> Result<Allow> {
 }
 
 /// nom parser for an Allow header value
-fn allow_parser(input: &str) -> IResult<&str, Allow> {
+pub fn allow_parser(input: &str) -> IResult<&str, Allow> {
     map(
         // Use parse_comma_separated_values helper or separated_list1 directly
         separated_list1(
@@ -538,7 +538,7 @@ pub fn parse_accept(input: &str) -> Result<Accept> {
 }
 
 /// nom parser for an Accept header value
-fn accept_parser(input: &str) -> IResult<&str, Accept> {
+pub fn accept_parser(input: &str) -> IResult<&str, Accept> {
     map(
         // Parse comma-separated list of media types
         separated_list1(
@@ -558,7 +558,7 @@ pub fn parse_content_disposition(input: &str) -> Result<ContentDisposition> {
 }
 
 /// nom parser for a Content-Disposition header value
-fn content_disposition_parser(input: &str) -> IResult<&str, ContentDisposition> {
+pub fn content_disposition_parser(input: &str) -> IResult<&str, ContentDisposition> {
     // Parse the disposition type (e.g., session, render)
     let (input, type_str) = parse_token(input)?;
     let disposition_type = match type_str.to_ascii_lowercase().as_str() {
@@ -585,7 +585,7 @@ pub fn parse_warning(input: &str) -> Result<Warning> {
 }
 
 /// nom parser for a Warning header value (e.g., 307 isi.edu "Session parameter 'foo' not understood")
-fn warning_parser(input: &str) -> IResult<&str, Warning> {
+pub fn warning_parser(input: &str) -> IResult<&str, Warning> {
     let (input, code) = map_res(digit1, |s: &str| s.parse::<u16>())(input)?;
     let (input, _) = space1(input)?;
     
@@ -614,7 +614,7 @@ pub fn parse_authorization(input: &str) -> Result<Authorization> {
 }
 
 /// nom parser for an Authorization header value
-fn authorization_parser(input: &str) -> IResult<&str, Authorization> {
+pub fn authorization_parser(input: &str) -> IResult<&str, Authorization> {
     // Parse the scheme (e.g., "Digest")
     let (input, scheme_str) = parse_token(input)?;
     let scheme = Scheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
@@ -700,7 +700,7 @@ pub fn parse_authentication_info(input: &str) -> Result<AuthenticationInfo> {
 }
 
 /// nom parser for an Authentication-Info header value
-fn authentication_info_parser(input: &str) -> IResult<&str, AuthenticationInfo> {
+pub fn authentication_info_parser(input: &str) -> IResult<&str, AuthenticationInfo> {
     // Parse comma-separated parameters directly
     let (input, params_list) = separated_list1(
         pair(char(','), space0),
@@ -730,7 +730,7 @@ fn authentication_info_parser(input: &str) -> IResult<&str, AuthenticationInfo> 
 }
 
 /// Parser for a single URI with parameters (e.g., <sip:host;lr>)
-fn uri_with_params_parser(input: &str) -> IResult<&str, UriWithParams> {
+pub fn uri_with_params_parser(input: &str) -> IResult<&str, UriWithParams> {
     let (mut remaining_input, uri_part) = alt((
         // <sip:alice@example.com> format
         delimited(
@@ -760,7 +760,7 @@ pub fn parse_route(input: &str) -> Result<Route> {
 }
 
 /// nom parser for a Route header value (comma-separated URIs with params)
-fn route_parser(input: &str) -> IResult<&str, Route> {
+pub fn route_parser(input: &str) -> IResult<&str, Route> {
     map(
         separated_list1(
             pair(char(','), space0),
@@ -779,7 +779,7 @@ pub fn parse_record_route(input: &str) -> Result<RecordRoute> {
 }
 
 /// nom parser for a Record-Route header value (identical structure to Route)
-fn record_route_parser(input: &str) -> IResult<&str, RecordRoute> {
+pub fn record_route_parser(input: &str) -> IResult<&str, RecordRoute> {
      map(
         separated_list1(
             pair(char(','), space0),

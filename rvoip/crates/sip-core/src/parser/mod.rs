@@ -4,12 +4,21 @@
 //! All parsers use the nom parser combinator library.
 
 // Core parsing modules
+mod common;
+pub mod headers;
 mod message;
 mod multipart;
 mod request;
 mod response;
-mod uri; // Renamed from uri_parser
+mod uri;
 mod utils;
+
+// Re-export necessary top-level parsers
+pub use message::parse_message;
+pub use request::request_parser;
+pub use response::response_parser;
+pub use uri::parse_uri;
+pub use multipart::parse_multipart;
 
 // Re-export key parsing functions and types
 pub use message::{
