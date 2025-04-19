@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::types::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription};
+use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute};
 use bytes::Bytes;
 use nom::{
     bytes::complete::{tag, take_till1, take_until},
@@ -11,9 +11,8 @@ use nom::{
 };
 use std::collections::HashMap;
 use std::str::{self, FromStr};
-use super::attributes; // Import the new module
-use crate::types::sdp::{ParsedAttribute, MediaDirection}; // Import the enum and sub-enum
-use crate::sdp::attributes; // Import the attribute parsers module
+use crate::sdp::attributes; // Import the attributes module itself
+use crate::sdp::attributes::MediaDirection; // Import MediaDirection specifically
 
 /// Parses a single SDP line into a key-value pair.
 /// Example: "v=0" -> Ok(("", ('v', "0")))
@@ -216,6 +215,7 @@ fn parse_attribute(value: &str) -> ParsedAttribute {
         match key_trimmed {
             "rtpmap" => {
                 attributes::parse_rtpmap(val_trimmed)
+                    .map(ParsedAttribute::RtpMap)
                     .unwrap_or_else(|e| {
                          println!("SDP Attribute Warning: Failed to parse rtpmap '{}': {}", value, e);
                          ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
@@ -223,6 +223,7 @@ fn parse_attribute(value: &str) -> ParsedAttribute {
             }
             "fmtp" => {
                  attributes::parse_fmtp(val_trimmed)
+                    .map(ParsedAttribute::Fmtp)
                     .unwrap_or_else(|e| {
                         println!("SDP Attribute Warning: Failed to parse fmtp '{}': {}", value, e);
                         ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())

@@ -14,8 +14,8 @@ use nom::{
 
 use crate::error::{Error, Result};
 use crate::uri::{Uri, Scheme, Host};
+use crate::types::param::Param;
 use super::utils::clone_str;
-use crate::types::Param;
 use ordered_float::NotNan;
 
 // Parse the scheme of a URI (sip, sips, tel)

@@ -11,22 +11,22 @@ use nom::{
     Err, IResult, Needed,
 };
 
+use nom::error::{Error as NomError, ErrorKind};
+use std::collections::HashMap;
+
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
-use crate::message::{Message, Request, Response, StatusCode};
-use crate::method::Method;
-use crate::uri::Uri;
-use crate::version::Version;
+use crate::types::{Message, Request, Response, StatusCode, Method, Version};
+use crate::types::uri::Uri;
 
 // Now use the new parser modules
-use super::headers::parse_header;
-use super::request::{request_parser, parse_request_line};
-use super::response::{response_parser, parse_response_line};
-use super::uri::parse_uri;
-use super::utils::crlf;
+use crate::parser::headers::{parse_header, parse_headers};
+use crate::parser::request::parse_request_line;
+use crate::parser::response::parse_response_line;
+use crate::parser::utils::crlf;
 
 /// Maximum length of a single line in a SIP message
-pub const MAX_LINE_LENGTH: usize = 8192;
+pub const MAX_LINE_LENGTH: usize = 4096;
 /// Maximum number of headers in a SIP message
 pub const MAX_HEADER_COUNT: usize = 100;
 /// Maximum size of a SIP message body
@@ -484,11 +484,11 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
     }
     
     // Otherwise try the regular parsers (calling the new modules)
-    if let Ok((_, message)) = request_parser(input_str) {
+    if let Ok((_, message)) = parse_request_line(input_str) {
         return Ok(message);
     }
     
-    if let Ok((_, message)) = response_parser(input_str) {
+    if let Ok((_, message)) = parse_response_line(input_str) {
         return Ok(message);
     }
     
@@ -503,11 +503,11 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
     };
     
     // Try again with normalized input
-    if let Ok((_, message)) = request_parser(&normalized_input) {
+    if let Ok((_, message)) = parse_request_line(&normalized_input) {
         return Ok(message);
     }
     
-    if let Ok((_, message)) = response_parser(&normalized_input) {
+    if let Ok((_, message)) = parse_response_line(&normalized_input) {
         return Ok(message);
     }
     

@@ -1,8 +1,7 @@
-use crate::types::uri_with_params::UriWithParams;
 use std::fmt;
 use std::str::FromStr;
+use crate::types::uri_with_params::UriWithParams;
 use crate::error::Result;
-use crate::parser::uri::parse_uri_list;
 use serde::{Serialize, Deserialize};
 
 /// Represents a list of URIs with parameters (e.g., for Route, Record-Route).

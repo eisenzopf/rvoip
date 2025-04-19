@@ -1,10 +1,11 @@
 use std::collections::HashMap;
-use std::str::{FromStr, from_utf8_lossy};
+use std::str::{FromStr};
+use std::borrow::Cow;
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_till, take_until, take_while, take_while1, crlf as bytes_crlf},
-    character::complete::{char, line_ending, multispace0, space0, space1},
+    bytes::complete::{tag, take_till, take_until, take_while, take_while1},
+    character::complete::{char, line_ending, multispace0, space0, space1, crlf},
     combinator::{map, map_res, opt, recognize, value, verify, eof},
     multi::{many0, many1, many_till, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -68,8 +69,8 @@ impl MimePart {
     }
 
     /// Get the raw content as lossy UTF-8 string
-    pub fn content_as_str_lossy(&self) -> std::borrow::Cow<str> {
-        from_utf8_lossy(&self.raw_content)
+    pub fn content_as_str_lossy(&self) -> Cow<str> {
+        String::from_utf8_lossy(&self.raw_content)
     }
 }
 
@@ -138,7 +139,7 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
         // Provide more context on error
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(Error::Parser(format!(
             "Failed to parse multipart body near '{}': {:?}", 
-            from_utf8_lossy(e.input),
+            String::from_utf8_lossy(e.input),
             e.code
         ))),
         Err(nom::Err::Incomplete(needed)) => Err(Error::Parser(format!(
@@ -183,20 +184,20 @@ fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str)
         // Check for the end boundary immediately after the normal boundary
         if let Ok((i, _)) = tag::<_, _, nom::error::Error<&[u8]>>(b"--")(input) {
              // This is the final boundary marker
-            let (i, _) = alt((bytes_crlf, eof))(i)?; // Consume trailing CRLF or EOF, use bytes_crlf
+            let (i, _) = alt((crlf::<&[u8], _>, eof))(i)?; // Use crlf, specify input type
             input = i;
             break; // End of multipart body
         }
 
         // Expect CRLF after boundary
-        let (i, _) = bytes_crlf(input)?;// use bytes_crlf
+        let (i, _) = crlf(input)?;// use crlf
         input = i;
 
         // Parse headers for the part
         let mut headers = Vec::new();
         let mut header_input = input;
         loop {
-            match header_parser(from_utf8_lossy(header_input).as_ref()) { // Use lossy for header parsing
+            match crate::parser::headers::header_parser(String::from_utf8_lossy(header_input).as_ref()) { // Use FQ path and lossy
                 Ok((rest_str, hdr)) => {
                      let consumed_bytes = header_input.len() - rest_str.len();
                      headers.push(hdr);
@@ -205,7 +206,7 @@ fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str)
                 Err(_) => break, // Error or no more headers
             }
             // Check for the empty line (end of headers)
-            if let Ok((rest_bytes, _)) = bytes_crlf(header_input) {
+            if let Ok((rest_bytes, _)) = crlf::<_, NomError<&[u8]>>(header_input) {
                 header_input = rest_bytes;
                 break;
             }

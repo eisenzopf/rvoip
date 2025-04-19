@@ -1,22 +1,19 @@
 use std::collections::HashMap;
 use std::fmt;
-use crate::sdp::parser::parse_sdp; // Use the parser
 use bytes::Bytes;
 use std::str::FromStr;
-use crate::types::uri::Uri;
+use crate::uri::Uri;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
-use crate::sdp::{SdpSession, ConnectionInfo, TimeDescription, MediaDescription, MediaDirection, RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, SsrcAttribute}; // Adjusted import
 use crate::parser::sdp::parse_sdp;
 
-// Import attribute structs/enums
-// Assuming MediaDirection is defined in sdp/attributes.rs for now
-use crate::sdp::attributes::MediaDirection; 
-
+// Import attribute structs/enums from the correct location
+use crate::sdp::attributes::MediaDirection; // Keep this
+// Remove other potential imports from crate::sdp if they were added erroneously
 
 // --- Placeholder Attribute Structs --- 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RtpMapAttribute {
     pub payload_type: u8,
     pub encoding_name: String,
@@ -24,7 +21,7 @@ pub struct RtpMapAttribute {
     pub encoding_params: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FmtpAttribute {
     pub format: String,
     pub parameters: String, 
@@ -32,7 +29,7 @@ pub struct FmtpAttribute {
 
 /// Represents a parsed ICE Candidate attribute (RFC 5245 / 8445 / 8839).
 /// Structure: foundation component-id transport priority conn-addr port type [related-addr related-port] *(extensions)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateAttribute {
     pub foundation: String,
     pub component_id: u32,
@@ -49,7 +46,7 @@ pub struct CandidateAttribute {
 
 /// Represents a parsed SSRC attribute (RFC 5576).
 /// Structure: ssrc-id attribute[:value]
-#[derive(Debug, Clone, PartialEq, Eq)] // Eq because value is Option<String>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Eq because value is Option<String>
 pub struct SsrcAttribute {
     pub ssrc_id: u32,
     pub attribute: String,
@@ -57,7 +54,7 @@ pub struct SsrcAttribute {
 }
 
 /// Enum representing a parsed SDP attribute.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParsedAttribute {
     RtpMap(RtpMapAttribute),
     Fmtp(FmtpAttribute),
@@ -75,7 +72,7 @@ pub enum ParsedAttribute {
 }
 
 /// Represents the Origin (o=) field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
     pub username: String,
     pub sess_id: String, // Often u64, but spec allows more flexibility
@@ -86,7 +83,7 @@ pub struct Origin {
 }
 
 /// Represents the Connection Data (c=) field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionData {
     pub net_type: String, // IN
     pub addr_type: String, // IP4 / IP6
@@ -94,14 +91,14 @@ pub struct ConnectionData {
 }
 
 /// Represents a Time Description (t=) field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeDescription {
     pub start_time: String, // u64 NTP timestamp
     pub stop_time: String, // u64 NTP timestamp
 }
 
 /// Represents a parsed SDP Session.
-#[derive(Debug, Clone, PartialEq)] 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
 pub struct SdpSession {
     pub version: String, 
     pub origin: Origin, // Changed from String
@@ -192,7 +189,7 @@ impl SdpSession {
 }
 
 /// Represents an SDP Media Description section (m=...)
-#[derive(Debug, Clone, PartialEq)] 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
 pub struct MediaDescription {
     pub media: String, 
     pub port: u16,
@@ -316,9 +313,9 @@ impl MediaDescription {
 impl FromStr for SdpSession {
     type Err = crate::error::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         // Convert string to Bytes and parse
-        parse_sdp(&Bytes::from(s.as_bytes()))
+        crate::parser::sdp::parse_sdp(&Bytes::from(s.as_bytes()))
     }
 }
 

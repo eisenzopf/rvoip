@@ -13,7 +13,7 @@ use nom::{
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
-use crate::method::Method;
+use crate::types::Method;
 use super::utils::{
     crlf, parse_param_name, parse_param_value, parse_token, 
     parse_quoted_string, parse_text_value, parse_semicolon_params, 
@@ -349,14 +349,6 @@ pub fn content_type_parser(input: &str) -> IResult<&str, MediaType> {
     };
 
     Ok((input, media_type))
-}
-
-impl FromStr for Via {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        parse_via(s)
-    }
 }
 
 /// Parse a Via header using nom

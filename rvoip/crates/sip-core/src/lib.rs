@@ -8,41 +8,72 @@
 // Declare modules
 pub mod error;
 pub mod header;
-pub mod uri;
-pub mod version;
+pub mod method;
 pub mod parser;
+pub mod status;
 pub mod types;
+pub mod uri;
 pub mod sdp;
 
 // Re-export key public items
 pub use error::{Error, Result};
 pub use header::{Header, HeaderName, HeaderValue};
-pub use uri::{Uri, Scheme, Host};
-pub use version::Version;
+pub use method::Method;
+pub use parser::{parse_message, IncrementalParser, ParseState};
+pub use status::StatusCode;
 pub use types::{
-    Method, StatusCode, Request, Response, Message,
-    Address, Param, Via, CSeq, From, To, Contact, Route, RecordRoute, ReplyTo,
-    ContentType, MediaType, Accept, Allow, ContentDisposition, DispositionType,
-    Warning, ContentLength, Expires, MaxForwards, CallId,
-    auth,
-    SdpSession, MediaDescription, ParsedAttribute,
+    Address, 
+    CallId, 
+    Contact, 
+    ContentDisposition, 
+    ContentLength, 
+    ContentType, 
+    CSeq, 
+    Expires, 
+    From, 
+    MaxForwards, 
+    MediaType, 
+    sip_message::Message,
+    RecordRoute, 
+    ReplyTo, 
+    sip_message::Request,
+    sip_message::Response,
+    Route, 
+    sdp::SdpSession,
+    To, 
+    TypedHeader, 
+    uri_with_params::UriWithParams,
+    uri_with_params_list::UriWithParamsList,
+    via::Via,
+    Warning,
+    sdp::MediaDescription, 
+    sdp::Origin,
+    sdp::ConnectionData, 
+    sdp::TimeDescription,
+    auth::*,
+    sdp::ParsedAttribute,
 };
-pub use parser::prelude::*;
+pub use uri::Uri;
+pub use sdp::attributes::MediaDirection;
 
 /// Re-export of common types and functions
 pub mod prelude {
-    pub use super::{
-        Error, Header, HeaderName, HeaderValue, Host, Message, Method, 
-        Request, Response, Result, Scheme, StatusCode, Uri, Version, 
-        Via, parse_message, parse_message_bytes, IncrementalParser, ParseState, MultipartBody,
-        MimePart, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
-    };
+    pub use crate::error::{Error, Result};
+    pub use crate::header::{Header, HeaderName, HeaderValue};
+    pub use crate::uri::{Uri, Host, Scheme};
+    pub use crate::method::Method;
+    pub use crate::status::StatusCode;
+    pub use crate::types::sip_message::{Request, Response, Message};
+    pub use crate::types::via::Via;
+    pub use crate::parser::{parse_message, IncrementalParser, ParseState, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
+    pub use crate::parser::multipart::{MultipartBody, MimePart};
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn it_works() {
-        assert_eq!(2 + 2, 4);
+        let result = 2 + 2;
+        assert_eq!(result, 4);
     }
 } 

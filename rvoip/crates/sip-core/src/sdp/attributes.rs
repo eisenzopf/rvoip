@@ -15,6 +15,8 @@ use std::net::IpAddr;
 
 // --- Placeholder Attribute Structs (Consider moving to types/sdp_attributes.rs later) ---
 
+// Remove these struct definitions as they should be defined in types/sdp.rs
+/*
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtpMapAttribute {
     pub payload_type: u8,
@@ -28,6 +30,7 @@ pub struct FmtpAttribute {
     pub format: String,
     pub parameters: String, // Keep as raw string for now
 }
+*/
 
 /// SDP Media Direction attribute (e.g., sendrecv, sendonly)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
