@@ -13,67 +13,13 @@ mod response;
 pub mod uri;
 mod utils;
 
-// --- Minimal Re-exports --- 
+// Re-export top-level parsers and types, consolidate duplicates
 pub use message::{parse_message, IncrementalParser, ParseState};
-pub use request::request_parser; 
-pub use response::response_parser;
-// All other uses should use full paths e.g. crate::parser::headers::...
-
-// Ensure NO OTHER mod or pub use lines exist in this file.
-
-// Re-export necessary top-level parsers
-pub use message::parse_message;
 pub use request::request_parser;
 pub use response::response_parser;
-pub use uri::parse_uri;
-pub use multipart::parse_multipart;
-
-// Re-export key parsing functions and types
-pub use message::{
-    // parse_message, // Will be moved here or called from here
-    // parse_message_bytes, // Will be moved here or called from here
-    IncrementalParser,
-    ParseState,
-    MAX_LINE_LENGTH,
-    MAX_HEADER_COUNT,
-    MAX_BODY_SIZE,
-};
-pub use uri::parse_uri; // Keep URI parser export
-pub use multipart::{parse_multipart, MimePart, MultipartBody}; // Keep multipart exports
-
-// Specific request/response parsers (to be added)
-// pub use request::parse_request;
-// pub use response::parse_response;
-
-// Re-export common parsing functions for convenience
-pub mod prelude {
-    pub use super::message::{
-        IncrementalParser, ParseState, MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE,
-    };
-    pub use super::uri::parse_uri;
-    pub use super::multipart::{parse_multipart, MimePart, MultipartBody};
-
-    // Add new exports as they are created
-    // pub use super::parse_message;
-    // pub use super::request::parse_request;
-    // pub use super::response::parse_response;
-}
-
-// Export necessary parsers
-pub mod common;
-pub mod request;
-pub mod response;
-pub mod message;
-pub mod uri;
-pub mod utils;
-pub mod multipart;
-pub mod headers; // Ensure this is public
-
-// Re-export top-level parsers
-pub use message::parse_message;
-pub use request::request_parser;
-pub use response::response_parser;
-pub use uri::{parse_uri, parse_uri_params, parse_host_port};
+// Commenting out potentially unresolved imports
+pub use uri::{parse_uri /*, parse_uri_params, parse_host_port*/ };
+pub use multipart::{parse_multipart, MimePart, MultipartBody};
 
 // Re-export specific header parsers needed by types/header.rs
 pub use headers::{
