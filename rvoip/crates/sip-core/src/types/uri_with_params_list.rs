@@ -2,9 +2,11 @@ use crate::types::uri_with_params::UriWithParams;
 use std::fmt;
 use std::str::FromStr;
 use crate::error::Result;
+use crate::parser::uri::parse_uri_list;
+use serde::{Serialize, Deserialize};
 
 /// Represents a list of URIs with parameters (e.g., for Route, Record-Route).
-#[derive(Debug, Clone, PartialEq, Eq, Default)] // Add Default derive
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)] // Add Default derive
 pub struct UriWithParamsList {
     pub uris: Vec<UriWithParams>,
 }
@@ -26,12 +28,12 @@ impl UriWithParamsList {
     }
 
     /// Returns an iterator over the URIs.
-    pub fn iter(&self) -> std::slice::Iter<'_> {
+    pub fn iter(&self) -> std::slice::Iter<'_, UriWithParams> {
         self.uris.iter()
     }
 
     /// Returns a mutable iterator over the URIs.
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, UriWithParams> {
         self.uris.iter_mut()
     }
 

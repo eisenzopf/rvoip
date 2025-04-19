@@ -247,13 +247,27 @@ impl IncrementalParser {
                         let header_str = format!("{}\r\n", header_value);
                         
                         // Parse the header
-                        if let Ok((_, header)) = parse_header(&header_str) {
-                            if self.debug_mode {
-                                println!("IncrementalParser: Parsed header: {}", header_value);
+                        match parse_header(&header_str) {
+                            Ok(header) => {
+                                if self.debug_mode {
+                                    println!("IncrementalParser: Parsed header: {}", header_value);
+                                }
+                                headers.push(header);
+                            },
+                            Err(e) => {
+                                // Decide how to handle header parsing errors (ignore, return error?)
+                                // For now, let's collect it as an Other header
+                                let parts: Vec<&str> = header_str.splitn(2, ':').collect();
+                                if parts.len() == 2 {
+                                    headers.push(Header {
+                                        name: HeaderName::Other(parts[0].trim().to_string()),
+                                        value: HeaderValue::Raw(parts[1].trim().to_string()), // Store raw value on error
+                                    });
+                                } else {
+                                     // Malformed header line, couldn't even split name/value
+                                     println!("Malformed header line skipped: {}", header_str); // Log or return error?
+                                }
                             }
-                            headers.push(header);
-                        } else if self.debug_mode {
-                            println!("IncrementalParser: Failed to parse header: {}", header_value);
                         }
                         
                         // Move to the next line after processing any continuations

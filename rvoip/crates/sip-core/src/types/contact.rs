@@ -81,7 +81,7 @@ impl FromStr for Contact {
     fn from_str(s: &str) -> Result<Self> {
         if s.trim() == "*" {
             // Handle wildcard contact
-            Ok(Contact::new(Address::new(None, crate::uri::Uri::from_str("*").unwrap()))) // Create a dummy Address for wildcard
+            Ok(Contact::new(Address::new(None::<String>, crate::uri::Uri::from_str("*").unwrap()))) // Add ::<String>
         } else {
             // Assumes parse_contact returns Vec<Address>, we take the first.
             // This might need adjustment if parse_contact changes or if we want to enforce single-value parsing here.

@@ -38,7 +38,7 @@ impl FromStr for Scheme {
 }
 
 /// Digest Algorithm (MD5, SHA-256, etc.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Algorithm {
     Md5,
     Md5Sess,

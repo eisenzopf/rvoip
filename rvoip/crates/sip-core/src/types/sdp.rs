@@ -3,6 +3,12 @@ use std::fmt;
 use crate::sdp::parser::parse_sdp; // Use the parser
 use bytes::Bytes;
 use std::str::FromStr;
+use crate::types::uri::Uri;
+use crate::types::param::Param;
+use serde::{Serialize, Deserialize};
+use crate::error::{Error, Result};
+use crate::sdp::{SdpSession, ConnectionInfo, TimeDescription, MediaDescription, MediaDirection, RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, SsrcAttribute}; // Adjusted import
+use crate::parser::sdp::parse_sdp;
 
 // Import attribute structs/enums
 // Assuming MediaDirection is defined in sdp/attributes.rs for now

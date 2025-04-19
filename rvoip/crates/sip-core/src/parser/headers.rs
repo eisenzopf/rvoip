@@ -864,10 +864,11 @@ mod tests {
     #[test]
     fn test_cseq_parser_typed() {
         let input = "314159 INVITE";
-        let (_, cseq) = cseq_parser(input).unwrap();
-        
-        assert_eq!(cseq.seq, "314159");
-        assert_eq!(cseq.method, Method::INVITE);
+        let result = parse_cseq(input);
+        assert!(result.is_ok());
+        let cseq = result.unwrap();
+        assert_eq!(cseq.seq, 314159); // Compare u32 with u32 literal
+        assert_eq!(cseq.method, Method::Invite);
     }
     
     #[test]
