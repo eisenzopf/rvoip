@@ -684,10 +684,10 @@ fn test_decode_raw_udp_data() {
 47346261306231633264330d0a46726f6d3a203c73\
 69703a616c6963654031323723302e302e313e3b74\
 61673d61626364656630313233340d0a546f3a203c\
-7369703a626f6240313237232e302e302e313e0d0a\\\
-43616c6c2d49443a2074657374696e672d70617273\\\
-65720d0a435365713a203120494e564954450d0a4d\\\
-61782d466f7277617264733a2037300d0a436f6e74\\\
+7369703a626f6240313237232e302e302e313e0d0a\
+43616c6c2d49443a2074657374696e672d70617273\
+65720d0a435365713a203120494e564954450d0a4d\
+61782d466f7277617264733a2037300d0a436f6e74\
 656e742d4c656e6774683a2030",
         "494e56495445207369703a626f6240313237\
 2e302e302e313a35303731205349502f322e300d0a\
@@ -696,13 +696,22 @@ fn test_decode_raw_udp_data() {
 47346261306231633264330d0a46726f6d3a203c73\
 69703a616c6963654031323723302e302e313e3b74\
 61673d61626364656630313233340d0a546f3a203c\
-7369703a626f6240313237232e302e302e313e0d0a\\\
-43616c6c2d49443a2074657374696e672d70617273\\\
-65720d0a435365713a203120494e564954450d0a4d\\\
-61782d466f7277617264733a2037300d0a436f6e74\\\
+7369703a626f6240313237232e302e302e313e0d0a\
+43616c6c2d49443a2074657374696e672d70617273\
+65720d0a435365713a203120494e564954450d0a4d\
+61782d466f7277617264733a2037300d0a436f6e74\
 656e742d4c656e6774683a2030"
     ];
-     for (i, hex_packet) in example_packets.iter().enumerate() {\n        println!(\"Testing packet {}\", i+1);\n        let binary_data = hex_to_bytes(hex_packet);\n        let result = parse_message_bytes(&binary_data);\n        if i == 0 {\n            assert!(result.is_ok(), \"Valid packet failed: {:?}\", result.err());\n        } else {\n            assert!(result.is_err(), \"Invalid packet succeeded\");\n        }\n     }\n}\n
+     for (i, hex_packet) in example_packets.iter().enumerate() {
+        println!("Testing packet {}", i+1);
+        let binary_data = hex_to_bytes(hex_packet);
+        let result = parse_message_bytes(&binary_data);
+        if i == 0 {
+            assert!(result.is_ok(), "Valid packet failed: {:?}", result.err());
+        } else {
+            assert!(result.is_err(), "Invalid packet succeeded");
+        }
+    }
 }
 
 // Removed test_standalone_parser_improvements (covered by other tests)

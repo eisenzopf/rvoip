@@ -8,8 +8,10 @@ use bytes::BytesMut;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
+use futures_util::stream::StreamExt;
 
-use rvoip_sip_core::{Message, parse_message, parse_message_bytes};
+use rvoip_sip_core::types::Message;
+use rvoip_sip_core::{parse_message};
 
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent};
@@ -161,7 +163,7 @@ impl UdpTransport {
                 let packet_str = String::from_utf8_lossy(&packet_data);
                 debug!("Received SIP message from {}: {}", src, packet_str);
                 
-                match parse_message_bytes(&packet_data) {
+                match parse_message(&packet_data) {
                     Ok(message) => {
                         let event = TransportEvent::MessageReceived {
                             message,

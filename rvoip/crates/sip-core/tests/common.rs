@@ -8,6 +8,15 @@ use rvoip_sip_core::message::{Message, Request, Response};
 use rvoip_sip_core::parser::message::parse_message; // Use the parser's function
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via}; // Import types
+use rvoip_sip_core::types::{HeaderName, HeaderValue}; // Added Message, Request, Response imports
+use rvoip_sip_core::types::sip_message::{Message, Request, Response};
+use rvoip_sip_core::{
+    Error as SipError,
+    Result as SipResult,
+    parse_message, // Use the main parse function
+    // Message, Request, Response // Already imported from types?
+};
+use ordered_float::NotNan; // Add import for NotNan
 
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -38,16 +47,16 @@ pub fn addr(display_name: Option<&str>, uri_str: &str, params: Vec<Param>) -> Ad
 pub fn param_tag(val: &str) -> Param { Param::Tag(val.to_string()) }
 pub fn param_branch(val: &str) -> Param { Param::Branch(val.to_string()) }
 pub fn param_expires(val: u32) -> Param { Param::Expires(val) }
-pub fn param_received(val: &str) -> Param { Param::Received(IpAddr::from_str(val).unwrap()) }
+pub fn param_received(val: &str) -> Param { Param::Received(val.to_string()) }
 pub fn param_maddr(val: &str) -> Param { Param::Maddr(val.to_string()) }
 pub fn param_ttl(val: u8) -> Param { Param::Ttl(val) }
 pub fn param_lr() -> Param { Param::Lr }
-pub fn param_q(val: f32) -> Param { Param::Q(val) }
+pub fn param_q(val: f32) -> Param { Param::Q(NotNan::new(val).expect("Q value cannot be NaN")) }
 pub fn param_transport(val: &str) -> Param { Param::Transport(val.to_string()) }
 pub fn param_user(val: &str) -> Param { Param::User(val.to_string()) }
 pub fn param_method(val: &str) -> Param { Param::Method(val.to_string()) }
-pub fn param_other(key: &str, val: Option<&str>) -> Param { 
-    Param::Other(key.to_string(), val.map(String::from)) 
+pub fn param_other(key: &str, value: Option<&str>) -> Param {
+    Param::Other(key.to_string(), value.map(String::from))
 }
 
 
@@ -103,26 +112,21 @@ pub fn parse_sip_message_bytes(data: &[u8]) -> Result<Message> {
 }
 
 /// Helper to parse a SIP message from a string
-pub fn parse_sip_message(data: &str) -> Result<Message> {
-    parse_message(data.as_bytes())
+pub fn parse_sip_message(msg: &str) -> SipResult<Message> {
+    parse_message(msg.as_bytes())
 }
 
-/// Helper to expect a parse error
-pub fn expect_parse_error(data: &str, _expected_error_substring: Option<&str>) -> bool {
-    match parse_sip_message(data) {
-        Ok(message) => {
-            println!("Expected error but got successful parse: {:?}", message);
-            false
-        },
-        Err(error) => {
-            println!("Got expected error: {:?}", error);
-            if let Some(sub) = _expected_error_substring {
-                if !error.to_string().contains(sub) {
-                    println!("Error '{}' does not contain expected substring '{}'", error, sub);
-                    return false;
-                }
+/// Helper to expect a parsing error
+pub fn expect_parse_error(msg: &str, expected_substring: Option<&str>) -> bool {
+    let result = parse_message(msg.as_bytes());
+    match result {
+        Ok(_) => false,
+        Err(e) => {
+            if let Some(sub) = expected_substring {
+                e.to_string().contains(sub)
+            } else {
+                true // Any error is acceptable if no substring specified
             }
-            true
         }
     }
 }

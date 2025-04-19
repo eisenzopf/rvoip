@@ -193,18 +193,26 @@ impl TlsTransport {
                     // Got data, process it
                     let data = buffer[..n].to_vec();
                     
-                    // Forward the data as a transport event
-                    let _ = event_tx.send(TransportEvent::MessageReceived {
-                        message: match rvoip_sip_core::Message::parse(&data) {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                error!("Failed to parse SIP message: {}", e);
-                                continue;
-                            }
+                    // Attempt to parse the buffered data as a SIP message
+                    let data_clone = data.clone(); // Clone data for parsing attempt
+                    let result = tokio::task::block_in_place(|| {
+                        // Call the standalone parse function
+                        rvoip_sip_core::parse_message(&data_clone)
+                    });
+
+                    match result {
+                        Ok(msg) => {
+                            // Forward the data as a transport event
+                            let _ = event_tx.send(TransportEvent::MessageReceived {
+                                message: msg,
+                                source: remote_addr,
+                                destination: local_addr,
+                            }).await;
                         },
-                        source: remote_addr,
-                        destination: local_addr,
-                    }).await;
+                        Err(e) => {
+                            error!("Failed to parse SIP message: {}", e);
+                        }
+                    }
                 },
                 Err(e) => {
                     error!("Failed to read from TLS stream: {}", e);
