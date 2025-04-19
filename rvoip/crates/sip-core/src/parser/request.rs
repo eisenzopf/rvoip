@@ -45,10 +45,8 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
 /// Parser for a complete SIP request
 pub fn request_parser(input: &str) -> IResult<&str, Message> {
     // Parse the request line
-    let (input, (method, uri, version)) = terminated(
-        parse_request_line,
-        super::utils::crlf
-    )(input)?;
+    let (input, (method, uri, version)) = parse_request_line(input)?;
+    let (input, _) = super::utils::crlf(input)?; // Consume CRLF explicitly
 
     // Parse headers
     let (input, headers) = terminated(

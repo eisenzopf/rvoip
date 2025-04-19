@@ -314,8 +314,8 @@ impl FromStr for SdpSession {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Convert string to Bytes and parse
-        crate::parser::sdp::parse_sdp(&Bytes::from(s.as_bytes()))
+        // Convert string to owned Bytes and parse
+        crate::parser::sdp::parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
     }
 }
 

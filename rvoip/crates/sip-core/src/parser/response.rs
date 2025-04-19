@@ -49,10 +49,8 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 /// Parser for a complete SIP response
 pub fn response_parser(input: &str) -> IResult<&str, Message> {
     // Parse the response line
-    let (input, (version, status, reason)) = terminated(
-        parse_response_line,
-        super::utils::crlf
-    )(input)?;
+    let (input, (version, status, reason)) = parse_response_line(input)?;
+    let (input, _) = super::utils::crlf(input)?; // Consume CRLF explicitly
 
     // Parse headers
     let (input, headers) = terminated(

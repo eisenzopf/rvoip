@@ -45,10 +45,10 @@ impl TryFrom<Header> for TypedHeader {
     fn try_from(header: Header) -> Result<Self> {
         let value_text = match header.value.as_text() {
             Some(text) => text,
-            None => return Ok(TypedHeader::Other(header.name.clone(), header.value)), // Clone needed here
+            None => return Ok(TypedHeader::Other(header.name.clone(), header.value.clone())),
         };
 
-        let result = match header.name {
+        let result = match &header.name {
             // Core Headers
             HeaderName::Via => parser::headers::parse_via(value_text).map(TypedHeader::Via),
             HeaderName::From => parser::headers::parse_address(value_text).map(|addr| TypedHeader::From(types::From(addr))),
@@ -85,24 +85,23 @@ impl TryFrom<Header> for TypedHeader {
             // TODO: Implement parsers for other headers as needed
 
             // Fallback for other/unimplemented headers
-            _ => Ok(TypedHeader::Other(header.name, header.value)), // name and value are moved here
+            _ => Ok(TypedHeader::Other(header.name.clone(), header.value.clone())),
         };
         
-        // Map specific parser errors to a more generic parsing error for this header
+        let result_clone_for_err = result.clone();
+
         result.map_err(|e| {
-             if let TypedHeader::Other(n, v) = result.as_ref().unwrap_or(&TypedHeader::Other(header.name.clone(), header.value.clone())) {
-                 // If it fell through to Other or was already an error, use original values
-                  Error::Parser(format!(
+             if let Ok(TypedHeader::Other(n, v)) = &result_clone_for_err {
+                 Error::Parser(format!(
                      "Failed to parse header '{:?}' value '{}': {}", 
                      n, 
                      value_text, 
                      e
                  ))
              } else {
-                 // If parsing succeeded initially but mapping failed (shouldn't happen with current structure)
-                  Error::Parser(format!(
+                 Error::Parser(format!(
                      "Failed to parse header '{:?}' value '{}': {}", 
-                     header.name, 
+                     header.name.clone(), 
                      value_text, 
                      e
                  ))

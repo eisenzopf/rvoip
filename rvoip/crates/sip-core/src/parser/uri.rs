@@ -128,26 +128,30 @@ fn parameter_parser(input: &str) -> IResult<&str, Param> {
         "tag" => Param::Tag(opt_val.unwrap_or_default()),
         "expires" => {
             opt_val
+                .as_ref()
                 .and_then(|v| v.parse::<u32>().ok())
                 .map(Param::Expires)
-                .unwrap_or_else(|| Param::Other(key, opt_val))
+                .unwrap_or_else(|| Param::Other(key, opt_val.clone()))
         }
         "received" => {
             opt_val
-                .and_then(|v| IpAddr::from_str(&v).ok())
+                .as_ref()
+                .and_then(|v| IpAddr::from_str(v).ok())
                 .map(Param::Received)
-                .unwrap_or_else(|| Param::Other(key, opt_val))
+                .unwrap_or_else(|| Param::Other(key, opt_val.clone()))
         }
         "maddr" => Param::Maddr(opt_val.unwrap_or_default()),
         "ttl" => {
             opt_val
+                .as_ref()
                 .and_then(|v| v.parse::<u8>().ok())
                 .map(Param::Ttl)
-                .unwrap_or_else(|| Param::Other(key, opt_val))
+                .unwrap_or_else(|| Param::Other(key, opt_val.clone()))
         }
         "lr" => Param::Lr, // Flag parameter
         "q" => {
              opt_val
+                 .as_ref()
                  .and_then(|v| v.parse::<f32>().ok())
                  .and_then(|f| NotNan::try_from(f).ok())
                  .map(Param::Q)
@@ -163,8 +167,8 @@ fn parameter_parser(input: &str) -> IResult<&str, Param> {
     Ok((input, param))
 }
 
-// Parse all parameters
-fn parameters_parser(input: &str) -> IResult<&str, Vec<Param>> {
+/// Parser for URI parameters (e.g., ;param1=value1;param2)
+pub fn parameters_parser(input: &str) -> IResult<&str, Vec<Param>> {
     many0(parameter_parser)(input)
 }
 

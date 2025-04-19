@@ -85,9 +85,16 @@ impl Address {
         })
     }
 
-    /// Sets or replaces the expires parameter.
+    /// Set the expires parameter value.
     pub fn set_expires(&mut self, expires: u32) {
-        self.params.retain(|p| !matches!(p, Param::Expires(_) | Param::Other(k, _) if k.eq_ignore_ascii_case("expires")));
+        // Remove existing expires param
+        self.params.retain(|p| {
+            match p {
+                Param::Expires(_) => false, // Remove this variant
+                Param::Other(k, _) => !k.eq_ignore_ascii_case("expires"), // Keep if key doesn't match
+                _ => true, // Keep other variants
+            }
+        });
         self.params.push(Param::Expires(expires));
     }
 

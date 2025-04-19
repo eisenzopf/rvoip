@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute};
+use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, MediaDirection};
 use bytes::Bytes;
 use nom::{
     bytes::complete::{tag, take_till1, take_until},
@@ -12,7 +12,6 @@ use nom::{
 use std::collections::HashMap;
 use std::str::{self, FromStr};
 use crate::sdp::attributes; // Import the attributes module itself
-use crate::sdp::attributes::MediaDirection; // Import MediaDirection specifically
 
 /// Parses a single SDP line into a key-value pair.
 /// Example: "v=0" -> Ok(("", ('v', "0")))

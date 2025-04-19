@@ -5,18 +5,22 @@
 
 // Core parsing modules
 mod common;
-pub mod headers; 
-pub mod message; // Make public if needed for IncrementalParser, ParseState
-pub mod multipart;
-pub mod request;
-pub mod response;
-pub mod uri; 
-pub mod utils;
+mod message;
+mod multipart;
+mod request;
+mod response;
+mod utils;
 
-// --- Remove ALL re-exports --- 
-// Other modules must use full paths, e.g.:
-// crate::parser::message::parse_message
-// crate::parser::headers::parse_via
+pub mod headers; 
+pub mod uri; 
+
+// --- Minimal Re-exports --- 
+pub use message::{parse_message, IncrementalParser, ParseState};
+pub use request::request_parser; 
+pub use response::response_parser;
+// All other uses should use full paths e.g. crate::parser::headers::...
+
+// Ensure no other pub use or pub mod lines exist in this file.
 
 // Re-export necessary top-level parsers
 pub use message::parse_message;
