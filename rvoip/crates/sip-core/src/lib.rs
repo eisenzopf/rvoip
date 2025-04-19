@@ -7,7 +7,7 @@ mod error;
 mod header;
 mod message;
 mod method;
-mod parser;
+pub mod parser;
 mod uri;
 mod version;
 

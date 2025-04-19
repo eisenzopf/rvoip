@@ -120,11 +120,11 @@ mod tests {
         assert_eq!(Method::from_str("BYE").unwrap(), Method::Bye);
         assert_eq!(Method::from_str("REGISTER").unwrap(), Method::Register);
         assert_eq!(Method::from_str("OPTIONS").unwrap(), Method::Options);
-        
+
         // Extension method
         let custom = Method::from_str("CUSTOM").unwrap();
         assert!(matches!(custom, Method::Extension(s) if s == "CUSTOM"));
-        
+
         // Empty method is invalid
         assert!(Method::from_str("").is_err());
     }
@@ -143,10 +143,10 @@ mod tests {
         assert!(Method::Invite.creates_dialog());
         assert!(Method::Subscribe.creates_dialog());
         assert!(!Method::Register.creates_dialog());
-        
+
         assert!(Method::Invite.requires_response());
         assert!(!Method::Ack.requires_response());
-        
+
         assert!(Method::Invite.is_standard());
         assert!(!Method::Extension("CUSTOM".to_string()).is_standard());
     }

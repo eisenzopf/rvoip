@@ -5,7 +5,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, line_ending, space0, space1},
-    combinator::{map, map_res, opt, recognize, value, verify},
+    combinator::{map, map_res, opt, recognize, verify},
     multi::{many0, many1, many_till, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     Err, IResult, Needed,
@@ -18,8 +18,11 @@ use crate::method::Method;
 use crate::uri::Uri;
 use crate::version::Version;
 
-use super::headers::parse_headers;
-use super::uri_parser::parse_uri;
+// Now use the new parser modules
+use super::headers::parse_header;
+use super::request::{request_parser, parse_request_line};
+use super::response::{response_parser, parse_response_line};
+use super::uri::parse_uri;
 use super::utils::crlf;
 
 /// Maximum length of a single line in a SIP message
@@ -62,6 +65,8 @@ pub struct IncrementalParser {
     headers: Vec<Header>,
     /// Message body
     body: Option<String>,
+    /// Debug mode for increased logging
+    debug_mode: bool,
 }
 
 impl IncrementalParser {
@@ -73,6 +78,19 @@ impl IncrementalParser {
             start_line: None,
             headers: Vec::new(),
             body: None,
+            debug_mode: false,
+        }
+    }
+    
+    /// Create a new incremental parser with debug mode enabled
+    pub fn new_with_debug() -> Self {
+        Self {
+            state: ParseState::WaitingForStartLine,
+            buffer: String::new(),
+            start_line: None,
+            headers: Vec::new(),
+            body: None,
+            debug_mode: true,
         }
     }
     
@@ -95,85 +113,232 @@ impl IncrementalParser {
         // Add data to the buffer
         self.buffer.push_str(data);
         
+        if self.debug_mode {
+            println!("IncrementalParser: Received chunk: {:?}", data);
+            println!("IncrementalParser: Current state: {:?}", self.state);
+            println!("IncrementalParser: Buffer now contains {} bytes", self.buffer.len());
+        }
+        
         match self.state {
             ParseState::WaitingForStartLine => {
-                // Try to find the start line
-                if let Some(idx) = self.buffer.find("\r\n") {
-                    if idx > MAX_LINE_LENGTH {
-                        self.state = ParseState::Failed(Error::LineTooLong(idx));
-                        return &self.state;
-                    }
-                    
-                    let start_line = self.buffer[..idx].to_string();
-                    self.start_line = Some(start_line);
-                    self.buffer.drain(..idx + 2);
-                    self.state = ParseState::ParsingHeaders;
-                    
-                    // Continue parsing headers
-                    return self.parse("");
+                // Try to find the start line, accepting either CRLF or just LF as line ending
+                let idx_crlf = self.buffer.find("\r\n");
+                let idx_lf = self.buffer.find("\n");
+                
+                // Determine which line ending was found first
+                let (idx, end_len) = match (idx_crlf, idx_lf) {
+                    (Some(crlf), Some(lf)) => {
+                        // Handle case where \n is part of \r\n
+                        if crlf + 1 == lf { (crlf, 2) } else if crlf < lf { (crlf, 2) } else { (lf, 1) }
+                    },
+                    (Some(crlf), None) => (crlf, 2),
+                    (None, Some(lf)) => (lf, 1),
+                    (None, None) => return &self.state,
+                };
+                
+                if idx > MAX_LINE_LENGTH {
+                    self.state = ParseState::Failed(Error::LineTooLong(idx));
+                    return &self.state;
                 }
+                
+                // Get the start line and remove it from the buffer
+                let start_line = self.buffer[..idx].trim().to_string();
+                self.start_line = Some(start_line);
+                self.buffer.drain(..idx + end_len);
+                
+                if self.debug_mode {
+                    println!("IncrementalParser: Found start line: {:?}", self.start_line);
+                    println!("IncrementalParser: Buffer size after removing start line: {}", self.buffer.len());
+                }
+                
+                self.state = ParseState::ParsingHeaders;
+                
+                // Continue parsing headers
+                return self.parse("");
             }
             ParseState::ParsingHeaders => {
-                // Try to find the end of the headers
-                if let Some(idx) = self.buffer.find("\r\n\r\n") {
-                    let headers_str = self.buffer[..idx + 2].to_string();
-                    self.buffer.drain(..idx + 4);
+                // Look for the end of headers (empty line, accepting either \r\n\r\n or \n\n or mixed formats)
+                // We need to handle multiple cases: \r\n\r\n, \n\n, \r\n\n, \n\r\n
+                let possible_endings = ["\r\n\r\n", "\n\n", "\r\n\n", "\n\r\n"];
+                
+                let mut min_idx = None;
+                let mut end_len = 0;
+                
+                for &ending in &possible_endings {
+                    if let Some(idx) = self.buffer.find(ending) {
+                        if min_idx.is_none() || idx < min_idx.unwrap() {
+                            min_idx = Some(idx);
+                            end_len = ending.len();
+                        }
+                    }
+                }
+                
+                if min_idx.is_none() {
+                    // Need more data - no complete header section found yet
+                    return &self.state;
+                }
+                
+                let idx = min_idx.unwrap();
+                
+                // Found end of headers
+                let header_section = self.buffer[..idx].to_string();
+                
+                // Save the buffer after headers for body processing
+                let body_start = idx + end_len;
+                let body_data = if body_start < self.buffer.len() {
+                    self.buffer[body_start..].to_string()
+                } else {
+                    String::new()
+                };
+                
+                // Clear the buffer
+                self.buffer.clear();
+                
+                if self.debug_mode {
+                    println!("IncrementalParser: Found end of headers at position {}", idx);
+                    println!("IncrementalParser: Header section:\n{}", header_section);
+                    println!("IncrementalParser: Body data initially available: {} bytes", body_data.len());
+                }
+                
+                // Parse the headers
+                let mut headers = Vec::new();
+                
+                // First normalize all line endings to LF
+                let normalized_lf = header_section.replace("\r\n", "\n");
+                
+                // Split into lines
+                let lines: Vec<&str> = normalized_lf.split('\n').collect();
+                
+                if self.debug_mode {
+                    println!("IncrementalParser: Processing {} header lines", lines.len());
+                }
+                
+                // Process headers with folding
+                let mut i = 0;
+                while i < lines.len() {
+                    let line = lines[i];
                     
-                    // Parse headers
-                    match parse_headers(&headers_str) {
-                        Ok(headers) => {
-                            if headers.len() > MAX_HEADER_COUNT {
-                                self.state = ParseState::Failed(Error::TooManyHeaders(headers.len()));
-                                return &self.state;
-                            }
-                            
-                            self.headers = headers;
-                            
-                            // Check for Content-Length header
-                            let content_length = self.get_content_length().unwrap_or(0);
-                            
-                            if content_length > MAX_BODY_SIZE {
-                                self.state = ParseState::Failed(Error::BodyTooLarge(content_length));
-                                return &self.state;
-                            }
-                            
-                            if content_length == 0 {
-                                // No body, message is complete
-                                self.complete_message();
-                            } else {
-                                // Has body, need to read more data
-                                self.state = ParseState::ParsingBody {
-                                    content_length,
-                                    bytes_parsed: self.buffer.len(),
-                                };
-                                
-                                // Continue parsing the body if there's data already in the buffer
-                                if !self.buffer.is_empty() {
-                                    return self.parse("");
+                    if line.is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                    
+                    // Check if this is a header line (not a continuation)
+                    if !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+                        let mut header_value = line.to_string();
+                        
+                        // Look ahead for folded lines (continuations)
+                        let mut j = i + 1;
+                        while j < lines.len() {
+                            if lines[j].starts_with(' ') || lines[j].starts_with('\t') {
+                                // This is a continuation - append it with proper spacing
+                                if !header_value.ends_with(' ') {
+                                    header_value.push(' ');
                                 }
+                                header_value.push_str(lines[j].trim());
+                                j += 1;
+                            } else {
+                                // Not a continuation
+                                break;
                             }
                         }
-                        Err(e) => {
-                            self.state = ParseState::Failed(e);
+                        
+                        // Add CRLF for header parsing
+                        let header_str = format!("{}\r\n", header_value);
+                        
+                        // Parse the header
+                        if let Ok((_, header)) = parse_header(&header_str) {
+                            if self.debug_mode {
+                                println!("IncrementalParser: Parsed header: {}", header_value);
+                            }
+                            headers.push(header);
+                        } else if self.debug_mode {
+                            println!("IncrementalParser: Failed to parse header: {}", header_value);
                         }
+                        
+                        // Move to the next line after processing any continuations
+                        i = j;
+                    } else {
+                        // Not a valid header, skip it
+                        i += 1;
+                    }
+                }
+                
+                if self.debug_mode {
+                    println!("IncrementalParser: Parsed {} headers", headers.len());
+                    for header in &headers {
+                        println!("  {} = {}", header.name, header.value);
+                    }
+                }
+                
+                // Store the headers
+                self.headers = headers;
+                
+                // Check Content-Length to determine if we have a body
+                let content_length = self.get_content_length().unwrap_or(0);
+                
+                if content_length > MAX_BODY_SIZE {
+                    self.state = ParseState::Failed(Error::BodyTooLarge(content_length));
+                    return &self.state;
+                }
+                
+                if content_length == 0 {
+                    // No body, message is complete
+                    self.complete_message();
+                    return &self.state;
+                } else {
+                    // Has body - add any existing body data to the buffer
+                    self.buffer = body_data;
+                    
+                    // Set state to parsing body
+                    self.state = ParseState::ParsingBody {
+                        content_length,
+                        bytes_parsed: 0,
+                    };
+                    
+                    // Continue parsing the body if there's data already in the buffer
+                    if !self.buffer.is_empty() {
+                        return self.parse("");
                     }
                 }
             }
             ParseState::ParsingBody { content_length, bytes_parsed } => {
-                let new_bytes_parsed = bytes_parsed + self.buffer.len();
+                let buffer_len = self.buffer.len();
+                let total_bytes = bytes_parsed + buffer_len;
                 
-                if new_bytes_parsed >= content_length {
+                if self.debug_mode {
+                    println!("IncrementalParser: Parsing body - have {} bytes, need {}", total_bytes, content_length);
+                }
+                
+                if total_bytes >= content_length {
                     // We have the entire body
-                    let needed = content_length.saturating_sub(bytes_parsed);
-                    let body = self.buffer.drain(..needed).collect::<String>();
+                    let needed = content_length - bytes_parsed;
                     
-                    self.body = Some(body);
-                    self.complete_message();
+                    if self.debug_mode {
+                        println!("IncrementalParser: Got complete body, needed {} bytes", needed);
+                    }
+                    
+                    if needed <= buffer_len {
+                        // Preserve the exact body content without modifying line endings
+                        let body = self.buffer.drain(..needed).collect::<String>();
+                        self.body = Some(body);
+                        
+                        if self.debug_mode {
+                            if let Some(body) = &self.body {
+                                println!("IncrementalParser: Body extracted, length: {}", body.len());
+                                println!("IncrementalParser: Body content: {}", body);
+                            }
+                        }
+                        
+                        self.complete_message();
+                    } else {
+                        self.state = ParseState::Failed(Error::Parser(format!("Content-Length mismatch")));
+                    }
                 } else {
                     // Still need more data
                     self.state = ParseState::ParsingBody {
                         content_length,
-                        bytes_parsed: new_bytes_parsed,
+                        bytes_parsed: total_bytes,
                     };
                 }
             }
@@ -208,7 +373,9 @@ impl IncrementalParser {
                     Ok((_, (version, status, reason))) => {
                         // Create response using the correct constructor
                         let mut response = Response::new(status);
+                        if !reason.is_empty() {
                         response = response.with_reason(reason);
+                        }
                         
                         // Add headers
                         for header in &self.headers {
@@ -233,6 +400,7 @@ impl IncrementalParser {
                     Ok((_, (method, uri, version))) => {
                         // Create request using the correct constructor
                         let mut request = Request::new(method, uri);
+                        request.version = version;
                         
                         // Add headers
                         for header in &self.headers {
@@ -269,147 +437,74 @@ impl IncrementalParser {
     }
 }
 
-/// Parse a SIP message from a string
-pub fn parse_message(input: &str) -> Result<Message> {
-    // Try to parse as a request first
-    if let Ok((_, message)) = request_parser(input) {
+/// Parse a SIP message from a string or bytes
+pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
+    // Convert input to string if needed
+    let input_str = match std::str::from_utf8(input.as_ref()) {
+        Ok(s) => s,
+        Err(e) => return Err(Error::Parser(format!("Invalid UTF-8 data: {}", e))),
+    };
+    
+    // Check if input is empty
+    if input_str.trim().is_empty() {
+        return Err(Error::Parser("Empty message".to_string()));
+    }
+    
+    // Try to parse with incremental parser first for more accurate body handling
+    let mut parser = IncrementalParser::new();
+    let state = parser.parse(input_str);
+    
+    match state {
+        ParseState::Complete(_) => {
+            if let Some(message) = parser.take_message() {
+                return Ok(message);
+            }
+        },
+        ParseState::Failed(error) => {
+            // If the incremental parser explicitly failed, report that error
+            return Err(error.clone());
+        },
+        _ => {
+            // If not complete yet, try the regular parsers
+        }
+    }
+    
+    // Otherwise try the regular parsers (calling the new modules)
+    if let Ok((_, message)) = request_parser(input_str) {
         return Ok(message);
     }
     
-    // Try to parse as a response
-    if let Ok((_, message)) = response_parser(input) {
+    if let Ok((_, message)) = response_parser(input_str) {
         return Ok(message);
     }
     
+    // If both failed, try normalizing the line endings and try again
+    let normalized_input = input_str.replace("\r\n", "\n").replace("\n", "\r\n");
+    
+    // Ensure message ends with at least one CRLF
+    let normalized_input = if !normalized_input.ends_with("\r\n") {
+        format!("{}\r\n", normalized_input)
+    } else {
+        normalized_input
+    };
+    
+    // Try again with normalized input
+    if let Ok((_, message)) = request_parser(&normalized_input) {
+        return Ok(message);
+    }
+    
+    if let Ok((_, message)) = response_parser(&normalized_input) {
+        return Ok(message);
+    }
+    
+    // If we get here, all parsing attempts failed
     Err(Error::Parser("Failed to parse as request or response".to_string()))
 }
 
-/// Parse a SIP message from bytes
+/// Parse a SIP message from bytes (legacy API, kept for compatibility)
 pub fn parse_message_bytes(input: &[u8]) -> Result<Message> {
-    // Convert bytes to string for parsing
-    match std::str::from_utf8(input) {
-        Ok(text) => parse_message(text),
-        Err(e) => Err(Error::Parser(format!("Invalid UTF-8 data: {}", e))),
-    }
-}
-
-/// Parser for a SIP request line
-fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> {
-    let (input, method) = map_res(
-        take_while1(|c: char| c.is_alphabetic() || c == '_'),
-        |s: &str| Method::from_str(s)
-    )(input)?;
-    
-    let (input, _) = space1(input)?;
-    
-    let (input, uri_str) = take_till(|c| c == ' ')(input)?;
-    let uri = match parse_uri(uri_str) {
-        Ok(uri) => uri,
-        Err(e) => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
-    };
-    
-    let (input, _) = space1(input)?;
-    
-    let (input, version) = map_res(
-        take_till(|c| c == '\r' || c == '\n'),
-        |s: &str| Version::from_str(s)
-    )(input)?;
-    
-    Ok((input, (method, uri, version)))
-}
-
-/// Parser for a SIP response line
-fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, String)> {
-    let (input, version) = map_res(
-        take_till(|c| c == ' '),
-        |s: &str| Version::from_str(s)
-    )(input)?;
-    
-    let (input, _) = space1(input)?;
-    
-    // First map to u16, then handle potential errors when creating StatusCode
-    let (input, status_code) = map_res(
-        digit1,
-        |s: &str| s.parse::<u16>()
-    )(input)?;
-    
-    // Convert u16 to StatusCode
-    let status = match StatusCode::from_u16(status_code) {
-        Ok(status) => status,
-        Err(_) => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
-    };
-    
-    let (input, _) = space1(input)?;
-    
-    let (input, reason) = map(
-        take_till(|c| c == '\r' || c == '\n'),
-        |s: &str| s.to_string()
-    )(input)?;
-    
-    Ok((input, (version, status, reason)))
-}
-
-/// Parser for a complete SIP request
-fn request_parser(input: &str) -> IResult<&str, Message> {
-    // Parse the request line
-    let (input, (method, uri, version)) = terminated(
-        parse_request_line,
-        crlf
-    )(input)?;
-    
-    // Parse headers
-    let (input, headers) = terminated(
-        many0(super::headers::header_parser),
-        crlf
-    )(input)?;
-    
-    // Create the request
-    let mut request = Request::new(method, uri);
-    
-    // Add headers
-    for header in headers {
-        request = request.with_header(header);
-    }
-    
-    // Parse the body if present
-    let body = input.trim_end_matches(|c| c == '\r' || c == '\n');
-    if !body.is_empty() {
-        request = request.with_body(body.to_string());
-    }
-    
-    Ok(("", Message::Request(request)))
-}
-
-/// Parser for a complete SIP response
-fn response_parser(input: &str) -> IResult<&str, Message> {
-    // Parse the response line
-    let (input, (version, status, reason)) = terminated(
-        parse_response_line,
-        crlf
-    )(input)?;
-    
-    // Parse headers
-    let (input, headers) = terminated(
-        many0(super::headers::header_parser),
-        crlf
-    )(input)?;
-    
-    // Create the response
-    let mut response = Response::new(status)
-        .with_reason(reason);
-    
-    // Add headers
-    for header in headers {
-        response = response.with_header(header);
-    }
-    
-    // Parse the body if present
-    let body = input.trim_end_matches(|c| c == '\r' || c == '\n');
-    if !body.is_empty() {
-        response = response.with_body(body.to_string());
-    }
-    
-    Ok(("", Message::Response(response)))
+    // Use the new implementation
+    parse_message(input)
 }
 
 #[cfg(test)]

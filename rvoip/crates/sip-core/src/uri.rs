@@ -14,6 +14,7 @@ use nom::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::types::Param; // Import the Param enum
 
 /// SIP URI schema types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -147,7 +148,7 @@ pub struct Uri {
     /// Port (optional)
     pub port: Option<u16>,
     /// URI parameters (;key=value or ;key)
-    pub parameters: HashMap<String, Option<String>>,
+    pub parameters: Vec<Param>, // Changed from HashMap<String, Option<String>>
     /// URI headers (?key=value)
     pub headers: HashMap<String, String>,
 }
@@ -161,7 +162,7 @@ impl Uri {
             password: None,
             host,
             port: None,
-            parameters: HashMap::new(),
+            parameters: Vec::new(), // Initialize as Vec
             headers: HashMap::new(),
         }
     }
@@ -215,11 +216,9 @@ impl Uri {
     }
 
     /// Add a parameter to the URI
-    pub fn with_parameter(mut self, key: impl Into<String>, value: Option<impl Into<String>>) -> Self {
-        self.parameters.insert(
-            key.into(),
-            value.map(|v| v.into()),
-        );
+    pub fn with_parameter(mut self, param: Param) -> Self {
+        // TODO: Handle replacing existing parameters if needed?
+        self.parameters.push(param);
         self
     }
 
@@ -231,15 +230,18 @@ impl Uri {
 
     /// Returns the transport parameter if present
     pub fn transport(&self) -> Option<&str> {
-        self.parameters.get("transport").and_then(|t| t.as_deref())
+        self.parameters.iter().find_map(|p| match p {
+            Param::Transport(val) => Some(val.as_str()),
+            _ => None,
+        })
     }
 
     /// Returns the user=phone parameter if present
     pub fn is_phone_number(&self) -> bool {
-        self.parameters.get("user")
-            .and_then(|u| u.as_deref())
-            .map(|u| u == "phone")
-            .unwrap_or(false)
+        self.parameters.iter().any(|p| match p {
+            Param::User(val) if val == "phone" => true,
+            _ => false,
+        })
     }
 }
 
@@ -263,16 +265,14 @@ impl fmt::Display for Uri {
             write!(f, ":{}", port)?;
         }
 
-        for (key, value) in &self.parameters {
-            write!(f, ";{}", escape_param(key))?;
-            if let Some(val) = value {
-                write!(f, "={}", escape_param(val))?;
-            }
+        // Iterate over Vec<Param> for display
+        for param in &self.parameters {
+            write!(f, "{}", param)?;
         }
 
         if !self.headers.is_empty() {
             write!(f, "?")?;
-            
+
             let mut first = true;
             for (key, value) in &self.headers {
                 if !first {
@@ -329,7 +329,7 @@ fn ipv4_parser(input: &str) -> IResult<&str, Host> {
         take_while1(|c: char| c.is_ascii_digit() || c == '.'),
         |s: &str| is_valid_ipv4(s)
     );
-    
+
     map(ip_parser, |s: &str| Host::IPv4(s.to_string()))(input)
 }
 
@@ -340,14 +340,14 @@ fn ipv6_parser(input: &str) -> IResult<&str, Host> {
         take_while1(|c: char| c.is_ascii_hexdigit() || c == ':' || c == '.'),
         char(']')
     );
-    
+
     map(ip_parser, |s: &str| Host::IPv6(s.to_string()))(input)
 }
 
 // Parse domain name
 fn domain_parser(input: &str) -> IResult<&str, Host> {
     let domain_parser = take_while1(|c: char| c.is_alphanumeric() || c == '.' || c == '-' || c == '+');
-    
+
     map(domain_parser, |s: &str| Host::Domain(s.to_string()))(input)
 }
 
@@ -368,33 +368,8 @@ fn port_parser(input: &str) -> IResult<&str, u16> {
     )(input)
 }
 
-// Parse a single parameter
-fn parameter_parser(input: &str) -> IResult<&str, (String, Option<String>)> {
-    preceded(
-        char(';'),
-        pair(
-            map(
-                take_till(|c| c == '=' || c == ';' || c == '?'),
-                |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-            ),
-            opt(preceded(
-                char('='),
-                map(
-                    take_till(|c| c == ';' || c == '?'),
-                    |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-                )
-            ))
-        )
-    )(input)
-}
-
-// Parse all parameters
-fn parameters_parser(input: &str) -> IResult<&str, HashMap<String, Option<String>>> {
-    map(
-        many0(parameter_parser),
-        |params| params.into_iter().collect()
-    )(input)
-}
+// Note: parameter_parser and parameters_parser are now in parser/uri.rs
+// We might need to import them or adjust the uri_parser below
 
 // Parse a single header
 fn header_parser(input: &str) -> IResult<&str, (String, String)> {
@@ -423,29 +398,31 @@ fn headers_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
 }
 
 // Parser for a complete URI
+// Note: Assumes parameter_parser and parameters_parser are available
+// We need to import them from parser::uri
 fn uri_parser(input: &str) -> IResult<&str, Uri> {
+    use crate::parser::uri::parameters_parser; // Import the refactored parser
+
     let (input, scheme) = terminated(scheme_parser, char(':'))(input)?;
     let (input, (user, password)) = userinfo_parser(input)?;
     let (input, host) = host_parser(input)?;
     let (input, port) = opt(port_parser)(input)?;
-    
-    let (input, parameters) = opt(parameters_parser)(input)?;
-    let (input, headers) = opt(headers_parser)(input)?;
-    
+
+    let (input, parameters_vec) = opt(parameters_parser)(input)?;
+    let (input, headers_map) = opt(headers_parser)(input)?;
+
     let mut uri = Uri::new(scheme, host);
-    
+
     uri.user = user;
     uri.password = password;
     uri.port = port;
-    
-    if let Some(params) = parameters {
-        uri.parameters = params;
-    }
-    
-    if let Some(hdrs) = headers {
+
+    uri.parameters = parameters_vec.unwrap_or_default();
+
+    if let Some(hdrs) = headers_map {
         uri.headers = hdrs;
     }
-    
+
     Ok((input, uri))
 }
 
@@ -460,13 +437,15 @@ impl FromStr for Uri {
     }
 }
 
+// --- Helper functions (escape/unescape, validation) ---
+
 /// Escape URI user info component according to RFC 3261
 fn escape_user_info(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3); // Worst case: all chars need escaping (×3)
-    
+
     for c in s.chars() {
         match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | 
+            'a'..='z' | 'A'..='Z' | '0'..='9' |
             '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' => {
                 result.push(c);
             },
@@ -479,7 +458,7 @@ fn escape_user_info(s: &str) -> String {
             }
         }
     }
-    
+
     result
 }
 
@@ -487,11 +466,11 @@ fn escape_user_info(s: &str) -> String {
 fn unescape_user_info(s: &str) -> Result<String> {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '%' {
             let mut hex = String::with_capacity(2);
-            
+
             if let Some(h1) = chars.next() {
                 hex.push(h1);
             } else {
@@ -500,7 +479,7 @@ fn unescape_user_info(s: &str) -> Result<String> {
                     message: "Incomplete percent encoding".to_string()
                 });
             }
-            
+
             if let Some(h2) = chars.next() {
                 hex.push(h2);
             } else {
@@ -509,7 +488,7 @@ fn unescape_user_info(s: &str) -> Result<String> {
                     message: "Incomplete percent encoding".to_string()
                 });
             }
-            
+
             if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                 result.push(byte as char);
             } else {
@@ -522,17 +501,17 @@ fn unescape_user_info(s: &str) -> Result<String> {
             result.push(c);
         }
     }
-    
+
     Ok(result)
 }
 
 /// Escape URI parameters and headers
 fn escape_param(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
-    
+
     for c in s.chars() {
         match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | 
+            'a'..='z' | 'A'..='Z' | '0'..='9' |
             '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | '+' => {
                 result.push(c);
             },
@@ -545,7 +524,7 @@ fn escape_param(s: &str) -> String {
             }
         }
     }
-    
+
     result
 }
 
@@ -557,18 +536,18 @@ fn unescape_param(s: &str) -> Result<String> {
 /// Check if a string is a valid IPv4 address
 fn is_valid_ipv4(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
-    
+
     if parts.len() != 4 {
         return false;
     }
-    
+
     for part in parts {
         match part.parse::<u8>() {
             Ok(_) => continue,
             Err(_) => return false,
         }
     }
-    
+
     true
 }
 
@@ -576,39 +555,39 @@ fn is_valid_ipv4(s: &str) -> bool {
 fn is_valid_ipv6(s: &str) -> bool {
     // Check for basic IPv6 format
     let parts = s.split(':').collect::<Vec<&str>>();
-    
+
     // IPv6 has 8 parts max, or fewer if contains ::
     if parts.len() > 8 {
         return false;
     }
-    
+
     // Check for empty parts (::)
     let empty_parts = parts.iter().filter(|p| p.is_empty()).count();
-    
+
     // Handle :: (consecutive colons)
     if empty_parts > 0 {
         if empty_parts > 2 || (empty_parts == 2 && !s.contains("::")) {
             return false;
         }
     }
-    
+
     // Validate each part
     for part in parts {
         if part.is_empty() {
             continue; // Empty part due to ::
         }
-        
+
         // Check if it's an IPv4 address in the last part (IPv4-mapped IPv6)
         if part.contains('.') {
             return is_valid_ipv4(part);
         }
-        
+
         // Each part should be a valid hex number with at most 4 digits
         if part.len() > 4 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
             return false;
         }
     }
-    
+
     true
 }
 
@@ -625,7 +604,7 @@ mod tests {
         assert!(uri.port.is_none());
         assert!(uri.parameters.is_empty());
         assert!(uri.headers.is_empty());
-        
+
         assert_eq!(uri.to_string(), "sip:example.com");
     }
 
@@ -634,22 +613,23 @@ mod tests {
         let uri = Uri::sip("example.com")
             .with_user("alice")
             .with_port(5060)
-            .with_parameter("transport", Some("tcp"))
-            .with_parameter("method", Some("INVITE"))
+            .with_parameter(Param::Transport("tcp".to_string())) // Use Param enum
+            .with_parameter(Param::Method("INVITE".to_string())) // Use Param enum
             .with_header("subject", "Project X");
-            
+
         assert_eq!(uri.scheme, Scheme::Sip);
         assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "example.com"));
         assert_eq!(uri.user, Some("alice".to_string()));
         assert_eq!(uri.port, Some(5060));
-        assert_eq!(uri.parameters.get("transport").unwrap(), &Some("tcp".to_string()));
+        assert_eq!(uri.transport(), Some("tcp")); // Use helper method
+        assert!(uri.parameters.contains(&Param::Method("INVITE".to_string())));
         assert_eq!(uri.headers.get("subject").unwrap(), "Project X");
-        
+
         // The order of parameters and headers in the string representation may vary
         let s = uri.to_string();
-        assert!(s.starts_with("sip:alice@example.com:5060;"));
-        assert!(s.contains("transport=tcp"));
-        assert!(s.contains("method=INVITE"));
+        assert!(s.starts_with("sip:alice@example.com:5060"));
+        assert!(s.contains(";transport=tcp"));
+        assert!(s.contains(";method=INVITE"));
         assert!(s.contains("?subject=Project%20X") || s.contains("&subject=Project%20X"));
     }
 
@@ -658,10 +638,10 @@ mod tests {
         let uri = Uri::sip_ipv4("192.168.1.1");
         assert_eq!(uri.scheme, Scheme::Sip);
         assert!(matches!(uri.host, Host::IPv4(ref ip) if ip == "192.168.1.1"));
-        
+
         let uri_str = uri.to_string();
         assert_eq!(uri_str, "sip:192.168.1.1");
-        
+
         let parsed = Uri::from_str(&uri_str).unwrap();
         assert!(matches!(parsed.host, Host::IPv4(ref ip) if ip == "192.168.1.1"));
     }
@@ -671,10 +651,10 @@ mod tests {
         let uri = Uri::sip_ipv6("2001:db8::1");
         assert_eq!(uri.scheme, Scheme::Sip);
         assert!(matches!(uri.host, Host::IPv6(ref ip) if ip == "2001:db8::1"));
-        
+
         let uri_str = uri.to_string();
         assert_eq!(uri_str, "sip:[2001:db8::1]");
-        
+
         let parsed = Uri::from_str(&uri_str).unwrap();
         assert!(matches!(parsed.host, Host::IPv6(ref ip) if ip == "2001:db8::1"));
     }
@@ -685,7 +665,7 @@ mod tests {
         assert_eq!(uri.scheme, Scheme::Sip);
         assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "example.com"));
         assert!(uri.user.is_none());
-        
+
         let uri = Uri::from_str("sips:secure.example.com:5061").unwrap();
         assert_eq!(uri.scheme, Scheme::Sips);
         assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "secure.example.com"));
@@ -698,7 +678,8 @@ mod tests {
         assert_eq!(uri.scheme, Scheme::Sip);
         assert_eq!(uri.user, Some("alice".to_string()));
         assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "example.com"));
-        assert_eq!(uri.parameters.get("transport").unwrap(), &Some("tcp".to_string()));
+        assert_eq!(uri.transport(), Some("tcp")); // Use helper
+        assert!(uri.parameters.contains(&Param::Transport("tcp".to_string())));
         assert_eq!(uri.headers.get("subject").unwrap(), "Meeting");
     }
 
@@ -707,25 +688,25 @@ mod tests {
         let uri = Uri::tel("+1-212-555-0123");
         assert_eq!(uri.scheme, Scheme::Tel);
         assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "+1-212-555-0123"));
-        
+
         let uri = Uri::from_str("tel:+1-212-555-0123").unwrap();
         assert_eq!(uri.scheme, Scheme::Tel);
-        assert!(matches!(uri.host, Host::Domain(ref domain) if domain == "+1-212-555-0123"));
+        assert!(matches!(parsed.host, Host::Domain(ref domain) if domain == "+1-212-555-0123"));
     }
 
     #[test]
     fn test_escaped_uri() {
         let uri = Uri::sip("example.com")
             .with_user("user with spaces")
-            .with_parameter("param", Some("value with spaces"));
-        
+            .with_parameter(Param::Other("param".to_string(), Some("value with spaces".to_string())));
+
         let uri_str = uri.to_string();
         assert!(uri_str.contains("user%20with%20spaces@"));
         assert!(uri_str.contains("param=value%20with%20spaces"));
-        
+
         let parsed = Uri::from_str(&uri_str).unwrap();
         assert_eq!(parsed.user, Some("user with spaces".to_string()));
-        assert_eq!(parsed.parameters.get("param").unwrap(), &Some("value with spaces".to_string()));
+        assert!(parsed.parameters.contains(&Param::Other("param".to_string(), Some("value with spaces".to_string()))));
     }
 
     #[test]
@@ -734,7 +715,7 @@ mod tests {
         assert!(is_valid_ipv4("127.0.0.1"));
         assert!(is_valid_ipv4("255.255.255.255"));
         assert!(is_valid_ipv4("0.0.0.0"));
-        
+
         assert!(!is_valid_ipv4("192.168.1"));
         assert!(!is_valid_ipv4("192.168.1.256"));
         assert!(!is_valid_ipv4("192.168.1.1.1"));
@@ -747,7 +728,7 @@ mod tests {
         assert!(is_valid_ipv6("::1"));
         assert!(is_valid_ipv6("2001:db8:0:0:0:0:0:1"));
         assert!(is_valid_ipv6("2001:db8::192.168.1.1")); // IPv4-mapped
-        
+
         assert!(!is_valid_ipv6("2001:db8:::1")); // too many colons
         assert!(!is_valid_ipv6("2001:db8::1::1")); // multiple ::
         assert!(!is_valid_ipv6("2001:db8:gggg::1")); // invalid hex
