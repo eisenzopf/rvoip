@@ -7,6 +7,8 @@ use nom::{
     combinator::{map, map_res, opt, recognize, verify},
     multi::{many0, many1, many_till, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    bytes::complete::take,
+    combinator::rest,
     Err, IResult, Needed,
 };
 
@@ -47,38 +49,36 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
     Ok((input, (version, status, reason)))
 }
 
-/// Parser for a complete SIP response, mapped to Message enum
-pub fn response_parser(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
-    map(
-        response_parser_inner, 
-        |((version, status, reason), headers, body)| {
-            let response = Response {
-                version,
-                status,
-                reason: if reason.is_empty() { None } else { Some(reason) },
-                headers,
-                body,
-            };
-            Message::Response(response)
-        }
-    )(input)
-} 
-
-// Change return type to tuple of components
-fn response_parser_inner(input: &str) -> IResult<&str, ((Version, StatusCode, String), Vec<Header>, Bytes), nom::error::Error<&str>> {
-    // Use tuple combinator
+/// Helper to parse headers and body
+fn parse_headers_and_body(input: &str) -> IResult<&str, (Vec<Header>, Bytes), nom::error::Error<&str>> {
     map(
         tuple((
-            // 1. Parse start line and consume CRLF
-            terminated(parse_response_line, super::utils::crlf),
-            // 2. Parse headers and consume CRLF
             terminated(many0(super::headers::header_parser), super::utils::crlf),
-            // 3. Take the rest as the body (&str)
             rest
         )),
-        // Map the resulting tuple ((Version, StatusCode, String), Vec<Header>, &str) to include owned Bytes
-        |(start_line_components, headers, body_str)| {
-            (start_line_components, headers, Bytes::from(body_str))
-        }
+        |(headers, body_str)| (headers, Bytes::from(body_str))
     )(input)
+}
+
+/// Top-level parser for a complete SIP response
+pub fn response_parser(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
+    // 1. Parse the start line and consume CRLF
+    let (rest_after_start_line, (version, status, reason)) = 
+        terminated(parse_response_line, super::utils::crlf)(input)?;
+
+    // 2. Parse headers and body from the rest of the input
+    let (remaining_input_after_all, (headers, body)) = 
+        parse_headers_and_body(rest_after_start_line)?;
+
+    // 3. Construct the Response (all components are now owned)
+    let response = Response {
+        version,
+        status,
+        reason: if reason.is_empty() { None } else { Some(reason) },
+        headers,
+        body,
+    };
+    
+    // 4. Wrap in Message enum
+    Ok((remaining_input_after_all, Message::Response(response)))
 } 

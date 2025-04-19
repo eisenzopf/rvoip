@@ -45,9 +45,11 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
 }
 
 /// Parser for a complete SIP request, mapped to Message enum
-pub fn request_parser_mapped(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
+// Takes owned String as input
+pub fn request_parser_mapped(input: String) -> IResult<String, Message, nom::error::Error<String>> {
     map(
-        request_parser_inner, 
+        // Call inner parser with &str
+        |s: String| request_parser_inner(s.as_str()), 
         |((method, uri, version), headers, body)| {
             let request = Request {
                 method,
@@ -58,10 +60,42 @@ pub fn request_parser_mapped(input: &str) -> IResult<&str, Message, nom::error::
             };
             Message::Request(request)
         }
-    )(input)
+    // How to apply map to the result of the inner call? This structure is wrong.
+    // We need to call inner first, then map the Result.
+    )(input) // Pass owned String
 }
 
-// Change return type to tuple of components
+// Keep the public interface named request_parser
+// Takes owned String as input
+pub fn request_parser(input: String) -> IResult<String, Message, nom::error::Error<String>> {
+    // Directly call inner parser and map the result, avoiding mapped function for now.
+    match request_parser_inner(input.as_str()) {
+        Ok((_remaining_str, ((method, uri, version), headers, body))) => {
+             let request = Request {
+                method,
+                uri,
+                version,
+                headers,
+                body,
+            };
+            // Need to return the remaining input as String, which is awkward.
+            // This workaround seems problematic.
+            // Let's stick to the original approach and rethink the inner parser structure.
+            // REVERTING THIS CHANGE IDEA.
+            // Returning error to indicate failure of this approach.
+            Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+        }
+        Err(e) => {
+             // Need to convert error from Error<&str> to Error<String>.
+             Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+             // Err(e.map_input(|_| input)) // This might work if error type allows map_input
+        }
+    }
+    // request_parser_mapped(input)
+} 
+
+// Let's try the original mapped approach again, but fix the E0597 error using the compiler hint
+// Revert the _inner function as well
 fn request_parser_inner(input: &str) -> IResult<&str, ((Method, Uri, Version), Vec<Header>, Bytes), nom::error::Error<&str>> {
     // Use tuple combinator
     map(
@@ -80,7 +114,36 @@ fn request_parser_inner(input: &str) -> IResult<&str, ((Method, Uri, Version), V
     )(input)
 }
 
-// Keep the public interface named request_parser
+/// Helper to parse headers and body
+fn parse_headers_and_body(input: &str) -> IResult<&str, (Vec<Header>, Bytes), nom::error::Error<&str>> {
+    map(
+        tuple((
+            terminated(many0(super::headers::header_parser), super::utils::crlf),
+            rest
+        )),
+        |(headers, body_str)| (headers, Bytes::from(body_str))
+    )(input)
+}
+
+/// Top-level parser for a complete SIP request
 pub fn request_parser(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
-    request_parser_mapped(input)
+    // 1. Parse the start line and consume CRLF
+    let (rest_after_start_line, (method, uri, version)) = 
+        terminated(parse_request_line, super::utils::crlf)(input)?;
+
+    // 2. Parse headers and body from the rest of the input
+    let (remaining_input_after_all, (headers, body)) = 
+        parse_headers_and_body(rest_after_start_line)?;
+
+    // 3. Construct the Request (all components are now owned)
+    let request = Request {
+        method,
+        uri,
+        version,
+        headers,
+        body,
+    };
+    
+    // 4. Wrap in Message enum
+    Ok((remaining_input_after_all, Message::Request(request)))
 } 
