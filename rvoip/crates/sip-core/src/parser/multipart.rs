@@ -17,7 +17,7 @@ use bytes::Bytes;
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue}; // Use core Header type
 use crate::types::sdp::SdpSession; // Placeholder for parsed SDP
-use crate::types::multipart::{MimePart, ParsedBody, MultipartBody}; // Import multipart types
+// use crate::types::multipart::{MimePart, ParsedBody, MultipartBody}; // Import multipart types -> Removed, defined locally
 use crate::parser::headers::header_parser; // Use absolute path
 
 /// Represents potentially parsed body content types.

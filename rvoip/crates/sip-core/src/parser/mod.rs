@@ -6,7 +6,7 @@
 // Core parsing modules
 mod common;
 pub mod headers;
-mod message;
+pub mod message;
 pub mod multipart;
 mod request;
 mod response;

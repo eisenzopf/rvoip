@@ -42,13 +42,17 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
     Ok((input, (method, uri, version)))
 }
 
-/// Parser for a complete SIP request
-pub fn request_parser(input: &str) -> IResult<&str, Message> {
-    // Parse the request line
-    let (input, (method, uri, version)) = parse_request_line(input)?;
-    let (input, _) = super::utils::crlf(input)?; // Consume CRLF explicitly
+/// Parser for a complete SIP request, mapped to Message enum
+pub fn request_parser_mapped(input: &str) -> IResult<&str, Message> {
+    map(request_parser_inner, Message::Request)(input)
+}
 
-    // Parse headers
+// Rename original parser to avoid direct recursion if mapping fails
+fn request_parser_inner(input: &str) -> IResult<&str, Request> {
+    // Parse the request line and consume the following CRLF
+    let (input, (method, uri, version)) = terminated(parse_request_line, super::utils::crlf)(input)?;
+
+    // Parse headers using the remaining input
     let (input, headers) = terminated(
         many0(super::headers::header_parser),
         super::utils::crlf
@@ -71,5 +75,10 @@ pub fn request_parser(input: &str) -> IResult<&str, Message> {
         request.body = input.into();
     }
 
-    Ok(("", Message::Request(request)))
+    Ok(("", request))
+}
+
+// Keep the public interface named request_parser
+pub fn request_parser(input: &str) -> IResult<&str, Message> {
+    request_parser_mapped(input)
 } 

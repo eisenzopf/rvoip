@@ -473,6 +473,10 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
         ParseState::Complete(_) => {
             if let Some(message) = parser.take_message() {
                 return Ok(message);
+            } else {
+                // This case should ideally not happen if state is Complete,
+                // but return an error to satisfy the compiler.
+                return Err(Error::Parser("Internal parser error: Complete state with no message".to_string()));
             }
         },
         ParseState::Failed(error) => {
@@ -480,40 +484,12 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
             return Err(error.clone());
         },
         _ => {
-            // If not complete yet, try the regular parsers
+            // If we get here, incremental parser didn't complete and didn't explicitly fail,
+            // or it failed and we already returned the error.
+            // Return a generic error if no message was produced.
+            Err(Error::Parser("Failed to parse message using incremental parser".to_string()))
         }
     }
-    
-    // Otherwise try the regular parsers (calling the new modules)
-    if let Ok((_, message)) = parse_request_line(input_str) {
-        return Ok(message);
-    }
-    
-    if let Ok((_, message)) = parse_response_line(input_str) {
-        return Ok(message);
-    }
-    
-    // If both failed, try normalizing the line endings and try again
-    let normalized_input = input_str.replace("\r\n", "\n").replace("\n", "\r\n");
-    
-    // Ensure message ends with at least one CRLF
-    let normalized_input = if !normalized_input.ends_with("\r\n") {
-        format!("{}\r\n", normalized_input)
-    } else {
-        normalized_input
-    };
-    
-    // Try again with normalized input
-    if let Ok((_, message)) = parse_request_line(&normalized_input) {
-        return Ok(message);
-    }
-    
-    if let Ok((_, message)) = parse_response_line(&normalized_input) {
-        return Ok(message);
-    }
-    
-    // If we get here, all parsing attempts failed
-    Err(Error::Parser("Failed to parse as request or response".to_string()))
 }
 
 /// Parse a SIP message from bytes (legacy API, kept for compatibility)

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, MediaDirection};
+use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute};
 use bytes::Bytes;
 use nom::{
     bytes::complete::{tag, take_till1, take_until},

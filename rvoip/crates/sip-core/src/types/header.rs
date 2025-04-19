@@ -10,12 +10,12 @@ pub enum TypedHeader {
     // Core Headers (Examples)
     Via(types::Via),
     From(types::From),
-    To(types::To),
+    To(types::to::To),
     Contact(types::Contact),
     CallId(types::CallId),
     CSeq(types::CSeq),
-    Route(types::Route),
-    RecordRoute(types::RecordRoute),
+    Route(types::route::Route),
+    RecordRoute(types::record_route::RecordRoute),
     MaxForwards(types::MaxForwards),
     ContentType(types::ContentType),
     ContentLength(types::ContentLength),
@@ -31,7 +31,7 @@ pub enum TypedHeader {
     // Add other typed headers here as they are defined...
     Accept(types::Accept),
     Allow(types::Allow),
-    ReplyTo(types::ReplyTo),
+    ReplyTo(types::reply_to::ReplyTo),
     Warning(types::Warning),
     ContentDisposition(types::ContentDisposition),
 
@@ -52,7 +52,7 @@ impl TryFrom<Header> for TypedHeader {
             // Core Headers
             HeaderName::Via => parser::headers::parse_via(value_text).map(TypedHeader::Via),
             HeaderName::From => parser::headers::parse_address(value_text).map(|addr| TypedHeader::From(types::From(addr))),
-            HeaderName::To => parser::headers::parse_address(value_text).map(|addr| TypedHeader::To(types::To(addr))),
+            HeaderName::To => parser::headers::parse_address(value_text).map(|addr| TypedHeader::To(types::to::To(addr))),
             HeaderName::Contact => parser::headers::parse_contact(value_text).map(|addrs| {
                 addrs.into_iter().next().map(types::Contact).map(TypedHeader::Contact)
                      .unwrap_or_else(|| TypedHeader::Other(header.name.clone(), header.value.clone()))

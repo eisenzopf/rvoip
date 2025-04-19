@@ -4,12 +4,14 @@ use std::str::FromStr;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while, take_while1},
-    character::complete::{char, digit1, space0, space1},
+    character::complete::{char, digit1, space0, space1, lws, token},
     combinator::{map, map_res, opt, recognize},
-    multi::{many0, many1, separated_list0, separated_list1},
+    multi::{fold_many0, many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
 };
+
+use nom::{Err, Needed};
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
@@ -19,10 +21,15 @@ use super::utils::{
     parse_quoted_string, parse_text_value, parse_semicolon_params, 
     parse_comma_separated_values
 };
-use crate::types::{Via, CSeq, Address, Param, MediaType, Allow, Accept, ContentDisposition, DispositionType, Warning, Route, RecordRoute, ReplyTo, UriWithParams, UriWithParamsList, ContentLength, Expires, MaxForwards, CallId};
+use crate::types::{Via, CSeq, Address, Param, MediaType, Allow, Accept, ContentDisposition, DispositionType, Warning, ContentLength, Expires, MaxForwards, CallId, ContentType};
+use crate::types::route::Route;
+use crate::types::record_route::RecordRoute;
+use crate::types::reply_to::ReplyTo;
+use crate::types::uri_with_params::UriWithParams;
+use crate::types::uri_with_params_list::UriWithParamsList;
+use crate::types::auth::{AuthScheme, AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate, Scheme, Algorithm, Qop};
 use crate::uri::Uri;
 use super::uri::{parse_uri, parameters_parser};
-use crate::types::auth::{WwwAuthenticate, Scheme, Algorithm, Qop, Authorization, AuthenticationInfo, ProxyAuthenticate, ProxyAuthorization};
 
 /// Parse a single header
 pub fn parse_header(input: &str) -> Result<Header> {

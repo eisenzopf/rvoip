@@ -8,7 +8,9 @@ use nom::{
     IResult,
 };
 // Use the enum defined in types::sdp
-use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, MediaDirection, SsrcAttribute};
+// use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, MediaDirection, SsrcAttribute};
+// Import only the types needed from types::sdp, NOT MediaDirection
+use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, ParsedAttribute, CandidateAttribute, SsrcAttribute};
 use serde::{Deserialize, Serialize};
 use std::fmt; // Import fmt
 use std::net::IpAddr;
