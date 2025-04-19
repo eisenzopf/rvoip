@@ -1,24 +1,19 @@
 use std::str::FromStr;
-
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, tag_no_case, take_till, take_while, take_while1},
-    character::complete::{char, digit1, line_ending, space0, space1},
-    combinator::{map, map_res, opt, recognize, verify},
-    multi::{many0, many1, many_till, separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    bytes::complete::take,
-    combinator::rest,
-    Err, IResult, Needed,
+    bytes::complete::{take_till},
+    character::complete::{digit1, space1},
+    combinator::{map, map_res, rest},
+    sequence::{terminated, tuple},
+    multi::many0,
+    IResult,
 };
-
 use crate::error::{Error, Result};
-use crate::header::{Header, HeaderName, HeaderValue};
-use crate::types::{Message, Response, StatusCode};
+use crate::types::{StatusCode, Message, Response, Header};
 use crate::version::Version;
 use bytes::Bytes;
 
 /// Parser for a SIP response line
+/// Returns components needed by IncrementalParser
 pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, String)> {
     let (input, version) = map_res(
         take_till(|c| c == ' '),
@@ -36,7 +31,7 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
     // Convert u16 to StatusCode
     let status = match StatusCode::from_u16(status_code) {
         Ok(status) => status,
-        Err(_) => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))), // TODO: Better error
+        Err(_) => return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))), // Use Failure for semantic errors
     };
 
     let (input, _) = space1(input)?;

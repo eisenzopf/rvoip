@@ -15,8 +15,8 @@ mod utils;
 
 // Re-export top-level parsers and types, consolidate duplicates
 pub use message::{parse_message, IncrementalParser, ParseState};
-pub use request::request_parser;
-pub use response::response_parser;
+// pub use request::request_parser; // Removed
+// pub use response::response_parser; // Removed
 // Commenting out potentially unresolved imports
 pub use uri::{parse_uri /*, parse_uri_params, parse_host_port*/ };
 pub use multipart::{parse_multipart, MimePart, MultipartBody};
