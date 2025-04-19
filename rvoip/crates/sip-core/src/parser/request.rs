@@ -16,6 +16,8 @@ use crate::types::{Message, Request, Method, StatusCode};
 use crate::uri::Uri;
 use crate::version::Version;
 use super::uri::parse_uri;
+use bytes::Bytes;
+use nom::combinator::rest;
 
 /// Parser for a SIP request line
 pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> {
@@ -44,38 +46,38 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
 
 /// Parser for a complete SIP request, mapped to Message enum
 pub fn request_parser_mapped(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
-    map(request_parser_inner, Message::Request)(input)
+    map(
+        request_parser_inner, 
+        |((method, uri, version), headers, body)| {
+            let request = Request {
+                method,
+                uri,
+                version,
+                headers,
+                body,
+            };
+            Message::Request(request)
+        }
+    )(input)
 }
 
-// Rename original parser to avoid direct recursion if mapping fails
-fn request_parser_inner(input: &str) -> IResult<&str, Request, nom::error::Error<&str>> {
-    // Parse the request line and consume the following CRLF
-    let (input, (method, uri, version)) = terminated(parse_request_line, super::utils::crlf)(input)?;
-
-    // Parse headers using the remaining input
-    let (input, headers) = terminated(
-        many0(super::headers::header_parser),
-        super::utils::crlf
-    )(input)?;
-
-    // Create the request
-    let mut request = Request {
-        method,
-        uri,
-        version,
-        headers: vec![], // Initialize headers vec
-        body: Default::default(),
-    };
-
-    // Add headers
-    request.headers = headers; // Assign parsed headers
-
-    // Parse the body if present - preserve it exactly as is without modifying line endings
-    if !input.is_empty() {
-        request.body = input.into();
-    }
-
-    Ok(("", request))
+// Change return type to tuple of components
+fn request_parser_inner(input: &str) -> IResult<&str, ((Method, Uri, Version), Vec<Header>, Bytes), nom::error::Error<&str>> {
+    // Use tuple combinator
+    map(
+        tuple((
+            // 1. Parse start line and consume CRLF
+            terminated(parse_request_line, super::utils::crlf),
+            // 2. Parse headers and consume CRLF
+            terminated(many0(super::headers::header_parser), super::utils::crlf),
+            // 3. Take the rest as the body (&str)
+            rest
+        )),
+        // Map the resulting tuple ((Method, Uri, Version), Vec<Header>, &str) to include owned Bytes
+        |(start_line_components, headers, body_str)| {
+            (start_line_components, headers, Bytes::from(body_str))
+        }
+    )(input)
 }
 
 // Keep the public interface named request_parser

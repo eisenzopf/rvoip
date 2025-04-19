@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::header::{Header, HeaderName, HeaderValue};
 use crate::types::{Message, Response, StatusCode};
 use crate::version::Version;
+use bytes::Bytes;
 
 /// Parser for a SIP response line
 pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, String)> {
@@ -46,38 +47,38 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
     Ok((input, (version, status, reason)))
 }
 
-// Rename original parser
-fn response_parser_inner(input: &str) -> IResult<&str, Response, nom::error::Error<&str>> {
-    // Parse the response line and consume the following CRLF
-    let (input, (version, status, reason)) = terminated(parse_response_line, super::utils::crlf)(input)?;
-
-    // Parse headers using the remaining input
-    let (input, headers) = terminated(
-        many0(super::headers::header_parser),
-        super::utils::crlf
-    )(input)?;
-
-    // Create the response
-    let mut response = Response {
-        version,
-        status,
-        reason: if reason.is_empty() { None } else { Some(reason) },
-        headers: vec![], // Initialize headers vec
-        body: Default::default(),
-    };
-
-    // Add headers
-    response.headers = headers; // Assign parsed headers
-
-    // Parse the body if present - preserve it exactly as is without modifying line endings
-    if !input.is_empty() {
-        response.body = input.into();
-    }
-
-    Ok(("", response))
-}
-
 /// Parser for a complete SIP response, mapped to Message enum
 pub fn response_parser(input: &str) -> IResult<&str, Message, nom::error::Error<&str>> {
-    map(response_parser_inner, Message::Response)(input)
+    map(
+        response_parser_inner, 
+        |((version, status, reason), headers, body)| {
+            let response = Response {
+                version,
+                status,
+                reason: if reason.is_empty() { None } else { Some(reason) },
+                headers,
+                body,
+            };
+            Message::Response(response)
+        }
+    )(input)
+} 
+
+// Change return type to tuple of components
+fn response_parser_inner(input: &str) -> IResult<&str, ((Version, StatusCode, String), Vec<Header>, Bytes), nom::error::Error<&str>> {
+    // Use tuple combinator
+    map(
+        tuple((
+            // 1. Parse start line and consume CRLF
+            terminated(parse_response_line, super::utils::crlf),
+            // 2. Parse headers and consume CRLF
+            terminated(many0(super::headers::header_parser), super::utils::crlf),
+            // 3. Take the rest as the body (&str)
+            rest
+        )),
+        // Map the resulting tuple ((Version, StatusCode, String), Vec<Header>, &str) to include owned Bytes
+        |(start_line_components, headers, body_str)| {
+            (start_line_components, headers, Bytes::from(body_str))
+        }
+    )(input)
 } 
