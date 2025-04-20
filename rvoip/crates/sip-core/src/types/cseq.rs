@@ -28,7 +28,9 @@ impl FromStr for CSeq {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_cseq(s)
+        // Trim whitespace before parsing
+        let trimmed_s = s.trim();
+        parse_cseq(trimmed_s)
     }
 }
 

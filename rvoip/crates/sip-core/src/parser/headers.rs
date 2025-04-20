@@ -309,10 +309,17 @@ pub fn cseq_parser(input: &str) -> IResult<&str, CSeq> {
     
     let (input, _) = space1(input)?;
     
-    let (input, method) = map_res(
-        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-'),
-        |s: &str| Method::from_str(s) // Parse directly to Method enum
-    )(input)?;
+    // Only map if Method::from_str succeeds AND is not an Extension
+    let (input, method) = map_res(parse_token, |m_str| {
+         Method::from_str(m_str).and_then(|method| {
+             if matches!(method, Method::Extension(_)) {
+                 // Treat unrecognized methods as parse errors for CSeq header
+                 Err(Error::InvalidMethod)
+             } else {
+                 Ok(method)
+             }
+         })
+    })(input)?;
     
     // Return the strongly typed CSeq struct
     Ok((input, CSeq { seq: seq_str, method }))
@@ -343,11 +350,11 @@ pub fn content_type_parser(input: &str) -> IResult<&str, MediaType> {
         map(parse_token, |s: &str| s.to_string())
     )(input)?;
 
-    // Parse parameters
-    let (input, params_vec) = parse_semicolon_params(input)?;
-
-    // Convert Vec<(String, String)> to HashMap<String, String>
-    let params_map: HashMap<String, String> = params_vec.into_iter().collect();
+    // Parse optional parameters directly (parse_semicolon_params handles leading ';')
+    let (input, params_map) = match parse_semicolon_params(input) {
+        Ok((rest, params)) => (rest, params),
+        Err(_) => (input, HashMap::new()), // No parameters found or parsing failed
+    };
 
     let media_type = MediaType {
         type_,
@@ -519,7 +526,6 @@ pub fn parse_allow(input: &str) -> Result<Allow> {
 /// nom parser for an Allow header value
 pub fn allow_parser(input: &str) -> IResult<&str, Allow> {
     map(
-        // Use parse_comma_separated_values helper or separated_list1 directly
         separated_list1(
             pair(char(','), space0), 
             map_res(parse_token, |m_str| Method::from_str(m_str))
@@ -530,8 +536,16 @@ pub fn allow_parser(input: &str) -> IResult<&str, Allow> {
 
 /// Parse an Accept header value into the Accept struct
 pub fn parse_accept(input: &str) -> Result<Accept> {
-    match accept_parser(input) {
-        Ok((_, accept)) => Ok(accept),
+    let trimmed_input = input.trim(); // Trim input first
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty Accept header value".to_string()));
+    }
+    match accept_parser(trimmed_input) {
+        // Ensure the entire trimmed input was consumed
+        Ok((rest, accept)) if rest.is_empty() => Ok(accept),
+        Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after Accept value: {}", rest
+        ))),
         Err(e) => Err(Error::Parser(format!("Failed to parse Accept header: {:?}", e))),
     }
 }
@@ -568,9 +582,16 @@ pub fn content_disposition_parser(input: &str) -> IResult<&str, ContentDispositi
         _ => DispositionType::Other(type_str.to_string()),
     };
 
-    // Parse parameters
-    let (input, params_vec) = parse_semicolon_params(input)?;
-    let params_map: HashMap<String, String> = params_vec.into_iter().collect();
+    // Parse parameters using a parser that handles quoted values
+    let (input, params_list) = many0(
+         preceded(
+             // Parameter starts with ; and optional spaces
+             pair(char(';'), space0), 
+             // Use auth_param_parser which handles quotes and removes them
+             auth_param_parser 
+         )
+     )(input)?;
+    let params_map: HashMap<String, String> = params_list.into_iter().collect();
 
     Ok((input, ContentDisposition { disposition_type, params: params_map }))
 }
@@ -715,7 +736,19 @@ pub fn authentication_info_parser(input: &str) -> IResult<&str, AuthenticationIn
         .map(|s| Qop::from_str(s).unwrap_or_else(|_| Qop::Other(s.to_string())));
     let rspauth = params.get("rspauth").map(|s| s.to_string());
     let cnonce = params.get("cnonce").map(|s| s.to_string());
-    let nc = params.get("nc").and_then(|s| u32::from_str_radix(s, 8).ok()); // nc is octal in Auth-Info
+    // Make nc parsing stricter - must be valid hex
+    let nc = match params.get("nc") {
+        Some(s) => {
+            // Ensure it contains only hex digits and has the correct length (8)
+            if s.len() == 8 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                u32::from_str_radix(s, 16).ok()
+            } else {
+                // Return error if format is wrong, instead of None
+                 return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+            }
+        }
+        None => None,
+    };
 
     let auth_info = AuthenticationInfo {
         nextnonce,
@@ -742,12 +775,13 @@ pub fn uri_with_params_parser(input: &str) -> IResult<&str, UriWithParams> {
     ))(input)?;
 
     // Parse parameters that follow the URI part
-    let (final_input, params) = match parameters_parser(remaining_input) {
+    let (final_input, parsed_params) = match parameters_parser(remaining_input) {
         Ok((final_input, params_vec)) => (final_input, params_vec),
-        Err(_) => (remaining_input, Vec::new()),
+        Err(_) => (remaining_input, Vec::new()), // Default to empty if no params
     };
 
-    Ok((final_input, UriWithParams { uri: uri_part, params }))
+    // Construct UriWithParams using both the parsed URI and the parsed parameters
+    Ok((final_input, UriWithParams { uri: uri_part, params: parsed_params }))
 }
 
 /// Parse a Route header value into the Route struct

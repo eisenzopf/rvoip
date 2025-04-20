@@ -11,6 +11,7 @@ use nom::{
 };
 
 use crate::error::{Error, Result};
+use nom::error::ErrorKind;
 
 /// Parser for CRLF (both \r\n and \n are accepted)
 pub fn crlf(input: &str) -> IResult<&str, &str> {
@@ -33,9 +34,14 @@ pub fn parse_param_value(input: &str) -> IResult<&str, &str> {
 
 /// Parse a list of comma-separated values with optional whitespace
 pub fn parse_comma_separated_values(input: &str) -> IResult<&str, Vec<&str>> {
-    separated_list0(
-        tuple((char(','), space0)),
-        take_till(|c| c == ',' || c == '\r' || c == '\n')
+    map(
+        separated_list0(
+            tuple((char(','), space0)), // Separator: comma + optional space
+            // Item: Take until the next comma (includes surrounding whitespace)
+            take_till(|c| c == ',' || c == '\r' || c == '\n')
+        ),
+        // Trim whitespace from each resulting item AFTER the list is parsed
+        |items: Vec<&str>| items.into_iter().map(str::trim).collect()
     )(input)
 }
 
@@ -65,23 +71,31 @@ pub fn parse_text_value(input: &str) -> IResult<&str, &str> {
     ))(input)
 }
 
+/// Parser for a single parameter (name=value or name)
+fn parse_one_param(input: &str) -> IResult<&str, (String, String)> {
+    alt((
+        separated_pair(
+            map(parse_param_name, |s| s.to_string()),
+            char('='),
+            map(parse_param_value, |s| s.to_string())
+        ),
+        map(
+            parse_param_name, // Flag parameter
+            |name| (name.to_string(), "".to_string())
+        )
+    ))(input)
+}
+
 /// Parse all parameters in semicolon-delimited format: ;name=value;flag
+/// Allows optional spaces after the semicolon separator.
 pub fn parse_semicolon_params(input: &str) -> IResult<&str, HashMap<String, String>> {
     map(
+        // Use many0 to parse zero or more parameters
         many0(
+            // Each parameter must be preceded by ';' and optional spaces
             preceded(
-                char(';'),
-                alt((
-                    separated_pair(
-                        map(parse_param_name, |s| s.to_string()),
-                        char('='),
-                        map(parse_param_value, |s| s.to_string())
-                    ),
-                    map(
-                        parse_param_name,
-                        |name| (name.to_string(), "".to_string())
-                    )
-                ))
+                pair(char(';'), space0), 
+                parse_one_param // Use the helper to parse name=value or flag
             )
         ),
         |params| params.into_iter().collect()
@@ -128,8 +142,8 @@ mod tests {
         
         assert_eq!(values.len(), 4);
         assert_eq!(values[0], "value1");
-        assert_eq!(values[1], " value2");
-        assert_eq!(values[2], "value3 ");
-        assert_eq!(values[3], " value4");
+        assert_eq!(values[1], "value2");
+        assert_eq!(values[2], "value3");
+        assert_eq!(values[3], "value4");
     }
 } 

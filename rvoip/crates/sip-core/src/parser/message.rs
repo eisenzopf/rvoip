@@ -369,8 +369,24 @@ impl IncrementalParser {
     fn get_content_length(&self) -> Option<usize> {
         for header in &self.headers {
             if header.name == HeaderName::ContentLength {
-                if let Some(text) = header.value.as_text() {
-                    return text.trim().parse::<usize>().ok();
+                return match &header.value {
+                    HeaderValue::Integer(int) => {
+                        // Convert i64 to usize safely
+                        if *int >= 0 {
+                            Some(*int as usize)
+                        } else {
+                            None // Negative content length is invalid
+                        }
+                    },
+                    HeaderValue::Text(text) => {
+                        // Also handle if it was parsed as Text
+                        text.trim().parse::<usize>().ok()
+                    },
+                     HeaderValue::Raw(raw) => {
+                        // Attempt to parse if stored as Raw
+                        raw.trim().parse::<usize>().ok()
+                    },
+                    _ => None // Other variants are not valid Content-Length
                 }
             }
         }
@@ -465,29 +481,29 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
         return Err(Error::Parser("Empty message".to_string()));
     }
     
-    // Try to parse with incremental parser first for more accurate body handling
+    // Use incremental parser
     let mut parser = IncrementalParser::new();
-    let state = parser.parse(input_str);
+    let mut state = parser.parse(input_str);
+    
+    // If parsing headers led to needing a body, give it a chance to parse the buffered body data
+    if matches!(state, ParseState::ParsingBody { .. }) {
+       state = parser.parse(""); // Call parse again with empty input to process buffer
+    }
     
     match state {
         ParseState::Complete(_) => {
             if let Some(message) = parser.take_message() {
-                return Ok(message);
+                Ok(message)
             } else {
-                // This case should ideally not happen if state is Complete,
-                // but return an error to satisfy the compiler.
-                return Err(Error::Parser("Internal parser error: Complete state with no message".to_string()));
+                Err(Error::Parser("Internal parser error: Complete state with no message".to_string()))
             }
         },
         ParseState::Failed(error) => {
-            // If the incremental parser explicitly failed, report that error
-            return Err(error.clone());
+            Err(error.clone())
         },
         _ => {
-            // If we get here, incremental parser didn't complete and didn't explicitly fail,
-            // or it failed and we already returned the error.
-            // Return a generic error if no message was produced.
-            Err(Error::Parser("Failed to parse message using incremental parser".to_string()))
+            // Didn't reach Complete or Failed state (e.g., still WaitingForStartLine, ParsingHeaders, or ParsingBody)
+            Err(Error::IncompleteParse(format!("Incomplete message - ended in state: {:?}", state)))
         }
     }
 }

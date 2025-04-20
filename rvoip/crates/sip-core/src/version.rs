@@ -49,9 +49,11 @@ impl FromStr for Version {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if s == "SIP/2.0" {
+        // Case-insensitive check for "SIP/2.0"
+        if s.eq_ignore_ascii_case("SIP/2.0") {
             Ok(Version::sip_2_0())
         } else {
+            // Consider adding more robust parsing if needed in the future
             Err(Error::InvalidVersion)
         }
     }

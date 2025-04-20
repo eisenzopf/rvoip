@@ -4,7 +4,7 @@ use crate::common::{assert_parses_ok, assert_parse_fails, uri, addr, param_tag, 
 use crate::common::param_branch;
 use rvoip_sip_core::error::{Result, Error};
 use rvoip_sip_core::types::{self, CSeq, Method, Address, Param, MediaType, Via, Allow, Accept, ContentDisposition, DispositionType, Warning, ContentLength, Expires, MaxForwards, CallId};
-// use rvoip_sip_core::common::Name; // Commented out - likely not public
+use rvoip_sip_core::HeaderName; // Use HeaderName, already exported from lib.rs
 use rvoip_sip_core::types::route::Route;
 use rvoip_sip_core::types::record_route::RecordRoute;
 use rvoip_sip_core::types::reply_to::ReplyTo;
@@ -172,7 +172,7 @@ fn test_allow_parser_typed() {
      );
 
     assert_parse_fails::<Allow>("");
-    assert_parse_fails::<Allow>("INVITE, BAD");
+    assert_parse_fails::<Allow>("INVITE, BAD METHOD"); // Contains space, should fail parse_token
 }
 
 #[test]
@@ -220,9 +220,10 @@ fn test_content_disposition_parser_typed() {
     
     // Quoted filename (parser should handle unquoting)
     let mut params3 = HashMap::new();
-    params3.insert("filename".to_string(), "file name.txt".to_string());
+    params3.insert("filename".to_string(), "file name.txt".to_string()); // Value without quotes
     assert_parses_ok(
         "attachment;filename=\"file name.txt\"", 
+        // Expected parsed struct has value *without* quotes
         ContentDisposition { disposition_type: DispositionType::Other("attachment".to_string()), params: params3 }
     );
 

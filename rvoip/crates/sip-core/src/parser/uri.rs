@@ -111,7 +111,7 @@ fn parameter_parser(input: &str) -> IResult<&str, Param> {
             opt(preceded(
                 char('='),
                 map(
-                    take_till(|c| c == ';' || c == '?' || c == '\r' || c == '\n'),
+                    take_till(|c| c == ';' || c == ',' || c == '?' || c == '\r' || c == '\n'),
                     |s: &str| s.trim() // Trim whitespace from value
                 )
             ))
