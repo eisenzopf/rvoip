@@ -3,11 +3,13 @@
 use crate::common::{assert_parses_ok, assert_parse_fails, uri, addr, param_tag, param_lr, param_expires, param_transport, param_other, param_received, param_ttl, param_q, param_method, param_user};
 use crate::common::param_branch;
 use rvoip_sip_core::error::{Result, Error};
-use rvoip_sip_core::types::{self, CSeq, Method, Address, Param, MediaType, Via, Allow, Accept, ContentDisposition, DispositionType, Warning, ContentLength, Expires, MaxForwards, CallId, Name}; // Keep base types
+use rvoip_sip_core::types::{self, CSeq, Method, Address, Param, MediaType, Via, Allow, Accept, ContentDisposition, DispositionType, Warning, ContentLength, Expires, MaxForwards, CallId};
+// use rvoip_sip_core::common::Name; // Commented out - likely not public
 use rvoip_sip_core::types::route::Route;
 use rvoip_sip_core::types::record_route::RecordRoute;
 use rvoip_sip_core::types::reply_to::ReplyTo;
-use rvoip_sip_core::types::uri_with_params::{UriWithParams, UriWithParamsList};
+use rvoip_sip_core::types::uri_with_params::{UriWithParams};
+use rvoip_sip_core::types::uri_with_params_list::UriWithParamsList;
 use rvoip_sip_core::types::auth::{WwwAuthenticate, Scheme, Algorithm, Qop, Authorization, AuthenticationInfo, ProxyAuthenticate, ProxyAuthorization};
 use rvoip_sip_core::parser::headers::*; // Import parser functions
 use rvoip_sip_core::Uri;

@@ -1,7 +1,8 @@
 // Tests for the Address type and related types (From, To, Contact)
 
 use crate::common::{uri, addr, param_tag, param_expires, param_q, assert_parses_ok, assert_parse_fails, assert_display_parses_back};
-use rvoip_sip_core::types::{Address, Param, From, To, Contact};
+use rvoip_sip_core::types::{Address, Param, From, Contact};
+use rvoip_sip_core::types::to::To;
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
 use ordered_float::NotNan;

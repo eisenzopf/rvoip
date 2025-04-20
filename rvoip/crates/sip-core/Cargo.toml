@@ -34,4 +34,4 @@ tracing-subscriber = { workspace = true }
 # Integration tests configuration
 [[test]]
 name = "torture_tests"
-path = "tests/torture_tests.rs" 
+path = "tests/rfc_compliance/torture_tests.rs" 

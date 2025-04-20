@@ -4,7 +4,8 @@ use crate::common::{assert_parses_ok, assert_parse_fails, assert_display_parses_
 use rvoip_sip_core::types::{Via, Param};
 use std::str::FromStr;
 use std::net::IpAddr;
-use rvoip_sip_core::SipError;
+// use rvoip_sip_core::error::SipError; // Removed - Provided by common.rs
+use rvoip_sip_core::uri::{Uri, Scheme, Host};
 
 /*
 #[test]

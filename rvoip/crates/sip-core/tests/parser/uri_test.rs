@@ -9,7 +9,7 @@ use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
 use std::net::IpAddr;
 use std::collections::HashMap;
-use rvoip_sip_core::SipError;
+// use rvoip_sip_core::error::SipError; // Commented out - likely not public
 
 // Helper function to parse just parameters for focused tests
 // Requires making parameter_parser pub(crate) or similar visibility adjustment.
@@ -233,7 +233,7 @@ fn test_parse_uri_edge_cases() {
         }
     );
      // Empty parameter value
-    assert_parses_ok("sip:host.com;foo=", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("host.com".to_string()), port: None, parameters: vec![param_other("foo", Some("".to_string()))], headers: HashMap::new() });
+    assert_parses_ok("sip:host.com;foo=", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("host.com".to_string()), port: None, parameters: vec![param_other("foo", Some(""))], headers: HashMap::new() });
 }
 
 #[test]

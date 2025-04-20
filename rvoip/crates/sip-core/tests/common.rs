@@ -184,22 +184,6 @@ pub fn validate_message_basic(
 
 // TODO: Add typed header validation helpers later 
 
-pub fn addr(uri: Uri) -> Address {
-    Address::new(None::<String>, uri)
-}
-
-pub fn addr_with_display(display: &str, uri: Uri) -> Address {
-    Address::new(Some(display), uri)
-}
-
-pub fn uri(scheme: Scheme, host: Host, user: Option<&str>) -> Uri {
-    let mut uri = Uri::new(scheme, host);
-    if let Some(u) = user {
-        uri.user = Some(u.to_string());
-    }
-    uri
-}
-
 pub fn via(host: Host, port: Option<u16>, transport: &str) -> Via {
     Via::new(
         "SIP",
@@ -208,4 +192,4 @@ pub fn via(host: Host, port: Option<u16>, transport: &str) -> Via {
         host.to_string(),
         port
     )
-} 
+}

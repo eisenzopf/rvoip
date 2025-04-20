@@ -1,6 +1,11 @@
 // Tests for Routing related types (Route, RecordRoute, ReplyTo)
 use crate::common::{uri, addr, param_lr, param_transport, assert_parses_ok, assert_parse_fails, assert_display_parses_back};
-use rvoip_sip_core::types::{Route, RecordRoute, ReplyTo, Address, UriWithParams, UriWithParamsList, Param};
+use rvoip_sip_core::types::{Address, Param};
+use rvoip_sip_core::types::route::Route;
+use rvoip_sip_core::types::record_route::RecordRoute;
+use rvoip_sip_core::types::reply_to::ReplyTo;
+use rvoip_sip_core::types::uri_with_params::{UriWithParams};
+use rvoip_sip_core::types::uri_with_params_list::UriWithParamsList;
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
 

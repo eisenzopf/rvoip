@@ -151,14 +151,17 @@ fn test_contact_list_parsing() {
 
     // Build expected results
     let alice_uri = Uri::from_str("sip:alice@wonderland.lit").unwrap();
-    let alice_addr = Address::new(Some("Alice Liddell"), alice_uri).with_param(Param::Tag("asdf".to_string()));
+    let mut alice_addr = Address::new(Some("Alice Liddell"), alice_uri);
+    alice_addr.set_param("tag", Some("asdf"));
     let alice_contact = Contact(alice_addr);
 
     let bob_uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
-    let bob_addr = Address::new(None::<String>, bob_uri).with_param(Param::Q(NotNan::new(0.5).unwrap()));
+    let mut bob_addr = Address::new(None::<String>, bob_uri);
+    bob_addr.set_q(0.5);
     let bob_contact = Contact(bob_addr);
 
-    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap()).with_param(Param::Expires(600));
+    let mut wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
+    wc_addr.set_expires(600);
     let wc_contact = Contact(wc_addr);
 
     // Parse the input and compare with expected results
@@ -167,13 +170,3 @@ fn test_contact_list_parsing() {
 }
 
 // TODO: Add tests for Contact-specific helpers (expires, q) 
-
-let addr = addr(None, "sip:user@host.com", vec![]);
-let contact = Contact(addr.clone());
-assert_eq!(contact.to_string(), "<sip:user@host.com>");
-assert!(!contact.is_wildcard());
-
-// Test wildcard check
-let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-let contact_wc = Contact::new(wc_addr);
-assert!(contact_wc.is_wildcard());

@@ -1,6 +1,6 @@
 // Tests for SDP attribute parsing logic in sdp/attributes.rs
 
-use rvoip_sip_core::SipError;
+// use rvoip_sip_core::error::SipError; // Commented out - likely not public
 use rvoip_sip_core::sdp::attributes::{parse_rtpmap, parse_fmtp, parse_ptime, parse_direction, MediaDirection, parse_candidate, parse_ssrc};
 use rvoip_sip_core::types::sdp::{RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, ParsedAttribute};
 use std::str::FromStr;
@@ -9,28 +9,25 @@ use std::str::FromStr;
 fn test_parse_rtpmap_attribute() {
     /// Test parsing a=rtpmap lines (RFC 4566 Section 6)
     let value1 = "0 PCMU/8000";
-    let expected1 = ParsedAttribute::RtpMap(RtpMapAttribute {
+    let expected1 = RtpMapAttribute {
         payload_type: 0, encoding_name: "PCMU".to_string(), clock_rate: 8000, encoding_params: None 
-    });
+    };
     assert_eq!(parse_rtpmap(value1).unwrap(), expected1);
     
     let value2 = "8 PCMA/8000/1";
-     let expected2 = ParsedAttribute::RtpMap(RtpMapAttribute {
+     let expected2 = RtpMapAttribute {
         payload_type: 8, encoding_name: "PCMA".to_string(), clock_rate: 8000, encoding_params: Some("1".to_string()) 
-    });
+    };
     assert_eq!(parse_rtpmap(value2).unwrap(), expected2);
 
     let value3 = "96 H264/90000";
     let result3 = parse_rtpmap(value3);
     assert!(result3.is_ok());
-    if let Ok(ParsedAttribute::RtpMap(attr3)) = result3 {
-        assert_eq!(attr3.payload_type, 96);
-        assert_eq!(attr3.encoding_name, "H264");
-        assert_eq!(attr3.clock_rate, 90000);
-        assert!(attr3.encoding_params.is_none());
-    } else {
-        panic!("Parsed as wrong variant or failed: {:?}", result3);
-    }
+    let attr3 = result3.unwrap();
+    assert_eq!(attr3.payload_type, 96);
+    assert_eq!(attr3.encoding_name, "H264");
+    assert_eq!(attr3.clock_rate, 90000);
+    assert!(attr3.encoding_params.is_none());
 
     // Failure cases
     assert!(parse_rtpmap("PCMU/8000").is_err()); // Missing payload type
@@ -43,21 +40,18 @@ fn test_parse_rtpmap_attribute() {
 fn test_parse_fmtp_attribute() {
     /// Test parsing a=fmtp lines (RFC 4566 Section 6)
     let value1 = "97 profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1";
-    let expected1 = ParsedAttribute::Fmtp(FmtpAttribute {
+    let expected1 = FmtpAttribute {
         format: "97".to_string(),
         parameters: "profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1".to_string()
-    });
+    };
     assert_eq!(parse_fmtp(value1).unwrap(), expected1);
 
     let value2 = "101 0-15"; // Example for telephone-event
     let result2 = parse_fmtp(value2);
     assert!(result2.is_ok());
-    if let Ok(ParsedAttribute::Fmtp(attr2)) = result2 {
-        assert_eq!(attr2.format, "101");
-        assert_eq!(attr2.parameters, "0-15");
-    } else {
-        panic!("Parsed as wrong variant or failed: {:?}", result2);
-    }
+    let attr2 = result2.unwrap();
+    assert_eq!(attr2.format, "101");
+    assert_eq!(attr2.parameters, "0-15");
 
     // Failure cases
     assert!(parse_fmtp("97").is_err()); // Missing parameters part

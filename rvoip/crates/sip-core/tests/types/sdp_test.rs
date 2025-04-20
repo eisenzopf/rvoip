@@ -1,7 +1,7 @@
 // Tests for SDP types (SdpSession, MediaDescription, etc.)
 
 use crate::common::{assert_display_parses_back}; // Use helper
-use rvoip_sip_core::common::error::SipError;
+// use rvoip_sip_core::error::SipError; // Commented out - likely not public
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use rvoip_sip_core::types::sdp::{SdpSession, MediaDescription, ParsedAttribute, RtpMapAttribute, Origin, ConnectionData, TimeDescription, SsrcAttribute, FmtpAttribute};
 use std::str::FromStr;
@@ -74,25 +74,23 @@ fn test_sdp_session_display_parse_roundtrip() {
     
     // Manually check the string output for expected format using a multi-line string
     let sdp_string = session.to_string();
-    let expected_sdp = format!(
-        "v=0\r\n"
-        "o=user 123 456 IN IP4 1.1.1.1\r\n"
-        "s=Test Session\r\n"
-        "c=IN IP4 192.168.4.1\r\n"
-        "t=0 0\r\n"
-        "a=sendrecv\r\n"
-        "a=tool:TestTool 1.0\r\n"
-        "a=orient:portrait\r\n"
-        "m=audio 5004 RTP/AVP 0 8\r\n"
-        "a=ptime:20\r\n"
-        "a=rtpmap:0 PCMU/8000\r\n"
-        "a=rtpmap:8 PCMA/8000/1\r\n"
-        "m=video 5006 RTP/AVP 99\r\n"
-        "c=IN IP4 192.168.4.2\r\n"
-        "a=sendonly\r\n"
-        "a=rtpmap:99 H264/90000\r\n"
-        "a=framerate:25\r\n"
-    );
+    let expected_sdp = "v=0\r\n".to_owned()
+                     + "o=user 123 456 IN IP4 1.1.1.1\r\n"
+                     + "s=Test Session\r\n"
+                     + "c=IN IP4 192.168.4.1\r\n"
+                     + "t=0 0\r\n"
+                     + "a=sendrecv\r\n"
+                     + "a=tool:TestTool 1.0\r\n"
+                     + "a=orient:portrait\r\n"
+                     + "m=audio 5004 RTP/AVP 0 8\r\n"
+                     + "a=ptime:20\r\n"
+                     + "a=rtpmap:0 PCMU/8000\r\n"
+                     + "a=rtpmap:8 PCMA/8000/1\r\n"
+                     + "m=video 5006 RTP/AVP 99\r\n"
+                     + "c=IN IP4 192.168.4.2\r\n"
+                     + "a=sendonly\r\n"
+                     + "a=rtpmap:99 H264/90000\r\n"
+                     + "a=framerate:25\r\n";
       
     assert_eq!(sdp_string, expected_sdp);
 }

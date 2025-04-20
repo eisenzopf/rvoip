@@ -1,6 +1,7 @@
 // Tests for To type
 use crate::common::{addr, param_tag, assert_parses_ok, assert_parse_fails, assert_display_parses_back};
-use rvoip_sip_core::types::{Address, To, Param};
+use rvoip_sip_core::types::{Address, Param};
+use rvoip_sip_core::types::to::To;
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
 

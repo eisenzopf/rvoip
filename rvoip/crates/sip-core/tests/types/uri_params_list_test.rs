@@ -1,11 +1,12 @@
 // Tests for UriWithParamsList type and its use in Route/RecordRoute
 
 use rvoip_sip_core::types::{Param, Address};
-use rvoip_sip_core::types::uri_with_params::{UriWithParams, UriWithParamsList};
+use rvoip_sip_core::types::uri_with_params::{UriWithParams};
+use rvoip_sip_core::types::uri_with_params_list::{UriWithParamsList};
 use rvoip_sip_core::types::route::Route;
 use rvoip_sip_core::types::record_route::RecordRoute;
 use rvoip_sip_core::uri::Uri;
-use crate::common::{uri, param_lr};
+use crate::common::{uri, param_lr, param_transport};
 
 #[test]
 fn test_uri_with_params_list_helpers() {
