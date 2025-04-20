@@ -17,29 +17,9 @@ use rvoip_sip_core::{
 };
 
 // Use crate:: syntax as this will be part of the test crate
-use rvoip_sip_core::error::{Error, Result};
-use rvoip_sip_core::message::{Message, Request, Response};
-// use rvoip_sip_core::method::Method; // Now in types
-// use rvoip_sip_core::message::StatusCode; // Now in types
-use rvoip_sip_core::parser::message::parse_message; // Use the parser's function
-use rvoip_sip_core::uri::{Uri, Scheme, Host};
-use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via}; // Import types
-use rvoip_sip_core::types::sip_message::{Message, Request, Response};
-use rvoip_sip_core::{
-    Error as SipError,
-    Result as SipResult,
-    parse_message, // Use the main parse function
-    HeaderName, // Import from lib.rs
-    HeaderValue // Import from lib.rs
-};
-use ordered_float::NotNan; // Add import for NotNan
-
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-use std::str::FromStr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::net::IpAddr;
 
 // --- Type Construction Helpers ---
 
@@ -81,7 +61,7 @@ pub fn param_other(key: &str, value: Option<&str>) -> Param {
 /// Asserts that parsing the input string with T::from_str results in the expected value.
 pub fn assert_parses_ok<T>(input: &str, expected: T)
 where
-    T: FromStr<Err = Error> + PartialEq + Debug,
+    T: FromStr<Err = SipError> + PartialEq + Debug,
 {
     match T::from_str(input) {
         Ok(parsed) => assert_eq!(parsed, expected, "Input: '{}'", input),
@@ -92,7 +72,7 @@ where
 /// Asserts that parsing the input string with T::from_str results in an Err.
 pub fn assert_parse_fails<T>(input: &str)
 where
-    T: FromStr<Err = Error> + Debug, // Only need Debug for the panic message
+    T: FromStr<Err = SipError> + Debug, // Only need Debug for the panic message
 {
      match T::from_str(input) {
         Ok(parsed) => panic!("Expected Err, got Ok({:?}) for input: '{}'", parsed, input),
@@ -105,7 +85,7 @@ where
 /// Asserts that item.to_string() can be parsed back into an equivalent item.
 pub fn assert_display_parses_back<T>(item: &T)
 where
-    T: Display + FromStr<Err = Error> + PartialEq + Debug + Clone,
+    T: Display + FromStr<Err = SipError> + PartialEq + Debug + Clone,
 {
     let displayed = item.to_string();
     match T::from_str(&displayed) {
@@ -123,7 +103,7 @@ where
 // --- Message Test Helpers (Keep existing for now) ---
 
 /// Helper to parse a SIP message using bytes
-pub fn parse_sip_message_bytes(data: &[u8]) -> Result<Message> {
+pub fn parse_sip_message_bytes(data: &[u8]) -> SipResult<Message> {
     parse_message(data) // Direct call to parser
 }
 
