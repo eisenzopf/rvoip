@@ -3,6 +3,7 @@ use crate::common::{addr, param_expires, param_q, param_other, param_tag, assert
 use rvoip_sip_core::types::{Address, Contact, Param};
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
+use ordered_float::NotNan;
 
 // Helper function 
 fn basic_uri(user: &str, domain: &str) -> Uri {
@@ -29,7 +30,7 @@ fn test_contact_display_parse_roundtrip() {
     assert_display_parses_back(&contact2);
     
     // Test wildcard
-    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
     let contact_wc = Contact::new(wc_addr);
     assert_eq!(contact_wc.to_string(), "*");
     assert_display_parses_back(&contact_wc);
@@ -69,7 +70,7 @@ fn test_contact_display() {
     assert_display_parses_back(&contact2);
     
     // Test wildcard
-    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
     let contact_wc = Contact::new(wc_addr);
     assert_eq!(contact_wc.to_string(), "*");
     assert_display_parses_back(&contact_wc);
@@ -104,7 +105,7 @@ fn test_contact_helpers() {
     assert!(contact.0.params.contains(&Param::Expires(3600)));
     
     contact.set_q(0.7);
-    assert_eq!(contact.q(), Some(0.7));
+    assert_eq!(contact.q(), Some(NotNan::new(0.7).unwrap()));
     assert!(contact.0.params.iter().any(|p| matches!(p, Param::Q(v) if (*v - 0.7).abs() < f32::EPSILON)));
     
     // Test replacement
@@ -113,12 +114,12 @@ fn test_contact_helpers() {
     assert_eq!(contact.0.params.iter().filter(|p| matches!(p, Param::Expires(_))).count(), 1);
 
     contact.set_q(1.1); // Test clamping
-    assert_eq!(contact.q(), Some(1.0));
-    assert!(contact.0.params.contains(&Param::Q(1.0)));
+    assert_eq!(contact.q(), Some(NotNan::new(1.0).unwrap()));
+    assert!(contact.0.params.contains(&Param::Q(NotNan::new(1.0).unwrap())));
     
     contact.set_q(-0.5); // Test clamping
-    assert_eq!(contact.q(), Some(0.0));
-    assert!(contact.0.params.contains(&Param::Q(0.0)));
+    assert_eq!(contact.q(), Some(NotNan::new(0.0).unwrap()));
+    assert!(contact.0.params.contains(&Param::Q(NotNan::new(0.0).unwrap())));
 
     // Test delegated methods
     contact.set_tag("newtag");
@@ -126,10 +127,53 @@ fn test_contact_helpers() {
     assert!(contact.0.params.contains(&Param::Tag("newtag".to_string())));
     
     // Test wildcard check
-    let wc_addr = Address::new(None, Uri::from_str("*").unwrap());
+    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
     let contact_wc = Contact::new(wc_addr);
     assert!(contact_wc.is_wildcard());
 
 }
 
+#[test]
+fn test_contact_asterisk() {
+    let wc_str = "*";
+    let contact_wc = Contact::from_str(wc_str).unwrap();
+
+    // Construct the expected Address part for '*' Contact
+    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
+    let expected_wc = Contact(wc_addr);
+
+    assert_eq!(contact_wc, expected_wc);
+}
+
+#[test]
+fn test_contact_list_parsing() {
+    let input = "\"Alice Liddell\" <sip:alice@wonderland.lit>;tag=asdf, <sip:bob@biloxi.com>;q=0.5, *;expires=600";
+
+    // Build expected results
+    let alice_uri = Uri::from_str("sip:alice@wonderland.lit").unwrap();
+    let alice_addr = Address::new(Some("Alice Liddell"), alice_uri).with_param(Param::Tag("asdf".to_string()));
+    let alice_contact = Contact(alice_addr);
+
+    let bob_uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
+    let bob_addr = Address::new(None::<String>, bob_uri).with_param(Param::Q(NotNan::new(0.5).unwrap()));
+    let bob_contact = Contact(bob_addr);
+
+    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap()).with_param(Param::Expires(600));
+    let wc_contact = Contact(wc_addr);
+
+    // Parse the input and compare with expected results
+    let parsed_contacts: Vec<Contact> = input.split(',').map(|s| s.trim().parse().unwrap()).collect();
+    assert_eq!(parsed_contacts, vec![alice_contact, bob_contact, wc_contact]);
+}
+
 // TODO: Add tests for Contact-specific helpers (expires, q) 
+
+let addr = addr(None, "sip:user@host.com", vec![]);
+let contact = Contact(addr.clone());
+assert_eq!(contact.to_string(), "<sip:user@host.com>");
+assert!(!contact.is_wildcard());
+
+// Test wildcard check
+let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
+let contact_wc = Contact::new(wc_addr);
+assert!(contact_wc.is_wildcard());

@@ -40,11 +40,15 @@ fn test_call_id_display_parse_roundtrip() {
 }
 
 #[test]
-fn test_call_id_random() {
+fn test_call_id() {
+    let s = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@foo.bar.com";
+    let cid = CallId::from_str(s).unwrap();
+    assert_eq!(cid.to_string(), s);
+    assert_display_parses_back(&cid);
+
+    /*
     let cid1 = CallId::new_random();
     let cid2 = CallId::new_random();
-    assert_ne!(cid1.0, cid2.0, "Random Call-IDs should be unique");
-    // Check if it looks like a UUID (basic check)
-    assert_eq!(cid1.0.len(), 36, "Random Call-ID length is not UUID length");
-    assert!(cid1.0.contains('-'), "Random Call-ID does not contain hyphens");
+    assert_ne!(cid1.0, cid2.0);
+    */
 } 

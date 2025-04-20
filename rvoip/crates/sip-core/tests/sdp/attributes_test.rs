@@ -1,8 +1,8 @@
 // Tests for SDP attribute parsing logic in sdp/attributes.rs
 
-use rvoip_sip_core::error::Result;
-use rvoip_sip_core::sdp::attributes::{parse_rtpmap, parse_fmtp, RtpMapAttribute, FmtpAttribute, parse_ptime, parse_direction, MediaDirection, parse_candidate, CandidateAttribute, parse_ssrc, SsrcAttribute};
-use rvoip_sip_core::types::sdp::ParsedAttribute;
+use rvoip_sip_core::SipError;
+use rvoip_sip_core::sdp::attributes::{parse_rtpmap, parse_fmtp, parse_ptime, parse_direction, MediaDirection, parse_candidate, parse_ssrc};
+use rvoip_sip_core::types::sdp::{RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, ParsedAttribute};
 use std::str::FromStr;
 
 #[test]
@@ -23,11 +23,14 @@ fn test_parse_rtpmap_attribute() {
     let value3 = "96 H264/90000";
     let result3 = parse_rtpmap(value3);
     assert!(result3.is_ok());
-    let attr3 = result3.unwrap();
-    assert_eq!(attr3.payload_type, 96);
-    assert_eq!(attr3.encoding_name, "H264");
-    assert_eq!(attr3.clock_rate, 90000);
-    assert!(attr3.encoding_params.is_none());
+    if let Ok(ParsedAttribute::RtpMap(attr3)) = result3 {
+        assert_eq!(attr3.payload_type, 96);
+        assert_eq!(attr3.encoding_name, "H264");
+        assert_eq!(attr3.clock_rate, 90000);
+        assert!(attr3.encoding_params.is_none());
+    } else {
+        panic!("Parsed as wrong variant or failed: {:?}", result3);
+    }
 
     // Failure cases
     assert!(parse_rtpmap("PCMU/8000").is_err()); // Missing payload type
@@ -49,9 +52,12 @@ fn test_parse_fmtp_attribute() {
     let value2 = "101 0-15"; // Example for telephone-event
     let result2 = parse_fmtp(value2);
     assert!(result2.is_ok());
-    let attr2 = result2.unwrap();
-    assert_eq!(attr2.format, "101");
-    assert_eq!(attr2.parameters, "0-15");
+    if let Ok(ParsedAttribute::Fmtp(attr2)) = result2 {
+        assert_eq!(attr2.format, "101");
+        assert_eq!(attr2.parameters, "0-15");
+    } else {
+        panic!("Parsed as wrong variant or failed: {:?}", result2);
+    }
 
     // Failure cases
     assert!(parse_fmtp("97").is_err()); // Missing parameters part

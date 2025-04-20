@@ -3,6 +3,7 @@
 use rvoip_sip_core::types::Param;
 use std::net::IpAddr;
 use std::str::FromStr;
+use ordered_float::NotNan;
 
 #[test]
 fn test_param_display() {
@@ -29,9 +30,9 @@ fn test_param_display() {
     assert_eq!(Param::Lr.to_string(), ";lr");
     
     /// RFC 3261 Section 20.10 Contact Parameters (q)
-    assert_eq!(Param::Q(0.8).to_string(), ";q=0.8");
-    assert_eq!(Param::Q(1.0).to_string(), ";q=1.0");
-    assert_eq!(Param::Q(0.123).to_string(), ";q=0.1"); // Check formatting precision
+    assert_eq!(Param::Q(NotNan::new(0.8).unwrap()).to_string(), ";q=0.8");
+    assert_eq!(Param::Q(NotNan::new(1.0).unwrap()).to_string(), ";q=1.0");
+    assert_eq!(Param::Q(NotNan::new(0.123).unwrap()).to_string(), ";q=0.1"); // Check formatting precision
     
     /// RFC 3261 Section 19.1.4 URI Parameters (transport)
     assert_eq!(Param::Transport("tcp".to_string()).to_string(), ";transport=tcp");

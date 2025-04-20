@@ -4,6 +4,7 @@ use crate::common::{uri, addr, param_tag, param_expires, param_q, assert_parses_
 use rvoip_sip_core::types::{Address, Param, From, To, Contact};
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use std::str::FromStr;
+use ordered_float::NotNan;
 
 // Helper to create a basic URI
 fn basic_uri(user: &str, domain: &str) -> Uri {
@@ -108,7 +109,7 @@ fn test_address_helpers() {
      assert!(addr.get_param("expires").flatten().unwrap_or("").contains("3600"));
      
      addr.set_q(0.5);
-     assert_eq!(addr.q(), Some(0.5));
+     assert_eq!(addr.q(), Some(NotNan::new(0.5).unwrap()));
      assert!(addr.has_param("q"));
      assert!(addr.get_param("q").flatten().unwrap_or("").contains("0.5"));
 
@@ -119,10 +120,16 @@ fn test_address_helpers() {
      
      addr.set_expires(60);
      assert_eq!(addr.expires(), Some(60));
-     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Expires(_))).count(), 1);
+     assert_eq!(addr.params.iter().filter(|p| {
+         match p {
+             Param::Expires(_) => true,
+             Param::Other(k, _) => k.eq_ignore_ascii_case("expires"),
+             _ => false,
+         }
+     }).count(), 1);
      
      addr.set_q(1.1); // Clamping
-     assert_eq!(addr.q(), Some(1.0));
+     assert_eq!(addr.q(), Some(NotNan::new(1.0).unwrap()));
      assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Q(_))).count(), 1);
      
      // Test generic set_param
@@ -140,7 +147,13 @@ fn test_address_helpers() {
      assert_eq!(addr.expires(), None); // Typed getter fails
      assert_eq!(addr.get_param("expires"), Some(Some("override"))); // Generic getter works
      assert!(addr.params.contains(&Param::Other("expires".to_string(), Some("override".to_string()))));
-     assert_eq!(addr.params.iter().filter(|p| matches!(p, Param::Expires(_) | Param::Other(k,_) if k.eq_ignore_ascii_case("expires"))).count(), 1);
+     assert_eq!(addr.params.iter().filter(|p| {
+         match p {
+             Param::Expires(_) => true,
+             Param::Other(k, _) => k.eq_ignore_ascii_case("expires"),
+             _ => false,
+         }
+     }).count(), 1);
 
 }
 
