@@ -361,40 +361,31 @@ fn test_authentication_info_parser_typed() {
 fn test_parse_route() {
     /// RFC 3261 Section 20.35 Route
     let input1 = "<sip:server10.biloxi.com;lr>, <sip:bigbox3.site3.atlanta.com;lr>";
-    let uri1_1 = UriWithParams { uri: uri("sip:server10.biloxi.com"), params: vec![param_lr()] };
-    let uri1_2 = UriWithParams { uri: uri("sip:bigbox3.site3.atlanta.com"), params: vec![param_lr()] };
-    match parse_route(input1) {
-        Ok(r) => assert_eq!(r, Route(UriWithParamsList { uris: vec![uri1_1, uri1_2] })),
-        Err(e) => panic!("Parse failed: {:?}", e),
-    }
+    let uri1_1_uri = uri("sip:server10.biloxi.com").with_parameter(param_lr()); 
+    let uri1_2_uri = uri("sip:bigbox3.site3.atlanta.com").with_parameter(param_lr());
+    let uri1_1 = UriWithParams { uri: uri1_1_uri, params: vec![] }; 
+    let uri1_2 = UriWithParams { uri: uri1_2_uri, params: vec![] }; 
+    assert_parses_ok(input1, Route(UriWithParamsList { uris: vec![uri1_1, uri1_2] }));
 
     /// No angle brackets, single entry
     let input2 = "sip:192.168.0.1;transport=udp";
-    let uri2_1 = UriWithParams { uri: uri("sip:192.168.0.1"), params: vec![param_transport("udp")] };
-    match parse_route(input2) {
-        Ok(r) => assert_eq!(r, Route(UriWithParamsList { uris: vec![uri2_1] })),
-        Err(e) => panic!("Parse failed: {:?}", e),
-    }
+    let uri2_1_uri = uri("sip:192.168.0.1").with_parameter(param_transport("udp"));
+    let uri2_1 = UriWithParams { uri: uri2_1_uri, params: vec![] };
+    assert_parses_ok(input2, Route(UriWithParamsList { uris: vec![uri2_1] }));
 
     /// Mixed formats and more params
     let input3 = "<sip:p1.example.com;lr;foo=bar>, sip:p2.example.com;transport=tcp";
-     let uri3_1 = UriWithParams { uri: uri("sip:p1.example.com"), params: vec![param_lr(), param_other("foo", Some("bar"))] };
-     let uri3_2 = UriWithParams { uri: uri("sip:p2.example.com"), params: vec![param_transport("tcp")] };
-      match parse_route(input3) {
-         Ok(r) => assert_eq!(r, Route(UriWithParamsList { uris: vec![uri3_1, uri3_2] })),
-          Err(e) => panic!("Parse failed: {:?}", e),
-      }
+     let uri3_1_uri = uri("sip:p1.example.com").with_parameter(param_lr()).with_parameter(param_other("foo", Some("bar")));
+     let uri3_2_uri = uri("sip:p2.example.com").with_parameter(param_transport("tcp"));
+     let uri3_1 = UriWithParams { uri: uri3_1_uri, params: vec![] };
+     let uri3_2 = UriWithParams { uri: uri3_2_uri, params: vec![] };
+     assert_parses_ok(input3, Route(UriWithParamsList { uris: vec![uri3_1, uri3_2] }));
 
     /// URI with userinfo
     let input4 = "<sip:user@[::1]:5090;transport=tls;lr>";
-     let uri4_1 = UriWithParams {
-          uri: uri("sip:user@[::1]:5090"), 
-          params: vec![param_transport("tls"), param_lr()]
-      };
-      match parse_route(input4) {
-         Ok(r) => assert_eq!(r, Route(UriWithParamsList { uris: vec![uri4_1] })),
-          Err(e) => panic!("Parse failed: {:?}", e),
-      }
+     let uri4_1_uri = uri("sip:user@[::1]:5090").with_parameter(param_transport("tls")).with_parameter(param_lr());
+     let uri4_1 = UriWithParams { uri: uri4_1_uri, params: vec![] };
+     assert_parses_ok(input4, Route(UriWithParamsList { uris: vec![uri4_1] }));
 
     // Failure cases
     assert_parse_fails::<Route>(""); // Empty
@@ -408,19 +399,16 @@ fn test_parse_route() {
 fn test_parse_record_route() {
     /// RFC 3261 Section 20.30 Record-Route
     let input1 = "<sip:server10.biloxi.com;lr>, <sip:bigbox3.site3.atlanta.com;lr>";
-    let uri1_1 = UriWithParams { uri: uri("sip:server10.biloxi.com"), params: vec![param_lr()] };
-    let uri1_2 = UriWithParams { uri: uri("sip:bigbox3.site3.atlanta.com"), params: vec![param_lr()] };
-    match parse_record_route(input1) {
-        Ok(rr) => assert_eq!(rr, RecordRoute(UriWithParamsList { uris: vec![uri1_1, uri1_2] })),
-        Err(e) => panic!("Parse failed: {:?}", e),
-    }
+    let uri1_1_uri = uri("sip:server10.biloxi.com").with_parameter(param_lr());
+    let uri1_2_uri = uri("sip:bigbox3.site3.atlanta.com").with_parameter(param_lr());
+    let uri1_1 = UriWithParams { uri: uri1_1_uri, params: vec![] };
+    let uri1_2 = UriWithParams { uri: uri1_2_uri, params: vec![] };
+    assert_parses_ok(input1, RecordRoute(UriWithParamsList { uris: vec![uri1_1, uri1_2] }));
 
     let input2 = "sip:192.168.0.1;transport=udp";
-    let uri2_1 = UriWithParams { uri: uri("sip:192.168.0.1"), params: vec![param_transport("udp")] };
-     match parse_record_route(input2) {
-        Ok(rr) => assert_eq!(rr, RecordRoute(UriWithParamsList { uris: vec![uri2_1] })),
-         Err(e) => panic!("Parse failed: {:?}", e),
-     }
+    let uri2_1_uri = uri("sip:192.168.0.1").with_parameter(param_transport("udp"));
+    let uri2_1 = UriWithParams { uri: uri2_1_uri, params: vec![] };
+    assert_parses_ok(input2, RecordRoute(UriWithParamsList { uris: vec![uri2_1] }));
 
     // Failure cases
     assert_parse_fails::<RecordRoute>("");

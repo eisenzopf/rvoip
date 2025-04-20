@@ -26,17 +26,7 @@ impl FromStr for RecordRoute {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let trimmed_s = s.trim();
-        if trimmed_s.is_empty() {
-             return Err(Error::InvalidHeader("Empty Record-Route header value".to_string()));
-        }
-        match parse_record_route(trimmed_s) { // Pass trimmed string
-             Ok(route) if route.0.uris.is_empty() => {
-                 Err(Error::InvalidHeader("Invalid Record-Route header value".to_string()))
-             }
-             Ok(route) => Ok(route),
-             Err(e) => Err(e)
-        }
+        parse_record_route(s)
     }
 }
 

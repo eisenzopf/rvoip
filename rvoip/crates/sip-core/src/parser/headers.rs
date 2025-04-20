@@ -5,7 +5,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete::{char, digit1, space0, space1},
-    combinator::{map, map_res, opt, recognize},
+    combinator::{map, map_res, opt, recognize, peek},
     multi::{fold_many0, many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
@@ -27,9 +27,9 @@ use crate::types::record_route::RecordRoute;
 use crate::types::reply_to::ReplyTo;
 use crate::types::uri_with_params::UriWithParams;
 use crate::types::uri_with_params_list::UriWithParamsList;
-use crate::types::auth::{/*AuthScheme,*/ Scheme, AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate, Algorithm, Qop};
-use crate::uri::Uri;
-use super::uri::{parse_uri, parameters_parser};
+use crate::types::auth::{AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate, Algorithm, Qop, Scheme as AuthScheme};
+use crate::uri::{Uri, Host, Scheme};
+use crate::parser::uri::{scheme_parser, userinfo_parser, host_parser, port_parser, parameters_parser};
 
 /// Parse a single header
 pub fn parse_header(input: &str) -> Result<Header> {
@@ -327,16 +327,24 @@ pub fn cseq_parser(input: &str) -> IResult<&str, CSeq> {
 
 /// Parse a Content-Type header value into the MediaType struct
 pub fn parse_content_type(input: &str) -> Result<MediaType> {
-    match content_type_parser(input) {
-        Ok((_, content_type)) => Ok(content_type),
+    let trimmed_input = input.trim(); // Trim input
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty Content-Type value".to_string()));
+    }
+    match content_type_parser(trimmed_input) {
+        // Check that the entire trimmed input was consumed
+        Ok((rest, content_type)) if rest.is_empty() => Ok(content_type),
+        Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after Content-Type value: {}", rest
+        ))),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(Error::Parser(format!(
             "Failed to parse Content-Type header '{}': {:?}",
-            input,
+            trimmed_input,
             e.code
         ))),
         Err(nom::Err::Incomplete(_)) => Err(Error::Parser(format!(
             "Incomplete input while parsing Content-Type header: {}",
-            input
+            trimmed_input
         ))),
     }
 }
@@ -460,7 +468,7 @@ pub fn parse_www_authenticate(input: &str) -> Result<WwwAuthenticate> {
 pub fn www_authenticate_parser(input: &str) -> IResult<&str, WwwAuthenticate> {
     // Parse the scheme (e.g., "Digest")
     let (input, scheme_str) = parse_token(input)?;
-    let scheme = Scheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
+    let scheme = AuthScheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
     let (input, _) = space1(input)?;
 
     // Parse the comma-separated parameters
@@ -527,7 +535,8 @@ pub fn parse_allow(input: &str) -> Result<Allow> {
 pub fn allow_parser(input: &str) -> IResult<&str, Allow> {
     map(
         separated_list1(
-            pair(char(','), space0), 
+            // Separator: Allow optional spaces around the comma
+            delimited(space0, char(','), space0), 
             map_res(parse_token, |m_str| Method::from_str(m_str))
         ),
         |methods| Allow(methods)
@@ -637,7 +646,7 @@ pub fn parse_authorization(input: &str) -> Result<Authorization> {
 pub fn authorization_parser(input: &str) -> IResult<&str, Authorization> {
     // Parse the scheme (e.g., "Digest")
     let (input, scheme_str) = parse_token(input)?;
-    let scheme = Scheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
+    let scheme = AuthScheme::from_str(scheme_str).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
     let (input, _) = space1(input)?;
 
     // Parse the comma-separated parameters
@@ -763,31 +772,45 @@ pub fn authentication_info_parser(input: &str) -> IResult<&str, AuthenticationIn
 
 /// Parser for a single URI with parameters (e.g., <sip:host;lr>)
 pub fn uri_with_params_parser(input: &str) -> IResult<&str, UriWithParams> {
-    let (mut remaining_input, uri_part) = alt((
-        // <sip:alice@example.com> format
+    // Revert to parsing the URI part first, which includes its own parameters
+    let (remaining_input, uri_part) = alt((
+        // <sip:alice@example.com;param=val> format
         delimited(
             char('<'),
             map_res(take_till(|c| c == '>'), |s: &str| Uri::from_str(s)),
             char('>')
         ),
-        // sip:alice@example.com format (no angle brackets)
-        map_res(take_till(|c| c == ';' || c == ',' || c == '\r' || c == '\n'), |s: &str| Uri::from_str(s.trim()))
+        // sip:alice@example.com;param=val format (no angle brackets)
+        // Stop parsing at the next comma if present (for list context)
+        map_res(take_till(|c| c == ',' || c == '\r' || c == '\n'), |s: &str| Uri::from_str(s.trim()))
     ))(input)?;
 
-    // Parse parameters that follow the URI part
-    let (final_input, parsed_params) = match parameters_parser(remaining_input) {
-        Ok((final_input, params_vec)) => (final_input, params_vec),
-        Err(_) => (remaining_input, Vec::new()), // Default to empty if no params
-    };
+    // Header parameters are generally NOT associated with Route/Record-Route URIs this way.
+    // Parameters specific to the routing hop belong inside the URI's parameters field.
+    // We assume no *additional* parameters after the URI part for Route/Record-Route.
+    let header_params = Vec::new(); // Initialize as empty
+    let final_input = remaining_input; // No further parsing here
 
-    // Construct UriWithParams using both the parsed URI and the parsed parameters
-    Ok((final_input, UriWithParams { uri: uri_part, params: parsed_params }))
+    Ok((final_input, UriWithParams { uri: uri_part, params: header_params }))
 }
 
 /// Parse a Route header value into the Route struct
 pub fn parse_route(input: &str) -> Result<Route> {
-    match route_parser(input) {
-        Ok((_, route)) => Ok(route),
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty Route header value".to_string()));
+    }
+    match route_parser(trimmed_input) {
+        Ok((rest, route)) if rest.is_empty() => {
+            if route.0.uris.is_empty() {
+                Err(Error::InvalidHeader("Invalid Route header value (empty list)".to_string()))
+            } else {
+                Ok(route)
+            }
+        },
+        Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after Route value: {}", rest
+        ))),
         Err(e) => Err(Error::Parser(format!("Failed to parse Route header: {:?}", e))),
     }
 }
@@ -805,8 +828,21 @@ pub fn route_parser(input: &str) -> IResult<&str, Route> {
 
 /// Parse a Record-Route header value into the RecordRoute struct
 pub fn parse_record_route(input: &str) -> Result<RecordRoute> {
-    match record_route_parser(input) {
-        Ok((_, route)) => Ok(route),
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty Record-Route header value".to_string()));
+    }
+    match record_route_parser(trimmed_input) {
+        Ok((rest, route)) if rest.is_empty() => {
+             if route.0.uris.is_empty() {
+                Err(Error::InvalidHeader("Invalid Record-Route header value (empty list)".to_string()))
+            } else {
+                Ok(route)
+            }
+        },
+        Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after Record-Route value: {}", rest
+        ))),
         Err(e) => Err(Error::Parser(format!("Failed to parse Record-Route header: {:?}", e))),
     }
 }

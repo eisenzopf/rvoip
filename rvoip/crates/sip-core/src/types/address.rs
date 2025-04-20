@@ -33,7 +33,7 @@ impl fmt::Display for Address {
         if let Some(name) = &self.display_name {
             if !name.is_empty() { // Don't write anything for empty display name
                 if needs_quoting(name) {
-                    write!(f, "\"{}\"", name.replace("\"", "\"\"") )?;
+                    write!(f, "\"{}\"", name)?;
                 } else {
                     write!(f, "{}", name)?;
                 }

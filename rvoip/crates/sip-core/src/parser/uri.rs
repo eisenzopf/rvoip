@@ -19,19 +19,22 @@ use super::utils::clone_str;
 use ordered_float::NotNan;
 
 // Parse the scheme of a URI (sip, sips, tel)
-fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
+pub fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
     map_res(
         alt((
-            tag("sip"),
             tag("sips"),
+            tag("SIPS"),
+            tag("sip"),
+            tag("SIP"),
             tag("tel"),
+            tag("TEL"),
         )),
         |s: &str| Scheme::from_str(s)
     )(input)
 }
 
 // Parse the userinfo part (user:password@)
-fn userinfo_parser(input: &str) -> IResult<&str, (Option<String>, Option<String>)> {
+pub fn userinfo_parser(input: &str) -> IResult<&str, (Option<String>, Option<String>)> {
     match opt(terminated(
         pair(
             map(
@@ -83,7 +86,7 @@ fn domain_parser(input: &str) -> IResult<&str, Host> {
 }
 
 // Parse the host part (either IPv4, IPv6, or domain)
-fn host_parser(input: &str) -> IResult<&str, Host> {
+pub fn host_parser(input: &str) -> IResult<&str, Host> {
     alt((
         ipv6_parser,
         ipv4_parser,
@@ -92,7 +95,7 @@ fn host_parser(input: &str) -> IResult<&str, Host> {
 }
 
 // Parse the port part
-fn port_parser(input: &str) -> IResult<&str, u16> {
+pub fn port_parser(input: &str) -> IResult<&str, u16> {
     map_res(
         preceded(char(':'), digit1),
         |s: &str| s.parse::<u16>()
@@ -101,22 +104,25 @@ fn port_parser(input: &str) -> IResult<&str, u16> {
 
 // Parse a single parameter
 fn parameter_parser(input: &str) -> IResult<&str, Param> {
-    let (input, (key_str, opt_val_str)) = preceded(
-        char(';'),
-        pair(
-            map(
+    let (input, _) = char(';')(input)?; // Consume semicolon first
+    let (input, key_str) = map(
                 take_till(|c| c == '=' || c == ';' || c == '?' || c == '\r' || c == '\n'),
                 |s: &str| s.trim() // Trim whitespace from key
-            ),
-            opt(preceded(
+            )(input)?;
+    
+    // Fail if key is empty after trimming
+    if key_str.is_empty() {
+        return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+    }
+
+    let (input, opt_val_str) = opt(preceded(
                 char('='),
                 map(
+                    // Value stops at semicolon, comma, ?, or EOL
                     take_till(|c| c == ';' || c == ',' || c == '?' || c == '\r' || c == '\n'),
                     |s: &str| s.trim() // Trim whitespace from value
                 )
-            ))
-        )
-    )(input)?;
+            ))(input)?;
 
     // Attempt to unescape key and value - ignore errors for now, just use original
     let key = unescape_param(key_str).unwrap_or_else(|_| key_str.to_string());
@@ -169,6 +175,7 @@ fn parameter_parser(input: &str) -> IResult<&str, Param> {
 
 /// Parser for URI parameters (e.g., ;param1=value1;param2)
 pub fn parameters_parser(input: &str) -> IResult<&str, Vec<Param>> {
+    // Revert to many0(parameter_parser) - parameter_parser now handles required ;
     many0(parameter_parser)(input)
 }
 

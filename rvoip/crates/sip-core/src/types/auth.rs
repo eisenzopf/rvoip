@@ -127,26 +127,27 @@ pub struct WwwAuthenticate {
 
 impl fmt::Display for WwwAuthenticate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} realm=\"\"{}\"\"", self.scheme, self.realm)?; // Realm is mandatory
-        write!(f, ", nonce=\"\"{}\"\"", self.nonce)?; // Nonce is mandatory
+        write!(f, "{} realm=\"{}\"", self.scheme, self.realm)?;
+        write!(f, ", nonce=\"{}\"", self.nonce)?;
 
         if let Some(domain) = &self.domain {
-            write!(f, ", domain=\"\"{}\"\"", domain)?; // Domain should be quoted
+            write!(f, ", domain=\"{}\"", domain)?;
         }
         if let Some(opaque) = &self.opaque {
-            write!(f, ", opaque=\"\"{}\"\"", opaque)?; 
+            write!(f, ", opaque=\"{}\"", opaque)?;
         }
         if let Some(stale) = self.stale {
-            write!(f, ", stale={}", if stale { "true" } else { "false" })?;
+            write!(f, ", stale={}", if stale { "true" } else { "false" })?; // stale=true/false (no quotes)
         }
         if let Some(algo) = &self.algorithm {
-            write!(f, ", algorithm={}", algo)?; // Algorithm might not need quotes per examples
+            // Algorithm MAY be a token or quoted-string, usually token
+            write!(f, ", algorithm={}", algo)?; // Output as token for simplicity
         }
         if !self.qop.is_empty() {
+            // qop value MUST be quoted, potentially comma-separated list
             let qop_str = self.qop.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(",");
-            write!(f, ", qop=\"\"{}\"\"", qop_str)?; // qop value MUST be quoted
+            write!(f, ", qop=\"{}\"", qop_str)?;
         }
-        // TODO: Add display for other fields (charset, userhash etc.)
         Ok(())
     }
 }
@@ -231,26 +232,28 @@ pub struct Authorization {
 
 impl fmt::Display for Authorization {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} username=\"\"{}\"\"", self.scheme, self.username)?;
-        write!(f, ", realm=\"\"{}\"\"", self.realm)?; 
-        write!(f, ", nonce=\"\"{}\"\"", self.nonce)?; 
-        write!(f, ", uri=\"\"{}\"\"", self.uri)?; // URI should be quoted
-        write!(f, ", response=\"\"{}\"\"", self.response)?; // Response must be quoted
+        write!(f, "{} username=\"{}\"", self.scheme, self.username)?;
+        write!(f, ", realm=\"{}\"", self.realm)?; 
+        write!(f, ", nonce=\"{}\"", self.nonce)?; 
+        write!(f, ", uri=\"{}\"", self.uri)?; 
+        write!(f, ", response=\"{}\"", self.response)?;
 
         if let Some(algo) = &self.algorithm {
-            write!(f, ", algorithm={}", algo)?;
+             // Algorithm MAY be a token or quoted-string, usually token
+            write!(f, ", algorithm={}", algo)?; // Output as token
         }
         if let Some(cnonce) = &self.cnonce {
-            write!(f, ", cnonce=\"\"{}\"\"", cnonce)?; 
+            write!(f, ", cnonce=\"{}\"", cnonce)?; 
         }
         if let Some(opaque) = &self.opaque {
-            write!(f, ", opaque=\"\"{}\"\"", opaque)?;
+            write!(f, ", opaque=\"{}\"", opaque)?;
         }
         if let Some(qop) = &self.message_qop {
-            write!(f, ", qop={}", qop)?; // qop value is not quoted here
+             // qop value MUST be quoted in Authorization according to RFC 7616 errata (originally token)
+             // However, many implementations expect token. Let's use token for now.
+            write!(f, ", qop={}", qop)?; 
         }
         if let Some(nc) = self.nonce_count {
-            // Nonce count MUST be 8 hex digits
             write!(f, ", nc={:08x}", nc)?;
         }
         Ok(())
@@ -372,16 +375,16 @@ impl fmt::Display for AuthenticationInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
         if let Some(nextnonce) = &self.nextnonce {
-            parts.push(format!("nextnonce=\"\"{}\"\"", nextnonce));
+            parts.push(format!("nextnonce=\"{}\"", nextnonce));
         }
         if let Some(qop) = &self.qop {
              parts.push(format!("qop={}", qop)); // qop value is not quoted here
         }
          if let Some(rspauth) = &self.rspauth {
-            parts.push(format!("rspauth=\"\"{}\"\"", rspauth));
+            parts.push(format!("rspauth=\"{}\"", rspauth));
         }
         if let Some(cnonce) = &self.cnonce {
-            parts.push(format!("cnonce=\"\"{}\"\"", cnonce));
+            parts.push(format!("cnonce=\"{}\"", cnonce));
         }
         if let Some(nc) = self.nc {
             // Nonce count MUST be 8 octal digits according to RFC 7615

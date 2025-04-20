@@ -37,10 +37,9 @@ impl fmt::Display for ContentDisposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.disposition_type)?;
         for (key, value) in &self.params {
-            // According to RFC 2183/6266, parameter values might need quoting
-            // if they contain non-token characters. Using a simple check for now.
-            if value.chars().any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '!' | '#' | '$' | '%' | '&' | '\\' | '\'' | '^' | '_' | '`' | '{' | '}' | '~' | '-')) {
-                write!(f, ";{}=\\\"{}\\\"", key, value)?;
+            // Remove internal quote escaping for now
+            if value.chars().any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '^' | '_' | '`' | '{' | '}' | '~' | '-')) {
+                write!(f, ";{}=\"{}\"", key, value)?;
             } else {
                 write!(f, ";{}={}", key, value)?;
             }

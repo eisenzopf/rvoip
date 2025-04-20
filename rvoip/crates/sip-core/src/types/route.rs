@@ -26,17 +26,8 @@ impl FromStr for Route {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let trimmed_s = s.trim();
-        if trimmed_s.is_empty() {
-             return Err(Error::InvalidHeader("Empty Route header value".to_string()));
-        }
-        match parse_route(trimmed_s) {
-             Ok(route) if route.0.uris.is_empty() => {
-                 Err(Error::InvalidHeader("Invalid Route header value".to_string()))
-             }
-             Ok(route) => Ok(route),
-             Err(e) => Err(e)
-        }
+        // Revert: Call the public parse function
+        parse_route(s)
     }
 }
 
