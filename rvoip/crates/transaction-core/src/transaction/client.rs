@@ -148,49 +148,34 @@ impl ClientInviteTransaction {
     
     /// Create an ACK request for a response
     fn create_ack(&self, response: &Response) -> Result<Request> {
-        // Create a new ACK request based on the original INVITE
-        let mut ack = Request {
-            method: Method::Ack,
-            uri: self.request.uri.clone(),
-            version: self.request.version,
-            headers: Vec::new(),
-            body: self.request.body.clone(),
-        };
-        
-        // Copy headers from original request
-        for header in &self.request.headers {
-            if matches!(header.name, 
-                HeaderName::Via | 
-                HeaderName::From | 
-                HeaderName::To | 
-                HeaderName::CallId | 
-                HeaderName::Route | 
-                HeaderName::MaxForwards
-            ) {
-                // For To header, preserve the tag from the response
-                if header.name == HeaderName::To && response.header(&HeaderName::To).is_some() {
-                    ack = ack.with_header(response.header(&HeaderName::To).unwrap().clone());
-                } else {
-                    ack = ack.with_header(header.clone());
-                }
-            }
+        // Create ACK based on original request and received response
+        let mut ack_request = Request::new(Method::Ack, self.request.uri.clone());
+        ack_request.version = self.request.version.clone(); // Clone Version
+
+        // Copy essential headers (To, From, Call-ID, CSeq Method=ACK)
+        if let Some(to_header) = response.header(&HeaderName::To) {
+            ack_request = ack_request.with_header(to_header.clone());
         }
-        
-        // Update CSeq for ACK
+        if let Some(from_header) = self.request.header(&HeaderName::From) {
+            ack_request = ack_request.with_header(from_header.clone());
+        }
+        if let Some(call_id_header) = self.request.header(&HeaderName::CallId) {
+            ack_request = ack_request.with_header(call_id_header.clone());
+        }
         if let Some((cseq_num, _)) = utils::extract_cseq(&Message::Request(self.request.clone())) {
-            ack = ack.with_header(Header::text(
+            ack_request = ack_request.with_header(Header::text(
                 HeaderName::CSeq,
                 format!("{} ACK", cseq_num)
             ));
         }
         
         // Add Content-Length header if not present
-        ack = ack.clone().with_header(Header::integer(
+        ack_request = ack_request.clone().with_header(Header::integer(
             HeaderName::ContentLength,
-            ack.body.len() as i64
+            ack_request.body.len() as i64
         ));
         
-        Ok(ack)
+        Ok(ack_request)
     }
 
     /// Create an ACK request for a 2xx response
@@ -430,7 +415,7 @@ impl Transaction for ClientInviteTransaction {
                 
                 // Check if branch and call-id match
                 if let (Some(incoming_branch), Some(our_branch)) = (
-                    message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
+                    message.first_via().and_then(|via| via.get("branch").flatten().map(|s| s.to_string())),
                     utils::extract_branch(&Message::Request(self.request.clone()))
                 ) {
                     if incoming_branch == our_branch {
@@ -807,7 +792,7 @@ impl Transaction for ClientNonInviteTransaction {
                 
                 // Check if branch and call-id match
                 if let (Some(incoming_branch), Some(our_branch)) = (
-                    message.first_via().and_then(|via| via.get("branch").map(|s| s.to_string())),
+                    message.first_via().and_then(|via| via.get("branch").flatten().map(|s| s.to_string())),
                     utils::extract_branch(&Message::Request(self.request.clone()))
                 ) {
                     if incoming_branch == our_branch {

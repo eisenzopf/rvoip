@@ -14,9 +14,9 @@ pub fn generate_branch() -> String {
 
 /// Extract the branch parameter from a message
 pub fn extract_branch(message: &Message) -> Option<String> {
-    // Use the structured Via implementation to get the branch parameter
-    message.first_via()
-        .and_then(|via| via.get("branch").map(|s| s.to_string()))
+    message
+        .first_via()
+        .and_then(|via| via.get("branch").flatten().map(|s| s.to_string()))
 }
 
 /// Extract the Call-ID from a message

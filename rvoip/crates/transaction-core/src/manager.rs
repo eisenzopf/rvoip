@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::{Message, Method, Request, Response, HeaderName};
 use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_core::uri::Host;
 
 use crate::error::{Error, Result};
 use crate::transaction::{
@@ -21,6 +22,9 @@ use crate::transaction::{
 };
 use crate::transaction::client;
 use crate::utils;
+use crate::context::TransactionContext;
+use crate::error::{TransactionError, Result};
+use crate::transaction::{TransactionEvent, TransactionId, TransactionKey, TransactionKind};
 
 /// Transaction events sent by the transaction manager
 #[derive(Debug, Clone)]

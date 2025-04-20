@@ -10,7 +10,6 @@ use crate::{
     codec::{Codec, G711Codec, G711Variant},
     AudioBuffer, AudioFormat, SampleRate
 };
-use crate::jitter::JitterBuffer;
 
 /// Simple demo for G.711 codec
 #[derive(Parser, Debug)]

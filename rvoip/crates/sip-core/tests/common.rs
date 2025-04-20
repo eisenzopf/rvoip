@@ -1,4 +1,20 @@
 // Common test utilities for sip-core
+use std::str::FromStr;
+use std::net::IpAddr;
+use bytes::Bytes;
+use ordered_float::NotNan;
+
+// SIP Core imports
+use rvoip_sip_core::uri::{Uri, Scheme, Host};
+use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via};
+use rvoip_sip_core::types::sip_message::{Message, Request, Response};
+use rvoip_sip_core::{
+    Error as SipError,
+    Result as SipResult,
+    parse_message, 
+    HeaderName,
+    HeaderValue
+};
 
 // Use crate:: syntax as this will be part of the test crate
 use rvoip_sip_core::error::{Error, Result};
@@ -8,13 +24,13 @@ use rvoip_sip_core::message::{Message, Request, Response};
 use rvoip_sip_core::parser::message::parse_message; // Use the parser's function
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
 use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via}; // Import types
-use rvoip_sip_core::types::{HeaderName, HeaderValue}; // Added Message, Request, Response imports
 use rvoip_sip_core::types::sip_message::{Message, Request, Response};
 use rvoip_sip_core::{
     Error as SipError,
     Result as SipResult,
     parse_message, // Use the main parse function
-    // Message, Request, Response // Already imported from types?
+    HeaderName, // Import from lib.rs
+    HeaderValue // Import from lib.rs
 };
 use ordered_float::NotNan; // Add import for NotNan
 
@@ -47,7 +63,7 @@ pub fn addr(display_name: Option<&str>, uri_str: &str, params: Vec<Param>) -> Ad
 pub fn param_tag(val: &str) -> Param { Param::Tag(val.to_string()) }
 pub fn param_branch(val: &str) -> Param { Param::Branch(val.to_string()) }
 pub fn param_expires(val: u32) -> Param { Param::Expires(val) }
-pub fn param_received(val: &str) -> Param { Param::Received(val.to_string()) }
+pub fn param_received(val: &str) -> Param { Param::Received(IpAddr::from_str(val).expect("Invalid IP address for received param")) }
 pub fn param_maddr(val: &str) -> Param { Param::Maddr(val.to_string()) }
 pub fn param_ttl(val: u8) -> Param { Param::Ttl(val) }
 pub fn param_lr() -> Param { Param::Lr }
@@ -187,3 +203,29 @@ pub fn validate_message_basic(
 }
 
 // TODO: Add typed header validation helpers later 
+
+pub fn addr(uri: Uri) -> Address {
+    Address::new(None::<String>, uri)
+}
+
+pub fn addr_with_display(display: &str, uri: Uri) -> Address {
+    Address::new(Some(display), uri)
+}
+
+pub fn uri(scheme: Scheme, host: Host, user: Option<&str>) -> Uri {
+    let mut uri = Uri::new(scheme, host);
+    if let Some(u) = user {
+        uri.user = Some(u.to_string());
+    }
+    uri
+}
+
+pub fn via(host: Host, port: Option<u16>, transport: &str) -> Via {
+    Via::new(
+        "SIP",
+        "2.0",
+        transport.to_string(),
+        host.to_string(),
+        port
+    )
+} 

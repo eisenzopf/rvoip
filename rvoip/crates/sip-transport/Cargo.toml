@@ -32,6 +32,9 @@ tokio-rustls = { version = "0.24", optional = true }
 rustls = { version = "0.21", optional = true }
 rustls-pemfile = { version = "1.0", optional = true }
 
+# Add futures-util dependency
+futures-util = "0.3"
+
 [features]
 default = ["udp", "tls"]
 udp = []

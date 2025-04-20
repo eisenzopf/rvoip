@@ -2012,6 +2012,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "futures-util",
  "rustls",
  "rustls-pemfile",
  "rvoip-sip-core",
