@@ -49,3 +49,25 @@ fn test_uri_with_params_list_helpers() {
       assert_eq!(rr.len(), 2);
       assert_eq!(rr.last().unwrap().uri.host.to_string(), "p2.example.com");
 } 
+
+#[test]
+fn debug_host_parsing() {
+    // Use common::uri which calls Uri::from_str
+    let uri_str = "sip:p1@example.com";
+    let parsed_uri = uri(uri_str); 
+    println!("Parsed URI for {}: {:?}", uri_str, parsed_uri);
+    // Use direct comparison
+    assert_eq!(parsed_uri.host, Host::Domain("p1.example.com".to_string()));
+
+    let uri_str_2 = "sip:p2@example.com";
+    let parsed_uri_2 = uri(uri_str_2);
+    println!("Parsed URI for {}: {:?}", uri_str_2, parsed_uri_2);
+    // Use direct comparison
+     assert_eq!(parsed_uri_2.host, Host::Domain("p2.example.com".to_string()));
+
+     // Test without user part
+     let uri_str_3 = "sip:example.com";
+     let parsed_uri_3 = uri(uri_str_3);
+     println!("Parsed URI for {}: {:?}", uri_str_3, parsed_uri_3);
+     assert_eq!(parsed_uri_3.host, Host::Domain("example.com".to_string()));
+} 

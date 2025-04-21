@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use nom::{
     bytes::complete::{take_till},
-    character::complete::{digit1, space1},
+    character::complete::{digit1, space1, line_ending},
     combinator::{map, map_res},
     IResult,
 };
@@ -37,6 +37,9 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
         take_till(|c| c == '\r' || c == '\n'),
         |s: &str| s.to_string()
     )(input)?;
+
+    // Consume the line ending
+    let (input, _) = line_ending(input)?;
 
     Ok((input, (version, status, reason)))
 } 

@@ -5,6 +5,7 @@ use nom::{
     combinator::{map_res},
     IResult,
 };
+use nom::character::complete::line_ending;
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
 use crate::types::{Method};
@@ -33,6 +34,9 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
         take_till(|c| c == '\r' || c == '\n'),
         |s: &str| Version::from_str(s)
     )(input)?;
+
+    // Consume the line ending
+    let (input, _) = line_ending(input)?;
 
     Ok((input, (method, uri, version)))
 }
