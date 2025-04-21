@@ -426,7 +426,7 @@ impl fmt::Display for MediaDescription {
             if matches!(attr, ParsedAttribute::Ptime(_) | ParsedAttribute::Direction(_)) {
                 continue;
             }
-            write!(f, "{}\\r\\n", attr)?; 
+            write!(f, "{}\r\n", attr)?; 
         }
         Ok(())
     }
@@ -467,7 +467,7 @@ impl fmt::Display for SdpSession {
              if matches!(attr, ParsedAttribute::Direction(_)) {
                  continue;
              }
-            write!(f, "{}\\r\\n", attr)?;
+            write!(f, "{}\r\n", attr)?;
         }
 
         // Media descriptions

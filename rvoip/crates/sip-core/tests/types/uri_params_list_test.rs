@@ -38,6 +38,7 @@ fn test_uri_with_params_list_helpers() {
      // Test Route/RecordRoute delegation via Deref
      let route = Route(list.clone());
      assert_eq!(route.len(), 2);
+     println!("Debugging route.first(): {:?}", route.first()); 
      assert_eq!(route.first().unwrap().uri.host.to_string(), "p1.example.com");
      
      let rr = RecordRoute(list);

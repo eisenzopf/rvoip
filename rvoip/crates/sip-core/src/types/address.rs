@@ -7,11 +7,26 @@ use std::str::FromStr;
 use ordered_float::NotNan;
 
 /// Represents a SIP Name Address (Display Name <URI>; params).
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+#[derive(Debug, Clone, Eq)] // Remove PartialEq, keep Eq (requires Hash later? Check Param)
 pub struct Address {
     pub display_name: Option<String>,
     pub uri: Uri,
     pub params: Vec<Param>,
+}
+
+// Manual PartialEq implementation to treat None and Some("") display_name as equal
+impl PartialEq for Address {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare display_name (treating None and Some("") as equal)
+        let display_name_eq = match (&self.display_name, &other.display_name) {
+            (None, None) => true,
+            (Some(s1), Some(s2)) => s1.trim() == s2.trim(),
+            (Some(s), None) | (None, Some(s)) => s.trim().is_empty(),
+        };
+
+        // Compare URI and params (params order matters with Vec)
+        display_name_eq && self.uri == other.uri && self.params == other.params
+    }
 }
 
 // Function to check if quoting is needed for display-name
