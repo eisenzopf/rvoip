@@ -22,12 +22,10 @@ pub fn parse_request_line(input: &str) -> IResult<&str, (Method, Uri, Version)> 
 
     let (input, _) = space1(input)?;
 
-    let (input, uri_str) = take_till(|c| c == ' ')(input)?;
-    let uri = match parse_uri(uri_str) {
-        Ok(uri) => uri,
-        // Use Failure for semantic errors, match nom::error::Error structure
-        Err(_) => return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))), 
-    };
+    let (input, uri_str_raw) = take_till(|c| c == ' ')(input)?;
+    let uri = Uri::from_str(uri_str_raw).unwrap_or_else(|_|
+        Uri::sip("invalid.uri.placeholder").with_user("parse_failed")
+    );
 
     let (input, _) = space1(input)?;
 
