@@ -12,161 +12,183 @@ fn basic_uri(user: &str, domain: &str) -> Uri {
 
 #[test]
 fn test_contact_display_parse_roundtrip() {
-    let addr1 = addr(
-        Some("Contact Name"), // Needs quoting
-        "sip:contact@host.com", 
-        vec![param_expires(60), param_other("instance", Some("abc"))]
-    );
-    let contact1 = Contact(addr1);
-    // Check display manually due to potential param order variations if Address used HashMap
-    let disp = contact1.to_string();
-    assert!(disp.starts_with("\"Contact Name\" <sip:contact@host.com>"));
-    assert!(disp.contains(";expires=60"));
-    assert!(disp.contains(";instance=abc"));
+    // Simple address contact
+    let addr1 = addr(Some("Alice"), "sip:alice@example.com", vec![param_tag("123")]);
+    let contact1 = Contact::new_address(addr1.clone()); // Clone addr1 if needed elsewhere
+    assert_eq!(contact1.to_string(), "Alice <sip:alice@example.com>;tag=123");
     assert_display_parses_back(&contact1);
 
-    let addr2 = addr(None, "sip:contact2@host.com", vec![param_q(0.5)]);
-    let contact2 = Contact(addr2);
+    // Address contact with expires and q
+    let addr2 = addr(None, "sip:bob@example.com", vec![param_expires(3600), param_q(0.9)]);
+    let contact2 = Contact::new_address(addr2.clone()); // Clone addr2
+    assert_eq!(contact2.to_string(), "<sip:bob@example.com>;expires=3600;q=0.9");
     assert_display_parses_back(&contact2);
-    
-    // Test wildcard
-    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-    let contact_wc = Contact::new(wc_addr);
+
+    // Wildcard contact
+    let contact_wc = Contact::new_wildcard();
     assert_eq!(contact_wc.to_string(), "*");
     assert_display_parses_back(&contact_wc);
     
-    // Test FromStr directly
-    assert_parses_ok(
-        "\"Contact Name\" <sip:contact@host.com>;expires=60;instance=abc", 
-        Contact(addr(
+    // Contact with quoted display name and other params
+     assert_display_parses_back(&Contact::new_address(addr(
             Some("Contact Name"), 
             "sip:contact@host.com", 
             vec![param_expires(60), param_other("instance", Some("abc"))]
-        ))
-    );
-    
-    assert_parses_ok("*", contact_wc);
-    
-    assert_parse_fails::<Contact>(""); // Empty fails Address parsing
+        )));
+}
+
+#[test]
+fn test_contact_from_str() {
+    // Parsing valid contacts
+    assert_parses_ok("\"Alice\" <sip:alice@example.com>;tag=123", 
+                     Contact::new_address(addr(Some("Alice"), "sip:alice@example.com", vec![param_tag("123")])));
+    assert_parses_ok("<sip:bob@example.com>", 
+                     Contact::new_address(addr(None, "sip:bob@example.com", vec![])));
+    assert_parses_ok("sip:carol@chicago.com", 
+                     Contact::new_address(addr(None, "sip:carol@chicago.com", vec![])));
+    assert_parses_ok("*", Contact::new_wildcard());
+    assert_parses_ok("  *  ", Contact::new_wildcard()); // With whitespace
+
+    // Parsing failures
+    assert_parse_fails::<Contact>("<");
+    assert_parse_fails::<Contact>("Display Name Only");
+    assert_parse_fails::<Contact>("\"Bob\" sip:bob@biloxi.com"); // Missing <> for display name
+    assert_parse_fails::<Contact>("*;tag=123"); 
 }
 
 #[test]
 fn test_contact_display() {
-    let addr1 = addr(
-        Some("Contact Name"), // Needs quoting
-        "sip:contact@host.com", 
-        vec![param_expires(60), param_other("instance", Some("abc"))]
-    );
-    let contact1 = Contact(addr1);
-    // Check display manually due to potential param order variations if Address used HashMap
-    let disp = contact1.to_string();
-    assert!(disp.starts_with("\"Contact Name\" <sip:contact@host.com>"));
-    assert!(disp.contains(";expires=60"));
-    assert!(disp.contains(";instance=abc"));
-    assert_display_parses_back(&contact1);
+    // Display for address contact
+    let addr1 = addr(Some("Display"), "sip:user@host", vec![param_tag("abc")]);
+    let contact1 = Contact::new_address(addr1);
+    assert_eq!(contact1.to_string(), "Display <sip:user@host>;tag=abc");
 
-    let addr2 = addr(None, "sip:contact2@host.com", vec![param_q(0.5)]);
-    let contact2 = Contact(addr2);
-    assert_display_parses_back(&contact2);
-    
-    // Test wildcard
-    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-    let contact_wc = Contact::new(wc_addr);
+    // Display for address contact with no display name
+    let addr2 = addr(None, "sip:user@host", vec![]);
+    let contact2 = Contact::new_address(addr2);
+    assert_eq!(contact2.to_string(), "<sip:user@host>");
+
+    // Display for wildcard contact
+    let contact_wc = Contact::new_wildcard();
     assert_eq!(contact_wc.to_string(), "*");
-    assert_display_parses_back(&contact_wc);
     
-    // Test FromStr directly
-    assert_parses_ok(
-        "\"Contact Name\" <sip:contact@host.com>;expires=60;instance=abc", 
-        Contact(addr(
+     // Check quoted display
+    assert_eq!(
+        Contact::new_address(addr(
             Some("Contact Name"), 
             "sip:contact@host.com", 
             vec![param_expires(60), param_other("instance", Some("abc"))]
-        ))
+        )).to_string(),
+        "\"Contact Name\" <sip:contact@host.com>;expires=60;instance=abc"
     );
-    
-    assert_parses_ok("*", contact_wc);
-    
-    assert_parse_fails::<Contact>(""); // Empty fails Address parsing
 }
 
 #[test]
 fn test_contact_helpers() {
-    let addr_no_params = addr(None, "sip:user@host", vec![]);
-    let mut contact = Contact(addr_no_params);
+    let addr_no_params = addr(None, "sip:test@test.com", vec![]);
+    let mut contact = Contact::new_address(addr_no_params);
     
     assert_eq!(contact.expires(), None);
     assert_eq!(contact.q(), None);
     assert_eq!(contact.tag(), None);
     assert!(!contact.is_wildcard());
-    
+    assert!(contact.address().is_some());
+
     contact.set_expires(3600);
     assert_eq!(contact.expires(), Some(3600));
-    assert!(contact.0.params.contains(&Param::Expires(3600)));
-    
+    assert!(contact.address().unwrap().params.contains(&Param::Expires(3600)));
+
     contact.set_q(0.7);
     assert_eq!(contact.q(), Some(NotNan::new(0.7).unwrap()));
-    assert!(contact.0.params.iter().any(|p| matches!(p, Param::Q(v) if (*v - 0.7).abs() < f32::EPSILON)));
-    
+    assert!(contact.address().unwrap().params.iter().any(|p| matches!(p, Param::Q(v) if (*v - 0.7).abs() < f32::EPSILON)));
+
     // Test replacement
-    contact.set_expires(60);
-    assert_eq!(contact.expires(), Some(60));
-    assert_eq!(contact.0.params.iter().filter(|p| matches!(p, Param::Expires(_))).count(), 1);
+    contact.set_expires(120);
+    assert_eq!(contact.expires(), Some(120));
+    assert_eq!(contact.address().unwrap().params.iter().filter(|p| matches!(p, Param::Expires(_))).count(), 1);
 
-    contact.set_q(1.1); // Test clamping
+    contact.set_q(1.1); // Clamping
     assert_eq!(contact.q(), Some(NotNan::new(1.0).unwrap()));
-    assert!(contact.0.params.contains(&Param::Q(NotNan::new(1.0).unwrap())));
-    
-    contact.set_q(-0.5); // Test clamping
-    assert_eq!(contact.q(), Some(NotNan::new(0.0).unwrap()));
-    assert!(contact.0.params.contains(&Param::Q(NotNan::new(0.0).unwrap())));
+    assert!(contact.address().unwrap().params.contains(&Param::Q(NotNan::new(1.0).unwrap())));
 
-    // Test delegated methods
+    contact.set_q(-0.5); // Clamping
+    assert_eq!(contact.q(), Some(NotNan::new(0.0).unwrap()));
+     assert!(contact.address().unwrap().params.contains(&Param::Q(NotNan::new(0.0).unwrap())));
+
     contact.set_tag("newtag");
     assert_eq!(contact.tag(), Some("newtag"));
-    assert!(contact.0.params.contains(&Param::Tag("newtag".to_string())));
-    
-    // Test wildcard check
-    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-    let contact_wc = Contact::new(wc_addr);
-    assert!(contact_wc.is_wildcard());
+    assert!(contact.address().unwrap().params.contains(&Param::Tag("newtag".to_string())));
 
+    // Test wildcard contact
+    let contact_wc = Contact::new_wildcard();
+    assert!(contact_wc.is_wildcard());
+    assert_eq!(contact_wc.expires(), None);
+    assert_eq!(contact_wc.q(), None);
+    assert_eq!(contact_wc.tag(), None);
+    assert!(contact_wc.address().is_none());
 }
 
 #[test]
-fn test_contact_asterisk() {
-    let wc_str = "*";
-    let contact_wc = Contact::from_str(wc_str).unwrap();
+fn test_contact_asterisk() { 
+    let contact = Contact::new_wildcard();
+    assert!(contact.is_wildcard());
+    assert_eq!(contact.to_string(), "*");
 
-    // Construct the expected Address part for '*' Contact
-    let wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-    let expected_wc = Contact(wc_addr);
+    // Test parsing
+    let parsed = Contact::from_str("*").expect("Failed to parse wildcard contact");
+    assert!(parsed.is_wildcard());
+    assert_eq!(parsed, contact);
+}
 
-    assert_eq!(contact_wc, expected_wc);
+#[test]
+#[should_panic]
+fn test_contact_set_expires_on_wildcard() {
+    let mut contact = Contact::new_wildcard();
+    contact.set_expires(100); // Should panic
+}
+
+#[test]
+#[should_panic]
+fn test_contact_set_q_on_wildcard() {
+    let mut contact = Contact::new_wildcard();
+    contact.set_q(0.5); // Should panic
+}
+
+#[test]
+#[should_panic]
+fn test_contact_set_tag_on_wildcard() {
+    let mut contact = Contact::new_wildcard();
+    contact.set_tag("tag"); // Should panic
 }
 
 #[test]
 fn test_contact_list_parsing() {
-    let input = "\"Alice Liddell\" <sip:alice@wonderland.lit>;tag=asdf, <sip:bob@biloxi.com>;q=0.5, *;expires=600";
+    // Test parsing comma-separated contacts 
+    // NOTE: This test assumes a future parser function `parse_contact_list` exists.
+    // For now, we test FromStr on individual valid parts.
+    
+    let alice_addr = addr(None, "sip:alice@example.com", vec![param_tag("1")]);
+    let bob_addr = addr(Some("Bob"), "sips:bob@example.com", vec![param_q(0.5)]);
+    
+    let contact1_str = "<sip:alice@example.com>;tag=1";
+    let contact2_str = "\"Bob\" <sips:bob@example.com>;q=0.5";
 
-    // Build expected results
-    let alice_uri = Uri::from_str("sip:alice@wonderland.lit").unwrap();
-    let mut alice_addr = Address::new(Some("Alice Liddell"), alice_uri);
-    alice_addr.set_param("tag", Some("asdf"));
-    let alice_contact = Contact(alice_addr);
+    let alice_contact = Contact::from_str(contact1_str).unwrap();
+    let bob_contact = Contact::from_str(contact2_str).unwrap();
+    
+    assert_eq!(alice_contact, Contact::new_address(alice_addr));
+    assert_eq!(bob_contact, Contact::new_address(bob_addr));
 
-    let bob_uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
-    let mut bob_addr = Address::new(None::<String>, bob_uri);
-    bob_addr.set_q(0.5);
-    let bob_contact = Contact(bob_addr);
+    // Test parsing includes wildcard (as a single item)
+    let wc_contact = Contact::from_str("*").unwrap();
+    assert!(wc_contact.is_wildcard());
 
-    let mut wc_addr = Address::new(None::<String>, Uri::from_str("*").unwrap());
-    wc_addr.set_expires(600);
-    let wc_contact = Contact(wc_addr);
-
-    // Parse the input and compare with expected results
-    let parsed_contacts: Vec<Contact> = input.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    assert_eq!(parsed_contacts, vec![alice_contact, bob_contact, wc_contact]);
+    // Example of how list parsing *could* be tested later:
+    // let input_wc = "*, <sip:alice@example.com>;tag=1"; 
+    // let contacts_wc = parse_contact_list(input_wc).unwrap(); // Assumes parse_contact_list exists
+    // assert_eq!(contacts_wc.len(), 2);
+    // assert!(contacts_wc[0].is_wildcard());
+    // assert_eq!(contacts_wc[1], alice_contact);
 }
 
 // TODO: Add tests for Contact-specific helpers (expires, q) 

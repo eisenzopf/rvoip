@@ -54,7 +54,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::From => parser::headers::parse_address(value_text).map(|addr| TypedHeader::From(types::From(addr))),
             HeaderName::To => parser::headers::parse_address(value_text).map(|addr| TypedHeader::To(types::to::To(addr))),
             HeaderName::Contact => parser::headers::parse_contact(value_text).map(|addrs| {
-                addrs.into_iter().next().map(types::Contact).map(TypedHeader::Contact)
+                addrs.into_iter().next().map(types::Contact::new_address).map(TypedHeader::Contact)
                      .unwrap_or_else(|| TypedHeader::Other(header.name.clone(), header.value.clone()))
             }),
             HeaderName::CSeq => parser::headers::parse_cseq(value_text).map(TypedHeader::CSeq),
