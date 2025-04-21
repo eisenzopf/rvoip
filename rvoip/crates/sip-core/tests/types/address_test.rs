@@ -62,8 +62,9 @@ fn test_address_display_parse_roundtrip() {
         "sip:empty@domain.com", 
         vec![]
     );
-    assert_eq!(addr5.to_string(), "\"\" <sip:empty@domain.com>");
-    assert_display_parses_back(&addr5);
+    // Correct assertion: Empty display name should not be rendered
+    assert_eq!(addr5.to_string(), "<sip:empty@domain.com>");
+    assert_display_parses_back(&addr5); // This should now pass
 }
 
 #[test]

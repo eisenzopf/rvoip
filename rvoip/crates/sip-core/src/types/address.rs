@@ -19,7 +19,7 @@ pub struct Address {
 // Quotes are needed if it's not a token or contains specific characters like ", \, or spaces.
 fn needs_quoting(display_name: &str) -> bool {
     if display_name.is_empty() {
-        return true; // Empty string should be quoted ""
+        return false; // Empty string should NOT be quoted
     }
     // Check for characters that *require* quoting or are not part of a token
     display_name.chars().any(|c| {
@@ -60,8 +60,12 @@ impl fmt::Display for Address {
 impl Address {
     /// Creates a new Address.
     pub fn new(display_name: Option<impl Into<String>>, uri: Uri) -> Self {
+        let normalized_display_name = display_name
+            .map(|s| s.into()) // Convert to String
+            .filter(|s| !s.trim().is_empty()); // Convert Some("") or Some("  ") to None
+            
         Address {
-            display_name: display_name.map(|s| s.into()),
+            display_name: normalized_display_name, // Use the normalized version
             uri,
             params: Vec::new(),
         }

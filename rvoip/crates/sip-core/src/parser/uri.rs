@@ -34,7 +34,8 @@ pub fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
 fn is_userinfo_char(c: char) -> bool {
     c.is_alphanumeric() || 
     matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | 
-               '&' | '=' | '+' | '$' | ',')
+               '&' | '=' | '+' | '$' | ',' | 
+               '%')
     // Percent escapes are handled separately by unescaper
 }
 
@@ -186,24 +187,33 @@ pub fn parameters_parser(input: &str) -> IResult<&str, Vec<Param>> {
     many0(parameter_parser)(input)
 }
 
-// Parse a single header (?key=value)
+// Parse a single header (key=value)
 fn header_parser(input: &str) -> IResult<&str, (String, String)> {
-    // Use peek to check for = without consuming, then parse key
-    let (key_part, _) = take_till(|c| c == '=' || c == '&')(input)?;
-    if key_part.is_empty() {
-        // Return Failure if key is empty *before* consuming '='
-        // Ensure this Failure propagates up from separated_list1
-        return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
-    }
-    let key = unescape_param(key_part).map_err(|_| nom::Err::Failure(nom::error::Error::new(key_part, nom::error::ErrorKind::MapRes)))?;
-    let (input, _) = tag(key_part)(input)?; // Consume the key part now
-
-    let (input, _) = char('=')(input)?; // Consume =
-    
-    let (input, value_part) = take_till(|c| c == '&')(input)?;
-    let value = unescape_param(value_part).map_err(|_| nom::Err::Failure(nom::error::Error::new(value_part, nom::error::ErrorKind::MapRes)))?;
-
-    Ok((input, (key, value)))
+    // Refactor using separated_pair for clarity
+    separated_pair(
+        // Key: Take characters until '=' or '&'. Check non-empty. Unescape.
+        map_res(
+            take_till(|c| c == '=' || c == '&'), 
+            |key_part: &str| {
+                let trimmed_key = key_part.trim();
+                if trimmed_key.is_empty() {
+                    // Return an error that map_res understands
+                    Err(Error::MalformedUriComponent { 
+                        component: "header key".to_string(), 
+                        message: "Empty header key found".to_string() 
+                    }) 
+                } else {
+                    unescape_param(trimmed_key) // Unescape non-empty key
+                }
+            }
+        ),
+        char('='), // Separator
+        // Value: Take characters until '&' or end of input. Unescape.
+        map_res(
+            take_till(|c| c == '&'), // Consume value until next separator or end
+            |s: &str| unescape_param(s.trim()) // Trim and unescape value
+        )
+    )(input)
 }
 
 // Parse all headers (?key=value&key2=value2)
@@ -211,6 +221,7 @@ fn headers_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
     preceded(
         char('?'),
         map(
+            // Ensure header_parser can handle empty values correctly if needed
             separated_list1(char('&'), header_parser), 
             |headers| headers.into_iter().collect()
         )
@@ -224,9 +235,10 @@ fn uri_parser(input: &str) -> IResult<&str, Uri> {
     let (input, host) = host_parser(input)?;
     let (input, port) = opt(port_parser)(input)?;
     
-    // Parse parameters first
-    let (input_after_params, parameters_vec) = opt(parameters_parser)(input)?;
+    // Parse parameters first, consumes input up to the '?' or end
+    let (input_after_params, parameters_vec) = opt(parameters_parser)(input)?; 
     // Then parse headers from the remaining input *after* parameters
+    // This assumes parameters end before headers start
     let (final_input, headers_map) = opt(headers_parser)(input_after_params)?;
 
     let mut uri = Uri::new(scheme, host);
@@ -236,8 +248,8 @@ fn uri_parser(input: &str) -> IResult<&str, Uri> {
     uri.parameters = parameters_vec.unwrap_or_default();
     uri.headers = headers_map.unwrap_or_default();
 
-    // Return the input remaining *after* headers
-    Ok((final_input, uri))
+    // Return the final remaining input after parsing everything
+    Ok((final_input, uri)) 
 }
 
 /// Parse a URI string into a Uri object
@@ -247,9 +259,14 @@ pub fn parse_uri(input: &str) -> Result<Uri> {
         return Err(Error::InvalidUri("Empty URI string".to_string()));
     }
     match uri_parser(trimmed_input) {
-        Ok((rest, uri)) if rest.is_empty() => Ok(uri),
-        Ok((rest, _)) => Err(Error::InvalidUri(format!("Unexpected trailing characters after URI: {}", rest))),
-        Err(e) => Err(Error::InvalidUri(format!("Failed to parse URI '{}': {:?}", trimmed_input, e))),
+        // Ensure the entire input was consumed by the uri_parser
+        Ok((rest, uri)) if rest.is_empty() => Ok(uri), 
+        Ok((rest, _)) => Err(Error::InvalidUri(format!("URI parser finished but did not consume entire input. Remaining: '{}'", rest))),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+             // Provide more context on parsing failure
+             Err(Error::InvalidUri(format!("Failed to parse URI near '{}': {:?}", &trimmed_input[..trimmed_input.len() - e.input.len()], e.code)))
+        },
+        Err(nom::Err::Incomplete(_)) => Err(Error::InvalidUri("Incomplete URI input".to_string())),
     }
 }
 

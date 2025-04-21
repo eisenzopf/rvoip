@@ -8,70 +8,118 @@ use std::ops::Deref;
 use crate::types::param::Param;
 use ordered_float::NotNan;
 
+/// Represents the value within a Contact header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContactValue {
+    /// A standard SIP address.
+    Address(Address),
+    /// The wildcard value "*".
+    Wildcard,
+}
+
 /// Typed Contact header.
 /// Note: RFC 3261 allows multiple Contact values in a single header line (comma-separated)
 /// or multiple Contact header lines. This struct represents a SINGLE Contact value.
-/// Use Vec<Contact> or similar for multiple contacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Contact(pub Address);
+pub struct Contact(pub ContactValue);
 
 impl Contact {
-    /// Creates a new Contact header.
-    pub fn new(address: Address) -> Self {
-        Self(address)
+    /// Creates a new Contact header from an Address.
+    pub fn new_address(address: Address) -> Self {
+        Self(ContactValue::Address(address))
+    }
+
+    /// Creates a new wildcard Contact header.
+    pub fn new_wildcard() -> Self {
+        Self(ContactValue::Wildcard)
     }
 
     /// Gets the expires parameter value, if present.
+    /// Returns None for wildcard contacts.
     pub fn expires(&self) -> Option<u32> {
-        self.0.params.iter().find_map(|p| match p {
-            Param::Expires(val) => Some(*val),
-            _ => None,
-        })
+        match &self.0 {
+            ContactValue::Address(addr) => addr.params.iter().find_map(|p| match p {
+                Param::Expires(val) => Some(*val),
+                _ => None,
+            }),
+            ContactValue::Wildcard => None,
+        }
     }
     
     /// Sets or replaces the expires parameter.
+    /// Panics if called on a wildcard contact.
     pub fn set_expires(&mut self, expires: u32) {
-        self.0.params.retain(|p| !matches!(p, Param::Expires(_)));
-        self.0.params.push(Param::Expires(expires));
+        match &mut self.0 {
+            ContactValue::Address(addr) => {
+                addr.params.retain(|p| !matches!(p, Param::Expires(_)));
+                addr.params.push(Param::Expires(expires));
+            },
+            ContactValue::Wildcard => panic!("Cannot set expires on wildcard Contact"),
+        }
     }
 
     /// Gets the q parameter value, if present.
+    /// Returns None for wildcard contacts.
     pub fn q(&self) -> Option<NotNan<f32>> {
-        self.0.params.iter().find_map(|p| match p {
-            Param::Q(val) => Some(val),
-            _ => None,
-        }).copied()
+        match &self.0 {
+            ContactValue::Address(addr) => addr.params.iter().find_map(|p| match p {
+                Param::Q(val) => Some(val),
+                _ => None,
+            }).copied(),
+            ContactValue::Wildcard => None,
+        }
     }
     
     /// Sets or replaces the q parameter.
+    /// Panics if called on a wildcard contact.
     pub fn set_q(&mut self, q: f32) {
         let clamped_q = q.max(0.0).min(1.0);
-        self.0.params.retain(|p| !matches!(p, Param::Q(_)));
-        self.0.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
+        match &mut self.0 {
+            ContactValue::Address(addr) => {
+                addr.params.retain(|p| !matches!(p, Param::Q(_)));
+                addr.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
+            },
+            ContactValue::Wildcard => panic!("Cannot set q on wildcard Contact"),
+        }
     }
     
-    // Delegate other Address methods if needed (e.g., tag)
+    /// Gets the tag parameter value.
+    /// Returns None for wildcard contacts.
     pub fn tag(&self) -> Option<&str> {
-        self.0.tag()
+        match &self.0 {
+            ContactValue::Address(addr) => addr.tag(),
+            ContactValue::Wildcard => None,
+        }
     }
     
+    /// Sets or replaces the tag parameter.
+    /// Panics if called on a wildcard contact.
     pub fn set_tag(&mut self, tag: impl Into<String>) {
-        self.0.set_tag(tag)
+        match &mut self.0 {
+            ContactValue::Address(addr) => addr.set_tag(tag),
+            ContactValue::Wildcard => panic!("Cannot set tag on wildcard Contact"),
+        }
     }
 
     /// Checks if this Contact represents the wildcard (*).
     pub fn is_wildcard(&self) -> bool {
-        self.0.uri.to_string() == "*" // Simplistic check, might need refinement if URI struct changes
+        matches!(self.0, ContactValue::Wildcard)
+    }
+    
+    /// Returns the underlying Address if this is not a wildcard contact.
+    pub fn address(&self) -> Option<&Address> {
+        match &self.0 {
+            ContactValue::Address(addr) => Some(addr),
+            ContactValue::Wildcard => None,
+        }
     }
 }
 
 impl fmt::Display for Contact {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Special case for wildcard contact
-        if self.is_wildcard() {
-            write!(f, "*")
-        } else {
-            write!(f, "{}", self.0) // Delegate to Address display
+        match &self.0 {
+            ContactValue::Address(addr) => write!(f, "{}", addr), // Delegate to Address display
+            ContactValue::Wildcard => write!(f, "*"),
         }
     }
 }
@@ -79,26 +127,28 @@ impl fmt::Display for Contact {
 impl FromStr for Contact {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
-        if s.trim() == "*" {
-            // Handle wildcard contact
-            Ok(Contact::new(Address::new(None::<String>, crate::uri::Uri::from_str("*").unwrap()))) // Add ::<String>
+        let trimmed = s.trim();
+        if trimmed == "*" {
+            Ok(Contact::new_wildcard())
         } else {
             // Assumes parse_contact returns Vec<Address>, we take the first.
-            // This might need adjustment if parse_contact changes or if we want to enforce single-value parsing here.
-            parse_contact(s)?
+            parse_contact(trimmed)?
                 .into_iter()
                 .next()
-                .map(Contact::new)
+                .map(Contact::new_address) // Use new_address constructor
                 .ok_or_else(|| crate::error::Error::Parser("No valid contact value found".into()))
         }
     }
 }
 
+// Remove Deref implementation as it no longer directly wraps Address
+/*
 impl Deref for Contact {
     type Target = Address;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+*/
 
 // TODO: Implement specific Contact logic/helpers (e.g., getting expires, q) 
