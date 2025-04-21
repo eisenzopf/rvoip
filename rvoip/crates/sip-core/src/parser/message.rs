@@ -526,11 +526,28 @@ fn parse_single_folded_header_line(input: &str) -> IResult<&str, Header> {
 
     let final_value_str = value_str.trim();
     let header_value = match name_str {
-        HeaderName::ContentLength => { parse_content_length(final_value_str).map(|cl| HeaderValue::Integer(cl.0 as i64)).unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) }
-        HeaderName::CSeq => { parse_cseq(final_value_str).map(|_| HeaderValue::Raw(final_value_str.to_string())).unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) }
-        HeaderName::Expires => { parse_expires(final_value_str).map(|exp| HeaderValue::Integer(exp.0 as i64)).unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) }
-        HeaderName::MaxForwards => { parse_max_forwards(final_value_str).map(|mf| HeaderValue::Integer(mf.0 as i64)).unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) }
-        _ => HeaderValue::from_str(final_value_str).unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+        HeaderName::ContentLength => {
+            parse_content_length(final_value_str)
+                .map(|cl| HeaderValue::Integer(cl.0 as i64))
+                .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+        }
+        HeaderName::CSeq => {
+            parse_cseq(final_value_str)
+                .map(|_| HeaderValue::Raw(final_value_str.to_string())) // Keep as Raw for now
+                .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+        }
+         HeaderName::Expires => {
+            parse_expires(final_value_str)
+                 .map(|exp| HeaderValue::Integer(exp.0 as i64))
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+         }
+         HeaderName::MaxForwards => {
+             parse_max_forwards(final_value_str)
+                 .map(|mf| HeaderValue::Integer(mf.0 as i64))
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+         }
+        _ => HeaderValue::from_str(final_value_str)
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) 
     };
     
     Ok((current_line_rest, Header::new(name_str, header_value)))
@@ -539,60 +556,36 @@ fn parse_single_folded_header_line(input: &str) -> IResult<&str, Header> {
 /// Top-level nom parser for a full SIP message
 fn full_message_parser(input: &str) -> IResult<&str, Message> {
     // 1. Parse Start Line
-    let (rest_after_start_line, start_line_data) = alt((
+    let (mut rest, start_line_data) = alt((
         map(parse_request_line, |(m, u, v)| (true, Some(m), Some(u), Some(v), None, None)),
         map(parse_response_line, |(v, s, r)| (false, None, None, Some(v), Some(s), Some(r)))
     ))(input)?;
     
     let (is_request, method, uri, version, status, reason) = start_line_data;
     
-    // 2. Parse Headers using take_until for the block
-    let (body_and_rest, header_section) = terminated(
-        take_until("\r\n\r\n"), 
-        tag("\r\n\r\n") 
-    )(rest_after_start_line)?;
-
-    // Process header_section using split/fold logic 
+    // 2. Parse Headers line by line until empty line marker
     let mut headers: Vec<Header> = Vec::new();
-    let normalized_lf = header_section.replace("\r\n", "\n");
-    let lines: Vec<&str> = normalized_lf.split('\n').collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if line.is_empty() { i += 1; continue; }
+    loop {
+        // Check for empty line marker (CRLF or LF)
+        if rest.starts_with("\r\n") { rest = &rest[2..]; break; }
+        else if rest.starts_with("\n") { rest = &rest[1..]; break; }
+        else if rest.is_empty() { break; } // End of input after headers is OK
         
-        if (line.starts_with(' ') || line.starts_with('\t')) && !headers.is_empty() {
-             if let Some(last_header) = headers.last_mut() {
-                 let mut current_val = last_header.value.to_string_value();
-                 if !current_val.ends_with(' ') { current_val.push(' '); }
-                 current_val.push_str(line.trim());
-                 last_header.value = HeaderValue::from_str(&current_val).unwrap_or(HeaderValue::Raw(current_val)); 
-             }
-             i += 1;
-        } else if line.contains(':') { 
-            // Use the specific header parser helper we defined earlier
-            match parse_single_folded_header_line(line) { 
-                 Ok((_, header)) => headers.push(header), // OK, header parsed (ignore remainder from helper here)
-                 Err(_) => { 
-                     // Fallback if helper fails (shouldn't happen often)
-                     let parts: Vec<&str> = line.splitn(2, ':').collect();
-                     if parts.len() == 2 {
-                         let name_str = parts[0].trim();
-                         let value_str = parts[1].trim();
-                         headers.push(Header {
-                             name: HeaderName::from_str(name_str).unwrap_or_else(|_| HeaderName::Other(name_str.to_string())),
-                             value: HeaderValue::from_str(value_str).unwrap_or_else(|_| HeaderValue::Raw(value_str.to_string())),
-                         });
-                     }
-                 }
+        // Parse one header line including potential folding
+        match parse_single_folded_header_line(rest) {
+            Ok((next_rest, header)) => { headers.push(header); rest = next_rest; }
+            Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+                 return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify))); // Convert error
             }
-            i += 1;
-        } else { 
-             i += 1; 
+            Err(nom::Err::Incomplete(needed)) => {
+                 return Err(nom::Err::Incomplete(needed));
+            }
         }
     }
     
-    // 3. Validate Headers (Define counts here)
+    let body_and_rest = rest; 
+
+    // 3. Validate Headers
     let mut cl_count = 0; 
     let mut cseq_count = 0;
     let mut call_id_count = 0;
@@ -618,21 +611,15 @@ fn full_message_parser(input: &str) -> IResult<&str, Message> {
     if from_count > 1 { return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify))); } 
     if max_forwards_count > 1 { return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify))); } 
 
-    // 4. Get Content-Length (Restore logic)
+    // 4. Get Content-Length (Restore full logic)
     let content_length_result: Result<usize> = headers.iter().find_map(|h| {
         if h.name == HeaderName::ContentLength {
             let value_str = h.value.to_string_value();
             let trimmed_value = value_str.trim();
             match trimmed_value.parse::<i64>() {
-                Ok(val) if val >= 0 => {
-                    Some(usize::try_from(val).map_err(|_| Error::InvalidHeader("Content-Length value too large".to_string())))
-                }
-                Ok(_) => {
-                    Some(Err(Error::InvalidHeader("Negative Content-Length".to_string())))
-                }
-                Err(_) => {
-                    Some(trimmed_value.parse::<usize>().map_err(|_| Error::InvalidHeader(format!("Invalid Content-Length value: {}", trimmed_value))))
-                }
+                Ok(val) if val >= 0 => Some(usize::try_from(val).map_err(|_| Error::InvalidHeader("Content-Length value too large".to_string()))),
+                Ok(_) => Some(Err(Error::InvalidHeader("Negative Content-Length".to_string()))),
+                Err(_) => Some(trimmed_value.parse::<usize>().map_err(|_| Error::InvalidHeader(format!("Invalid Content-Length value: {}", trimmed_value))))
             }
         } else {
             None
@@ -641,18 +628,24 @@ fn full_message_parser(input: &str) -> IResult<&str, Message> {
 
     let content_length = match content_length_result {
         Ok(cl) => cl,
-        Err(_) => return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify))), 
+        Err(_) => return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify))),
     };
 
     // 5. Parse Body 
     if body_and_rest.len() < content_length {
-        return Err(nom::Err::Incomplete(Needed::new(content_length - body_and_rest.len())));
+        // Check if CL was 0 and we correctly reached end of input
+        if content_length == 0 && body_and_rest.is_empty() {
+             // This is fine, no body expected or present
+        } else {
+            return Err(nom::Err::Incomplete(Needed::new(content_length - body_and_rest.len())));
+        }
     }
+    // Only take body if CL > 0
     let (final_rest, body_slice) = take(content_length)(body_and_rest)?;
     
     // 6. Construct Message
     let body = Bytes::copy_from_slice(body_slice.as_bytes());
-    let message = if is_request {
+    let message = if is_request { 
         let mut req = Request::new(method.unwrap(), uri.unwrap());
         req.version = version.unwrap();
         req.headers = headers;
