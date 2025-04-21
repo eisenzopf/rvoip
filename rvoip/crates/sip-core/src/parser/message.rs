@@ -21,12 +21,14 @@ use crate::uri::Uri;
 use crate::version::Version;
 
 // Now use the new parser modules
-use crate::parser::headers::{parse_header, parse_headers, header_parser as single_nom_header_parser};
+use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser};
 use crate::parser::request::parse_request_line;
 use crate::parser::response::parse_response_line;
 use crate::parser::utils::crlf;
 use nom::bytes::complete::{take};
 use nom::character::complete::{multispace0};
+use crate::parser::headers::{parse_cseq, parse_content_length, parse_expires, parse_max_forwards};
+use crate::types::{CSeq, ContentLength, Expires, MaxForwards};
 
 /// Maximum length of a single line in a SIP message
 pub const MAX_LINE_LENGTH: usize = 4096;
@@ -249,7 +251,7 @@ impl IncrementalParser {
                         let header_str = format!("{}\r\n", header_value);
                         
                         // Parse the header
-                        match parse_header(&header_str) {
+                        match parse_header_value(&header_str) {
                             Ok(header) => {
                                 if self.debug_mode {
                                     println!("IncrementalParser: Parsed header: {}", header_value);
@@ -488,7 +490,7 @@ impl IncrementalParser {
     }
 }
 
-// Helper to parse one potentially folded header line
+// Helper to parse one potentially folded header line, attempting strong typing
 fn parse_single_folded_header_line(input: &str) -> IResult<&str, Header> {
     // Parse Header Name (up to colon)
     let (rest, name_str) = map_res(
@@ -527,13 +529,39 @@ fn parse_single_folded_header_line(input: &str) -> IResult<&str, Header> {
               break; 
          }
     }
+    let final_value_str = value_str.trim();
 
-    // Create HeaderValue (Try integer, list, fallback to text/raw)
-    // Use the existing FromStr impl for HeaderValue for basic type detection
-    let value = HeaderValue::from_str(value_str.trim()).unwrap_or_else(|_| HeaderValue::Raw(value_str.trim().to_string()));
+    // Attempt to parse value using specific parser based on name
+    let header_value = match name_str {
+        HeaderName::ContentLength => {
+            parse_content_length(final_value_str)
+                .map(|cl| HeaderValue::Integer(cl.0 as i64)) // Store as Integer
+                .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) // Fallback to Raw on error
+        }
+        HeaderName::CSeq => {
+            parse_cseq(final_value_str)
+                .map(|_| HeaderValue::Raw(final_value_str.to_string())) // Store as Raw for now, or create CSeq variant? For now, Raw.
+                .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) // Fallback to Raw on error
+        }
+         HeaderName::Expires => {
+            parse_expires(final_value_str)
+                 .map(|exp| HeaderValue::Integer(exp.0 as i64))
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+         }
+         HeaderName::MaxForwards => {
+             parse_max_forwards(final_value_str)
+                 .map(|mf| HeaderValue::Integer(mf.0 as i64))
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string()))
+         }
+        // Add cases for other known headers that need specific parsing/validation
+        _ => {
+             // Default fallback: Try basic FromStr (integer, list, text)
+             HeaderValue::from_str(final_value_str)
+                 .unwrap_or_else(|_| HeaderValue::Raw(final_value_str.to_string())) 
+        }
+    };
     
-    // Return the rest of the input *after* the last processed CRLF (or end of input)
-    Ok((current_line_rest, Header::new(name_str, value)))
+    Ok((current_line_rest, Header::new(name_str, header_value)))
 }
 
 /// Parse a SIP message from a string or bytes (Simplified non-nom top-level parser)
@@ -657,7 +685,7 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
              i += 1;
         } else if line.contains(':') { // New header
             // Use Result-based parse_header on the single line
-            match parse_header(line) { // parse_header expects just Name: Value
+            match parse_header_value(line) { // parse_header expects just Name: Value
                  Ok(header) => headers.push(header),
                  // Propagate error instead of storing as Raw
                  Err(e) => return Err(e), 
