@@ -26,11 +26,13 @@ impl UriWithParams {
 // Implement Display for UriWithParams
 impl fmt::Display for UriWithParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<{}", self.uri)?;
+        // Display the URI part (which includes its own parameters)
+        write!(f, "{}", self.uri)?;
+        // Display the *header* parameters associated with this URI in the list
         for param in &self.params {
             write!(f, "{}", param)?;
         }
-        write!(f, ">")
+        Ok(())
     }
 }
 

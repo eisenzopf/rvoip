@@ -31,25 +31,26 @@ impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut wrote_display_name = false;
         if let Some(name) = &self.display_name {
-            if !name.is_empty() { // Don't write anything for empty display name
-                if needs_quoting(name) {
-                    write!(f, "\"{}\"", name)?;
+            let trimmed_name = name.trim();
+            if !trimmed_name.is_empty() {
+                if needs_quoting(trimmed_name) {
+                    write!(f, "\"{}\"", name.replace("\"", "\\\""))?;
                 } else {
-                    write!(f, "{}", name)?;
+                    write!(f, "{}", trimmed_name)?;
                 }
                 wrote_display_name = true;
             }
         }
-        // Add space ONLY if display name was present and non-empty
+        
         if wrote_display_name {
              write!(f, " ")?;
-        }
-        // Always write URI in angle brackets for name-addr format
+        } 
+        // Revert: Always write URI in angle brackets for now for name-addr
         write!(f, "<{}>", self.uri)?;
 
         // Write parameters
         for param in &self.params {
-            write!(f, "{}", param)?; // Uses Param's Display impl
+            write!(f, "{}", param)?;
         }
 
         Ok(())

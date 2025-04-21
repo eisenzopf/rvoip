@@ -7,7 +7,7 @@ use nom::{
     bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete::{char, digit1},
     combinator::{map, map_res, opt, verify},
-    multi::{many0, separated_list0},
+    multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
 };
@@ -15,22 +15,27 @@ use nom::{
 use crate::error::{Error, Result};
 use crate::uri::{Uri, Scheme, Host};
 use crate::types::param::Param;
-use super::utils::clone_str;
+use super::utils::{clone_str, parse_token};
 use ordered_float::NotNan;
 
 // Parse the scheme of a URI (sip, sips, tel)
 pub fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
-    map_res(
-        alt((
-            tag("sips"),
-            tag("SIPS"),
-            tag("sip"),
-            tag("SIP"),
-            tag("tel"),
-            tag("TEL"),
-        )),
-        |s: &str| Scheme::from_str(s)
-    )(input)
+    alt((
+        map(tag("sips"), |_| Scheme::Sips),
+        map(tag("SIPS"), |_| Scheme::Sips),
+        map(tag("sip"), |_| Scheme::Sip),
+        map(tag("SIP"), |_| Scheme::Sip),
+        map(tag("tel"), |_| Scheme::Tel),
+        map(tag("TEL"), |_| Scheme::Tel),
+    ))(input)
+}
+
+// Helper: Check if char is allowed in user/password part (unreserved or escaped)
+fn is_userinfo_char(c: char) -> bool {
+    c.is_alphanumeric() || 
+    matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | 
+               '&' | '=' | '+' | '$' | ',')
+    // Percent escapes are handled separately by unescaper
 }
 
 // Parse the userinfo part (user:password@)
@@ -38,13 +43,15 @@ pub fn userinfo_parser(input: &str) -> IResult<&str, (Option<String>, Option<Str
     match opt(terminated(
         pair(
             map(
-                take_till(|c| c == ':' || c == '@'),
+                // Use take_while1 with allowed chars, not take_till
+                take_while1(is_userinfo_char), 
                 |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
             ),
             opt(preceded(
                 char(':'),
                 map(
-                    take_till(|c| c == '@'),
+                    // Use take_while1 with allowed chars for password too
+                    take_while1(is_userinfo_char), 
                     |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
                 )
             ))
@@ -179,27 +186,32 @@ pub fn parameters_parser(input: &str) -> IResult<&str, Vec<Param>> {
     many0(parameter_parser)(input)
 }
 
-// Parse a single header
+// Parse a single header (?key=value)
 fn header_parser(input: &str) -> IResult<&str, (String, String)> {
-    separated_pair(
-        map(
-            take_till(|c| c == '=' || c == '&'),
-            |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-        ),
-        char('='),
-        map(
-            take_till(|c| c == '&'),
-            |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-        )
-    )(input)
+    // Use peek to check for = without consuming, then parse key
+    let (key_part, _) = take_till(|c| c == '=' || c == '&')(input)?;
+    if key_part.is_empty() {
+        // Return Failure if key is empty *before* consuming '='
+        // Ensure this Failure propagates up from separated_list1
+        return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+    }
+    let key = unescape_param(key_part).map_err(|_| nom::Err::Failure(nom::error::Error::new(key_part, nom::error::ErrorKind::MapRes)))?;
+    let (input, _) = tag(key_part)(input)?; // Consume the key part now
+
+    let (input, _) = char('=')(input)?; // Consume =
+    
+    let (input, value_part) = take_till(|c| c == '&')(input)?;
+    let value = unescape_param(value_part).map_err(|_| nom::Err::Failure(nom::error::Error::new(value_part, nom::error::ErrorKind::MapRes)))?;
+
+    Ok((input, (key, value)))
 }
 
-// Parse all headers
+// Parse all headers (?key=value&key2=value2)
 fn headers_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
     preceded(
         char('?'),
         map(
-            separated_list0(char('&'), header_parser),
+            separated_list1(char('&'), header_parser), 
             |headers| headers.into_iter().collect()
         )
     )(input)
@@ -211,30 +223,33 @@ fn uri_parser(input: &str) -> IResult<&str, Uri> {
     let (input, (user, password)) = userinfo_parser(input)?;
     let (input, host) = host_parser(input)?;
     let (input, port) = opt(port_parser)(input)?;
-
-    let (input, parameters_vec) = opt(parameters_parser)(input)?;
-    let (input, headers_map) = opt(headers_parser)(input)?;
+    
+    // Parse parameters first
+    let (input_after_params, parameters_vec) = opt(parameters_parser)(input)?;
+    // Then parse headers from the remaining input *after* parameters
+    let (final_input, headers_map) = opt(headers_parser)(input_after_params)?;
 
     let mut uri = Uri::new(scheme, host);
-
     uri.user = user;
     uri.password = password;
     uri.port = port;
-
     uri.parameters = parameters_vec.unwrap_or_default();
+    uri.headers = headers_map.unwrap_or_default();
 
-    if let Some(hdrs) = headers_map {
-        uri.headers = hdrs;
-    }
-
-    Ok((input, uri))
+    // Return the input remaining *after* headers
+    Ok((final_input, uri))
 }
 
 /// Parse a URI string into a Uri object
 pub fn parse_uri(input: &str) -> Result<Uri> {
-    match uri_parser(input) {
-        Ok((_, uri)) => Ok(uri),
-        Err(e) => Err(Error::InvalidUri(format!("Failed to parse URI: {input} - Error: {e:?}"))),
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidUri("Empty URI string".to_string()));
+    }
+    match uri_parser(trimmed_input) {
+        Ok((rest, uri)) if rest.is_empty() => Ok(uri),
+        Ok((rest, _)) => Err(Error::InvalidUri(format!("Unexpected trailing characters after URI: {}", rest))),
+        Err(e) => Err(Error::InvalidUri(format!("Failed to parse URI '{}': {:?}", trimmed_input, e))),
     }
 }
 
@@ -342,4 +357,17 @@ fn is_valid_ipv6(s: &str) -> bool {
     }
 
     true
+}
+
+impl FromStr for Uri {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+         let trimmed = s.trim();
+         if trimmed == "*" {
+              return Err(Error::InvalidUri("Parsing '*' URI is not currently supported by this structure".to_string()));
+         }
+         // Call the main public parse function which handles trimming and full consumption check
+         parse_uri(trimmed)
+    }
 } 

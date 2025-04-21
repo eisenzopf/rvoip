@@ -33,7 +33,14 @@ fn test_from_display_parse_roundtrip() {
         From(addr(None, "sip:anonymous@anonymous.invalid", vec![param_tag("456")]))
     );
     
-    assert_parse_fails::<From>("sip:bob@host"); // Missing tag (usually required)
+    // Address spec without tag is valid, but usually From requires a tag
+    // For parsing, accept it if the structure is Address-like
+    assert_parses_ok(
+        "sip:bob@host",
+        From(addr(None, "sip:bob@host", vec![]))
+    );
+    assert_parse_fails::<From>("sip:bob@host;;"); // Invalid params
+    assert_parse_fails::<From>("<"); // Invalid address
 }
 
 #[test]

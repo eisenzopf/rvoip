@@ -51,17 +51,7 @@ impl FromStr for Allow {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let trimmed_s = s.trim();
-        if trimmed_s.is_empty() {
-             return Err(Error::InvalidHeader("Empty Allow header value".to_string()));
-        }
-        match parse_allow(trimmed_s) {
-             Ok(allow) if allow.0.is_empty() => {
-                 Err(Error::InvalidHeader("Invalid Allow header value".to_string()))
-             }
-             Ok(allow) => Ok(allow),
-             Err(e) => Err(e)
-        }
+        parse_allow(s)
     }
 }
 

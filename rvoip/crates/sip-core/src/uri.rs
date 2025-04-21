@@ -48,11 +48,14 @@ impl FromStr for Scheme {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
+        // Check specifically for schemes followed by ':' implicitly
+        // The nom parser `terminated(scheme_parser, char(':'))` ensures this, 
+        // so direct FromStr should handle the base scheme string correctly.
         match s.to_lowercase().as_str() {
             "sip" => Ok(Scheme::Sip),
             "sips" => Ok(Scheme::Sips),
             "tel" => Ok(Scheme::Tel),
-            _ => Err(Error::InvalidUri(format!("Invalid scheme: {s}"))),
+            _ => Err(Error::InvalidUri(format!("Invalid scheme token: {}", s))),
         }
     }
 }
@@ -424,34 +427,6 @@ fn uri_parser(input: &str) -> IResult<&str, Uri> {
     }
 
     Ok((input, uri))
-}
-
-impl FromStr for Uri {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        let trimmed = s.trim();
-        // Handle the special '*' URI case
-        if trimmed == "*" {
-            // Represent '*' as a URI with a special host or convention
-            // Option 1: Use a placeholder host
-            // return Ok(Uri::new(Scheme::Sip, Host::Domain("*".to_string()))); 
-            
-            // Option 2: Add a specific variant to Host or Uri? (Requires lib changes)
-            // For now, let's return an error as the current structure doesn't fit '*'
-             return Err(Error::InvalidUri("Parsing '*' URI is not currently supported by this structure".to_string()));
-             // OR, if we decide '*' should map to a default SIP URI for the host:
-             // return Ok(Uri::sip("")); // Needs careful consideration
-        }
-        
-        // Proceed with normal parsing if not '*'
-        match uri_parser(trimmed) {
-            // Ensure the entire input was consumed
-            Ok((rest, uri)) if rest.is_empty() => Ok(uri),
-            Ok((rest, _)) => Err(Error::InvalidUri(format!("Unexpected trailing characters after URI: {}", rest))),
-            Err(e) => Err(Error::InvalidUri(format!("Failed to parse URI: {} - Error: {:?}", s, e))),
-        }
-    }
 }
 
 // --- Helper functions (escape/unescape, validation) ---

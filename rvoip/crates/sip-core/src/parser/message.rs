@@ -289,6 +289,32 @@ impl IncrementalParser {
                 // Store the headers
                 self.headers = headers;
                 
+                // --- Validate Single-Value Headers --- 
+                let mut found_cl = false;
+                let mut found_cseq = false;
+                // Add other single-value headers as needed (e.g., Call-ID, Max-Forwards)
+                for header in &self.headers {
+                    match header.name {
+                        HeaderName::ContentLength => {
+                            if found_cl { 
+                                self.state = ParseState::Failed(Error::InvalidHeader("Multiple Content-Length headers".to_string()));
+                                return &self.state;
+                            }
+                            found_cl = true;
+                        }
+                        HeaderName::CSeq => {
+                             if found_cseq { 
+                                self.state = ParseState::Failed(Error::InvalidHeader("Multiple CSeq headers".to_string()));
+                                return &self.state;
+                            }
+                            found_cseq = true;
+                        }
+                        // Add checks for other single-value headers here
+                        _ => {}
+                    }
+                }
+                // --------------------------------------
+                
                 // Check Content-Length to determine if we have a body
                 let content_length = self.get_content_length().unwrap_or(0);
                 
@@ -371,22 +397,19 @@ impl IncrementalParser {
             if header.name == HeaderName::ContentLength {
                 return match &header.value {
                     HeaderValue::Integer(int) => {
-                        // Convert i64 to usize safely
                         if *int >= 0 {
                             Some(*int as usize)
                         } else {
-                            None // Negative content length is invalid
+                            None
                         }
                     },
                     HeaderValue::Text(text) => {
-                        // Also handle if it was parsed as Text
                         text.trim().parse::<usize>().ok()
                     },
                      HeaderValue::Raw(raw) => {
-                        // Attempt to parse if stored as Raw
                         raw.trim().parse::<usize>().ok()
                     },
-                    _ => None // Other variants are not valid Content-Length
+                    _ => None
                 }
             }
         }

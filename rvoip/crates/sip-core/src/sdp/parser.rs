@@ -110,7 +110,23 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 
             let mut current_media: Option<MediaDescription> = None;
 
+            // Add state for order checking
+            #[derive(PartialEq, PartialOrd)]
+            enum SdpParseSection { SessionHeader, MediaDescription }
+            let mut current_section = SdpParseSection::SessionHeader;
+
             for (key, value) in lines {
+                // Enforce basic order: session headers before media descriptions
+                if key == 'm' && current_section < SdpParseSection::MediaDescription {
+                    current_section = SdpParseSection::MediaDescription;
+                } else if key != 'm' && current_section == SdpParseSection::MediaDescription && !matches!(key, 'a' | 'c' | 'b' | 'k' | 'i') {
+                    // Allow only specific keys after m= line starts media section (a=, c=, b=, k=, i= according to RFC 4566)
+                    // Simplified check: disallow v, o, s, t, p, u, e, r, z after m=
+                    if matches!(key, 'v' | 'o' | 's' | 't' | 'p' | 'u' | 'e' | 'r' | 'z') {
+                         return Err(Error::SdpParsingError(format!("Invalid SDP order: '{}=' line found after 'm=' line", key)));
+                    }
+                }
+                
                 match key {
                     'v' => {
                         if value != "0" { return Err(Error::SdpParsingError("Unsupported SDP version".to_string())); }
@@ -125,6 +141,35 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                          if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
                          temp_s_line = Some(value.to_string());
                     }
+                    'i' => { // Session Information
+                         if current_media.is_none() {
+                            session.generic_attributes.push(ParsedAttribute::Value("i".to_string(), value.to_string()));
+                         } else {
+                            // i= line not allowed at media level
+                            println!("SDP Warning: i= line found at media level (invalid)");
+                         }
+                    }
+                    'u' => { // URI
+                         if current_media.is_none() {
+                            session.generic_attributes.push(ParsedAttribute::Value("u".to_string(), value.to_string()));
+                         } else {
+                            println!("SDP Warning: u= line found at media level (invalid)");
+                         }
+                    }
+                    'e' => { // Email
+                         if current_media.is_none() {
+                            session.generic_attributes.push(ParsedAttribute::Value("e".to_string(), value.to_string()));
+                         } else {
+                            println!("SDP Warning: e= line found at media level (invalid)");
+                         }
+                    }
+                    'p' => { // Phone
+                         if current_media.is_none() {
+                            session.generic_attributes.push(ParsedAttribute::Value("p".to_string(), value.to_string()));
+                         } else {
+                            println!("SDP Warning: p= line found at media level (invalid)");
+                         }
+                    }
                     'c' => { 
                         let conn_data = parse_connection_line(value)?;
                         if let Some(media) = current_media.as_mut() {
@@ -136,6 +181,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         }
                     }
                     't' => { 
+                        // Check if t= appears after m= (invalid order)
+                        if current_section == SdpParseSection::MediaDescription {
+                            return Err(Error::SdpParsingError("Invalid SDP order: 't=' line found after 'm=' line".to_string()));
+                        }
                         temp_t_lines.push(parse_time_description_line(value)?);
                     }
                     'a' => { // Attribute
@@ -173,12 +222,16 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                          }
                     }
                     'm' => { // Media Description
+                        // Set section state
+                        current_section = SdpParseSection::MediaDescription;
+                        // Add previous media description if exists
                         if let Some(mut media) = current_media.take() {
                             session.media_descriptions.push(media);
                         }
                         current_media = Some(parse_media_description_line(value)?);
                     }
-                    _ => {} // Ignore other lines
+                    'b' | 'z' | 'k' | 'r' => { println!("SDP Info: Ignoring {}={} line", key, value); }
+                    _ => { println!("SDP Warning: Ignoring unknown line type '{}'", key); } // Log unknown lines
                 }
             }
 
@@ -196,8 +249,13 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             session.time_descriptions = temp_t_lines;
             
             // Final validation (connection info)
-            if session.connection_info.is_none() && !session.media_descriptions.is_empty() && session.media_descriptions.iter().any(|m| m.connection_info.is_none()) {
-                 return Err(Error::SdpParsingError("Missing mandatory c= field (session or all media)".to_string()));
+            // A c= line MUST be present either at session level OR in ALL media descriptions
+            let session_c_present = session.connection_info.is_some();
+            let all_media_have_c = !session.media_descriptions.is_empty() && 
+                                   session.media_descriptions.iter().all(|m| m.connection_info.is_some());
+
+            if !session_c_present && !all_media_have_c {
+                 return Err(Error::SdpParsingError("Missing mandatory c= field (must be session level or in all media)".to_string()));
             }
 
             Ok(session)

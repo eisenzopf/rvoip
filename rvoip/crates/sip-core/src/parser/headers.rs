@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_till, take_while, take_while1},
+    bytes::complete::{tag, take_till, take_while, take_while1, is_not, escaped_transform},
     character::complete::{char, digit1, space0, space1},
     combinator::{map, map_res, opt, recognize, peek},
     multi::{fold_many0, many0, many1, separated_list0, separated_list1},
@@ -234,36 +234,84 @@ fn contact_parser(input: &str) -> IResult<&str, Vec<Address>> {
 
 /// Parse an address header (From, To) into an Address
 pub fn parse_address(input: &str) -> Result<Address> {
-    match single_address_parser(input) {
-        Ok((_, address)) => Ok(address),
+    let trimmed_input = input.trim();
+     if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty address header value".to_string()));
+    }
+    match single_address_parser(trimmed_input) {
+        Ok((rest, address)) if rest.is_empty() => Ok(address),
+        Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after address value: {}", rest
+        ))),
         Err(e) => Err(Error::Parser(format!("Failed to parse address header: {:?}", e))),
     }
 }
 
+/// Parser for a quoted string that handles escaped quotes (\")
+fn parse_quoted_string_with_escapes(input: &str) -> IResult<&str, String> {
+    delimited(
+        char('"'),
+        // Use escaped_transform to handle \" and other potential escapes if needed
+        escaped_transform(
+            // Match normal characters that are not \ or "
+            is_not("\"\\\\\""),
+            // The control character is \\
+            '\\',
+            // Transform escaped characters: \" becomes ", \\\\ becomes \\\ etc.
+            alt((
+                map(tag("\""), |_| "\""), // Map \" to "
+                map(tag("\\"), |_| "\\")  // Map \\ to \
+                // Add other escapes if necessary
+            )),
+        ),
+        char('"')
+    )(input)
+}
+
 /// Parser for a single Address (used for Contact, From, To, etc.)
 fn single_address_parser(input: &str) -> IResult<&str, Address> {
-    let (mut remaining_input, contact_parts) = alt((
-        // Format: "Display Name" <URI>
+    // Try parsing name-addr format first ("Display Name" <URI>)
+    let name_addr_parser = map(
         tuple((
-            opt(terminated(
+            terminated(
                 alt((
-                    map(parse_quoted_string, |s: &str| s.trim_matches('"').to_string()),
+                    parse_quoted_string_with_escapes, 
                     map(take_till(|c| c == '<'), |s: &str| s.trim().to_string())
                 )),
-                space0
-            )),
+                space0 // Allow zero or more spaces before <
+            ), 
             delimited(
                 char('<'),
                 map_res(take_till(|c| c == '>'), |s: &str| Uri::from_str(s)),
                 char('>')
             )
         )),
-        // Format: URI (without < >)
-        map(
-            map_res(take_till(|c| c == ';' || c == ',' || c == '\r' || c == '\n'), |s: &str| Uri::from_str(s.trim())),
-            |uri| (None, uri)
-        )
-    ))(input)?;
+        |(disp_name, uri)| (Some(disp_name), uri) 
+    );
+
+    // Try parsing addr-spec format (URI without < >)
+    let addr_spec_parser = map(
+        // Use map_res to attempt parsing, stop if it fails before params
+        map_res(take_till(|c| c == ';' || c == ',' || c == '\r' || c == '\n'), |s: &str| Uri::from_str(s.trim())),
+        |uri| (None, uri) // No display name for addr-spec
+    );
+    
+    // Try parsing LAQUOT addr-spec RAQUOT format (<URI>)
+    let bracketed_addr_spec_parser = map(
+        delimited(
+            char('<'),
+            map_res(take_till(|c| c == '>'), |s: &str| Uri::from_str(s)),
+            char('>')
+        ),
+         |uri| (None, uri) // No display name
+    );
+
+    // Try name-addr, then <addr-spec>, then addr-spec
+    let (mut remaining_input, contact_parts) = alt((
+        name_addr_parser, 
+        bracketed_addr_spec_parser, 
+        addr_spec_parser
+        ))(input)?;
     
     let (display_name, uri) = contact_parts;
     
@@ -525,8 +573,21 @@ pub fn www_authenticate_parser(input: &str) -> IResult<&str, WwwAuthenticate> {
 
 /// Parse an Allow header value into the Allow struct
 pub fn parse_allow(input: &str) -> Result<Allow> {
-    match allow_parser(input) {
-        Ok((_, allow)) => Ok(allow),
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return Err(Error::InvalidHeader("Empty Allow header value".to_string()));
+    }
+    match allow_parser(trimmed_input) {
+        Ok((rest, allow)) if rest.is_empty() => {
+            if allow.0.is_empty() {
+                 Err(Error::InvalidHeader("Invalid Allow header value (empty list)".to_string()))
+            } else {
+                Ok(allow)
+            }
+        },
+         Ok((rest, _)) => Err(Error::InvalidHeader(format!(
+            "Trailing characters after Allow value: {}", rest
+        ))),
         Err(e) => Err(Error::Parser(format!("Failed to parse Allow header: {:?}", e))),
     }
 }

@@ -53,8 +53,8 @@ impl FromStr for MediaType {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Delegate to the existing parser function
-        parse_content_type(s)
+        // Delegate to the existing parser function, ensuring input is trimmed
+        parse_content_type(s.trim())
     }
 }
 
