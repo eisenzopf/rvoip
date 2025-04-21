@@ -21,7 +21,7 @@ use crate::uri::Uri;
 use crate::version::Version;
 
 // Now use the new parser modules
-use crate::parser::headers::{parse_header, parse_headers};
+use crate::parser::headers::{parse_header, parse_headers, header_parser as single_nom_header_parser};
 use crate::parser::request::parse_request_line;
 use crate::parser::response::parse_response_line;
 use crate::parser::utils::crlf;
@@ -181,24 +181,23 @@ impl IncrementalParser {
                 
                 let idx = min_idx.unwrap();
                 
-                // Found end of headers
-                let header_section = self.buffer[..idx].to_string();
-                
-                // Save the buffer after headers for body processing
-                let body_start = idx + end_len;
-                let body_data = if body_start < self.buffer.len() {
-                    self.buffer[body_start..].to_string()
-                } else {
-                    String::new()
-                };
-                
-                // Clear the buffer
-                self.buffer.clear();
+                // Process header section first
+                let header_section = self.buffer[..idx].to_string(); 
+
+                // Clone body slice to owned String *first*
+                let body_start = idx + end_len; 
+                let mut body_data = if body_start < self.buffer.len() { // Make body_data mutable
+                    self.buffer[body_start..].to_string() 
+                } else { String::new() };
+                let body_data_len = body_data.len();
+
+                // Clear buffer now that body_data is owned
+                self.buffer.clear(); 
                 
                 if self.debug_mode {
                     println!("IncrementalParser: Found end of headers at position {}", idx);
                     println!("IncrementalParser: Header section:\n{}", header_section);
-                    println!("IncrementalParser: Body data initially available: {} bytes", body_data.len());
+                    println!("IncrementalParser: Body slice initially available: {} bytes", body_data_len);
                 }
                 
                 // Parse the headers
@@ -298,14 +297,12 @@ impl IncrementalParser {
                         HeaderName::ContentLength => {
                             if found_cl { 
                                 self.state = ParseState::Failed(Error::InvalidHeader("Multiple Content-Length headers".to_string()));
-                                return &self.state;
                             }
                             found_cl = true;
                         }
                         HeaderName::CSeq => {
                              if found_cseq { 
                                 self.state = ParseState::Failed(Error::InvalidHeader("Multiple CSeq headers".to_string()));
-                                return &self.state;
                             }
                             found_cseq = true;
                         }
@@ -315,32 +312,28 @@ impl IncrementalParser {
                 }
                 // --------------------------------------
                 
-                // Check Content-Length to determine if we have a body
+                // Check Content-Length
                 let content_length = self.get_content_length().unwrap_or(0);
                 
                 if content_length > MAX_BODY_SIZE {
                     self.state = ParseState::Failed(Error::BodyTooLarge(content_length));
                     return &self.state;
                 }
-                
+
                 if content_length == 0 {
-                    // No body, message is complete
                     self.complete_message();
                     return &self.state;
                 } else {
-                    // Has body - add any existing body data to the buffer
+                    // Has body - need to transition
                     self.buffer = body_data;
-                    
-                    // Set state to parsing body
                     self.state = ParseState::ParsingBody {
                         content_length,
                         bytes_parsed: 0,
                     };
-                    
-                    // Continue parsing the body if there's data already in the buffer
                     if !self.buffer.is_empty() {
-                        return self.parse("");
+                        return self.parse(""); 
                     }
+                    return &self.state;
                 }
             }
             ParseState::ParsingBody { content_length, bytes_parsed } => {
@@ -352,31 +345,15 @@ impl IncrementalParser {
                 }
                 
                 if total_bytes >= content_length {
-                    // We have the entire body
                     let needed = content_length - bytes_parsed;
-                    
-                    if self.debug_mode {
-                        println!("IncrementalParser: Got complete body, needed {} bytes", needed);
-                    }
-                    
                     if needed <= buffer_len {
-                        // Preserve the exact body content without modifying line endings
                         let body = self.buffer.drain(..needed).collect::<String>();
                         self.body = Some(body);
-                        
-                        if self.debug_mode {
-                            if let Some(body) = &self.body {
-                                println!("IncrementalParser: Body extracted, length: {}", body.len());
-                                println!("IncrementalParser: Body content: {}", body);
-                            }
-                        }
-                        
                         self.complete_message();
                     } else {
                         self.state = ParseState::Failed(Error::Parser(format!("Content-Length mismatch")));
                     }
                 } else {
-                    // Still need more data
                     self.state = ParseState::ParsingBody {
                         content_length,
                         bytes_parsed: total_bytes,
@@ -491,6 +468,88 @@ impl IncrementalParser {
     }
 }
 
+/// Top-level nom parser for a full SIP message (Request or Response)
+fn full_message_parser(input: &str) -> IResult<&str, Message> {
+    // 1. Parse Start Line
+    let (rest, start_line_data) = alt((
+        map(parse_request_line, |(m, u, v)| (true, Some(m), Some(u), Some(v), None, None)),
+        map(parse_response_line, |(v, s, r)| (false, None, None, Some(v), Some(s), Some(r)))
+    ))(input)?;
+    
+    let (is_request, method, uri, version, status, reason) = start_line_data;
+    
+    // 2. Parse Headers line by line until empty line marker
+    let mut header_input = rest;
+    let mut headers = Vec::new();
+    loop {
+        // Check for end of headers
+        if header_input.starts_with("\r\n") { // Found empty line
+            header_input = &header_input[2..]; // Consume CRLF
+            break;
+        } else if header_input.is_empty() {
+            // Reached end unexpectedly before empty line
+            break; 
+        }
+        
+        // Attempt to parse a header line using the basic nom parser
+        match single_nom_header_parser(header_input) {
+            Ok((remaining, header)) => {
+                 // Check for required CRLF termination after header value
+                 if !remaining.starts_with("\r\n") {
+                      // Header value didn't end with CRLF - parse error
+                      return Err(nom::Err::Error(NomError::new(header_input, ErrorKind::CrLf)));
+                 }
+                 headers.push(header);
+                 header_input = &remaining[2..]; // Consume CRLF
+            }
+            Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_))=> {
+                // Failed to parse as header, maybe malformed? Stop parsing headers.
+                // We might lose body if this happens before the actual empty line.
+                 break; 
+            }
+            Err(nom::Err::Incomplete(_)) => {
+                 // Need more data
+                 return Err(nom::Err::Incomplete(Needed::Unknown)); 
+            }
+        }
+    }
+    
+    // header_input now contains the body + any trailing data
+    let body_and_rest = header_input; 
+
+    // 3. Extract Content-Length
+    let content_length = headers.iter().find_map(|h| {
+        if h.name == HeaderName::ContentLength {
+            h.value.to_string_value().parse::<usize>().ok()
+        } else {
+            None
+        }
+    }).unwrap_or(0);
+
+    // 4. Parse Body 
+    if body_and_rest.len() < content_length {
+        return Err(nom::Err::Incomplete(Needed::new(content_length - body_and_rest.len())));
+    }
+    let (final_rest, body_bytes) = nom::bytes::complete::take(content_length)(body_and_rest)?;
+    let body_str = String::from_utf8_lossy(body_bytes.as_bytes()).to_string(); // Assuming UTF-8 body for now
+    
+    // 5. Construct Message
+    if is_request {
+        let mut req = Request::new(method.unwrap(), uri.unwrap());
+        req.version = version.unwrap();
+        req.headers = headers;
+        if content_length > 0 { req.body = Bytes::copy_from_slice(body_bytes.as_bytes()); }
+        Ok((final_rest, Message::Request(req)))
+    } else {
+        let mut resp = Response::new(status.unwrap());
+        resp.version = version.unwrap();
+        if let Some(r) = reason { if !r.is_empty() { resp = resp.with_reason(r); } }
+        resp.headers = headers;
+        if content_length > 0 { resp.body = Bytes::copy_from_slice(body_bytes.as_bytes()); }
+        Ok((final_rest, Message::Response(resp)))
+    }
+}
+
 /// Parse a SIP message from a string or bytes
 pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
     // Convert input to string if needed
@@ -499,34 +558,25 @@ pub fn parse_message(input: impl AsRef<[u8]>) -> Result<Message> {
         Err(e) => return Err(Error::Parser(format!("Invalid UTF-8 data: {}", e))),
     };
     
-    // Check if input is empty
     if input_str.trim().is_empty() {
         return Err(Error::Parser("Empty message".to_string()));
     }
     
-    // Use incremental parser
-    let mut parser = IncrementalParser::new();
-    let mut state = parser.parse(input_str);
-    
-    // If parsing headers led to needing a body, give it a chance to parse the buffered body data
-    if matches!(state, ParseState::ParsingBody { .. }) {
-       state = parser.parse(""); // Call parse again with empty input to process buffer
-    }
-    
-    match state {
-        ParseState::Complete(_) => {
-            if let Some(message) = parser.take_message() {
-                Ok(message)
+    // Use direct nom parser for full input
+    match full_message_parser(input_str) {
+        Ok((rest, message)) => {
+            // Check if the entire input was consumed
+            if !rest.is_empty() {
+                 Err(Error::Parser(format!("Trailing data after message: {:?}", rest)))
             } else {
-                Err(Error::Parser("Internal parser error: Complete state with no message".to_string()))
+                 Ok(message)
             }
         },
-        ParseState::Failed(error) => {
-            Err(error.clone())
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+             Err(Error::Parser(format!("Failed to parse message near '{}': {:?}", &input_str[..input_str.len() - e.input.len()], e.code)))
         },
-        _ => {
-            // Didn't reach Complete or Failed state (e.g., still WaitingForStartLine, ParsingHeaders, or ParsingBody)
-            Err(Error::IncompleteParse(format!("Incomplete message - ended in state: {:?}", state)))
+        Err(nom::Err::Incomplete(needed)) => {
+             Err(Error::IncompleteParse(format!("Incomplete message: Needed {:?}", needed)))
         }
     }
 }
@@ -540,9 +590,13 @@ pub fn parse_message_bytes(input: &[u8]) -> Result<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use crate::uri::Host; // Import Host for assertions
+    use crate::types::Request; // Import Request
+    use crate::types::Response; // Import Response
     
     #[test]
-    fn test_parse_request() {
+    fn test_parse_request_full() { // Renamed test
         let input = "INVITE sip:bob@example.com SIP/2.0\r\n\
                      Via: SIP/2.0/UDP pc33.example.com:5060;branch=z9hG4bK776asdhds\r\n\
                      Max-Forwards: 70\r\n\
@@ -552,7 +606,7 @@ mod tests {
                      CSeq: 314159 INVITE\r\n\
                      Contact: <sip:alice@pc33.example.com>\r\n\
                      Content-Type: application/sdp\r\n\
-                     Content-Length: 142\r\n\
+                     Content-Length: 128\r\n\
                      \r\n\
                      v=0\r\n\
                      o=- 1234 1234 IN IP4 127.0.0.1\r\n\
@@ -562,24 +616,34 @@ mod tests {
                      m=audio 49170 RTP/AVP 0\r\n\
                      a=rtpmap:0 PCMU/8000\r\n";
         
-        let message = parse_message(input).unwrap();
+        // Test feeding the full input at once using the new parse_message
+        let result = parse_message(input.as_bytes());
+        assert!(result.is_ok(), "parse_message failed: {:?}", result.err());
         
+        let message = result.unwrap();
+        
+        // Check message content
         assert!(matches!(message, Message::Request(_)));
-        if let Message::Request(request) = message {
+        if let Message::Request(request) = message { 
             assert_eq!(request.method, Method::Invite);
             assert_eq!(request.uri.scheme.as_str(), "sip");
-            assert_eq!(request.uri.host.as_str(), "example.com");
+            // Check Host enum directly
+            assert_eq!(request.uri.host, Host::Domain("example.com".to_string()));
             assert_eq!(request.uri.user.as_ref().unwrap(), "bob");
             
             assert_eq!(request.headers.len(), 9);
             
             assert!(!request.body.is_empty());
-            assert!(std::str::from_utf8(&request.body).unwrap().starts_with("v=0"));
+            let body_str = std::str::from_utf8(&request.body).unwrap();
+            assert!(body_str.starts_with("v=0"));
+            assert_eq!(request.body.len(), 128); 
+        } else {
+            panic!("Parsed message was not a Request");
         }
     }
     
     #[test]
-    fn test_parse_response() {
+    fn test_parse_response_full() { // Renamed test
         let input = "SIP/2.0 200 OK\r\n\
                      Via: SIP/2.0/UDP pc33.example.com:5060;branch=z9hG4bK776asdhds;received=10.0.0.1\r\n\
                      To: Bob <sip:bob@example.com>;tag=a6c85cf\r\n\
@@ -588,7 +652,7 @@ mod tests {
                      CSeq: 314159 INVITE\r\n\
                      Contact: <sip:bob@192.168.0.2>\r\n\
                      Content-Type: application/sdp\r\n\
-                     Content-Length: 131\r\n\
+                     Content-Length: 130\r\n\
                      \r\n\
                      v=0\r\n\
                      o=- 1234 1234 IN IP4 192.168.0.2\r\n\
@@ -598,20 +662,30 @@ mod tests {
                      m=audio 49170 RTP/AVP 0\r\n\
                      a=rtpmap:0 PCMU/8000\r\n";
         
-        let message = parse_message(input).unwrap();
+        // Test feeding the full input at once using the new parse_message
+        let result = parse_message(input.as_bytes());
+        assert!(result.is_ok(), "parse_message failed: {:?}", result.err());
+
+        let message = result.unwrap();
         
+        // Check message content
         assert!(matches!(message, Message::Response(_)));
-        if let Message::Response(response) = message {
+        if let Message::Response(response) = message { 
             assert_eq!(response.status, StatusCode::Ok);
             assert_eq!(response.reason.as_deref().unwrap(), "OK");
             
             assert_eq!(response.headers.len(), 8);
             
             assert!(!response.body.is_empty());
-            assert!(std::str::from_utf8(&response.body).unwrap().starts_with("v=0"));
+            let body_str = std::str::from_utf8(&response.body).unwrap();
+            assert!(body_str.starts_with("v=0"));
+            assert_eq!(response.body.len(), 130); 
+        } else {
+            panic!("Parsed message was not a Response");
         }
     }
     
+    // Keep incremental tests - they should still pass if parser logic is sound
     #[test]
     fn test_incremental_parser() {
         let mut parser = IncrementalParser::new();
