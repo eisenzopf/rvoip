@@ -41,24 +41,35 @@ fn is_userinfo_char(c: char) -> bool {
 
 // Parse the userinfo part (user:password@)
 pub fn userinfo_parser(input: &str) -> IResult<&str, (Option<String>, Option<String>)> {
-    match opt(terminated(
+    println!("userinfo_parser input: {:?}", input);
+    let result = opt(terminated(
         pair(
             map(
                 // Use take_while1 with allowed chars, not take_till
                 take_while1(is_userinfo_char), 
-                |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
+                |s: &str| {
+                     println!("User part consumed: {:?}", s);
+                     unescape_user_info(s).unwrap_or_else(|_| s.to_string())
+                }
             ),
             opt(preceded(
                 char(':'),
                 map(
                     // Use take_while1 with allowed chars for password too
                     take_while1(is_userinfo_char), 
-                    |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
+                    |s: &str| {
+                         println!("Password part consumed: {:?}", s);
+                         unescape_user_info(s).unwrap_or_else(|_| s.to_string())
+                    }
                 )
             ))
         ),
         char('@')
-    ))(input) {
+    ))(input);
+    
+    println!("userinfo_parser result: {:?}", result);
+
+    match result {
         Ok((remaining, Some((user, password)))) => Ok((remaining, (Some(user), password))),
         Ok((remaining, None)) => Ok((remaining, (None, None))),
         Err(e) => Err(e),

@@ -42,12 +42,13 @@ fn test_uri_with_params_list_helpers() {
      let route = Route(list.clone());
      assert_eq!(route.len(), 2);
      println!("Debugging route.first(): {:?}", route.first()); 
-     let expected_host1 = Host::Domain("p1.example.com".to_string());
+     let expected_host1 = Host::Domain("example.com".to_string());
      assert_eq!(route.first().unwrap().uri.host, expected_host1);
      
      let rr = RecordRoute(list);
       assert_eq!(rr.len(), 2);
-      assert_eq!(rr.last().unwrap().uri.host.to_string(), "p2.example.com");
+      let expected_host2 = Host::Domain("example.com".to_string());
+      assert_eq!(rr.last().unwrap().uri.host, expected_host2);
 } 
 
 #[test]
@@ -56,14 +57,14 @@ fn debug_host_parsing() {
     let uri_str = "sip:p1@example.com";
     let parsed_uri = uri(uri_str); 
     println!("Parsed URI for {}: {:?}", uri_str, parsed_uri);
-    // Use direct comparison
-    assert_eq!(parsed_uri.host, Host::Domain("p1.example.com".to_string()));
+    // Correct the expected host
+    assert_eq!(parsed_uri.host, Host::Domain("example.com".to_string()));
 
     let uri_str_2 = "sip:p2@example.com";
     let parsed_uri_2 = uri(uri_str_2);
     println!("Parsed URI for {}: {:?}", uri_str_2, parsed_uri_2);
-    // Use direct comparison
-     assert_eq!(parsed_uri_2.host, Host::Domain("p2.example.com".to_string()));
+    // Correct the expected host
+     assert_eq!(parsed_uri_2.host, Host::Domain("example.com".to_string()));
 
      // Test without user part
      let uri_str_3 = "sip:example.com";
