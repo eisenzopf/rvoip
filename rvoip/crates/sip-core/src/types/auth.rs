@@ -1,8 +1,8 @@
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use std::collections::HashMap;
 use std::fmt;
 use crate::parser::headers::{parse_www_authenticate, parse_authorization, parse_proxy_authenticate, parse_proxy_authorization, parse_authentication_info}; // Parsers
-use crate::error::Result;
+use crate::error::{Result, Error};
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 

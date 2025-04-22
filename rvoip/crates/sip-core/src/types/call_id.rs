@@ -29,7 +29,11 @@ impl FromStr for CallId {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match all_consuming(parse_call_id)(s.as_bytes()) {
+        // Call the parser first
+        let parse_result = all_consuming(parse_call_id)(s.as_bytes());
+
+        // Match on the Result
+        match parse_result {
             Ok((_, (local, host_opt))) => {
                 let local_part = String::from_utf8(local.to_vec())?;
                 let host_part = host_opt.map(|h| String::from_utf8(h.to_vec())).transpose()?;

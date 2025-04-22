@@ -23,7 +23,25 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::uri::Uri;
-use crate::types::call_info::{CallInfoValue, InfoPurpose, InfoParam}; // Assuming these exist
+
+// Make these types public
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfoPurpose {
+    Icon,
+    Info,
+    Card,
+    Other(String),
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum InfoParam {
+    Purpose(InfoPurpose),
+    Generic(Param),
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallInfoValue {
+    pub uri: String, // Changed from Uri based on parser
+    pub params: Vec<InfoParam>,
+}
 
 // info-param = ( "purpose" EQUAL ( "icon" / "info" / "card" / token ) ) / generic-param
 fn info_param(input: &[u8]) -> ParseResult<InfoParam> {

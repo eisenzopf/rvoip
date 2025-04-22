@@ -9,9 +9,10 @@ use crate::parser::separators::{comma, equal, ldquot, rdquot};
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 use crate::types::auth::{AuthParam, Challenge, DigestChallenge, DigestParam}; // Assume types exist
+use crate::types::param::Param; // Add Param import
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
+    bytes::complete::{tag, tag_no_case, take, take_while1}, // Add take, take_while1
     character::complete::space1,
     combinator::{map, map_res, opt, recognize},
     multi::{many0, separated_list0},
@@ -106,6 +107,23 @@ fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
 // Convenience function for quoted string within auth params
 fn auth_quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
      delimited(ldquot, recognize(many0(alt((token, tag(b" ".as_slice()))))), rdquot)(input) // Use b" ".as_slice()
+}
+
+// qdtext-alt = <any TEXT-UTF8char except \"> 
+fn qdtext_alt(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while1(|c| c != b'\"' && c != b'\r' && c != b'\n')(input) // Exclude " and CR/LF
+}
+
+// quoted-string-alt = DQUOTE *(qdtext-alt / quoted-pair-alt ) DQUOTE
+// Simplified version, doesn't handle complex escaping perfectly but captures content
+fn quoted_string_alt(input: &[u8]) -> ParseResult<&[u8]> {
+    delimited(
+        ldquot,
+        recognize(many0(alt((
+            token, tag(" ") // Changed b" " to " "
+        )))), 
+        rdquot
+    )(input)
 }
 
 // auth-param = token EQUAL ( token / quoted-string )

@@ -63,12 +63,11 @@ impl FromStr for Accept {
         // Convert &str to &[u8] and use all_consuming
         match all_consuming(parse_accept)(s.as_bytes()) {
             Ok((_, values)) => Ok(Accept(values)),
-            Err(e) => Err(Error::ParseError{ 
-                message: format!("Failed to parse Accept header: {:?}", e), 
-                source: None 
-            })
+            Err(e) => Err(Error::ParseError(
+                format!("Failed to parse Accept header: {:?}", e)
+            ))
         }
     }
 }
 
-// TODO: Implement methods (e.g., for checking acceptable types) 
+// TODO: Implement methods (e.g., for checking acceptable types)

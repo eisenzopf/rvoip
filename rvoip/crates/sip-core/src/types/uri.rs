@@ -90,11 +90,12 @@ impl Host {
         Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip.into().as_str()).unwrap()))
     }
 
-    /// Returns this host as a string
-    pub fn as_str(&self) -> &str {
+    /// Get the host as a string slice (only works for domain names).
+    /// For addresses, it converts to String.
+    pub fn as_str(&self) -> String {
         match self {
-            Host::Domain(domain) => domain,
-            Host::Address(addr) => addr.to_string().as_str(),
+            Host::Domain(domain) => domain.clone(),
+            Host::Address(addr) => addr.to_string(),
         }
     }
 }

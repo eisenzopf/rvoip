@@ -6,6 +6,10 @@ use ordered_float::NotNan;
 
 use crate::error::{Error, Result};
 use crate::types::Param;
+use crate::types::uri::Host;
+use crate::types::param::Param;
+use crate::types::param::GenericValue;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// A structured representation of a SIP Via header
 #[derive(Debug, Clone, PartialEq)]

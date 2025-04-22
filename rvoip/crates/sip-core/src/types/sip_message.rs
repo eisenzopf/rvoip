@@ -12,6 +12,14 @@ use crate::types::StatusCode;
 use crate::error::{Error, Result};
 // Use types from the current crate's types module
 use crate::types::{Via};
+use crate::types; // Add import
+use crate::method::Method;
+use crate::uri::Uri;
+use crate::version::Version;
+use crate::header::Header;
+use crate::header::HeaderName;
+use crate::header::TypedHeader;
+use crate::types::via::Via; // Import Via specifically
 
 /// A SIP request message
 #[derive(Debug, Clone, PartialEq)]

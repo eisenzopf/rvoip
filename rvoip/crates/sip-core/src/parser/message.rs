@@ -35,6 +35,8 @@ use crate::parser::token::token;
 use crate::parser::utf8::text_utf8_char;
 use crate::parser::common::sip_version;
 use crate::parser::utils::unfold_lws;
+use crate::parser::common::ParseResult;
+use crate::parser::response::parse_status_line;
 
 /// Maximum length of a single line in a SIP message
 pub const MAX_LINE_LENGTH: usize = 4096;
@@ -94,7 +96,7 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
     // 4. Get Content-Length (optional) - Needs update to use TypedHeader
     let content_length = typed_headers.iter().find_map(|h| {
         if let TypedHeader::ContentLength(cl) = h {
-            Some(*cl as usize)
+            Some(cl.0 as usize)
         } else { None }
     }).unwrap_or(0);
 

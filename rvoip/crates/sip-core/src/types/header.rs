@@ -454,8 +454,8 @@ pub enum TypedHeader {
     // Placeholder Types (replace with actual types from types/*)
     ContentEncoding(Vec<String>),
     ContentLanguage(Vec<String>),
-    AcceptEncoding(Vec<types::accept::EncodingInfo>),
-    AcceptLanguage(Vec<types::accept::LanguageInfo>),
+    AcceptEncoding(Vec<parser::headers::accept_encoding::EncodingInfo>),
+    AcceptLanguage(Vec<parser::headers::accept_language::LanguageInfo>),
     MinExpires(u32),
     MimeVersion((u32, u32)),
     Require(Vec<String>),
@@ -472,8 +472,8 @@ pub enum TypedHeader {
     InReplyTo(Vec<String>),
     RetryAfter((u32, Option<String>, Vec<types::retry_after::RetryParam>)),
     ErrorInfo(Vec<types::error_info::ErrorInfoValue>),
-    AlertInfo(Vec<types::alert_info::AlertInfoValue>),
-    CallInfo(Vec<types::call_info::CallInfoValue>),
+    AlertInfo(Vec<parser::headers::alert_info::AlertInfoValue>),
+    CallInfo(Vec<parser::headers::call_info::CallInfoValue>),
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),

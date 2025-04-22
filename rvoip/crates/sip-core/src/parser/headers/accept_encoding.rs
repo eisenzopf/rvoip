@@ -25,8 +25,14 @@ use crate::parser::common::comma_separated_list0;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::accept::EncodingInfo; // Assuming struct { coding: String, params: Vec<Param> }
 use crate::types::accept_encoding::AcceptEncoding as AcceptEncodingHeader; // Specific type
+
+// Define EncodingInfo locally and make it public
+#[derive(Debug, Clone, PartialEq)] // Add derives
+pub struct EncodingInfo {
+    pub coding: String,
+    pub params: Vec<Param>,
+}
 
 // codings = content-coding / "*"
 // content-coding = token

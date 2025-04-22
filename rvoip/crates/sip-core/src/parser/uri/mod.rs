@@ -4,6 +4,10 @@ pub mod userinfo;
 pub mod params;
 pub mod headers;
 pub mod absolute;
+pub mod authority;
+pub mod path;
+pub mod query;
+pub mod scheme;
 
 // Host sub-modules
 pub mod hostname;
@@ -35,6 +39,9 @@ use std::str;
 use crate::types::uri::{Host, Uri};
 use crate::types::param::Param;
 use crate::parser::ParseResult;
+use crate::Scheme;
+
+use authority::parse_authority;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {

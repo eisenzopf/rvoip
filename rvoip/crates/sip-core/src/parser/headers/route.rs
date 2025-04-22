@@ -24,6 +24,7 @@ use crate::types::route::RouteParamInfo; // Assuming struct { address: Address }
 use crate::types::route::Route as RouteHeader; // Use the specific header type
 use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::types::uri_with_params::UriWithParams;
+use crate::parser::address::parse_address;
 
 // Define a struct to represent a single route entry
 #[derive(Debug, PartialEq, Clone)]
@@ -48,20 +49,16 @@ fn route_param(input: &[u8]) -> ParseResult<Address> {
     )(input)
 }
 
-// Route = "Route" HCOLON route-param *(COMMA route-param)
-// Note: HCOLON handled elsewhere.
-pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
+// route = 1#("<" addr-spec ">" *( SEMI route-param ))
+pub(crate) fn parse_route(input: &[u8]) -> ParseResult<Route> {
     map(
-        comma_separated_list1(route_param), 
-        |addrs: Vec<Address>| {
-            // Convert Vec<Address> to Vec<UriWithParams>
-            let uris_with_params: Vec<UriWithParams> = addrs.into_iter()
-                .map(|addr| UriWithParams::new(addr.uri, addr.params)) // Use assumed constructor
-                .collect();
-            // Construct UriWithParamsList using struct literal syntax
-            let list = UriWithParamsList { uris: uris_with_params }; 
-            RouteHeader(list) // Construct the final header
-        }
+        comma_separated_list1(
+            map(
+                parse_address, // Use the address parser directly
+                |addr| addr // parse_address returns Address, which contains Uri and params
+            )
+        ),
+        Route // Wrap the Vec<Address> in the Route newtype
     )(input)
 }
 

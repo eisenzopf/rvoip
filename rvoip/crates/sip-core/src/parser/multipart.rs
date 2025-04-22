@@ -8,10 +8,10 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{crlf, space0, space1},
-    combinator::{map, map_res, opt, recognize, eof},
+    combinator::{map, map_res, opt, recognize, eof, all_consuming},
     error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0},
-    sequence::{pair, preceded},
+    multi::{many0, many1},
+    sequence::{pair, preceded, terminated},
     IResult,
 };
 use bytes::Bytes;

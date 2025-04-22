@@ -5,7 +5,7 @@ use nom::{
     bytes::complete as bytes,
     character::complete::{digit1},
     combinator::{map_res},
-    sequence::{separated_pair},
+    sequence::{separated_pair, pair},
     IResult,
     error::{ErrorKind, NomError},
 };
@@ -15,17 +15,18 @@ use std::str;
 use crate::parser::separators::hcolon;
 use crate::parser::ParseResult;
 use crate::types::version::Version as MimeVersion; // Alias to avoid confusion
+use crate::error::{Error, Result};
 
 // mime-version-val = 1*DIGIT "." 1*DIGIT
-fn mime_version_val(input: &[u8]) -> ParseResult<(u32, u32)> {
+fn mime_version_val(input: &[u8]) -> ParseResult<MimeVersion> {
     map_res(
-        separated_pair(bytes::tag(b"."), digit1),
+        separated_pair(digit1, bytes::tag(b"."), digit1),
         |(major_bytes, minor_bytes)| {
-            let major_s = str::from_utf8(major_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Char)))?;
-            let minor_s = str::from_utf8(minor_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Char)))?;
-            let major = major_s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Digit)))?;
-            let minor = minor_s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Digit)))?;
-            Ok::<(u32, u32), _>((major, minor))
+            let major_str = str::from_utf8(major_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Char)))?;
+            let minor_str = str::from_utf8(minor_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Char)))?;
+            let major = major_str.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Digit)))?;
+            let minor = minor_str.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Digit)))?;
+            Ok(MimeVersion::new(major, minor))
         }
     )(input)
 }

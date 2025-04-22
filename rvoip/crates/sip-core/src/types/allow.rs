@@ -54,19 +54,11 @@ impl FromStr for Allow {
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::allow::parse_allow;
 
-        match all_consuming(parse_allow)(s.as_bytes()) {
-            Ok((_, methods_bytes)) => {
-                // Convert Vec<&[u8]> to Vec<Method>
-                let methods = methods_bytes.iter()
-                    .map(|bytes| Method::from_str(std::str::from_utf8(bytes).unwrap_or("")))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Allow(methods))
-            },
-            Ok((_, list)) => Ok(Allow(list)),
-            Err(e) => Err(Error::ParseError(
-                format!("Failed to parse Allow header: {:?}", e)
-            ))
-        }
+        let (_, methods_bytes) = all_consuming(parse_allow)(s.as_bytes()).map_err(Error::from)?;
+        let methods = methods_bytes.0.iter()
+            .map(|m_bytes| Method::from_str(std::str::from_utf8(m_bytes)?))
+            .collect::<Result<Vec<Method>>>()?;
+        Ok(Allow(methods))
     }
 }
 

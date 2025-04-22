@@ -80,13 +80,6 @@ pub enum WarnAgent {
     HostPort(Host, Option<u16>),
     Pseudonym(Vec<u8>),
 }
-#[derive(Debug, PartialEq, Clone)]
-pub struct WarningValue {
-    pub code: u16,
-    pub agent: WarnAgent,
-    // Store raw bytes, unescaping handled by consumer if needed
-    pub text: Vec<u8>,
-}
 
 // Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 pub(crate) fn parse_warning(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
@@ -105,14 +98,6 @@ pub(crate) fn parse_warning(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
             }).collect()
         }
     )(input)
-}
-
-// Define structure for Warning value
-#[derive(Debug, PartialEq, Clone)]
-pub struct WarningValue { // Make struct pub
-    pub code: WarnCode,
-    pub agent: String, // Use String, can be host or pseudo-host
-    pub text: String, // Quoted string
 }
 
 // warn-value = warn-code SP warn-agent SP warn-text

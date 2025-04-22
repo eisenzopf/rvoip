@@ -39,7 +39,7 @@ fn display_name(input: &[u8]) -> ParseResult<&[u8]> {
 
 // addr-spec = SIP-URI / SIPS-URI / absoluteURI
 fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
-    request_uri(input)
+    parse_uri(input)
 }
 
 // name-addr = [ display-name ] LAQUOT addr-spec RAQUOT

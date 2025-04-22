@@ -23,7 +23,13 @@ use crate::uri::Uri;
 
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;
-use crate::types::alert_info::AlertInfoValue; // Assuming struct { uri: String, params: Vec<Param> }
+
+// Make this struct public
+#[derive(Debug, Clone, PartialEq)] // Derive necessary traits
+pub struct AlertInfoValue { 
+    pub uri: String, // Changed from Uri to String based on parser usage
+    pub params: Vec<Param>
+}
 
 // alert-param = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 fn alert_param(input: &[u8]) -> ParseResult<AlertInfoValue> {

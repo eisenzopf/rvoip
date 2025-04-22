@@ -29,12 +29,10 @@ impl FromStr for CSeq {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::cseq::parse_cseq;
-
         let trimmed_s = s.trim();
-        let (_, value) = all_consuming(parse_cseq)(trimmed_s.as_bytes()).map_err(Error::from)?;
-        let method = Method::from_str(std::str::from_utf8(&value.method)?).map_err(|_| Error::ParseError("Invalid method in CSeq".to_string()))?;
-        Ok(CSeq { seq: value.seq, method })
+        all_consuming(parse_cseq)(trimmed_s.as_bytes())
+            .map(|(_, cseq)| cseq)
+            .map_err(Error::from)
     }
 }
 

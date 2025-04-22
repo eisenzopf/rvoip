@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
+use std::default::Default;
 
 use crate::error::{Error, Result};
 use crate::types::uri::Host; // Assuming Host type exists
@@ -16,6 +17,13 @@ pub enum GenericValue {
     Token(String),
     Host(Host),
     Quoted(String),
+}
+
+// Implement Default manually
+impl Default for GenericValue {
+    fn default() -> Self {
+        GenericValue::Token(String::new()) // Default to empty token
+    }
 }
 
 // Add helper methods

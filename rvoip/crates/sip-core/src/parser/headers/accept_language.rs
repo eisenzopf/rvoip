@@ -26,8 +26,14 @@ use crate::parser::common::comma_separated_list0;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::accept::LanguageInfo; // Assuming struct { range: String, params: Vec<Param> }
 use crate::types::accept_language::AcceptLanguage as AcceptLanguageHeader; // Specific type
+
+// Define LanguageInfo locally and make it public
+#[derive(Debug, Clone, PartialEq)] // Add derives
+pub struct LanguageInfo {
+    pub range: String,
+    pub params: Vec<Param>,
+}
 
 // primary-tag = 1*8ALPHA
 // subtag = 1*8ALPHA

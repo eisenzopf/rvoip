@@ -55,8 +55,6 @@ pub mod priority;
 pub mod server;
 pub mod retry_after;
 pub mod error_info;
-pub mod alert_info;
-pub mod call_info;
 
 pub use accept::Accept;
 pub use address::Address;
@@ -79,5 +77,3 @@ pub use priority::*;
 pub use server::*;
 pub use retry_after::*;
 pub use error_info::*;
-pub use alert_info::*;
-pub use call_info::*;
