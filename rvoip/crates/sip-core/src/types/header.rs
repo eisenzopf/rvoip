@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::types::param::Param;
 use crate::types::uri::Uri; // Import Uri
+use crate::types::uri::Scheme; // Import Scheme
 use crate::types::address::Address; // Add explicit import for Address
 use crate::types::contact::{Contact, ContactValue as TypesContactValue}; // Import Contact
 use crate::types::from::From as FromHeaderValue; // Rename From to avoid conflict
@@ -40,6 +41,7 @@ use crate::parser::headers::reply_to::ReplyToValue; // Import from parser
 use crate::types::warning::Warning;
 use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
+use crate::types::priority::Priority; // Import Priority type
 use crate::parser::headers::content_type::parse_content_type_value;
 use crate::types::retry_after::RetryAfter;
 // CSeqValue doesn't seem to exist, CSeq struct is used directly
@@ -828,8 +830,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::ContentDisposition => {
                 match all_consuming(parser::headers::content_disposition::parse_content_disposition)(value_bytes) {
                     Ok((_, (disp_type_bytes, params_vec))) => {
-                        let disp_type_str = String::from_utf8(disp_type_bytes.to_vec())?;
-                        let disposition_type = DispositionType::from_str(&disp_type_str)?;
+                        let disposition_type = DispositionType::from_str(&disp_type_bytes)?;
                         let params: HashMap<String, String> = HashMap::new(); // Simplified for now
                         Ok(TypedHeader::ContentDisposition(ContentDisposition { disposition_type, params }))
                     },
@@ -837,21 +838,11 @@ impl TryFrom<Header> for TypedHeader {
                 }
             }
             HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_bytes_list)| {
-                    let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec()))
-                        .collect::<std::result::Result<Vec<String>, _>>()?;
-                    Ok(TypedHeader::ContentEncoding(strings))
-                }),
+                .map(|(_, strings)| TypedHeader::ContentEncoding(strings))
+                .map_err(Error::from),
             HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_bytes_list)| {
-                     let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec()))
-                        .collect::<std::result::Result<Vec<String>, _>>()?;
-                    Ok(TypedHeader::ContentLanguage(strings))
-                 }),
+                .map(|(_, strings)| TypedHeader::ContentLanguage(strings))
+                .map_err(Error::from),
             HeaderName::AcceptEncoding => all_consuming(parser::headers::parse_accept_encoding)(value_bytes)
                 .map(|(_, v)| TypedHeader::AcceptEncoding(v))
                 .map_err(Error::from),
@@ -898,37 +889,17 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, allow)| TypedHeader::Allow(allow))
                 .map_err(Error::from),
             HeaderName::Require => all_consuming(parser::headers::parse_require)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_bytes_list)| {
-                     let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_owned()))
-                         .collect::<std::result::Result<Vec<String>, _>>()?;
-                     Ok(TypedHeader::Require(strings))
-                 }),
+                .map(|(_, strings)| TypedHeader::Require(strings))
+                .map_err(Error::from),
             HeaderName::Supported => all_consuming(parser::headers::parse_supported)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_bytes_list)| {
-                     let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
-                         .collect::<std::result::Result<Vec<String>, _>>()?;
-                     Ok(TypedHeader::Supported(strings))
-                 }),
+                .map(|(_, strings)| TypedHeader::Supported(strings))
+                .map_err(Error::from),
             HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_bytes_list)| {
-                     let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
-                         .collect::<std::result::Result<Vec<String>, _>>()?;
-                     Ok(TypedHeader::Unsupported(strings))
-                 }),
+                .map(|(_, strings)| TypedHeader::Unsupported(strings))
+                .map_err(Error::from),
             HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_bytes_list)| {
-                     let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
-                         .collect::<std::result::Result<Vec<String>, _>>()?;
-                     Ok(TypedHeader::ProxyRequire(strings))
-                 }),
+                .map(|(_, strings)| TypedHeader::ProxyRequire(strings))
+                .map_err(Error::from),
 
             // Miscellaneous Headers
             HeaderName::Date => all_consuming(parser::headers::parse_date)(value_bytes)
@@ -938,17 +909,14 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::Timestamp(v))
                 .map_err(Error::from),
             HeaderName::Organization => all_consuming(parser::headers::parse_organization)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_vec())?))),
+                .map(|(_, string)| TypedHeader::Organization(string))
+                .map_err(Error::from),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| {
-                    let priority_str = String::from_utf8(v_bytes.to_owned())?;
-                    Ok(TypedHeader::Priority(priority_str))
-                 }),
+                .map(|(_, priority)| TypedHeader::Priority(priority.to_string()))
+                .map_err(Error::from),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_vec())?))),
+                .map(|(_, string)| TypedHeader::Subject(string))
+                .map_err(Error::from),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_list)| {
@@ -998,12 +966,12 @@ impl TryFrom<Header> for TypedHeader {
                          for parsed_value in parsed_values {
                              let agent_uri = match parsed_value.agent {
                                  parser::headers::warning::WarnAgent::HostPort(host, port_opt) => {
-                                     Uri::new(None, host, port_opt, Vec::new(), Vec::new())
+                                     Uri::new(Scheme::Sip, host)
                                  },
                                  parser::headers::warning::WarnAgent::Pseudonym(bytes) => {
                                      let host_str = String::from_utf8_lossy(&bytes);
                                      match types::uri::Host::from_str(&host_str) {
-                                          Ok(host) => Uri::new(None, host, None, Vec::new(), Vec::new()),
+                                          Ok(host) => Uri::new(Scheme::Sip, host),
                                           Err(_) => {
                                               return Err(Error::ParseError(format!("Cannot represent warning agent pseudonym '{}' as a valid host for Uri", host_str)));
                                           }
@@ -1089,7 +1057,7 @@ impl TryFrom<Header> for TypedHeader {
                         let params = value.params;
                         
                         // Build Address and ReferTo
-                        let address = crate::types::address::Address::new(uri, display_name, params);
+                        let address = crate::types::address::Address::new(display_name, uri);
                         Ok(TypedHeader::ReferTo(ReferTo(address)))
                     }
                     _ => Err(Error::ParseError(format!("Invalid header value for Refer-To header")))

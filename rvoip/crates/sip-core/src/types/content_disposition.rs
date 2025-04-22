@@ -75,14 +75,13 @@ impl FromStr for ContentDisposition {
         all_consuming(parse_content_disposition)(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
-                // Convert Vec<u8> to String properly
-                let disp_type_str = String::from_utf8(dtype_bytes.to_vec())?;
-                let disp_type = match disp_type_str.to_lowercase().as_str() {
+                // String is already a String type, so we don't need to_vec()
+                let disp_type = match dtype_bytes.as_str() {
                     "session" => DispositionType::Session,
                     "render" => DispositionType::Render,
                     "icon" => DispositionType::Icon,
                     "alert" => DispositionType::Alert,
-                    _ => DispositionType::Other(disp_type_str),
+                    _ => DispositionType::Other(dtype_bytes),
                 };
                 
                 // Convert params to HashMap
