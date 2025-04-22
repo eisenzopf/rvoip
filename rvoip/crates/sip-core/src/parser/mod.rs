@@ -4,7 +4,7 @@
 //! All parsers use the nom parser combinator library.
 
 // Core parsing modules
-mod common;
+pub mod common;
 // mod basic_rules; // REMOVED
 pub mod headers;
 pub mod message;

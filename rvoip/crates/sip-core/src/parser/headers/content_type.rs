@@ -17,15 +17,18 @@ use nom::{
     branch::alt,
     bytes::complete::{tag_no_case},
     combinator::{map, map_res},
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, separated_pair},
     IResult,
 };
 use std::str;
 use std::collections::HashMap;
 
 // Import from base parser modules
-use crate::parser::separators::hcolon;
+use crate::parser::separators::{hcolon, equal, slash};
 use crate::parser::ParseResult;
+use crate::parser::token::token;
+use crate::parser::quoted::quoted_string;
+use crate::parser::common_params::{semicolon_separated_params0, generic_param};
 
 // Import from sibling header modules
 use super::media_type::{parse_media_type, media_params_to_hashmap}; // Use the specific media_type parser
@@ -37,9 +40,11 @@ use crate::types::content_type::ContentType as ContentTypeHeader; // Specific he
 use crate::types::param::Param;
 
 // m-type, m-subtype are just tokens
-fn m_token(input: &[u8]) -> ParseResult<&[u8]> {
-    token(input)
-}
+// Note: These seem to be defined in media_type.rs now, potentially remove if unused locally
+// fn m_token(input: &[u8]) -> ParseResult<&[u8]> {
+//     token(input)
+// }
+// Access m_type and m_subtype through imported media_type module functions if needed.
 
 // m-value = token / quoted-string
 fn m_value(input: &[u8]) -> ParseResult<&[u8]> {

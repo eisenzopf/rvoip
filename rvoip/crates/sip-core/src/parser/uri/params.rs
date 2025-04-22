@@ -107,7 +107,7 @@ fn ttl_param(input: &[u8]) -> ParseResult<Param> {
 fn maddr_param(input: &[u8]) -> ParseResult<Param> {
     map(
         preceded(tag("maddr="), host), // Use the actual host parser
-        |host_val: UriHost| Param::Maddr(host_val) // Map UriHost directly
+        |host_val: UriHost| Param::Maddr(host_val.to_string()) // Add .to_string()
     )(input)
 }
 

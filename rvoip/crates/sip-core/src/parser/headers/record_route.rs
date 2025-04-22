@@ -5,7 +5,7 @@
 
 use nom::{
     branch::alt,
-    combinator::map,
+    combinator::{map, map_res},
     multi::{many0, separated_list1},
     sequence::{pair, preceded},
     IResult,
@@ -15,26 +15,24 @@ use nom::{
 use crate::parser::separators::{hcolon, comma};
 use crate::parser::address::name_addr; // Record-Route uses name-addr strictly
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::common::comma_separated_list0; // Record-Route can be empty
+use crate::parser::common::comma_separated_list1; // Changed from list0
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::uri::Uri;
-use crate::types::address::Address;
-use crate::types::record_route::RecordRouteInfo;
+use crate::types::address::Address; // Use Address directly
+// use crate::types::record_route::RecordRouteInfo; // Removed, seems unused
 use crate::types::record_route::RecordRoute as RecordRouteHeader; // Import specific type
+use crate::types::uri_with_params::UriWithParams; // Added
+use crate::types::uri_with_params_list::UriWithParamsList; // Added
 
 // Define a struct to represent a single Record-Route entry (same as RouteEntry)
-#[derive(Debug, PartialEq, Clone)]
-pub struct RecordRouteEntry {
-    pub display_name: Option<String>,
-    pub uri: Uri,
-    pub params: Vec<Param>,
-}
+// REMOVED RecordRouteEntry struct definition
 
 // rec-route = name-addr *( SEMI rr-param )
 // rr-param = generic-param
-fn record_route_entry(input: &[u8]) -> ParseResult<RecordRouteEntry> {
+// Changed return type to ParseResult<Address>
+fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
      map_res(
         pair(
             name_addr, // name_addr returns (Option<display_name_bytes>, Uri)
@@ -42,19 +40,28 @@ fn record_route_entry(input: &[u8]) -> ParseResult<RecordRouteEntry> {
         ),
         |((dn_bytes_opt, uri), params)| {
             // Convert display name bytes
-            // TODO: Ensure address parser handles potential quoting/unescaping
              let display_name = dn_bytes_opt
                 .map(|b| std::str::from_utf8(b).map(|s| s.to_string()))
                 .transpose()?;
 
-            Ok(RecordRouteEntry { display_name, uri, params })
+            // Return Address directly
+            Ok(Address { display_name, uri, params })
         }
     )(input)
 }
 
 // Record-Route = "Record-Route" HCOLON rec-route *(COMMA rec-route)
 pub(crate) fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader> {
-    map(comma_separated_list1(rec_route), RecordRouteHeader)(input)
+    map(
+        comma_separated_list1(record_route_entry), // Now returns Vec<Address>
+        |entries: Vec<Address>| { // Changed input type to Vec<Address>
+            let uris: Vec<UriWithParams> = entries
+                .into_iter()
+                .map(|addr| UriWithParams { uri: addr.uri, params: addr.params }) // Convert each Address
+                .collect();
+            RecordRouteHeader(UriWithParamsList { uris }) // Construct the final type
+        }
+    )(input)
 }
 
 #[cfg(test)]
