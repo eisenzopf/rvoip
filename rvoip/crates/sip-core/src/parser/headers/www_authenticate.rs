@@ -2,7 +2,7 @@
 
 use super::auth::challenge::challenge; // Use the challenge parser
 use crate::parser::ParseResult;
-use crate::types::auth::Challenge;
+use crate::types::auth::{Challenge, AuthParam}; // Add AuthParam for test
 use nom::IResult;
 
 // WWW-Authenticate = "WWW-Authenticate" HCOLON challenge
@@ -16,6 +16,7 @@ pub(crate) fn parse_www_authenticate(input: &[u8]) -> ParseResult<Challenge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Import needed types for tests
     use crate::types::auth::{DigestParam, Qop, Algorithm};
 
     #[test]
@@ -44,8 +45,10 @@ mod tests {
          if let Challenge::Other { scheme, params } = challenge {
             assert_eq!(scheme, "NewScheme");
             assert_eq!(params.len(), 3);
-            // Basic check, assumes AuthParam implements PartialEq
-            // assert!(params.contains(&AuthParam { name: "realm".to_string(), value: "apps.example.com".to_string() }));
+            // Check for specific AuthParams
+            assert!(params.contains(&AuthParam { name: "realm".to_string(), value: "apps.example.com".to_string() }));
+            assert!(params.contains(&AuthParam { name: "type".to_string(), value: "1".to_string() })); // Values are strings
+            assert!(params.contains(&AuthParam { name: "title".to_string(), value: "Login Required".to_string() }));
         } else {
             panic!("Expected Other challenge");
         }

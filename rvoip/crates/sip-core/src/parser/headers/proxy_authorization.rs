@@ -15,8 +15,7 @@ pub(crate) fn parse_proxy_authorization(input: &[u8]) -> ParseResult<Credentials
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{DigestParam as DigestRespParam, Qop, Algorithm};
-    use crate::types::Uri;
+    use crate::types::auth::{DigestParam, Qop, Algorithm, Uri};
 
     #[test]
     fn test_parse_proxy_authorization_digest() {
@@ -26,11 +25,11 @@ mod tests {
         let (rem, creds) = result.unwrap();
         assert!(rem.is_empty());
         if let Credentials::Digest { params } = creds {
-            assert!(params.contains(&DigestRespParam::Username("Bob".to_string())));
-            assert!(params.contains(&DigestRespParam::Realm("proxy.com".to_string())));
-            assert!(params.contains(&DigestRespParam::Nonce("qwert".to_string())));
-            assert!(params.contains(&DigestRespParam::Response("12345".to_string())));
-            assert!(params.iter().any(|p| matches!(p, DigestRespParam::Uri(_))));
+            assert!(params.contains(&DigestParam::Username("Bob".to_string())));
+            assert!(params.contains(&DigestParam::Realm("proxy.com".to_string())));
+            assert!(params.contains(&DigestParam::Nonce("qwert".to_string())));
+            assert!(params.contains(&DigestParam::Response("12345".to_string())));
+            assert!(params.iter().any(|p| matches!(p, DigestParam::Uri(_))));
         } else {
             panic!("Expected Digest credentials");
         }

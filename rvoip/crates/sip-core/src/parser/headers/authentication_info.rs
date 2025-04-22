@@ -31,7 +31,7 @@ mod tests {
         assert!(params.contains(&AuthenticationInfoParam::Qop(Qop::Auth)));
         assert!(params.contains(&AuthenticationInfoParam::ResponseAuth("abcdef01".to_string())));
         assert!(params.contains(&AuthenticationInfoParam::Cnonce("abc".to_string())));
-        assert!(params.contains(&AuthenticationInfoParam::NonceCount("00000001".to_string())));
+        assert!(params.contains(&AuthenticationInfoParam::NonceCount(1)));
     }
      #[test]
     fn test_parse_authentication_info_single() {
