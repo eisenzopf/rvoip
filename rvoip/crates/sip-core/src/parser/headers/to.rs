@@ -38,10 +38,10 @@ fn to_spec(input: &[u8]) -> ParseResult<Address> {
     )(input)
 }
 
-// To = ("To" / "t") HCOLON to-spec
-// Note: HCOLON and compact form handled elsewhere
-pub(crate) fn parse_to(input: &[u8]) -> ParseResult<ToHeader> {
-    // Map the Address result into the To newtype
+// To = "To" / "t" HCOLON to-spec
+// Note: HCOLON handled elsewhere
+// Make this function public
+pub fn parse_to(input: &[u8]) -> ParseResult<ToHeader> {
     map(to_spec, ToHeader)(input)
 }
 

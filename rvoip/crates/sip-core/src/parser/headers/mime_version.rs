@@ -36,16 +36,22 @@ fn mime_version_val(input: &[u8]) -> ParseResult<MimeVersion> {
 pub(crate) fn parse_mime_version(input: &[u8]) -> ParseResult<MimeVersion> {
     map_res(
         separated_pair(digit1, bytes::tag(b"."), digit1),
-        |(major_bytes, minor_bytes)| -> Result<MimeVersion, nom::Err<NomError<&[u8]>>> {
-            let major_str = str::from_utf8(major_bytes)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Char)))?;
-            let major = major_str.parse::<u8>()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Digit)))?;
-            let minor_str = str::from_utf8(minor_bytes)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Char)))?;
-            let minor = minor_str.parse::<u8>()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Digit)))?;
-            Ok(MimeVersion::new(major, minor))
+        |(major_bytes, minor_bytes)| { 
+            str::from_utf8(major_bytes)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Char)))
+                .and_then(|major_str| {
+                    major_str.parse::<u8>()
+                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Digit)))
+                        .and_then(|major| {
+                            str::from_utf8(minor_bytes)
+                                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Char)))
+                                .and_then(|minor_str| {
+                                    minor_str.parse::<u8>()
+                                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Digit)))
+                                        .map(|minor| MimeVersion::new(major, minor))
+                                })
+                        })
+                })
         }
     )(input)
 }

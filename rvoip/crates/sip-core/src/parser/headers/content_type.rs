@@ -141,21 +141,21 @@ pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
             pair(m_token, preceded(slash, m_token)), // Use m_token for type/subtype
             semicolon_separated_params0(m_parameter_str) // Use param parser returning String, String
         ),
-        |(((type_bytes, subtype_bytes), params_vec))| -> Result<ContentTypeValue, nom::error::Error<&[u8]>> {
-            // Explicitly map Utf8Error to nom::Err::Failure, remove trailing ?
-            let m_type = str::from_utf8(type_bytes)
+        |(((type_bytes, subtype_bytes), params_vec))| { 
+            str::from_utf8(type_bytes)
                 .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(type_bytes, nom::error::ErrorKind::Char)))
-                .map(|s| s.to_lowercase()); // Apply map after map_err
-            let m_subtype = str::from_utf8(subtype_bytes)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(subtype_bytes, nom::error::ErrorKind::Char)))
-                .map(|s| s.to_lowercase());
-            
-            // We need to handle the Result from map_err now
-            let m_type_str = m_type?; // Propagate error if map_err resulted in Err
-            let m_subtype_str = m_subtype?;
-            
-            let parameters = params_vec.into_iter().collect::<HashMap<_,_>>();
-            Ok(ContentTypeValue { m_type: m_type_str, m_subtype: m_subtype_str, parameters })
+                .and_then(|m_type_str| {
+                    str::from_utf8(subtype_bytes)
+                        .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(subtype_bytes, nom::error::ErrorKind::Char)))
+                        .map(|m_subtype_str| {
+                             let parameters = params_vec.into_iter().collect::<HashMap<_,_>>();
+                             ContentTypeValue {
+                                m_type: m_type_str.to_lowercase(),
+                                m_subtype: m_subtype_str.to_lowercase(),
+                                parameters
+                            }
+                        })
+                })
         }
     )(input)
 }

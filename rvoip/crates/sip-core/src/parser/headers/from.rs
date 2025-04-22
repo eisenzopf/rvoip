@@ -84,10 +84,13 @@ fn from_spec(input: &[u8]) -> ParseResult<Address> {
 }
 
 // From = "From" HCOLON from-spec
-// Note: HCOLON handled elsewhere.
-pub(crate) fn parse_from(input: &[u8]) -> ParseResult<FromHeader> {
-    // Map the Address result into the From newtype
-    map(from_spec, FromHeader)(input)
+// Note: HCOLON handled elsewhere
+// Make this function public
+pub fn parse_from(input: &[u8]) -> ParseResult<FromHeader> {
+    map(
+        from_spec,
+        FromHeader
+    )(input)
 }
 
 #[cfg(test)]

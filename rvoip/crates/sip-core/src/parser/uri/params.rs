@@ -131,7 +131,7 @@ fn uri_parameter(input: &[u8]) -> ParseResult<Param> {
 }
 
 // uri-parameters = *( ";" uri-parameter)
-pub(crate) fn uri_parameters(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn uri_parameters(input: &[u8]) -> ParseResult<Vec<Param>> {
     many0(preceded(semi, uri_parameter))(input)
 }
 
