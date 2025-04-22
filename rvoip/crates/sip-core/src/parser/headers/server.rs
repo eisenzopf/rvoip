@@ -20,8 +20,6 @@ use super::server_val::ServerValComponent;
 
 // Import shared parsers
 use super::server_val::server_val;
-use crate::parser::whitespace::lws;
-use crate::parser::ParseResult;
 
 // Import types (assuming)
 use crate::types::server::ServerVal;

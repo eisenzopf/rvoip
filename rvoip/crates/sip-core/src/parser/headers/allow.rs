@@ -20,7 +20,6 @@ use super::token_list::parse_token_list0;
 
 use crate::types::allow::Allow;
 use crate::types::method::Method;
-use nom::combinator::{map, map_res, opt};
 use nom::multi::many0; // Import many0
 use std::str::{self, FromStr}; // Import self for FromStr
 

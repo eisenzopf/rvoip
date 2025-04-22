@@ -188,14 +188,6 @@ pub fn hashmap_param_list<'a>(
     )
 }
 
-// Function to parse a semicolon-separated list of Params using a specific Param parser
-// Updated to use the specific param item parser directly
-pub fn semicolon_separated_params0<'a>(
-    param_item_parser: impl Fn(&'a [u8]) -> ParseResult<'a, Param>,
-) -> impl FnMut(&'a [u8]) -> ParseResult<'a, Vec<Param>> {
-    many0(preceded(semi, param_item_parser))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

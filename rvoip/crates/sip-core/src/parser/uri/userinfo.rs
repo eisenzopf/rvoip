@@ -12,7 +12,7 @@ use std::str;
 // Import from new modules
 use crate::parser::common_chars::{unreserved, escaped};
 use crate::parser::ParseResult;
-use crate::parser.utils::unescape_uri_component; // Import unescape helper
+use crate::parser::utils::unescape_uri_component; // Import unescape helper
 use crate::error::Error; // For error type
 
 // user-unreserved = "&" / "=" / "+" / "$" / "," / ";" / "?" / "/"

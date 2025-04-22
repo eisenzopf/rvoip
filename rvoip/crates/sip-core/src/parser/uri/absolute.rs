@@ -14,7 +14,7 @@ use std::str;
 // Import shared parsers from base parser
 use crate::parser::common_chars::{alpha, digit, escaped, mark, reserved, unreserved};
 use crate::parser::uri::host::hostport; // For srvr
-use crate::parser.uri::userinfo::userinfo; // For srvr (assuming it returns bytes needed)
+use crate::parser::uri::userinfo::userinfo; // For srvr (assuming it returns bytes needed)
 use crate::parser::ParseResult;
 
 // --- URI Character Sets (RFC 2396 / 3261) ---

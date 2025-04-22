@@ -16,7 +16,6 @@ use nom::{
 };
 use crate::types::Version;
 use nom::character::complete::char;
-use nom::combinator::map_res;
 use nom::sequence::{delimited, separated_pair};
 use crate::parser::common_chars::is_alphanum;
 use crate::parser::token::token;

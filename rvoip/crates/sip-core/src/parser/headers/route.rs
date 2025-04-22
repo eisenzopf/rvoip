@@ -26,7 +26,6 @@ use crate::types::uri_with_params::UriWithParams;
 use crate::parser::address::parse_address;
 use serde::{Serialize, Deserialize}; // Added serde
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::generic_param; // Assuming generic param parser
 
 /// Represents a single route entry (typically name-addr or addr-spec)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize

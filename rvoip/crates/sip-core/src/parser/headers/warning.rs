@@ -14,6 +14,7 @@ use nom::{
     multi::{separated_list1},
     sequence::{pair, preceded, tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
 };
 use std::str;
 
@@ -28,15 +29,8 @@ use crate::parser::ParseResult;
 use crate::types::uri::Host;
 use crate::types::warning::Warning as WarningHeader; // Specific header type
 use crate::types::uri::Uri;
-use nom::{
-    bytes::complete::{tag_no_case, take_while_m_n},
-    character::complete::{digit1, char as nom_char},
-    combinator::{map, map_res, opt},
-    sequence::{pair, preceded, tuple},
-    error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
-    IResult,
-};
-use std::str::{self, FromStr};
+
+use std::str::FromStr;
 use crate::parser::values::delta_seconds; // Use delta_seconds for duration
 use crate::parser::whitespace::ows;
 

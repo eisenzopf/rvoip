@@ -6,8 +6,8 @@ use nom::{
     branch::alt,
     bytes::complete::{tag_no_case},
     combinator::{map, map_res, opt},
-    multi::{many0},
-    sequence::{pair, preceded, tuple},
+    multi::{many0, separated_list0},
+    sequence::{pair, preceded, tuple, delimited},
     IResult,
     error::{Error as NomError, ErrorKind, ParseError},
 };
@@ -28,11 +28,7 @@ use crate::parser::quoted::parse_quoted_string;
 use crate::parser::values::parse_u32;
 use crate::parser::whitespace::ows;
 // use crate::types::{HeaderError, RetryParam}; // Removed unused import
-use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::{map, map_res, opt};
-use nom::multi::separated_list0;
-use nom::sequence::{delimited, pair, preceded, tuple};
 use crate::parser::ParseResult;
 
 // Define local RetryParam enum
