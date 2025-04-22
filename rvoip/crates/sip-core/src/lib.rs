@@ -22,7 +22,7 @@ pub mod sdp;
 pub use error::{Error, Result};
 pub use types::header::{Header, HeaderName, HeaderValue};
 pub use types::Method;
-pub use parser::{parse_message, IncrementalParser, ParseState};
+pub use parser::parse_message;
 pub use types::StatusCode;
 pub use types::{
     Address, 
@@ -66,7 +66,7 @@ pub mod prelude {
     pub use crate::types::via::Via;
     pub use crate::types::Version; // Added Version
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
-    pub use crate::parser::{parse_message, IncrementalParser, ParseState};
+    pub use crate::parser::parse_message;
     pub use crate::types::multipart::{MultipartBody, MimePart};
 }
 

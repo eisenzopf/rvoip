@@ -1,5 +1,5 @@
 use crate::types::uri::Uri;
-use crate::parser::headers::parse_warning;
+use crate::parser::headers::warning::parse_warning_value_list;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
@@ -34,12 +34,10 @@ impl FromStr for Warning {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        use crate::parser::headers::warning::parse_warning;
-        use nom::combinator::all_consuming;
         use crate::error::Error; // Ensure Error is in scope
 
-        match all_consuming(parse_warning)(s.as_bytes()) {
-            // TODO: Fix this logic. parse_warning likely returns Vec<WarningValue> or similar
+        match all_consuming(parse_warning_value_list)(s.as_bytes()) {
+            // TODO: Fix this logic. parse_warning_value_list returns Vec<WarningValue>
             //       We need to map that result to a single Warning struct.
             //       Placeholder: return error for now.
             Ok((_, _value)) => Err(Error::ParseError(
