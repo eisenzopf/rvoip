@@ -33,7 +33,7 @@ fn mime_version_val(input: &[u8]) -> ParseResult<MimeVersion> {
 
 // MIME-Version = "MIME-Version" HCOLON 1*DIGIT "." 1*DIGIT
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_mime_version(input: &[u8]) -> ParseResult<MimeVersion> {
+pub fn parse_mime_version(input: &[u8]) -> ParseResult<MimeVersion> {
     map_res(
         separated_pair(digit1, bytes::tag(b"."), digit1),
         |(major_bytes, minor_bytes)| { 
