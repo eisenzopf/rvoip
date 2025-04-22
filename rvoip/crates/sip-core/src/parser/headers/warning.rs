@@ -103,7 +103,7 @@ pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<Vec<WarningValue>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, IpAddr};
 
     #[test]
     fn test_warning_value() {
@@ -141,6 +141,6 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert_eq!(warnings[0].code, 307);
         assert_eq!(warnings[1].code, 392);
-        assert!(matches!(warnings[1].agent, WarnAgent::HostPort(Host::Address(a), None) if *a == Ipv4Addr::new(192,168,1,1).into()));
+        assert!(matches!(warnings[1].agent, WarnAgent::HostPort(Host::Address(a), None) if a == IpAddr::from(Ipv4Addr::new(192,168,1,1))));
     }
 } 

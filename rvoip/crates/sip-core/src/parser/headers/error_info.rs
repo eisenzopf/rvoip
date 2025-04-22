@@ -75,6 +75,8 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
+    use crate::types::uri::{Uri, Scheme, Host};
+    use std::str::FromStr;
 
     #[test]
     fn test_parse_error_info() {
@@ -84,7 +86,11 @@ mod tests {
         let (rem, infos) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].uri, "sip:not-in-service@example.com"); // Our stub parses SIP URIs too
+        
+        // Create expected URI for comparison
+        let expected_uri = Uri::from_str("sip:not-in-service@example.com").unwrap();
+        assert_eq!(infos[0].uri, expected_uri);
+        
         assert_eq!(infos[0].params.len(), 1);
         assert!(matches!(infos[0].params[0], Param::Other(n, Some(GenericValue::Token(v))) if n == "reason" && v == "Foo"));
     }
@@ -97,9 +103,14 @@ mod tests {
         let (rem, infos) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(infos.len(), 2);
-        assert_eq!(infos[0].uri, "sip:error1@h.com");
+        
+        // Create expected URIs for comparison
+        let expected_uri1 = Uri::from_str("sip:error1@h.com").unwrap();
+        assert_eq!(infos[0].uri, expected_uri1);
         assert!(infos[0].params.is_empty());
-        assert_eq!(infos[1].uri, "http://error.com/more");
+        
+        let expected_uri2 = Uri::from_str("http://error.com/more").unwrap();
+        assert_eq!(infos[1].uri, expected_uri2);
         assert_eq!(infos[1].params.len(), 1);
     }
 } 

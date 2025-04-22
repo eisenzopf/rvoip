@@ -55,7 +55,7 @@ mod tests {
         let (rem, (method, uri, version)) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(method, Method::Invite);
-        assert_eq!(uri.scheme, "sip");
+        assert_eq!(uri.scheme, Scheme::Sip);
         assert_eq!(uri.userinfo.unwrap().0, "user");
         assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
         assert_eq!(version, Version::new(2, 0));
@@ -79,7 +79,7 @@ mod tests {
         let (rem, (method, uri, _)) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(method, Method::Register);
-        assert_eq!(uri.scheme, "sips");
+        assert_eq!(uri.scheme, Scheme::Sips);
     }
 
     #[test]

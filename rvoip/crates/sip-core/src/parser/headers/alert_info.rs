@@ -62,6 +62,7 @@ pub fn parse_alert_info(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
+    use crate::types::uri::{Uri, Scheme, Host};
 
     #[test]
     fn test_parse_alert_info() {
@@ -71,7 +72,10 @@ mod tests {
         let (rem, infos) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].uri, "http://www.example.com/sounds/moo.wav");
+        
+        // Create expected URI for comparison
+        let expected_uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
+        assert_eq!(infos[0].uri, expected_uri);
         assert!(infos[0].params.is_empty());
     }
 

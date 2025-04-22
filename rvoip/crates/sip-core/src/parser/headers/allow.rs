@@ -48,11 +48,11 @@ mod tests {
         let input = b"INVITE, ACK, OPTIONS, CANCEL, BYE";
         let (rem, allow_list) = parse_allow(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(allow_list, Allow(vec![Method::INVITE, Method::ACK, Method::OPTIONS, Method::CANCEL, Method::BYE]));
+        assert_eq!(allow_list, Allow(vec![Method::Invite, Method::Ack, Method::Options, Method::Cancel, Method::Bye]));
 
         let input_empty = b"";
         let (rem_empty, allow_empty) = parse_allow(input_empty).unwrap();
         assert!(rem_empty.is_empty());
-        assert!(allow_empty.is_empty());
+        assert!(allow_empty.0.is_empty());
     }
 }
