@@ -100,10 +100,10 @@ mod tests {
     #[test]
     fn test_text_utf8_trim() {
         // Basic ASCII
-        assert_eq!(text_utf8_trim(b"Subject Text"), Ok((&[][..], b"Subject Text")));
-        assert_eq!(text_utf8_trim(b"OneChar"), Ok((&[][..], b"OneChar")));
-        assert_eq!(text_utf8_trim(b"One\t Two"), Ok((&[][..], b"One\t Two"))); // Internal LWS
-        assert_eq!(text_utf8_trim(b"Leading LWS"), Ok((&[][..], b"Leading LWS"))); // LWS before second char
+        assert_eq!(text_utf8_trim(b"Subject Text"), Ok((&[][..], &b"Subject Text"[..])));
+        assert_eq!(text_utf8_trim(b"OneChar"), Ok((&[][..], &b"OneChar"[..])));
+        assert_eq!(text_utf8_trim(b"One\t Two"), Ok((&[][..], &b"One\t Two"[..]))); // Internal LWS
+        assert_eq!(text_utf8_trim(b"Leading LWS"), Ok((&[][..], &b"Leading LWS"[..]))); // LWS before second char
         
         // With UTF-8
         assert_eq!(text_utf8_trim(&[b'H', b'e', b'l', b'l', b'o', b' ', 0xC3, 0xA7]), Ok((&[][..], &[b'H', b'e', b'l', b'l', b'o', b' ', 0xC3, 0xA7][..]))); // "Hello ç"
@@ -111,12 +111,12 @@ mod tests {
         assert_eq!(text_utf8_trim(&[0xC3, 0xA7, b'\t', 0xE2, 0x82, 0xAC]), Ok((&[][..], &[0xC3, 0xA7, b'\t', 0xE2, 0x82, 0xAC][..]))); // "ç\t€"
 
         // Edge cases
-        assert_eq!(text_utf8_trim(b"!"), Ok((&[][..], b"!")));
+        assert_eq!(text_utf8_trim(b"!"), Ok((&[][..], &b"!"[..])));
         assert!(text_utf8_trim(b"\r\n").is_err()); // Should not consume CRLF
         assert!(text_utf8_trim(b" Text").is_err()); // Starts with LWS, not TEXT-UTF8char
         assert!(text_utf8_trim(b"").is_err()); // Empty input
 
         // Check remaining input
-        assert_eq!(text_utf8_trim(b"Value\r\nNext"), Ok((&b"\r\nNext"[..], b"Value")));
+        assert_eq!(text_utf8_trim(b"Value\r\nNext"), Ok((&b"\r\nNext"[..], &b"Value"[..])));
     }
 } 

@@ -22,6 +22,7 @@ use super::ParseResult;
 use crate::types::uri::Uri;
 use crate::types::address::Address; // Changed to use Address struct
 use crate::error::Error; // For unquote error
+use crate::types::uri::Scheme;
 
 // display-name = *(token LWS)/ quoted-string
 // Simplified: Parses either a single token or an unquoted string.
@@ -103,7 +104,7 @@ mod tests {
     fn test_addr_spec_sip() {
         let (rem, uri) = addr_spec(b"sip:user@example.com").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sip"); // Check Uri fields
+        assert_eq!(uri.scheme, Scheme::Sip);
     }
 
     #[test]
@@ -111,7 +112,7 @@ mod tests {
         let (rem, addr) = name_addr(b"\"Bob\" <sip:bob@host.com>").unwrap();
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, Some("Bob".to_string()));
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
         assert!(addr.params.is_empty()); // Params not parsed here
     }
     
@@ -120,7 +121,7 @@ mod tests {
         let (rem, addr) = name_addr(b"<sip:bob@host.com>").unwrap();
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, None);
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
         assert!(addr.params.is_empty());
     }
 
@@ -129,7 +130,7 @@ mod tests {
         let (rem, addr) = name_addr_or_addr_spec(b"\"Test\" <sip:t@test.com>").unwrap();
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, Some("Test".to_string()));
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
     }
     
     #[test]
@@ -137,6 +138,6 @@ mod tests {
         let (rem, addr) = name_addr_or_addr_spec(b"sip:t@test.com").unwrap();
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, None); 
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
     }
 } 

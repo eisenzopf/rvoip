@@ -98,7 +98,7 @@ mod tests {
     fn test_parse_optional_query() {
         let (rem, parsed) = parse_query(b"?param1=value1").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(parsed, Some(b"param1=value1"));
+        assert_eq!(parsed, Some(&b"param1=value1"[..]));
 
         let (rem, parsed) = parse_query(b"").unwrap();
         assert!(rem.is_empty());

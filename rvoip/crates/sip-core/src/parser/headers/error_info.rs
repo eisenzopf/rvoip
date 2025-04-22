@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(infos[0].uri, expected_uri);
         
         assert_eq!(infos[0].params.len(), 1);
-        assert!(matches!(infos[0].params[0], Param::Other(n, Some(GenericValue::Token(v))) if n == "reason" && v == "Foo"));
+        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(GenericValue::Token(v))) if n == "reason" && v == "Foo"));
     }
 
     #[test]

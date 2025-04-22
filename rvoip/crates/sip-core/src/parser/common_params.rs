@@ -194,17 +194,19 @@ pub fn hashmap_param_list<'a>(
 mod tests {
     use super::*;
     use crate::types::uri::Host;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, IpAddr};
     use ordered_float::NotNan;
 
     #[test]
     fn test_gen_value() {
+        // Test different value types
+        
         // Token
-        let (rem_tok, val_tok) = gen_value(b"mytoken").unwrap();
+        let (rem_tok, val_tok) = gen_value(b"token-value").unwrap();
         assert!(rem_tok.is_empty());
-        assert!(matches!(val_tok, GenericValue::Token(s) if s == "mytoken"));
-
-        // Host (Domain)
+        assert!(matches!(val_tok, GenericValue::Token(s) if s == "token-value"));
+        
+        // Host (domain)
         let (rem_host, val_host) = gen_value(b"example.com").unwrap();
         assert!(rem_host.is_empty());
         assert!(matches!(val_host, GenericValue::Host(Host::Domain(d)) if d == "example.com"));
@@ -212,7 +214,7 @@ mod tests {
         // Host (IPv4)
         let (rem_ip, val_ip) = gen_value(b"192.0.2.1").unwrap();
         assert!(rem_ip.is_empty());
-        assert!(matches!(val_ip, GenericValue::Host(Host::Address(a)) if a == Ipv4Addr::new(192,0,2,1).into()));
+        assert!(matches!(val_ip, GenericValue::Host(Host::Address(a)) if a == IpAddr::from(Ipv4Addr::new(192,0,2,1))));
 
         // Quoted String
         let (rem_qs, val_qs) = gen_value(b"\"Quoted Value\"").unwrap();
@@ -236,7 +238,7 @@ mod tests {
     fn test_generic_param_host() {
         let (rem, param) = generic_param(b"maddr=192.0.2.1").unwrap();
         assert!(rem.is_empty());
-        assert!(matches!(param, Param::Other(n, Some(GenericValue::Host(Host::Address(a)))) if n == "maddr" && a == Ipv4Addr::new(192,0,2,1).into()));
+        assert!(matches!(param, Param::Other(n, Some(GenericValue::Host(Host::Address(a)))) if n == "maddr" && a == IpAddr::from(Ipv4Addr::new(192,0,2,1))));
     }
 
     #[test]

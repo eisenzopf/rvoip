@@ -133,7 +133,7 @@ mod tests {
     use crate::types::uri::Host;
     use crate::types::param::Param;
     use crate::types::param::GenericValue;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, IpAddr};
     use nom::error::ErrorKind;
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(uri.scheme, Scheme::Sip);
         assert_eq!(uri.user, None);
         assert_eq!(uri.password, None);
-        assert!(matches!(uri.host, Host::Address(addr) if addr == Ipv4Addr::new(192, 168, 0, 1).into()));
+        assert!(matches!(uri.host, Host::Address(addr) if addr == IpAddr::from(Ipv4Addr::new(192, 168, 0, 1))));
         assert_eq!(uri.port, Some(8080));
         assert!(uri.parameters.is_empty());
         assert!(uri.headers.is_empty());
@@ -223,7 +223,7 @@ mod tests {
          assert_eq!(uri.port, Some(5061));
          assert_eq!(uri.parameters.len(), 2);
          assert!(uri.parameters.iter().any(|p| matches!(p, Param::Transport(s) if s == "tls")));
-         assert!(uri.parameters.iter().any(|p| matches!(p, Param::Maddr(Host::Address(_)))));
+         assert!(uri.parameters.iter().any(|p| matches!(p, Param::Maddr(s) if s == "192.0.2.1")));
          assert!(!uri.headers.is_empty());
          let headers = uri.headers;
          assert_eq!(headers.get("Subject"), Some(&"Hello".to_string()));

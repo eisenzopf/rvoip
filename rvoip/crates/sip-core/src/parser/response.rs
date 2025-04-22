@@ -108,10 +108,10 @@ mod tests {
 
     #[test]
     fn test_reason_phrase() {
-        assert_eq!(reason_phrase(b"OK\r\n"), Ok((&b"\r\n"[..], b"OK")));
-        assert_eq!(reason_phrase(b"Not Found\r\nMore"), Ok((&b"\r\nMore"[..], b"Not Found")));
-        assert_eq!(reason_phrase(b"Session Progress (Early Media)\r\n"), Ok((&b"\r\n"[..], b"Session Progress (Early Media)")));
-        assert_eq!(reason_phrase(b"\r\n"), Ok((&b"\r\n"[..], b""))); // Empty reason phrase
+        assert_eq!(reason_phrase(b"OK\r\n"), Ok((&b"\r\n"[..], &b"OK"[..])));
+        assert_eq!(reason_phrase(b"Not Found\r\nMore"), Ok((&b"\r\nMore"[..], &b"Not Found"[..])));
+        assert_eq!(reason_phrase(b"Session Progress (Early Media)\r\n"), Ok((&b"\r\n"[..], &b"Session Progress (Early Media)"[..])));
+        assert_eq!(reason_phrase(b"\r\n"), Ok((&b"\r\n"[..], &b""[..])));
     }
 
     #[test]
