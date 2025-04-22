@@ -95,9 +95,9 @@ fn ttl_param(input: &[u8]) -> ParseResult<Param> {
         preceded(tag("ttl="), take_while_m_n(1, 3, |c: u8| c.is_ascii_digit())),
         |ttl_bytes| {
             let s = str::from_utf8(ttl_bytes)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
+                .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Char)))?;
             s.parse::<u8>()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))
+                .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Digit)))
                 .map(Param::Ttl)
         }
     )(input)

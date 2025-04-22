@@ -31,10 +31,10 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
             crlf
         )),
         |(method_bytes, _, uri, _, version, _)| {
-            let method_str = str::from_utf8(method_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(method_bytes, ErrorKind::Char)))?;
+            let method_str = str::from_utf8(method_bytes).map_err(|_| nom::Err::Failure(NomError::new(method_bytes, ErrorKind::Char)))?;
             method_str.parse::<Method>()
                 .map(|m| (m, uri, version))
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(method_bytes, ErrorKind::Verify)))
+                .map_err(|_| nom::Err::Failure(NomError::new(method_bytes, ErrorKind::Verify)))
         }
     )(input)
 }

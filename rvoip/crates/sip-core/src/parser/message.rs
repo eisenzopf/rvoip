@@ -167,10 +167,10 @@ fn message_header(input: &[u8]) -> ParseResult<Header> {
         )),
         |(name_bytes, _, raw_value_bytes, _)| {
             str::from_utf8(name_bytes)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(name_bytes, ErrorKind::Char)))
+                .map_err(|_| nom::Err::Failure(NomError::new(name_bytes, ErrorKind::Char)))
                 .and_then(|name_str| {
                     HeaderName::from_str(name_str)
-                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(name_bytes, ErrorKind::Verify)))
+                        .map_err(|_| nom::Err::Failure(NomError::new(name_bytes, ErrorKind::Verify)))
                         .map(|header_name| {
                             let header_value = HeaderValue::Raw(raw_value_bytes.to_vec());
                             Header::new(header_name, header_value)

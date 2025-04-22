@@ -73,6 +73,9 @@ pub use headers::{
 // Type alias for parser result
 pub type ParseResult<'a, O> = nom::IResult<&'a [u8], O, nom::error::Error<&'a [u8]>>;
 
+// Re-export common nom traits and types
+pub use nom::error::{Error as NomError, ErrorKind, ParseError};
+
 // Declare parser submodules
 pub mod common_chars;
 pub mod whitespace;

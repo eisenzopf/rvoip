@@ -46,8 +46,8 @@ pub fn auth_param(input: &[u8]) -> ParseResult<AuthParam> {
         separated_pair(auth_param_name, equal, auth_value),
         |(name_bytes, value_bytes)| {
             // Specify error type for map_res
-            let name = str::from_utf8(name_bytes).map_err(|e| NomError::from_error_kind(name_bytes, ErrorKind::Char))?.to_string();
-            let value = str::from_utf8(value_bytes).map_err(|e| NomError::from_error_kind(value_bytes, ErrorKind::Char))?.to_string();
+            let name = str::from_utf8(name_bytes).map_err(|e| NomError::new(name_bytes, ErrorKind::Char))?.to_string();
+            let value = str::from_utf8(value_bytes).map_err(|e| NomError::new(value_bytes, ErrorKind::Char))?.to_string();
             Ok::<_, NomError<&[u8]>>(AuthParam { name, value }) // Explicit Ok type needed by map_res
         },
     )(input)
@@ -235,8 +235,8 @@ pub fn nonce_count(input: &[u8]) -> ParseResult<u32> {
         preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value)),
         |bytes| {
             // Convert Utf8Error and ParseIntError into nom::Err::Failure
-            let s = str::from_utf8(bytes).map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Char))?;
-            u32::from_str_radix(s, 16).map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Digit))
+            let s = str::from_utf8(bytes).map_err(|_| NomError::new(bytes, ErrorKind::Char))?;
+            u32::from_str_radix(s, 16).map_err(|_| NomError::new(bytes, ErrorKind::Digit))
         }
     )(input)
 }

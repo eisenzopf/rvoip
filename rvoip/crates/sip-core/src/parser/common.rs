@@ -69,18 +69,18 @@ pub fn sip_version(input: &[u8]) -> ParseResult<Version> {
         |bytes: &[u8]| -> Result<Version, NomError<&[u8]>> {
             let s = str::from_utf8(bytes)
                 // Map Utf8Error to NomError
-                .map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Char))?; 
+                .map_err(|_| NomError::new(bytes, ErrorKind::Char))?; 
             if let Some(parts) = s.strip_prefix("SIP/").and_then(|v| v.split_once('.')) {
                 let major = parts.0.parse::<u8>()
                     // Map ParseIntError to NomError
-                    .map_err(|_| NomError::from_error_kind(parts.0.as_bytes(), ErrorKind::Digit))?; 
+                    .map_err(|_| NomError::new(parts.0.as_bytes(), ErrorKind::Digit))?; 
                 let minor = parts.1.parse::<u8>()
                      // Map ParseIntError to NomError
-                    .map_err(|_| NomError::from_error_kind(parts.1.as_bytes(), ErrorKind::Digit))?; 
+                    .map_err(|_| NomError::new(parts.1.as_bytes(), ErrorKind::Digit))?; 
                 Ok(Version::new(major, minor))
             } else {
                 // Map logic error to NomError
-                Err(NomError::from_error_kind(bytes, ErrorKind::Verify))
+                Err(NomError::new(bytes, ErrorKind::Verify))
             }
         }
     )(input)
