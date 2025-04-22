@@ -1,4 +1,3 @@
-use crate::types::media_type::MediaType;
 use crate::parser::headers::parse_content_type;
 use crate::error::{Result, Error};
 use std::fmt;
@@ -8,15 +7,28 @@ use crate::types::param::Param;
 use bytes::Bytes;
 use std::collections::HashMap;
 use crate::parser;
+use crate::parser::headers::content_type::ContentTypeValue;
+use crate::parser::headers::content_type::parse_content_type_value;
+use serde::{Deserialize, Serialize};
 
-/// Typed Content-Type header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
-pub struct ContentType(pub MediaType);
+/// Represents the Content-Type header field (RFC 3261 Section 7.3.1).
+/// Describes the media type of the message body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentType(pub ContentTypeValue);
 
 impl ContentType {
     /// Creates a new Content-Type header.
-    pub fn new(media_type: MediaType) -> Self {
-        Self(media_type)
+    pub fn new(value: ContentTypeValue) -> Self {
+        Self(value)
+    }
+
+    /// Helper to create from basic type/subtype
+    pub fn from_type_subtype(m_type: impl Into<String>, m_subtype: impl Into<String>) -> Self {
+        Self(ContentTypeValue {
+            m_type: m_type.into(),
+            m_subtype: m_subtype.into(),
+            parameters: HashMap::new(),
+        })
     }
 }
 
@@ -30,9 +42,7 @@ impl FromStr for ContentType {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::content_type::parse_content_type;
-
-        all_consuming(parse_content_type)(s.as_bytes())
+        all_consuming(parse_content_type_value)(s.as_bytes())
             .map_err(Error::from)
             .map(|(_, value)| ContentType(value))
     }

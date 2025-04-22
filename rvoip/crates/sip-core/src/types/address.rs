@@ -2,12 +2,13 @@ use crate::types::uri::Uri;
 use crate::types::param::{Param, GenericValue};
 use crate::error::{Error, Result};
 use crate::parser::address::parse_address;
+use serde::{Serialize, Deserialize};
 use std::fmt;
 use std::str::FromStr;
 use ordered_float::NotNan;
 
 /// Represents a SIP Name Address (Display Name <URI>; params).
-#[derive(Debug, Clone, Eq)] // Remove PartialEq, keep Eq (requires Hash later? Check Param)
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub display_name: Option<String>,
     pub uri: Uri,
@@ -171,23 +172,27 @@ impl Address {
     /// Note: For typed params like Expires, this returns the string representation.
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
         Some(
-            self.params.iter().find_map(|p| match p {
-                Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
-                Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
-                Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
-                Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
-                Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None),
-                Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
-                Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
-                Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-                Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => v_opt.as_ref().and_then(|gv| gv.as_str()),
-                Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
-                Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                _ => None,
-            })
+            self.params
+                .iter()
+                .find_map(|p| match p {
+                    Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
+                    Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
+                    Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
+                    Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                    Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
+                    Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                    Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None), // Keep as Some(None) for flag params
+                    Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                    Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
+                    Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
+                    Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
+                    // Wrap the Option<&str> in Some to match expected Option<Option<&str>>
+                    Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => Some(v_opt.as_ref().and_then(|gv| gv.as_str())),
+                    Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
+                    Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                    _ => None,
+                })
+                .flatten() // Flatten the Option<Option<&str>> to Option<&str>
         )
     }
 

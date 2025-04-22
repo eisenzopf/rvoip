@@ -49,33 +49,33 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
         recognize(
             tuple((
                 bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, at)),
+                opt(pair(userinfo, bytes::tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
             ))
         ),
-        |bytes| {
+        |bytes_slice| {
             let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
                 bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, at)),
+                opt(pair(userinfo, bytes::tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
-            ))(bytes)?;
+            ))(bytes_slice)?;
 
             if !rem.is_empty() {
                  return Err(NomError::new(rem, ErrorKind::Verify));
             }
             
             let (user, password) = user_opt
-                .map(|(u, p_opt, _)| (Some(u), p_opt))
+                .map(|((u, p_opt), _)| (Some(u), p_opt))
                 .unwrap_or((None, None));
 
             Ok(Uri {
                 scheme: Scheme::Sip,
-                user: user.map(String::from),
-                password: password.map(String::from),
+                user: user.map(|s| String::from_utf8_lossy(s).into_owned()),
+                password: password.map(|s| String::from_utf8_lossy(s).into_owned()),
                 host,
                 port,
                 parameters: params_opt.unwrap_or_default(),
@@ -91,33 +91,33 @@ pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
         recognize(
             tuple((
                 bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, at)),
+                opt(pair(userinfo, bytes::tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
             ))
         ),
-        |bytes| {
+        |bytes_slice| {
              let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
                 bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, at)),
+                opt(pair(userinfo, bytes::tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
-            ))(bytes)?;
+            ))(bytes_slice)?;
 
             if !rem.is_empty() {
                  return Err(NomError::new(rem, ErrorKind::Verify));
             }
 
             let (user, password) = user_opt
-                .map(|(u, p_opt, _)| (Some(u), p_opt))
+                 .map(|((u, p_opt), _)| (Some(u), p_opt))
                 .unwrap_or((None, None));
                 
             Ok(Uri {
                 scheme: Scheme::Sips,
-                user: user.map(String::from),
-                password: password.map(String::from),
+                user: user.map(|s| String::from_utf8_lossy(s).into_owned()),
+                password: password.map(|s| String::from_utf8_lossy(s).into_owned()),
                 host,
                 port,
                 parameters: params_opt.unwrap_or_default(),
@@ -147,12 +147,13 @@ mod tests {
         let uri_bytes = b"sip:user@example.com";
         let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sip");
-        assert_eq!(uri.userinfo, Some(("user".to_string(), None)));
+        assert_eq!(uri.scheme, Scheme::Sip);
+        assert_eq!(uri.user, Some("user".to_string()));
+        assert_eq!(uri.password, None);
         assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
         assert_eq!(uri.port, None);
         assert!(uri.parameters.is_empty());
-        assert_eq!(uri.headers, None);
+        assert!(uri.headers.is_empty());
     }
     
     #[test]
@@ -160,12 +161,13 @@ mod tests {
         let uri_bytes = b"sips:alice@atlanta.com:5061";
         let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sips");
-        assert_eq!(uri.userinfo, Some(("alice".to_string(), None)));
+        assert_eq!(uri.scheme, Scheme::Sips);
+        assert_eq!(uri.user, Some("alice".to_string()));
+        assert_eq!(uri.password, None);
         assert!(matches!(uri.host, Host::Domain(d) if d == "atlanta.com"));
         assert_eq!(uri.port, Some(5061));
         assert!(uri.parameters.is_empty());
-        assert_eq!(uri.headers, None);
+        assert!(uri.headers.is_empty());
     }
 
     #[test]
@@ -173,12 +175,13 @@ mod tests {
         let uri_bytes = b"sip:192.168.0.1:8080";
         let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sip");
-        assert_eq!(uri.userinfo, None);
+        assert_eq!(uri.scheme, Scheme::Sip);
+        assert_eq!(uri.user, None);
+        assert_eq!(uri.password, None);
         assert!(matches!(uri.host, Host::Address(addr) if addr == Ipv4Addr::new(192, 168, 0, 1).into()));
         assert_eq!(uri.port, Some(8080));
         assert!(uri.parameters.is_empty());
-        assert_eq!(uri.headers, None);
+        assert!(uri.headers.is_empty());
     }
 
      #[test]
@@ -186,14 +189,15 @@ mod tests {
         let uri_bytes = b"sip:user@example.com;transport=tcp;lr";
         let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sip");
-        assert_eq!(uri.userinfo, Some(("user".to_string(), None)));
+        assert_eq!(uri.scheme, Scheme::Sip);
+        assert_eq!(uri.user, Some("user".to_string()));
+        assert_eq!(uri.password, None);
         assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
         assert_eq!(uri.port, None);
         assert_eq!(uri.parameters.len(), 2);
-        assert!(uri.parameters.contains(&Param::Transport("tcp".to_string())));
-        assert!(uri.parameters.contains(&Param::Lr));
-        assert_eq!(uri.headers, None);
+        assert!(uri.parameters.iter().any(|p| matches!(p, Param::Transport(s) if s == "tcp")));
+        assert!(uri.parameters.iter().any(|p| matches!(p, Param::Lr)));
+        assert!(uri.headers.is_empty());
     }
 
      #[test]
@@ -201,13 +205,14 @@ mod tests {
         let uri_bytes = b"sip:user@example.com?Subject=Urgent&Priority=High";
         let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
         assert!(rem.is_empty());
-        assert_eq!(uri.scheme, "sip");
-        assert_eq!(uri.userinfo, Some(("user".to_string(), None)));
+        assert_eq!(uri.scheme, Scheme::Sip);
+        assert_eq!(uri.user, Some("user".to_string()));
+        assert_eq!(uri.password, None);
         assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
         assert_eq!(uri.port, None);
         assert!(uri.parameters.is_empty());
-        assert!(uri.headers.is_some());
-        let headers = uri.headers.unwrap();
+        assert!(!uri.headers.is_empty());
+        let headers = uri.headers;
         assert_eq!(headers.get("Subject"), Some(&"Urgent".to_string()));
         assert_eq!(headers.get("Priority"), Some(&"High".to_string()));
     }
@@ -217,15 +222,17 @@ mod tests {
          let uri_bytes = b"sips:bob:password@[fe80::1]:5061;transport=tls;maddr=192.0.2.1?Subject=Hello";
          let (rem, uri) = parse_uri(uri_bytes).expect("Parsing failed");
          assert!(rem.is_empty());
-         assert_eq!(uri.scheme, "sips");
-         assert_eq!(uri.userinfo, Some(("bob".to_string(), Some("password".to_string()))));
-         assert!(matches!(uri.host, Host::Address(_))); // Simplified check for IPv6
+         assert_eq!(uri.scheme, Scheme::Sips);
+         assert_eq!(uri.user, Some("bob".to_string()));
+         assert_eq!(uri.password, Some("password".to_string()));
+         assert!(matches!(uri.host, Host::Address(_)));
          assert_eq!(uri.port, Some(5061));
          assert_eq!(uri.parameters.len(), 2);
-         assert!(uri.parameters.contains(&Param::Transport("tls".to_string())));
+         assert!(uri.parameters.iter().any(|p| matches!(p, Param::Transport(s) if s == "tls")));
          assert!(uri.parameters.iter().any(|p| matches!(p, Param::Maddr(Host::Address(_)))));
-         assert!(uri.headers.is_some());
-         assert_eq!(uri.headers.unwrap().get("Subject"), Some(&"Hello".to_string()));
+         assert!(!uri.headers.is_empty());
+         let headers = uri.headers;
+         assert_eq!(headers.get("Subject"), Some(&"Hello".to_string()));
     }
 
     #[test]
@@ -239,6 +246,6 @@ mod tests {
     fn test_invalid_uri_no_host() {
         let uri_bytes = b"sip:";
         let result = parse_uri(uri_bytes);
-        assert!(result.is_err()); // Fails in hostport parser
+        assert!(result.is_err());
     }
 } 

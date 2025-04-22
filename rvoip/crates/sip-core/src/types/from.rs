@@ -1,12 +1,14 @@
 use crate::types::address::Address;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use crate::error::Result;
 use crate::parser::headers::parse_address; // For FromStr
 use std::ops::Deref;
 
-/// Typed From header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+/// Represents the From header field (RFC 3261 Section 8.1.1.3).
+/// Contains the logical identity of the initiator of the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct From(pub Address);
 
 impl From {

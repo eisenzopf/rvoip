@@ -16,6 +16,7 @@ use nom::{
 use std::str;
 use std::collections::HashMap;
 use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
 
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma, equal};
@@ -29,9 +30,10 @@ use crate::types::param::Param;
 use crate::types::accept_language::AcceptLanguage as AcceptLanguageHeader; // Specific type
 
 // Define LanguageInfo locally and make it public
-#[derive(Debug, Clone, PartialEq)] // Add derives
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageInfo {
     pub range: String,
+    pub q: Option<NotNan<f32>>,
     pub params: Vec<Param>,
 }
 

@@ -4,9 +4,11 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::parser::headers::parse_address; // For FromStr
 use std::ops::Deref;
+use serde::{Serialize, Deserialize};
 
-/// Typed To header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+/// Represents the To header field (RFC 3261 Section 8.1.1.3).
+/// Contains the logical recipient of the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct To(pub Address);
 
 impl To {

@@ -24,10 +24,12 @@ use crate::uri::Uri;
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;
 
+use serde::{Serialize, Deserialize};
+
 // Make this struct public
-#[derive(Debug, Clone, PartialEq)] // Derive necessary traits
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlertInfoValue { 
-    pub uri: String, // Changed from Uri to String based on parser usage
+    pub uri: Uri,
     pub params: Vec<Param>
 }
 

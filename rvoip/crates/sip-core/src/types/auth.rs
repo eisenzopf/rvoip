@@ -5,6 +5,11 @@ use crate::parser::headers::{parse_www_authenticate, parse_authorization, parse_
 use crate::error::{Result, Error};
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
+use crate::parser::headers::auth::{
+    AuthenticationInfoValue, AuthorizationValue, ProxyAuthenticateValue, ProxyAuthorizationValue,
+    WwwAuthenticateValue,
+};
+use crate::{DigestChallenge, Method};
 
 /// Authentication Scheme (Digest, Basic, etc.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -112,100 +117,56 @@ impl FromStr for Qop {
 }
 
 /// Typed WWW-Authenticate header.
-#[derive(Debug, Clone, PartialEq)] // Eq might be tricky with floats/future extensions
-pub struct WwwAuthenticate {
-    pub scheme: Scheme,
-    pub realm: String,
-    pub domain: Option<String>,
-    pub nonce: String,
-    pub opaque: Option<String>,
-    pub stale: Option<bool>, // Changed to bool based on RFC 2617
-    pub algorithm: Option<Algorithm>,
-    pub qop: Vec<Qop>, // Can be a list
-    // Add other potential fields like charset, userhash
-}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WwwAuthenticate(pub WwwAuthenticateValue);
 
 impl fmt::Display for WwwAuthenticate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} realm=\"{}\"", self.scheme, self.realm)?;
-        write!(f, ", nonce=\"{}\"", self.nonce)?;
-
-        if let Some(domain) = &self.domain {
-            write!(f, ", domain=\"{}\"", domain)?;
-        }
-        if let Some(opaque) = &self.opaque {
-            write!(f, ", opaque=\"{}\"", opaque)?;
-        }
-        if let Some(stale) = self.stale {
-            write!(f, ", stale={}", if stale { "true" } else { "false" })?; // stale=true/false (no quotes)
-        }
-        if let Some(algo) = &self.algorithm {
-            // Algorithm MAY be a token or quoted-string, usually token
-            write!(f, ", algorithm={}", algo)?; // Output as token for simplicity
-        }
-        if !self.qop.is_empty() {
-            // qop value MUST be quoted, potentially comma-separated list
-            let qop_str = self.qop.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(",");
-            write!(f, ", qop=\"{}\"", qop_str)?;
-        }
-        Ok(())
+        write!(f, "{}", self.0)
     }
 }
 
 impl WwwAuthenticate {
     /// Creates a new WwwAuthenticate header with mandatory fields.
     pub fn new(scheme: Scheme, realm: impl Into<String>, nonce: impl Into<String>) -> Self {
-        Self {
-            scheme,
-            realm: realm.into(),
-            nonce: nonce.into(),
-            domain: None,
-            opaque: None,
-            stale: None,
-            algorithm: None,
-            qop: Vec::new(),
-        }
+        Self(WwwAuthenticateValue::new(scheme, realm, nonce))
     }
 
     /// Sets the domain parameter.
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        self.domain = Some(domain.into());
+        self.0.with_domain(domain);
         self
     }
 
     /// Sets the opaque parameter.
     pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
-        self.opaque = Some(opaque.into());
+        self.0.with_opaque(opaque);
         self
     }
 
     /// Sets the stale parameter.
     pub fn with_stale(mut self, stale: bool) -> Self {
-        self.stale = Some(stale);
+        self.0.with_stale(stale);
         self
     }
 
     /// Sets the algorithm parameter.
     pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
-        self.algorithm = Some(algorithm);
+        self.0.with_algorithm(algorithm);
         self
     }
 
     /// Adds a Qop value.
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        if !self.qop.contains(&qop) { // Avoid duplicates
-             self.qop.push(qop);
-        }
+        self.0.with_qop(qop);
         self
     }
 
     /// Sets multiple Qop values.
     pub fn with_qops(mut self, qops: Vec<Qop>) -> Self {
-        self.qop = qops;
+        self.0.with_qops(qops);
         self
     }
-
-    // TODO: Add with_charset, with_userhash if needed
 }
 
 impl FromStr for WwwAuthenticate {
@@ -214,49 +175,12 @@ impl FromStr for WwwAuthenticate {
 }
 
 /// Typed Authorization header.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Authorization {
-    pub scheme: Scheme,
-    pub username: String,
-    pub realm: String,
-    pub nonce: String,
-    pub uri: Uri,
-    pub response: String,
-    pub algorithm: Option<Algorithm>,
-    pub cnonce: Option<String>,
-    pub opaque: Option<String>,
-    pub message_qop: Option<Qop>,
-    pub nonce_count: Option<u32>,
-    // Add other fields
-}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Authorization(pub AuthorizationValue);
 
 impl fmt::Display for Authorization {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} username=\"{}\"", self.scheme, self.username)?;
-        write!(f, ", realm=\"{}\"", self.realm)?; 
-        write!(f, ", nonce=\"{}\"", self.nonce)?; 
-        write!(f, ", uri=\"{}\"", self.uri)?; 
-        write!(f, ", response=\"{}\"", self.response)?;
-
-        if let Some(algo) = &self.algorithm {
-             // Algorithm MAY be a token or quoted-string, usually token
-            write!(f, ", algorithm={}", algo)?; // Output as token
-        }
-        if let Some(cnonce) = &self.cnonce {
-            write!(f, ", cnonce=\"{}\"", cnonce)?; 
-        }
-        if let Some(opaque) = &self.opaque {
-            write!(f, ", opaque=\"{}\"", opaque)?;
-        }
-        if let Some(qop) = &self.message_qop {
-             // qop value MUST be quoted in Authorization according to RFC 7616 errata (originally token)
-             // However, many implementations expect token. Let's use token for now.
-            write!(f, ", qop={}", qop)?; 
-        }
-        if let Some(nc) = self.nonce_count {
-            write!(f, ", nc={:08x}", nc)?;
-        }
-        Ok(())
+        write!(f, "{}", self.0)
     }
 }
 
@@ -270,48 +194,36 @@ impl Authorization {
         uri: Uri,
         response: impl Into<String>
     ) -> Self {
-        Self {
-            scheme,
-            username: username.into(),
-            realm: realm.into(),
-            nonce: nonce.into(),
-            uri,
-            response: response.into(),
-            algorithm: None,
-            cnonce: None,
-            opaque: None,
-            message_qop: None,
-            nonce_count: None,
-        }
+        Self(AuthorizationValue::new(scheme, username, realm, nonce, uri, response))
     }
 
     /// Sets the algorithm parameter.
     pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
-        self.algorithm = Some(algorithm);
+        self.0.with_algorithm(algorithm);
         self
     }
 
     /// Sets the cnonce parameter.
     pub fn with_cnonce(mut self, cnonce: impl Into<String>) -> Self {
-        self.cnonce = Some(cnonce.into());
+        self.0.with_cnonce(cnonce);
         self
     }
 
     /// Sets the opaque parameter.
     pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
-        self.opaque = Some(opaque.into());
+        self.0.with_opaque(opaque);
         self
     }
 
     /// Sets the message_qop parameter.
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        self.message_qop = Some(qop);
+        self.0.with_qop(qop);
         self
     }
 
     /// Sets the nonce_count parameter.
     pub fn with_nonce_count(mut self, nc: u32) -> Self {
-        self.nonce_count = Some(nc);
+        self.0.with_nonce_count(nc);
         self
     }
 }
@@ -319,49 +231,30 @@ impl Authorization {
 impl FromStr for Authorization {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
-        // Assuming parse_authorization returns Ok((rest, (scheme, params_map))) 
-        // or similar where params_map is a HashMap<String, String> or struct.
-        // This needs to be adjusted based on the actual return type of parse_authorization.
-        // For now, let's placeholder-assume it returns a tuple matching the fields.
-        // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
         parse_authorization(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, v)| { 
-                // Placeholder: Assume v is a tuple with all fields in order.
-                // Need to extract/parse URI, Algorithm, Qop, nc correctly.
-                if v.len() < 6 { // Basic check for minimum required fields
+                if v.len() < 6 {
                     return Err(Error::ParseError("Missing required fields for Authorization".to_string()));
                 }
-                Ok(Authorization {
-                    scheme: v.0, // Assuming v.0 is Scheme
-                    username: v.1, // Assuming v.1 is String
-                    realm: v.2,
-                    nonce: v.3,
-                    uri: Uri::from_str(&v.4)?, // Assuming v.4 is string for Uri, needs parsing
-                    response: v.5,
-                    algorithm: v.6.map(Algorithm::from_str).transpose()?, // Assuming v.6 is Option<String>
-                    cnonce: v.7, // Assuming v.7 is Option<String>
-                    opaque: v.8, // Assuming v.8 is Option<String>
-                    message_qop: v.9.map(Qop::from_str).transpose()?, // Assuming v.9 is Option<String>
-                    nonce_count: v.10.map(|nc_str| u32::from_str_radix(&nc_str, 16)).transpose().map_err(|_| Error::ParseError("Invalid nonce_count".to_string()))?, // Assuming v.10 is Option<String>
-                })
+                Ok(Authorization(v))
             })
     }
 }
 
 /// Typed Proxy-Authenticate header.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProxyAuthenticate(pub WwwAuthenticate);
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyAuthenticate(pub ProxyAuthenticateValue);
 
 impl fmt::Display for ProxyAuthenticate {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to WwwAuthenticate display
+        write!(f, "{}", self.0)
     }
 }
 
 impl ProxyAuthenticate {
     /// Creates a new ProxyAuthenticate header.
-    pub fn new(auth: WwwAuthenticate) -> Self { Self(auth) }
+    pub fn new(auth: WwwAuthenticate) -> Self { Self(auth.0) }
 }
 
 impl FromStr for ProxyAuthenticate {
@@ -370,18 +263,18 @@ impl FromStr for ProxyAuthenticate {
 }
 
 /// Typed Proxy-Authorization header.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProxyAuthorization(pub Authorization);
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyAuthorization(pub ProxyAuthorizationValue);
 
 impl fmt::Display for ProxyAuthorization {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to Authorization display
+        write!(f, "{}", self.0)
     }
 }
 
 impl ProxyAuthorization {
     /// Creates a new ProxyAuthorization header.
-    pub fn new(auth: Authorization) -> Self { Self(auth) }
+    pub fn new(auth: Authorization) -> Self { Self(auth.0) }
 }
 
 impl FromStr for ProxyAuthorization {
@@ -390,35 +283,12 @@ impl FromStr for ProxyAuthorization {
 }
 
 /// Typed Authentication-Info header.
-#[derive(Debug, Clone, PartialEq, Default)] // Add Default
-pub struct AuthenticationInfo {
-    pub nextnonce: Option<String>,
-    pub qop: Option<Qop>,
-    pub rspauth: Option<String>,
-    pub cnonce: Option<String>,
-    pub nc: Option<u32>,
-}
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AuthenticationInfo(pub AuthenticationInfoValue);
 
 impl fmt::Display for AuthenticationInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut parts = Vec::new();
-        if let Some(nextnonce) = &self.nextnonce {
-            parts.push(format!("nextnonce=\"{}\"", nextnonce));
-        }
-        if let Some(qop) = &self.qop {
-             parts.push(format!("qop={}", qop)); // qop value is not quoted here
-        }
-         if let Some(rspauth) = &self.rspauth {
-            parts.push(format!("rspauth=\"{}\"", rspauth));
-        }
-        if let Some(cnonce) = &self.cnonce {
-            parts.push(format!("cnonce=\"{}\"", cnonce));
-        }
-        if let Some(nc) = self.nc {
-            // Nonce count MUST be 8 octal digits according to RFC 7615
-            parts.push(format!("nc={:08o}", nc)); 
-        }
-        write!(f, "{}", parts.join(", "))
+        write!(f, "{}", self.0)
     }
 }
 
@@ -430,31 +300,31 @@ impl AuthenticationInfo {
 
     /// Sets the nextnonce parameter.
     pub fn with_nextnonce(mut self, nextnonce: impl Into<String>) -> Self {
-        self.nextnonce = Some(nextnonce.into());
+        self.0.with_nextnonce(nextnonce);
         self
     }
 
     /// Sets the qop parameter.
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        self.qop = Some(qop);
+        self.0.with_qop(qop);
         self
     }
 
     /// Sets the rspauth parameter.
     pub fn with_rspauth(mut self, rspauth: impl Into<String>) -> Self {
-        self.rspauth = Some(rspauth.into());
+        self.0.with_rspauth(rspauth);
         self
     }
 
     /// Sets the cnonce parameter.
     pub fn with_cnonce(mut self, cnonce: impl Into<String>) -> Self {
-        self.cnonce = Some(cnonce.into());
+        self.0.with_cnonce(cnonce);
         self
     }
 
     /// Sets the nc (nonce count) parameter.
     pub fn with_nonce_count(mut self, nc: u32) -> Self {
-        self.nc = Some(nc);
+        self.0.with_nonce_count(nc);
         self
     }
 }
@@ -462,22 +332,13 @@ impl AuthenticationInfo {
 impl FromStr for AuthenticationInfo {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
-        // Assuming parse_authentication_info returns Ok((rest, params_map))
-        // Placeholder: Assume it returns a tuple of Option<String> for fields.
-        // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
         parse_authentication_info(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, v)| {
-                if v.len() < 5 { // Basic check
+                if v.len() < 5 {
                     return Err(Error::ParseError("Incorrect field count for AuthenticationInfo".to_string()));
                 }
-                Ok(AuthenticationInfo {
-                    nextnonce: v.0, // Assuming v.0 is Option<String>
-                    qop: v.1.map(Qop::from_str).transpose()?, // Assuming v.1 is Option<String>
-                    rspauth: v.2, // Assuming v.2 is Option<String>
-                    cnonce: v.3, // Assuming v.3 is Option<String>
-                    nc: v.4.map(|nc_str| u32::from_str_radix(&nc_str, 8)).transpose().map_err(|_| Error::ParseError("Invalid nc in AuthInfo".to_string()))?, // Assuming v.4 is Option<String>
-                })
+                Ok(AuthenticationInfo(v))
             })
     }
 }

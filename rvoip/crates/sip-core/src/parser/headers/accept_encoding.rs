@@ -16,6 +16,7 @@ use nom::{
 use std::str;
 use std::collections::HashMap;
 use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
 
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma};
@@ -28,7 +29,7 @@ use crate::types::param::Param;
 use crate::types::accept_encoding::AcceptEncoding as AcceptEncodingHeader; // Specific type
 
 // Define EncodingInfo locally and make it public
-#[derive(Debug, Clone, PartialEq)] // Add derives
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncodingInfo {
     pub coding: String,
     pub params: Vec<Param>,

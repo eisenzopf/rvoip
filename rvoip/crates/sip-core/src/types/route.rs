@@ -6,21 +6,24 @@ use std::str::FromStr;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use crate::types::Address;
+use crate::parser::headers::route::RouteValue;
+use serde::{Deserialize, Serialize};
 
-/// Typed Route header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
-pub struct Route(pub UriWithParamsList);
+/// Represents the Route header field (RFC 3261 Section 8.1.1.1).
+/// Contains a list of route entries (typically Addresses).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route(pub Vec<RouteValue>);
 
 impl Route {
     /// Creates a new Route header.
-    pub fn new(list: UriWithParamsList) -> Self {
+    pub fn new(list: Vec<RouteValue>) -> Self {
         Self(list)
     }
 }
 
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to UriWithParamsList
+        write!(f, "{}", self.0.iter().map(|r| r.to_string()).collect::<Vec<String>>().join(", "))
     }
 }
 
@@ -40,7 +43,7 @@ impl FromStr for Route {
 }
 
 impl Deref for Route {
-    type Target = UriWithParamsList;
+    type Target = Vec<RouteValue>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

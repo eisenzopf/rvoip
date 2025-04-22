@@ -6,21 +6,23 @@ use std::str::FromStr;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use crate::types::Address;
+use crate::parser::headers::record_route::RecordRouteValue;
+use serde::{Deserialize, Serialize};
 
 /// Typed Record-Route header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
-pub struct RecordRoute(pub UriWithParamsList);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRoute(pub Vec<RecordRouteValue>);
 
 impl RecordRoute {
     /// Creates a new RecordRoute header.
-    pub fn new(list: UriWithParamsList) -> Self {
+    pub fn new(list: Vec<RecordRouteValue>) -> Self {
         Self(list)
     }
 }
 
 impl fmt::Display for RecordRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to UriWithParamsList
+        write!(f, "{}", self.0.iter().map(|rr| rr.to_string()).collect::<Vec<String>>().join(", "))
     }
 }
 
@@ -38,7 +40,7 @@ impl FromStr for RecordRoute {
 }
 
 impl Deref for RecordRoute {
-    type Target = UriWithParamsList;
+    type Target = Vec<RecordRouteValue>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

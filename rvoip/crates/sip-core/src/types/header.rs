@@ -421,7 +421,7 @@ impl fmt::Display for Header {
 }
 
 /// Represents any parsed SIP header in a strongly-typed way.
-#[derive(Debug, Clone, PartialEq)] // Add necessary derives
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // Add Serialize, Deserialize
 pub enum TypedHeader {
     // Core Headers (Examples)
     Via(types::Via),

@@ -15,6 +15,15 @@ use nom::{
     error::{ErrorKind, ParseError, Error as NomError}
 };
 use crate::types::Version;
+use nom::character::complete::char;
+use nom::combinator::map_res;
+use nom::sequence::{delimited, separated_pair};
+use crate::parser::common_chars::is_alphanum;
+use crate::parser::token::token;
+use crate::parser::quoted::quoted_string;
+use crate::types::param::{Param, GenericValue};
+use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
 
 // Type alias for parser result - Added NomError back
 pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O, NomError<&'a [u8]>>;
@@ -99,3 +108,13 @@ mod tests {
 // fn parse_some_item(input: &[u8]) -> ParseResult<&[u8]> { token(input) }
 // let mut parser = comma_separated_list1(parse_some_item);
 // let result = parser(b"item1, item2 ,item3"); 
+
+// Define HeaderValue and make it public
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HeaderValue(pub Vec<u8>);
+
+impl HeaderValue {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+} 

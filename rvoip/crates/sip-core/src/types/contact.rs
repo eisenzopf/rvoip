@@ -7,16 +7,18 @@ use crate::parser::headers::parse_contact; // For FromStr
 use std::ops::Deref;
 use crate::types::param::Param;
 use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
+use crate::parser::headers::contact::ContactValue;
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactParamInfo {
     pub address: Address, // Contains URI, display name, and address parameters
 }
 
 /// Represents the value within a Contact header, aligning with parser.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactValue {
     /// The wildcard value "*".
     Star,
@@ -26,8 +28,8 @@ pub enum ContactValue {
 
 /// Typed Contact header.
 /// Represents the *entire* header value, which could be STAR or a list of contacts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Contact(pub ContactValue);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact(pub Vec<ContactValue>);
 
 impl Contact {
     /// Creates a new Contact header from a list of ContactParamInfo.
@@ -38,49 +40,49 @@ impl Contact {
             // Sticking with empty Params for now.
             println!("Warning: Creating Contact with empty parameter list.");
         }
-        Self(ContactValue::Params(params))
+        Self(vec![ContactValue::Params(params)])
     }
 
     /// Creates a new wildcard Contact header.
     pub fn new_star() -> Self {
-        Self(ContactValue::Star)
+        Self(vec![ContactValue::Star])
     }
 
     /// Gets the first Address from the Params variant, if present.
     /// Useful for single-valued Contact headers.
     /// Returns None for wildcard contacts or empty Params list.
     pub fn address(&self) -> Option<&Address> {
-        match &self.0 {
+        self.0.first().and_then(|value| match value {
             ContactValue::Params(params) => params.first().map(|cp| &cp.address),
             ContactValue::Star => None,
-        }
+        })
     }
 
     /// Gets a mutable reference to the first Address from the Params variant.
     /// Returns None for wildcard contacts or empty Params list.
     pub fn address_mut(&mut self) -> Option<&mut Address> {
-        match &mut self.0 {
+        self.0.first_mut().and_then(|value| match value {
             ContactValue::Params(params) => params.first_mut().map(|cp| &mut cp.address),
             ContactValue::Star => None,
-        }
+        })
     }
 
     /// Gets all addresses from the Params variant.
     /// Returns None for wildcard contacts.
     pub fn addresses(&self) -> Option<impl Iterator<Item = &Address>> {
-         match &self.0 {
+        self.0.iter().flat_map(|value| match value {
             ContactValue::Params(params) => Some(params.iter().map(|cp| &cp.address)),
             ContactValue::Star => None,
-        }
+        })
     }
     
      /// Gets mutable references to all addresses from the Params variant.
     /// Returns None for wildcard contacts.
     pub fn addresses_mut(&mut self) -> Option<impl Iterator<Item = &mut Address>> {
-         match &mut self.0 {
+        self.0.iter_mut().flat_map(|value| match value {
             ContactValue::Params(params) => Some(params.iter_mut().map(|cp| &mut cp.address)),
             ContactValue::Star => None,
-        }
+        })
     }
 
     /// Gets the expires parameter value from the *first* contact, if present.
@@ -94,16 +96,18 @@ impl Contact {
     /// Adds the first contact if the list is empty.
     /// Panics if called on a Star contact.
     pub fn set_expires(&mut self, expires: u32) {
-         match &mut self.0 {
-            ContactValue::Params(params) => {
-                if let Some(cp_info) = params.first_mut() {
-                     cp_info.address.set_param("expires", Some(expires.to_string()));
-                } else {
-                    // Handle case where Params list is empty? This seems unlikely for set_expires.
-                    panic!("Cannot set expires on an empty Contact parameter list");
-                }
-            },
-            ContactValue::Star => panic!("Cannot set expires on star Contact"),
+        if let Some(value) = self.0.first_mut() {
+            match value {
+                ContactValue::Params(params) => {
+                    if let Some(cp_info) = params.first_mut() {
+                        cp_info.address.set_param("expires", Some(expires.to_string()));
+                    } else {
+                        // Handle case where Params list is empty? This seems unlikely for set_expires.
+                        panic!("Cannot set expires on an empty Contact parameter list");
+                    }
+                },
+                ContactValue::Star => panic!("Cannot set expires on star Contact"),
+            }
         }
     }
 
@@ -122,15 +126,17 @@ impl Contact {
         if clamped_q.is_nan() { panic!("q value cannot be NaN"); }
         let q_value_str = clamped_q.to_string();
         
-         match &mut self.0 {
-             ContactValue::Params(params) => {
-                 if let Some(cp_info) = params.first_mut() {
-                     cp_info.address.set_param("q", Some(q_value_str));
-                 } else {
-                     panic!("Cannot set q on an empty Contact parameter list");
-                 }
-             },
-            ContactValue::Star => panic!("Cannot set q on star Contact"),
+        if let Some(value) = self.0.first_mut() {
+            match value {
+                ContactValue::Params(params) => {
+                    if let Some(cp_info) = params.first_mut() {
+                        cp_info.address.set_param("q", Some(q_value_str));
+                    } else {
+                        panic!("Cannot set q on an empty Contact parameter list");
+                    }
+                },
+                ContactValue::Star => panic!("Cannot set q on star Contact"),
+            }
         }
     }
     
@@ -142,41 +148,44 @@ impl Contact {
     /// Sets or replaces the tag parameter on the *first* contact.
     /// Panics if called on a Star contact or if list is empty.
     pub fn set_tag(&mut self, tag: impl Into<String>) {
-         match &mut self.0 {
-             ContactValue::Params(params) => {
-                 if let Some(addr) = params.first_mut() {
-                     addr.address.set_tag(tag);
-                 } else {
-                     panic!("Cannot set tag on an empty Contact parameter list");
-                 }
-             },
-            ContactValue::Star => panic!("Cannot set tag on star Contact"),
+        if let Some(value) = self.0.first_mut() {
+            match value {
+                ContactValue::Params(params) => {
+                    if let Some(addr) = params.first_mut() {
+                        addr.address.set_tag(tag);
+                    } else {
+                        panic!("Cannot set tag on an empty Contact parameter list");
+                    }
+                },
+                ContactValue::Star => panic!("Cannot set tag on star Contact"),
+            }
         }
     }
 
     /// Checks if this Contact represents the star (*).
     pub fn is_star(&self) -> bool {
-        matches!(self.0, ContactValue::Star)
+        self.0.iter().any(|value| matches!(value, ContactValue::Star))
     }
 }
 
 impl fmt::Display for Contact {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            // Display comma-separated list of addresses
-            ContactValue::Params(params) => {
-                let mut first = true;
-                for cp in params {
+        let mut first = true;
+        for value in &self.0 {
+            match value {
+                ContactValue::Params(params) => {
                     if !first {
-                        write!(f, ", ")?; // Assuming standard comma separation
+                        write!(f, ", ")?;
                     }
-                    write!(f, "{}", cp.address)?; // Display the Address
+                    for cp in params {
+                        write!(f, "{}", cp.address)?;
+                    }
                     first = false;
                 }
-                Ok(())
+                ContactValue::Star => write!(f, "*")?,
             }
-            ContactValue::Star => write!(f, "*"),
         }
+        Ok(())
     }
 }
 

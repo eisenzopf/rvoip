@@ -6,9 +6,11 @@ use uuid::Uuid;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use std::string::FromUtf8Error;
+use serde::{Serialize, Deserialize};
 
-/// Typed Call-ID header value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Add derives as needed
+/// Represents the Call-ID header field (RFC 3261 Section 8.1.1.6).
+/// Uniquely identifies a particular invitation or registration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CallId(pub String);
 
 impl Deref for CallId {

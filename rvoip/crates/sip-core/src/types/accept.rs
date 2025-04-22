@@ -6,10 +6,15 @@ use std::str::FromStr;
 use nom::combinator::all_consuming;
 use std::collections::HashMap;
 use ordered_float::NotNan;
+use crate::parser::headers::accept::AcceptValue;
+use serde::{Deserialize, Serialize};
+use crate::types::param::Param;
+use crate::types::content_type::ContentTypeValue;
 
-/// Typed Accept header.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Accept(pub Vec<MediaType>);
+/// Represents the Accept header field (RFC 3261 Section 20.1).
+/// Indicates the media types acceptable for the response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Accept(pub Vec<AcceptValue>);
 
 impl Accept {
     /// Creates an empty Accept header.
@@ -25,19 +30,19 @@ impl Accept {
     /// Creates an Accept header from an iterator of media types.
     pub fn from_media_types<I>(types: I) -> Self
     where
-        I: IntoIterator<Item = MediaType>
+        I: IntoIterator<Item = AcceptValue>
     {
         Self(types.into_iter().collect())
     }
 
     /// Adds a media type to the list.
-    pub fn push(&mut self, media_type: MediaType) {
+    pub fn push(&mut self, media_type: AcceptValue) {
         self.0.push(media_type);
     }
 
     /// Checks if a specific media type is acceptable (basic check).
     /// TODO: Implement proper matching based on type/subtype/* and parameters (q values).
-    pub fn accepts(&self, media_type: &MediaType) -> bool {
+    pub fn accepts(&self, media_type: &AcceptValue) -> bool {
         self.0.iter().any(|accepted_type| {
             // Simple type/subtype match for now
             (accepted_type.type_ == "*" || accepted_type.type_ == media_type.type_) &&

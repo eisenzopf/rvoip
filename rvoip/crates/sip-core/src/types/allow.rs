@@ -4,9 +4,11 @@ use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
 
-/// Typed Allow header.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Represents the Allow header field (RFC 3261 Section 20.5).
+/// Lists the SIP methods supported by the User Agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allow(pub Vec<Method>);
 
 impl Allow {

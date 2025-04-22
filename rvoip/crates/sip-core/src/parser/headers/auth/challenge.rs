@@ -31,7 +31,7 @@ fn domain(input: &[u8]) -> ParseResult<String> {
             tag_no_case("domain"),
             preceded(
                 equal,
-                delimited(ldquot, recognize(many0(alt((token, tag(b" "))))), rdquot), // Use b" "
+                delimited(ldquot, recognize(many0(alt((token, tag(b" ".as_slice()))))), rdquot), // Use b" ".as_slice()
             ),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),
@@ -120,7 +120,7 @@ fn quoted_string_alt(input: &[u8]) -> ParseResult<&[u8]> {
     delimited(
         ldquot,
         recognize(many0(alt((
-            token, tag(" ") // Changed b" " to " "
+            token, tag(b" ".as_slice()) // Changed tag(" ") to tag(b" ".as_slice())
         )))), 
         rdquot
     )(input)

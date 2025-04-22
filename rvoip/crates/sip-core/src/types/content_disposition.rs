@@ -5,6 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use crate::types::param::Param;
+use serde::{Serialize, Deserialize};
 
 /// Content Disposition Type (session, render, icon, alert, etc.)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ impl fmt::Display for DispositionType {
 }
 
 /// Typed Content-Disposition header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentDisposition {
     pub disposition_type: DispositionType,
     pub params: HashMap<String, String>,

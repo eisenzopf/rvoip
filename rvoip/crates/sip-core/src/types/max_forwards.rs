@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use crate::error::{Error, Result};
 
-/// Typed Max-Forwards header value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
+/// Represents the Max-Forwards header field (RFC 3261 Section 8.1.1.4).
+/// Limits the number of proxies a request can traverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MaxForwards(pub u8);
 
 impl MaxForwards {

@@ -22,7 +22,7 @@ use crate::header::TypedHeader;
 use crate::types::via::Via; // Import Via specifically
 
 /// A SIP request message
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// The method of the request
     pub method: Method,
@@ -201,7 +201,7 @@ impl fmt::Display for Request {
 }
 
 /// A SIP response message
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// The SIP version
     pub version: Version,

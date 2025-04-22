@@ -4,9 +4,10 @@ use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use serde::{Serialize, Deserialize};
 
 /// Typed Warning header value.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warning {
     pub code: u16,   // 3xx
     pub agent: Uri, // Or maybe just Host?

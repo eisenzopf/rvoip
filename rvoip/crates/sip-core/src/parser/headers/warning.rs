@@ -37,6 +37,7 @@ use nom::{
     IResult,
 };
 use std::str::{self, FromStr};
+use crate::types::WarningValue;
 
 // warn-code = 3DIGIT
 fn warn_code(input: &[u8]) -> ParseResult<WarnCode> {

@@ -4,9 +4,10 @@ use crate::error::{Error, Result};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize}; // Add import
 
 /// Typed Reply-To header.
-#[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct ReplyTo(pub Address); // Or UriWithParams
 
 impl ReplyTo {

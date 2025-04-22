@@ -7,6 +7,7 @@ use nom::{
     IResult,
 };
 use std::str;
+use ordered_float::NotNan;
 
 // Import necessary parsers
 use super::token::token;

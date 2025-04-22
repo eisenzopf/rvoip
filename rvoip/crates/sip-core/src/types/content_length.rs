@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use crate::parser;
@@ -6,8 +7,9 @@ use crate::parser::headers::parse_content_length;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 
-/// Typed Content-Length header value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
+/// Represents the Content-Length header field (RFC 3261 Section 7.3.2).
+/// Indicates the size of the message body in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ContentLength(pub usize);
 
 impl ContentLength {

@@ -3,6 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::net::IpAddr;
 use ordered_float::NotNan;
+use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
 use crate::types::Param;
@@ -10,23 +11,11 @@ use crate::types::uri::Host;
 use crate::types::param::Param;
 use crate::types::param::GenericValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use crate::parser::headers::via::ViaHeader;
 
 /// A structured representation of a SIP Via header
-#[derive(Debug, Clone, PartialEq)]
-pub struct Via {
-    /// Protocol (usually "SIP")
-    pub protocol: String,
-    /// Protocol version (usually "2.0")
-    pub version: String,
-    /// Transport protocol (UDP, TCP, etc.)
-    pub transport: String,
-    /// Host address
-    pub host: String,
-    /// Optional port
-    pub port: Option<u16>,
-    /// Header parameters
-    pub params: Vec<Param>,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Via(pub Vec<ViaHeader>);
 
 impl Via {
     /// Create a new Via header
@@ -37,239 +26,88 @@ impl Via {
         host: impl Into<String>,
         port: Option<u16>,
     ) -> Self {
-        Self {
-            protocol: protocol.into(),
-            version: version.into(),
-            transport: transport.into(),
-            host: host.into(),
+        Self(vec![ViaHeader::new(
+            protocol.into(),
+            version.into(),
+            transport.into(),
+            host.into(),
             port,
-            params: Vec::new(),
-        }
+        )])
     }
     
     /// Get the branch parameter value
     pub fn branch(&self) -> Option<&str> {
-        self.params.iter().find_map(|p| match p {
-            Param::Branch(val) => Some(val.as_str()),
-            _ => None,
-        })
+        self.0.iter().find_map(|v| v.branch())
     }
     
     /// Set or replace the branch parameter.
     pub fn set_branch(&mut self, branch: impl Into<String>) {
-        // Remove existing branch parameter(s)
-        self.params.retain(|p| !matches!(p, Param::Branch(_)));
-        // Add the new one
-        self.params.push(Param::Branch(branch.into()));
+        self.0.iter_mut().for_each(|v| v.set_branch(branch.clone()));
     }
     
     /// Get the first value associated with a parameter name (case-insensitive for key).
     pub fn get(&self, name: &str) -> Option<Option<&str>> {
-        Some(
-            self.params.iter().find_map(|p| match p {
-                Param::Other(key, val_opt) if key.eq_ignore_ascii_case(name) => {
-                    val_opt.as_ref().and_then(|gv| gv.as_str())
-                },
-                Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(val.as_str()),
-                Param::Tag(val) if name.eq_ignore_ascii_case("tag") => Some(val.as_str()),
-                Param::Expires(val) if name.eq_ignore_ascii_case("expires") => Some(Box::leak(val.to_string().into_boxed_str())),
-                Param::Received(val) if name.eq_ignore_ascii_case("received") => Some(Box::leak(val.to_string().into_boxed_str())),
-                Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(val.as_str()),
-                Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(Box::leak(val.to_string().into_boxed_str())),
-                Param::Q(val) if name.eq_ignore_ascii_case("q") => Some(Box::leak(val.to_string().into_boxed_str())),
-                Param::Transport(val) if name.eq_ignore_ascii_case("transport") => Some(val.as_str()),
-                Param::User(val) if name.eq_ignore_ascii_case("user") => Some(val.as_str()),
-                Param::Method(val) if name.eq_ignore_ascii_case("method") => Some(val.as_str()),
-                Param::Lr if name.eq_ignore_ascii_case("lr") => None,
-                Param::Handling(val) if name.eq_ignore_ascii_case("handling") => Some(val.as_str()),
-                Param::Duration(val) if name.eq_ignore_ascii_case("duration") => Some(Box::leak(val.to_string().into_boxed_str())),
-                _ => None,
-            })
-        )
+        self.0.iter().find_map(|v| v.get(name))
     }
     
     /// Set or replace a parameter. Adds as Param::Other if the key isn't known.
     pub fn set(&mut self, name: impl Into<String>, value: Option<impl Into<String>>) {
-        let key_string = name.into();
-        let value_opt_string = value.map(|v| v.into());
-
-        // Remove existing parameter(s) with the same name (case-insensitive)
-        self.params.retain(|p| match p {
-             Param::Other(k, _) => !k.eq_ignore_ascii_case(&key_string),
-             Param::Branch(_) => !key_string.eq_ignore_ascii_case("branch"),
-             Param::Tag(_) => !key_string.eq_ignore_ascii_case("tag"),
-             Param::Expires(_) => !key_string.eq_ignore_ascii_case("expires"),
-             Param::Received(_) => !key_string.eq_ignore_ascii_case("received"),
-             Param::Maddr(_) => !key_string.eq_ignore_ascii_case("maddr"),
-             Param::Ttl(_) => !key_string.eq_ignore_ascii_case("ttl"),
-             Param::Lr => !key_string.eq_ignore_ascii_case("lr"),
-             Param::Q(_) => !key_string.eq_ignore_ascii_case("q"),
-             Param::Transport(_) => !key_string.eq_ignore_ascii_case("transport"),
-             Param::User(_) => !key_string.eq_ignore_ascii_case("user"),
-             Param::Method(_) => !key_string.eq_ignore_ascii_case("method"),
-             Param::Handling(_) => !key_string.eq_ignore_ascii_case("handling"),
-             Param::Duration(_) => !key_string.eq_ignore_ascii_case("duration"),
-        });
-
-        // Add the new parameter (attempt to use specific type if possible)
-        let param = match key_string.to_ascii_lowercase().as_str() {
-            "branch" => Param::Branch(value_opt_string.unwrap_or_default()),
-            "tag" => Param::Tag(value_opt_string.unwrap_or_default()),
-            "expires" => value_opt_string.as_ref().and_then(|v| v.parse().ok()).map(Param::Expires).unwrap_or_else(|| Param::Other(key_string, value_opt_string.clone())),
-            "received" => value_opt_string.as_ref().and_then(|v| v.parse().ok()).map(Param::Received).unwrap_or_else(|| Param::Other(key_string, value_opt_string.clone())),
-            "maddr" => Param::Maddr(value_opt_string.unwrap_or_default()),
-            "ttl" => value_opt_string.as_ref().and_then(|v| v.parse().ok()).map(Param::Ttl).unwrap_or_else(|| Param::Other(key_string, value_opt_string.clone())),
-            "lr" => Param::Lr,
-            "q" => value_opt_string.as_ref().and_then(|v| v.parse::<f32>().ok()).and_then(|f| NotNan::try_from(f).ok()).map(Param::Q).unwrap_or_else(|| Param::Other(key_string, value_opt_string.clone())),
-            "transport" => Param::Transport(value_opt_string.unwrap_or_default()),
-            "user" => Param::User(value_opt_string.unwrap_or_default()),
-            "method" => Param::Method(value_opt_string.unwrap_or_default()),
-            "handling" => Param::Handling(value_opt_string.unwrap_or_default()),
-            "duration" => Param::Duration(value_opt_string.unwrap_or_default().parse().unwrap_or(0)),
-            _ => Param::Other(key_string, value_opt_string.map(GenericValue::Token)),
-        };
-        self.params.push(param);
+        self.0.iter_mut().for_each(|v| v.set(name.clone(), value.clone()));
     }
     
     /// Check if a parameter exists (case-insensitive key).
     pub fn contains(&self, name: &str) -> bool {
-        self.params.iter().any(|p| match p {
-            Param::Other(key, _) => key.eq_ignore_ascii_case(name),
-            Param::Branch(_) => name.eq_ignore_ascii_case("branch"),
-            Param::Tag(_) => name.eq_ignore_ascii_case("tag"),
-            Param::Expires(_) => name.eq_ignore_ascii_case("expires"),
-            Param::Received(_) => name.eq_ignore_ascii_case("received"),
-            Param::Maddr(_) => name.eq_ignore_ascii_case("maddr"),
-            Param::Ttl(_) => name.eq_ignore_ascii_case("ttl"),
-            Param::Lr => name.eq_ignore_ascii_case("lr"),
-            Param::Q(_) => name.eq_ignore_ascii_case("q"),
-            Param::Transport(_) => name.eq_ignore_ascii_case("transport"),
-            Param::User(_) => name.eq_ignore_ascii_case("user"),
-            Param::Method(_) => name.eq_ignore_ascii_case("method"),
-            Param::Handling(_) => name.eq_ignore_ascii_case("handling"),
-            Param::Duration(_) => name.eq_ignore_ascii_case("duration"),
-        })
+        self.0.iter().any(|v| v.contains(name))
     }
     
     /// Get all parameters as a reference to the Vec<Param>
-    pub fn params(&self) -> &Vec<Param> {
-        &self.params
+    pub fn params(&self) -> &Vec<ViaHeader> {
+        &self.0
     }
     
     /// Get a formatted string representation for this Via header
     pub fn to_string(&self) -> String {
-        let mut result = format!("{}/{}/{} {}", 
-            self.protocol, self.version, self.transport, self.host);
-            
-        if let Some(port) = self.port {
-            result.push_str(&format!(":{}", port));
-        }
-        
-        // Add parameters
-        for param in &self.params {
-            result.push_str(&param.to_string());
-        }
-        
-        result
+        self.0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
     }
 
     /// Get the received parameter value as IpAddr, if present and valid.
     pub fn received(&self) -> Option<IpAddr> {
-        self.params.iter().find_map(|p| {
-            match p {
-                Param::Received(ip) => Some(*ip),
-                Param::Other(key, val_opt) if key.eq_ignore_ascii_case("received") => {
-                    val_opt.as_ref().and_then(|gv| gv.as_str()).and_then(|s| IpAddr::from_str(s).ok())
-                }
-                _ => None,
-            }
-        })
+        self.0.iter().find_map(|v| v.received())
     }
     
     /// Sets or replaces the received parameter.
     pub fn set_received(&mut self, addr: IpAddr) {
-        self.params.retain(|p| {
-            match p {
-                Param::Received(_) => false, // Remove this variant
-                Param::Other(k, _) => !k.eq_ignore_ascii_case("received"), // Keep if key doesn't match
-                _ => true, // Keep other variants
-            }
-        });
-        self.params.push(Param::Received(addr));
+        self.0.iter_mut().for_each(|v| v.set_received(addr));
     }
     
     /// Get the maddr parameter value, if present.
     pub fn maddr(&self) -> Option<&str> {
-         self.params.iter().find_map(|p| {
-            match p {
-                Param::Maddr(val) => Some(val.as_str()),
-                Param::Other(key, val_opt) if key.eq_ignore_ascii_case("maddr") => {
-                    val_opt.as_ref().and_then(|gv| gv.as_str())
-                }
-                _ => None,
-            }
-        })
+        self.0.iter().find_map(|v| v.maddr())
     }
     
     /// Sets or replaces the maddr parameter.
     pub fn set_maddr(&mut self, maddr: impl Into<String>) {
-        let maddr_string = maddr.into();
-        self.params.retain(|p| {
-             match p {
-                Param::Maddr(_) => false,
-                Param::Other(k, _) => !k.eq_ignore_ascii_case("maddr"),
-                _ => true,
-            }
-        });
-        self.params.push(Param::Maddr(maddr_string));
+        self.0.iter_mut().for_each(|v| v.set_maddr(maddr.clone()));
     }
 
      /// Get the ttl parameter value, if present and valid.
     pub fn ttl(&self) -> Option<u8> {
-        self.params.iter().find_map(|p| {
-            match p {
-                Param::Ttl(val) => Some(*val),
-                 Param::Other(key, val_opt) if key.eq_ignore_ascii_case("ttl") => {
-                     val_opt.as_ref().and_then(|gv| gv.as_str()).and_then(|s| s.parse::<u8>().ok())
-                 }
-                _ => None,
-            }
-        })
+        self.0.iter().find_map(|v| v.ttl())
     }
     
     /// Sets or replaces the ttl parameter.
     pub fn set_ttl(&mut self, ttl: u8) {
-        self.params.retain(|p| {
-             match p {
-                Param::Ttl(_) => false,
-                Param::Other(k, _) => !k.eq_ignore_ascii_case("ttl"),
-                _ => true,
-            }
-        });
-        self.params.push(Param::Ttl(ttl));
+        self.0.iter_mut().for_each(|v| v.set_ttl(ttl));
     }
 
     /// Check if the rport parameter (flag) is present.
     pub fn rport(&self) -> bool {
-         self.params.iter().any(|p| {
-             match p {
-                 Param::Other(k, None) => k.eq_ignore_ascii_case("rport"),
-                 _ => false,
-             }
-         })
+        self.0.iter().any(|v| v.rport())
     }
     
     /// Sets or removes the rport parameter flag.
     pub fn set_rport(&mut self, present: bool) {
-         self.params.retain(|p| {
-             match p {
-                 Param::Other(k, None) => !k.eq_ignore_ascii_case("rport"),
-                 _ => true,
-             }
-         });
-         if present {
-             self.params.push(Param::Other("rport".to_string(), None));
-         }
+        self.0.iter_mut().for_each(|v| v.set_rport(present));
     }
 }
 

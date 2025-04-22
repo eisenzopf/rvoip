@@ -8,7 +8,7 @@ use nom::{
     bytes::complete::{tag_no_case},
     combinator::{map, map_res},
     multi::{many0, separated_list1},
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, delimited, tuple},
     IResult,
 };
 use std::str;
@@ -23,6 +23,7 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::uri::Uri;
+use serde::{Serialize, Deserialize};
 
 // Make these types public
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,10 +38,10 @@ pub enum InfoParam {
     Purpose(InfoPurpose),
     Generic(Param),
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallInfoValue {
-    pub uri: String, // Changed from Uri based on parser
-    pub params: Vec<InfoParam>,
+    pub uri: Uri,
+    pub params: Vec<Param>,
 }
 
 // info-param = ( "purpose" EQUAL ( "icon" / "info" / "card" / token ) ) / generic-param
