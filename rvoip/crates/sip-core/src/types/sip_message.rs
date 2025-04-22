@@ -11,7 +11,6 @@ use crate::types::method::Method;
 use crate::types::StatusCode;
 use crate::error::{Error, Result};
 // Use types from the current crate's types module
-use crate::types::{Via};
 use crate::types; // Add import
 use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::types::sdp::SdpSession; // Assuming SdpSession is in types::sdp

@@ -8,7 +8,6 @@ use std::ops::Deref;
 use crate::types::param::Param;
 use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
-use crate::types::contact::ContactValue;
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.

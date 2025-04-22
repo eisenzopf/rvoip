@@ -8,7 +8,6 @@ use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
 use crate::types::Param;
 use crate::types::uri::Host as UriHost;
-use crate::types::param::Param;
 use crate::types::param::GenericValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::parser::headers::via::ViaHeader;
