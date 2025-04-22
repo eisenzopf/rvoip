@@ -27,4 +27,4 @@ pub use call_struct::Call;
 mod utils;
 
 // Internal function for validating state transitions
-pub(crate) use utils::is_valid_state_transition; 
+pub use utils::is_valid_state_transition; 

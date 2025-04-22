@@ -44,7 +44,7 @@ use crate::Scheme;
 use authority::parse_authority;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
-pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
+pub fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
     map_res(
         recognize(
             tuple((
@@ -86,7 +86,7 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
 }
 
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
-pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
+pub fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
      map_res(
         recognize(
             tuple((

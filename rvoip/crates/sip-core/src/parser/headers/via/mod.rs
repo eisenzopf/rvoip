@@ -108,7 +108,7 @@ fn via_param_parser(input: &[u8]) -> ParseResult<ViaHeader> {
 }
 
 // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
-pub(crate) fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+pub fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
     preceded(
         pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
         comma_separated_list1(via_param_parser) // Use the parser for a full via-parm

@@ -13,7 +13,7 @@ use crate::parser::ParseResult;
 // IPv6reference = "[" IPv6address "]"
 // Simplified IPv6address parser: Recognizes bracketed content and uses std::net::IpAddr parsing for validation.
 // Allows hex, colons, dots (for IPv4-mapped), and percent (for scope IDs).
-pub(crate) fn ipv6_reference(input: &[u8]) -> ParseResult<Host> {
+pub fn ipv6_reference(input: &[u8]) -> ParseResult<Host> {
     map_res(
         delimited(
             tag(b"["),

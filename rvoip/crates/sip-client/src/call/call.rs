@@ -1,6 +1,6 @@
 // Re-export the Call struct implementation from the new module structure
 
-pub(crate) use super::call_struct::Call;
+pub use super::call_struct::Call;
 
 // The implementation is now split across multiple files:
 // - call_struct.rs - The struct definition and constructor

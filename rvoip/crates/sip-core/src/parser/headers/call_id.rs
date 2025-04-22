@@ -20,7 +20,7 @@ use crate::types::call_id::CallId; // Import the specific type
 
 // callid = word [ "@" word ]
 // Returns String representation
-pub(crate) fn callid(input: &[u8]) -> ParseResult<String> {
+pub fn callid(input: &[u8]) -> ParseResult<String> {
     map_res(
         pair(word, opt(preceded(tag("@"), word))),
         |(word1, opt_word2)| {

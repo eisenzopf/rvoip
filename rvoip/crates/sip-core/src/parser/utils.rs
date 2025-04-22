@@ -4,7 +4,7 @@
 /// Replaces CRLF followed immediately by WSP (SP/HTAB) with a single SP.
 /// Also compresses consecutive non-folding WSP into a single SP.
 /// Returns a new Vec<u8> with the unfolded bytes.
-pub(crate) fn unfold_lws(input: &[u8]) -> Vec<u8> {
+pub fn unfold_lws(input: &[u8]) -> Vec<u8> {
     let mut unfolded = Vec::with_capacity(input.len());
     let mut i = 0;
     let len = input.len();
@@ -79,7 +79,7 @@ pub(crate) fn unfold_lws(input: &[u8]) -> Vec<u8> {
 
 /// Decodes URI percent-encoding (%HH) within a byte slice.
 /// Returns a Result<String, Error>.
-pub(crate) fn unescape_uri_component(input: &[u8]) -> crate::error::Result<String> {
+pub fn unescape_uri_component(input: &[u8]) -> crate::error::Result<String> {
     let mut unescaped: Vec<u8> = Vec::with_capacity(input.len());
     let mut i = 0;
 

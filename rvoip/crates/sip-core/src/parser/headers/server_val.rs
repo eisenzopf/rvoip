@@ -35,7 +35,7 @@ fn product(input: &[u8]) -> ParseResult<Product> {
 }
 
 // server-val = product / comment
-pub(crate) fn server_val(input: &[u8]) -> ParseResult<ServerVal> {
+pub fn server_val(input: &[u8]) -> ParseResult<ServerVal> {
     alt((
         map(product, ServerVal::Product),
         // Assuming comment parser returns the content as String

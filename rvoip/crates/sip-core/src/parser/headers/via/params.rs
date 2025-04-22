@@ -61,7 +61,7 @@ fn via_branch(input: &[u8]) -> ParseResult<Param> {
 // via-params = via-ttl / via-maddr / via-received / via-branch / via-extension
 // via-extension = generic-param
 // This function parses ONE via parameter.
-pub(crate) fn via_param_item(input: &[u8]) -> ParseResult<Param> {
+pub fn via_param_item(input: &[u8]) -> ParseResult<Param> {
     alt((
         via_ttl,
         via_maddr,

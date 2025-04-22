@@ -28,7 +28,7 @@ use ordered_float::NotNan;
 
 /// Helper to unquote a quoted string (represented as bytes).
 /// Returns Ok(String) if successful, Err(Error) otherwise.
-pub(crate) fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
+pub fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
     unescape_uri_component(input)
         .map_err(|e| Error::ParseError(format!("Invalid escaped sequence in parameter: {}", e)))
 }
@@ -50,7 +50,7 @@ fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
 
 // generic-param = token [ EQUAL gen-value ]
 // Returns Param::Other(String, Option<GenericValue>)
-pub(crate) fn generic_param(input: &[u8]) -> ParseResult<Param> {
+pub fn generic_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         pair(token, opt(preceded(equal, gen_value))),
         |(name_b, val_opt)| {
@@ -63,7 +63,7 @@ pub(crate) fn generic_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // accept-param = ("q" EQUAL qvalue) / generic-param
-pub(crate) fn accept_param(input: &[u8]) -> ParseResult<Param> {
+pub fn accept_param(input: &[u8]) -> ParseResult<Param> {
     alt((
         map(preceded(pair(tag_no_case(b"q"), equal), qvalue), Param::Q),
         generic_param,
@@ -73,7 +73,7 @@ pub(crate) fn accept_param(input: &[u8]) -> ParseResult<Param> {
 /// Parses zero or more semicolon-preceded generic parameters.
 /// Input: b";name1=value1;name2;name3="value3""
 /// Output: A Vec containing Param::Other variants.
-pub(crate) fn semicolon_params0(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn semicolon_params0(input: &[u8]) -> ParseResult<Vec<Param>> {
     many0(
         preceded(
             semi, // Use the semi parser which handles surrounding SWS
@@ -83,7 +83,7 @@ pub(crate) fn semicolon_params0(input: &[u8]) -> ParseResult<Vec<Param>> {
 }
 
 /// Parses one or more semicolon-preceded generic parameters.
-pub(crate) fn semicolon_params1(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn semicolon_params1(input: &[u8]) -> ParseResult<Vec<Param>> {
     nom::multi::many1(
         preceded(
             semi, // Use the semi parser which handles surrounding SWS
@@ -94,7 +94,7 @@ pub(crate) fn semicolon_params1(input: &[u8]) -> ParseResult<Vec<Param>> {
 
 /// Parses zero or more semicolon-preceded parameters using a specific parameter parser function.
 /// Useful for headers where parameters might not all be generic-param.
-pub(crate) fn semicolon_separated_params0<'a, O, F>(param_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
+pub fn semicolon_separated_params0<'a, O, F>(param_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
 where
     F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
 {
@@ -107,7 +107,7 @@ where
 }
 
 /// Parses one or more semicolon-preceded parameters using a specific parameter parser function.
-pub(crate) fn semicolon_separated_params1<'a, O, F>(param_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
+pub fn semicolon_separated_params1<'a, O, F>(param_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
 where
     F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
 {
@@ -121,7 +121,7 @@ where
 
 // Helper to convert a Vec<Param> (like from semicolon_params0) to a HashMap for easier lookup.
 // Note: This assumes parameter names are unique, last one wins if not.
-pub(crate) fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> {
+pub fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> {
     params.into_iter().fold(HashMap::new(), |mut acc, param| {
         if let Param::Other(name, value) = param {
             acc.insert(name, value);
@@ -132,7 +132,7 @@ pub(crate) fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<St
 }
 
 // tag-param = "tag" EQUAL token
-pub(crate) fn tag_param(input: &[u8]) -> ParseResult<Param> {
+pub fn tag_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         preceded(tag_no_case(b"tag"), preceded(equal, token)),
         |tag_bytes| str::from_utf8(tag_bytes).map(|s| Param::Tag(s.to_string()))
@@ -141,7 +141,7 @@ pub(crate) fn tag_param(input: &[u8]) -> ParseResult<Param> {
 
 // Specific param parser for From/To headers
 // from-param / to-param = tag-param / generic-param
-pub(crate) fn from_to_param(input: &[u8]) -> ParseResult<Param> {
+pub fn from_to_param(input: &[u8]) -> ParseResult<Param> {
     alt((tag_param, generic_param))(input)
 }
 
@@ -164,7 +164,7 @@ fn cp_expires(input: &[u8]) -> ParseResult<u32> {
 // contact-params = c-p-q / c-p-expires / contact-extension
 // contact-extension = generic-param
 // Returns Param enum to capture the different types
-pub(crate) fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
+pub fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
     alt((
         map(cp_q, Param::Q),
         map(cp_expires, Param::Expires),
@@ -173,7 +173,7 @@ pub(crate) fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
 }
 
 // Function to parse a semicolon-separated list of key-value parameters into a HashMap<String, Option<String>>
-pub(crate) fn hashmap_param_list<'a>(
+pub fn hashmap_param_list<'a>(
     param_parser: impl Fn(&'a [u8]) -> ParseResult<'a, (String, Option<GenericValue>)>,
 ) -> impl FnMut(&'a [u8]) -> ParseResult<'a, HashMap<String, Option<String>>> {
     map(
@@ -190,7 +190,7 @@ pub(crate) fn hashmap_param_list<'a>(
 
 // Function to parse a semicolon-separated list of Params using a specific Param parser
 // Updated to use the specific param item parser directly
-pub(crate) fn semicolon_separated_params0<'a>(
+pub fn semicolon_separated_params0<'a>(
     param_item_parser: impl Fn(&'a [u8]) -> ParseResult<'a, Param>,
 ) -> impl FnMut(&'a [u8]) -> ParseResult<'a, Vec<Param>> {
     many0(preceded(semi, param_item_parser))

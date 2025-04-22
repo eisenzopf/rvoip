@@ -22,7 +22,7 @@ fn option_tag_list(input: &[u8]) -> ParseResult<Vec<&[u8]>> {
     comma_separated_list1(token)(input)
 }
 
-pub(crate) fn parse_proxy_require(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_proxy_require(input: &[u8]) -> ParseResult<Vec<String>> {
     // Proxy-Require MUST have at least one tag if present
     comma_separated_list1(token_string)(input)
 }

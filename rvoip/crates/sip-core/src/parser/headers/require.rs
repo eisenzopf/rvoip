@@ -15,7 +15,7 @@ use crate::parser::ParseResult;
 
 // Require = "Require" HCOLON option-tag *(COMMA option-tag)
 // Note: HCOLON handled elsewhere. option-tag is token.
-pub(crate) fn parse_require(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_require(input: &[u8]) -> ParseResult<Vec<String>> {
     // Require MUST have at least one tag if present
     comma_separated_list1(token_string)(input)
 }

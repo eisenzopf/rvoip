@@ -37,7 +37,7 @@ fn display_name(input: &[u8]) -> ParseResult<String> {
 // addr-spec = SIP-URI / SIPS-URI / absoluteURI
 // Modified: For headers like From/To/Contact, only parse SIP/SIPS URIs for now.
 // Returns Uri struct directly.
-pub(crate) fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
+pub fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
     parse_uri(input)
     // If absoluteURI support is needed later, this needs adjustment, perhaps returning an enum.
 }

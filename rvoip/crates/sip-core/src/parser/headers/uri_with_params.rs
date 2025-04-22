@@ -18,7 +18,7 @@ use crate::parser::ParseResult;
 use crate::types::param::Param;
 // Returns (URI String, Vec<Param>)
 
-pub(crate) fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
+pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
     map(
         pair(
             // LAQUOT absoluteURI RAQUOT

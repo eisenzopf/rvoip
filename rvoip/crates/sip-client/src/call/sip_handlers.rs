@@ -15,7 +15,7 @@ use super::types::CallState;
 
 impl Call {
     /// Handle an incoming SIP request
-    pub(crate) async fn handle_request(&self, request: Request) -> Result<Option<Response>> {
+    pub async fn handle_request(&self, request: Request) -> Result<Option<Response>> {
         match request.method {
             Method::Invite => {
                 // Store the original INVITE request
@@ -128,7 +128,7 @@ impl Call {
     }
     
     /// Handle a SIP response
-    pub(crate) async fn handle_response(&self, response: &Response) -> Result<()> {
+    pub async fn handle_response(&self, response: &Response) -> Result<()> {
         // Store the last response
         self.store_last_response(response.clone()).await?;
         
@@ -290,14 +290,14 @@ impl Call {
     }
     
     /// Create an INVITE request
-    pub(crate) async fn create_invite_request(&self) -> Result<Request> {
+    pub async fn create_invite_request(&self) -> Result<Request> {
         // Implementation would go here
         // For now, we'll leave this as a stub that returns an error
         Err(Error::Call("Not implemented".into()))
     }
     
     /// Send ACK for a response
-    pub(crate) async fn send_ack(&self) -> Result<()> {
+    pub async fn send_ack(&self) -> Result<()> {
         debug!("Starting to send ACK for call {}", self.id());
         
         // Get the dialog

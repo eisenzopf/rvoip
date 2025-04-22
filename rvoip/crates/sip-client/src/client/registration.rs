@@ -4,7 +4,7 @@ use std::time::Instant;
 use rvoip_sip_core::Uri;
 
 /// Registration state
-pub(crate) struct Registration {
+pub struct Registration {
     /// Server address
     pub server: SocketAddr,
     

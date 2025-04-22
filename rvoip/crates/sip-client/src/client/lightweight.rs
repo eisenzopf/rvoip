@@ -18,7 +18,7 @@ use super::events::SipClientEvent;
 use super::registration::Registration;
 
 /// Lightweight client for use in detached tasks
-pub(crate) struct LightweightClient {
+pub struct LightweightClient {
     pub transaction_manager: Arc<TransactionManager>,
     pub config: ClientConfig,
     pub cseq: Arc<Mutex<u32>>,

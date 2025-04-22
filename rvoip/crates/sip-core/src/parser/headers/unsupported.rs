@@ -15,7 +15,7 @@ use crate::parser::ParseResult;
 
 // Unsupported = "Unsupported" HCOLON option-tag *(COMMA option-tag)
 // Note: HCOLON handled elsewhere.
-pub(crate) fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
     // Unsupported MUST have at least one tag if present
     comma_separated_list1(token_string)(input)
 }

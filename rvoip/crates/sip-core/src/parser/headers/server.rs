@@ -34,7 +34,7 @@ fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
 
 // Server = "Server" HCOLON server-val *(LWS server-val)
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_server(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+pub fn parse_server(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
     server_val_list(input)
 }
 

@@ -68,7 +68,7 @@ fn time(input: &[u8]) -> ParseResult<(&[u8], &[u8], &[u8])> {
 
 // rfc1123-date = wkday "," SP date1 SP time SP "GMT"
 // Returns DateTime<FixedOffset> assuming chrono is available
-pub(crate) fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
+pub fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
     map_res(
         recognize( // Recognize the full pattern first
             tuple((
@@ -96,7 +96,7 @@ pub(crate) fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
 
 // Date = "Date" HCOLON SIP-date
 // Note: HCOLON handled by message_header
-pub(crate) fn parse_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
+pub fn parse_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
     sip_date(input)
 }
 

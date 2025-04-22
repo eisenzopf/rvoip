@@ -30,7 +30,7 @@ fn domain_part(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // hostname parser
-pub(crate) fn hostname(input: &[u8]) -> ParseResult<Host> {
+pub fn hostname(input: &[u8]) -> ParseResult<Host> {
     map_res(
         domain_part,
         |bytes: &[u8]| -> Result<Host> {

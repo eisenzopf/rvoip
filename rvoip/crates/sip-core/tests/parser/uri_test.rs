@@ -2,7 +2,7 @@
 
 use crate::common::{uri, addr, param_tag, param_expires, param_q, param_transport, param_method, param_user, param_other, param_received, param_ttl, param_lr, assert_parses_ok, assert_parse_fails, param_branch, param_maddr};
 use rvoip_sip_core::parser::uri::{parse_uri}; // Assuming this is the main entry point
-// Need to make parameter_parser pub(crate) or test via parse_uri
+// Need to make parameter_parser pub or test via parse_uri
 // use rvoip_sip_core::parser::uri::{parameter_parser};
 use rvoip_sip_core::types::{Param, Method};
 use rvoip_sip_core::uri::{Uri, Scheme, Host};
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 // use rvoip_sip_core::error::SipError; // Commented out - likely not public
 
 // Helper function to parse just parameters for focused tests
-// Requires making parameter_parser pub(crate) or similar visibility adjustment.
+// Requires making parameter_parser pub or similar visibility adjustment.
 /*
 fn parse_just_param(input: &str) -> Param {
     // Need to strip leading ';' for parameter_parser
@@ -123,7 +123,7 @@ fn test_escaped_uri_adapted() {
 }
 
 // Note: is_valid_ipv4 and is_valid_ipv6 tests are not moved as they test private helper functions.
-// Consider making them pub(crate) and testing directly if needed.
+// Consider making them pub and testing directly if needed.
 
 // --- New specific tests for parameter parsing --- 
 

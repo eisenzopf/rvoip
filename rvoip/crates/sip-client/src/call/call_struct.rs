@@ -116,7 +116,7 @@ pub struct Call {
 
 impl Call {
     /// Create a new Call instance
-    pub(crate) fn new(
+    pub fn new(
         direction: CallDirection,
         config: CallConfig,
         sip_call_id: String,

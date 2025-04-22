@@ -37,7 +37,7 @@ fn token_list0(input: &[u8]) -> ParseResult<Vec<&[u8]>> {
 
 /// Parses a header (long form only) with a comma-separated list of tokens (at least one required).
 /// Example: "HeaderName: token1, token2"
-pub(crate) fn parse_header_token_list1<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
+pub fn parse_header_token_list1<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
     preceded(
         pair(tag_no_case(name), hcolon),
         token_list1
@@ -46,7 +46,7 @@ pub(crate) fn parse_header_token_list1<'a>(name: &'a [u8], input: &'a [u8]) -> P
 
 /// Parses a header (long form only) with an optional comma-separated list of tokens.
 /// Example: "HeaderName: token1, token2" or "HeaderName:"
-pub(crate) fn parse_header_token_list0<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
+pub fn parse_header_token_list0<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
     preceded(
         pair(tag_no_case(name), hcolon),
         token_list0
@@ -54,7 +54,7 @@ pub(crate) fn parse_header_token_list0<'a>(name: &'a [u8], input: &'a [u8]) -> P
 }
 
 /// Parses a header (long or short form) with a comma-separated list of tokens (at least one required).
-pub(crate) fn parse_header_token_list1_short<'a>(
+pub fn parse_header_token_list1_short<'a>(
     long_name: &'a [u8],
     short_name: &'a [u8],
     input: &'a [u8],
@@ -66,7 +66,7 @@ pub(crate) fn parse_header_token_list1_short<'a>(
 }
 
 /// Parses a header (long or short form) with an optional comma-separated list of tokens.
-pub(crate) fn parse_header_token_list0_short<'a>(
+pub fn parse_header_token_list0_short<'a>(
     long_name: &'a [u8],
     short_name: &'a [u8],
     input: &'a [u8],
@@ -82,16 +82,16 @@ pub(crate) fn parse_header_token_list0_short<'a>(
 pub struct TokenList(pub Vec<String>); // Use String to hold tokens
 
 // Parses a comma-separated list of tokens
-pub(crate) fn parse_token_list0(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_token_list0(input: &[u8]) -> ParseResult<Vec<String>> {
     comma_separated_list0(token_string)(input)
 }
 
-pub(crate) fn parse_token_list1(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_token_list1(input: &[u8]) -> ParseResult<Vec<String>> {
     comma_separated_list1(token_string)(input)
 }
 
 // Helper to parse a token into a String
-pub(crate) fn token_string(input: &[u8]) -> ParseResult<String> { // Already pub(crate)
+pub fn token_string(input: &[u8]) -> ParseResult<String> { // Already pub
     map_res(token, |b| str::from_utf8(b).map(String::from))(input)
 }
 

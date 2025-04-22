@@ -26,12 +26,12 @@ use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
 
 // Type alias for parser result - Added NomError back
-pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O, NomError<&'a [u8]>>;
+pub type ParseResult<'a, O> = IResult<&'a [u8], O, NomError<&'a [u8]>>;
 
 /// Parses a comma-separated list of items using a provided item parser.
 /// Handles optional whitespace around the commas.
 /// Returns a Vec of the parsed items.
-pub(crate) fn comma_separated_list0<'a, O, F>(item_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
+pub fn comma_separated_list0<'a, O, F>(item_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
 where
     F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
 {
@@ -44,7 +44,7 @@ where
 /// Parses a comma-separated list of items that must have at least one item.
 /// Handles optional whitespace around the commas.
 /// Returns a Vec of the parsed items.
-pub(crate) fn comma_separated_list1<'a, O, F>(item_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
+pub fn comma_separated_list1<'a, O, F>(item_parser: F) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>> 
 where
     F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
 {
@@ -55,7 +55,7 @@ where
 }
 
 // SIP-Version = "SIP" "/" 1*DIGIT "." 1*DIGIT
-pub(crate) fn sip_version(input: &[u8]) -> ParseResult<Version> {
+pub fn sip_version(input: &[u8]) -> ParseResult<Version> {
     map_res(
         recognize(
             tuple((

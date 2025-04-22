@@ -11,7 +11,7 @@ use nom::{
 };
 
 // Type alias for parser result
-pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
+pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // UTF8-CONT = %x80-BF
 fn utf8_cont(input: &[u8]) -> ParseResult<&[u8]> {
@@ -29,7 +29,7 @@ fn utf8_cont(input: &[u8]) -> ParseResult<&[u8]> {
 //               / %xF0-F7 3UTF8-CONT
 // Adjusted ranges based on RFC 3629 (excluding overlong sequences C0, C1, etc.)
 // Checks first byte to determine length, then takes required bytes and validates.
-pub(crate) fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
     if input.is_empty() {
         return Err(nom::Err::Error(error_position!(input, ErrorKind::Eof)));
     }
@@ -67,7 +67,7 @@ pub(crate) fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // TEXT-UTF8char = %x21-7E / UTF8-NONASCII
-pub(crate) fn text_utf8_char(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn text_utf8_char(input: &[u8]) -> ParseResult<&[u8]> {
     alt((
         // %x21-7E (Printable US-ASCII chars excluding space)
         map_res(take(1usize), |byte: &[u8]| {

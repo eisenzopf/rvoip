@@ -28,19 +28,19 @@ fn is_param_unreserved(c: u8) -> bool {
 
 // paramchar = param-unreserved / unreserved / escaped
 // Returns raw bytes
-pub(crate) fn paramchar(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn paramchar(input: &[u8]) -> ParseResult<&[u8]> {
     alt((take_while1(is_param_unreserved), unreserved, escaped))(input)
 }
 
 // pname = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
-pub(crate) fn pname(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn pname(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many1(paramchar))(input)
 }
 
 // pvalue = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
-pub(crate) fn pvalue(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn pvalue(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many1(paramchar))(input)
 }
 

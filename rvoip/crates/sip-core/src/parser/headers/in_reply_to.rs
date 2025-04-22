@@ -16,7 +16,7 @@ use crate::parser::ParseResult;
 
 
 // Return Vec<(local_part_bytes, Option<host_bytes>)> 
-pub(crate) fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<(&[u8], Option<&[u8]>)>> {
+pub fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<(&[u8], Option<&[u8]>)>> {
     preceded(
         pair(tag_no_case(b"In-Reply-To"), hcolon),
         comma_separated_list1(callid_parser) // Use the callid parser

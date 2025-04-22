@@ -1,7 +1,7 @@
 use super::types::CallState;
 
 /// Checks if a state transition is valid
-pub(crate) fn is_valid_state_transition(from: CallState, to: CallState) -> bool {
+pub fn is_valid_state_transition(from: CallState, to: CallState) -> bool {
     match (from, to) {
         // Initial state can transition to Ringing, Terminating or Failed
         (CallState::Initial, CallState::Ringing) => true,

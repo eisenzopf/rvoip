@@ -38,7 +38,7 @@ fn priority_value(input: &[u8]) -> ParseResult<PriorityValue> {
     )(input)
 }
 
-pub(crate) fn parse_priority(input: &[u8]) -> ParseResult<PriorityValue> {
+pub fn parse_priority(input: &[u8]) -> ParseResult<PriorityValue> {
     priority_value(input)
 }
 

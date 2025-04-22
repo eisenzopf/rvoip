@@ -21,7 +21,7 @@ use crate::parser::ParseResult;
 
 /// Parser for a SIP request line
 /// Changed signature to accept &[u8]
-pub(crate) fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
+pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
     map_res(
         tuple((
             token,

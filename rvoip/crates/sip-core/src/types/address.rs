@@ -226,7 +226,7 @@ impl Address {
 
     // Helper to construct from parser output
     // This helper seems unused now that parsers directly construct Address
-    /* pub(crate) fn from_parsed(
+    /* pub fn from_parsed(
         display_name_bytes: Option<Vec<u8>>,
         uri: Uri,
         params: Vec<Param>

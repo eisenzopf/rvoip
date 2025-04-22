@@ -24,7 +24,7 @@ fn option_tag_list(input: &[u8]) -> ParseResult<Vec<&[u8]>> {
     comma_separated_list0(token)(input)
 }
 
-pub(crate) fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
     parse_token_list0(input)
 }
 

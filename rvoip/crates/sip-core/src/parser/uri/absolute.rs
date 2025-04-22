@@ -144,7 +144,7 @@ fn opaque_part(input: &[u8]) -> ParseResult<&[u8]> {
 
 // absoluteURI = scheme ":" ( hier-part / opaque-part )
 // Returns the full matched URI as &[u8]
-pub(crate) fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(
         tuple((
             scheme,

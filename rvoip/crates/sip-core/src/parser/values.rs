@@ -15,10 +15,10 @@ use super::utf8::text_utf8_char;
 use super::whitespace::lws;
 
 // Type alias for parser result
-pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
+pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // delta-seconds = 1*DIGIT
-pub(crate) fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
+pub fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1,
         |s: &[u8]| {
@@ -29,7 +29,7 @@ pub(crate) fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
 }
 
 // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
-pub(crate) fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
     map_res(
         recognize(alt((
             // 1.000 or 1
@@ -70,7 +70,7 @@ pub(crate) fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
 // Parses the structure but does not perform trimming or LWS replacement.
 // Those should happen after parsing.
 // Uses text_utf8_char from the utf8 module.
-pub(crate) fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(pair(
         text_utf8_char,
         many0(preceded(lws, text_utf8_char)),
@@ -78,7 +78,7 @@ pub(crate) fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // ttl = 1*3DIGIT ; 0-255
-pub(crate) fn ttl_value(input: &[u8]) -> ParseResult<u8> {
+pub fn ttl_value(input: &[u8]) -> ParseResult<u8> {
     map_res(
         map_res(digit1, |s: &[u8]| 
             // Convert bytes to str, then parse u8

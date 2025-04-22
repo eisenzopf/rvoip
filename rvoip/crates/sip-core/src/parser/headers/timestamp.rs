@@ -36,7 +36,7 @@ pub struct TimestampValue {
 }
 
 // Parses 1*(DIGIT) [ "." *(DIGIT) ] into NotNan<f32>
-pub(crate) fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
     map_res(
         // Recognize a sequence like "123" or "123.456"
         recognize(

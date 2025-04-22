@@ -31,16 +31,16 @@ pub struct WeakCall {
     pub state_watcher: watch::Receiver<CallState>,
     
     // Weak references to internal state
-    pub(crate) remote_tag: Weak<RwLock<Option<String>>>,
-    pub(crate) state: Weak<RwLock<CallState>>,
-    pub(crate) connect_time: Weak<RwLock<Option<Instant>>>,
-    pub(crate) end_time: Weak<RwLock<Option<Instant>>>,
+    pub remote_tag: Weak<RwLock<Option<String>>>,
+    pub state: Weak<RwLock<CallState>>,
+    pub connect_time: Weak<RwLock<Option<Instant>>>,
+    pub end_time: Weak<RwLock<Option<Instant>>>,
     
     // Registry reference (weak)
-    pub(crate) registry: Weak<RwLock<Option<Arc<dyn CallRegistryInterface + Send + Sync>>>>,
+    pub registry: Weak<RwLock<Option<Arc<dyn CallRegistryInterface + Send + Sync>>>>,
     
     // Transaction manager reference (strong to ensure DTMF works)
-    pub(crate) transaction_manager: Arc<TransactionManager>,
+    pub transaction_manager: Arc<TransactionManager>,
 }
 
 impl WeakCall {

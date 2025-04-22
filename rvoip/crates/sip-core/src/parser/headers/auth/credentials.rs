@@ -34,7 +34,7 @@ fn basic_credentials_token(input: &[u8]) -> ParseResult<&[u8]> {
 // digest-response = digest-param *(COMMA digest-param)
 // basic-credentials = base64-user-pass (token68)
 // other-response = auth-scheme LWS auth-param *(COMMA auth-param)
-pub(crate) fn credentials(input: &[u8]) -> ParseResult<Credentials> {
+pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
     let (rem, scheme_str) = auth_scheme(input)?;
     let (rem, _) = lws(rem)?;
 

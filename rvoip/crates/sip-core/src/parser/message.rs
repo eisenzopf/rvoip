@@ -46,7 +46,7 @@ pub const MAX_HEADER_COUNT: usize = 100;
 pub const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MB
 
 /// Helper for trimming leading/trailing ASCII whitespace from a byte slice
-pub(crate) fn trim_bytes<'a>(bytes: &'a [u8]) -> &'a [u8] {
+pub fn trim_bytes<'a>(bytes: &'a [u8]) -> &'a [u8] {
     let start = bytes.iter().position(|&b| !b.is_ascii_whitespace()).unwrap_or(0);
     let end = bytes.iter().rposition(|&b| !b.is_ascii_whitespace()).map_or(0, |p| p + 1);
     &bytes[start..end]
@@ -156,7 +156,7 @@ fn header_name(input: &[u8]) -> ParseResult<&[u8]> {
 
 // header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
 // Simplified: Takes bytes until CRLF. Actual unfolding/validation happens later.
-pub(crate) fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
 }
 

@@ -88,7 +88,7 @@ fn m_type(input: &[u8]) -> ParseResult<&[u8]> {
 
 // media-type = m-type SLASH m-subtype *(SEMI m-parameter)
 // Returns MediaType struct
-pub(crate) fn media_type(input: &[u8]) -> ParseResult<MediaType> {
+pub fn media_type(input: &[u8]) -> ParseResult<MediaType> {
     map_res(
         tuple((
             m_type,
@@ -112,7 +112,7 @@ pub(crate) fn media_type(input: &[u8]) -> ParseResult<MediaType> {
 /// Helper to convert parsed media parameters (Vec<(&[u8], &[u8])>) into a HashMap.
 /// Lowers keys, leaves values as Strings.
 /// TODO: Handle unescaping of quoted values.
-pub(crate) fn media_params_to_hashmap(params_b: Vec<(&[u8], &[u8])>) -> Result<HashMap<String, String>, str::Utf8Error> {
+pub fn media_params_to_hashmap(params_b: Vec<(&[u8], &[u8])>) -> Result<HashMap<String, String>, str::Utf8Error> {
     params_b.into_iter().map(|(attr_b, val_b)| {
         let attr = str::from_utf8(attr_b)?.to_lowercase();
         let val = str::from_utf8(val_b)?.to_string();

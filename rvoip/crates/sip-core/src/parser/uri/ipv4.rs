@@ -12,7 +12,7 @@ use crate::parser::ParseResult;
 
 // IPv4address = 1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT
 // Recognizes the pattern and then uses std::net::IpAddr parsing for validation.
-pub(crate) fn ipv4_address(input: &[u8]) -> ParseResult<Host> {
+pub fn ipv4_address(input: &[u8]) -> ParseResult<Host> {
     map_res(
         recognize(
             tuple((

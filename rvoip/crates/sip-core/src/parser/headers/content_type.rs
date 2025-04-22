@@ -161,7 +161,7 @@ pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
 }
 
 // Old parser function - keep for reference or remove later
-// pub(crate) fn parse_content_type(input: &[u8]) -> ParseResult<ContentTypeHeader> {
+// pub fn parse_content_type(input: &[u8]) -> ParseResult<ContentTypeHeader> {
 //     map(media_type, ContentTypeHeader)(input)
 // }
 

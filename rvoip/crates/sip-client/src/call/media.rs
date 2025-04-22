@@ -10,7 +10,7 @@ use super::call_struct::Call;
 
 impl Call {
     /// Setup local SDP for the call
-    pub(crate) async fn setup_local_sdp(&self) -> Result<Option<SessionDescription>> {
+    pub async fn setup_local_sdp(&self) -> Result<Option<SessionDescription>> {
         debug!("Setting up local SDP for call {}", self.id());
         
         // Create an SDP handler

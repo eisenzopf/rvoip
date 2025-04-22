@@ -82,7 +82,7 @@ pub mod token;
 pub mod quoted;
 pub mod values;
 
-// pub(crate) use basic_rules::{ParseResult, ...}; // REMOVE OR UPDATE COMMENT
+// pub use basic_rules::{ParseResult, ...}; // REMOVE OR UPDATE COMMENT
 
 #[cfg(test)]
 mod tests {

@@ -13,11 +13,11 @@ use super::whitespace::{sws, lws, wsp};
 use super::utf8::utf8_nonascii;
 
 // Type alias for parser result
-pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
+pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 
 // quoted-pair = "\" (%x00-09 / %x0B-0C / %x0E-7F)
-pub(crate) fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(pair(
         tag(b"\\"),
         map_res(take(1usize), |c: &[u8]| {
@@ -32,7 +32,7 @@ pub(crate) fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // qdtext = LWS / %x21 / %x23-5B / %x5D-7E / UTF8-NONASCII
-pub(crate) fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
     alt((
         lws,
         recognize(map_res(take(1usize), |c: &[u8]| {
@@ -48,7 +48,7 @@ pub(crate) fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
 
 // quoted-string = SWS DQUOTE *(qdtext / quoted-pair ) DQUOTE
 // Returns the raw content within the quotes, including escape sequences.
-pub(crate) fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
     preceded(
         sws,
         delimited(
@@ -60,7 +60,7 @@ pub(crate) fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // ctext = %x21-27 / %x2A-5B / %x5D-7E / UTF8-NONASCII / LWS
-pub(crate) fn ctext(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn ctext(input: &[u8]) -> ParseResult<&[u8]> {
     alt((
         lws,
         recognize(map_res(take(1usize), |c: &[u8]| {
@@ -76,7 +76,7 @@ pub(crate) fn ctext(input: &[u8]) -> ParseResult<&[u8]> {
 
 // comment = LPAREN *(ctext / quoted-pair / comment) RPAREN
 // Recursive parser. We return the content inside the parens.
-pub(crate) fn comment(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn comment(input: &[u8]) -> ParseResult<&[u8]> {
     delimited(
         lparen, // Consumes LPAREN and surrounding SWS
         recognize(many0(alt((ctext, quoted_pair, comment)))), // Recursive call

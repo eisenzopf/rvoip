@@ -16,7 +16,7 @@ use crate::parser::values::text_utf8_trim;
 use crate::parser::ParseResult;
 
 // Returns Option<&[u8]> representing the trimmed text
-pub(crate) fn parse_subject(input: &[u8]) -> ParseResult<String> {
+pub fn parse_subject(input: &[u8]) -> ParseResult<String> {
     // text_utf8_trim expects at least one char if not empty.
     // If input is empty, this will correctly fail (as it should for optional field)
     // If header exists but value is empty (e.g., "Subject: \r\n"), input will be empty.

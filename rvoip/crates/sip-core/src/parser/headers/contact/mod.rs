@@ -49,7 +49,7 @@ fn contact_param(input: &[u8]) -> ParseResult<ContactParamInfo> {
 
 // Contact = ("Contact" / "m") HCOLON (STAR / (contact-param *(COMMA contact-param)))
 // Note: HCOLON and compact form handled elsewhere.
-pub(crate) fn parse_contact(input: &[u8]) -> ParseResult<ContactValue> {
+pub fn parse_contact(input: &[u8]) -> ParseResult<ContactValue> {
     alt((
         // Handle the STAR case
         value(ContactValue::Star, star), // Use star parser which handles SWS * SWS

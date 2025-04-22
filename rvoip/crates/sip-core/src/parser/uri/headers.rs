@@ -48,7 +48,7 @@ fn header(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
 
 // headers = "?" header *( "&" header )
 // Returns HashMap<String, String>, handling unescaping.
-pub(crate) fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
     map_res(
         preceded(
             tag(b"?"),

@@ -27,7 +27,7 @@ fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
     separated_list1(lws, server_val)(input)
 }
 
-pub(crate) fn parse_user_agent(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+pub fn parse_user_agent(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
     server_val_list(input)
 }
 

@@ -14,7 +14,7 @@ use crate::call::{CallEvent, CallDirection};
 use super::events::SipClientEvent;
 
 /// Trait to transform channels
-pub(crate) trait ChannelTransformer<T, U> {
+pub trait ChannelTransformer<T, U> {
     fn with_transformer<F>(self, f: F) -> mpsc::Sender<T>
     where
         F: Fn(T) -> U + Send + 'static,
@@ -50,7 +50,7 @@ where
 }
 
 /// Add response headers to a response based on a request
-pub(crate) fn add_response_headers(request: &Request, response: &mut Response) {
+pub fn add_response_headers(request: &Request, response: &mut Response) {
     // Copy relevant headers from request to response
     for header in &request.headers {
         match header.name {

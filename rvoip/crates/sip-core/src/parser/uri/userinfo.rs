@@ -49,7 +49,7 @@ fn password(input: &[u8]) -> ParseResult<&[u8]> {
 // userinfo = user [ ":" password ] "@"
 // Returns (unescaped_user_string, Option<unescaped_password_string>)
 // Corrected structure: Parses user and optional password, terminated by '@'
-pub(crate) fn userinfo(input: &[u8]) -> ParseResult<(String, Option<String>)> {
+pub fn userinfo(input: &[u8]) -> ParseResult<(String, Option<String>)> {
     map_res(
         terminated(
             pair(user, opt(preceded(tag(b":"), password))),
