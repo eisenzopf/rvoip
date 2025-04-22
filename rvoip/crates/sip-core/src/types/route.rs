@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use crate::types::Address;
-use crate::parser::headers::route::RouteValue as ParserRouteValue;
+use crate::parser::headers::route::RouteEntry as ParserRouteValue;
 use serde::{Deserialize, Serialize};
 use crate::parser::ParseResult;
 use crate::types::param::Param;

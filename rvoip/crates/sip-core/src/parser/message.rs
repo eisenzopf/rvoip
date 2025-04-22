@@ -24,6 +24,7 @@ use nom::error::{Error as NomError, ErrorKind};
 use nom::sequence::tuple;
 use nom::multi::many_till;
 use nom::Needed;
+use nom::IResult;
 use bytes::Bytes;
 use std::str;
 use crate::error::{Error, Result};
