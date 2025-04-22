@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_status_code() {
-        assert_eq!(status_code(b"200 OK"), Ok((&b" OK"[..], StatusCode::OK)));
+        assert_eq!(status_code(b"200 OK"), Ok((&b" OK"[..], StatusCode::Ok)));
         assert_eq!(status_code(b"404 Not Found"), Ok((&b" Not Found"[..], StatusCode::NotFound)));
         assert_eq!(status_code(b"183"), Ok((&[][..], StatusCode::SessionProgress)));
         assert!(status_code(b"20").is_err());
@@ -122,7 +122,7 @@ mod tests {
         let (rem, (version, status, reason)) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(version, Version::new(2, 0));
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::Ok);
         assert_eq!(reason, b"OK");
     }
 

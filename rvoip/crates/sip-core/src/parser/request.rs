@@ -44,7 +44,7 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Host;
+    use crate::types::uri::{Host, Scheme};
     use std::net::Ipv4Addr;
 
     #[test]
@@ -56,7 +56,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(method, Method::Invite);
         assert_eq!(uri.scheme, Scheme::Sip);
-        assert_eq!(uri.userinfo.unwrap().0, "user");
+        assert_eq!(uri.user.as_ref().unwrap(), "user");
         assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
         assert_eq!(version, Version::new(2, 0));
     }

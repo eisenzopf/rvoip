@@ -31,7 +31,7 @@ mod tests {
         assert!(result.is_ok());
         let (rem, creds) = result.unwrap();
         assert!(rem.is_empty());
-        if let Authorization(Credentials::Digest { params }) = creds {
+        if let AuthorizationHeader(Credentials::Digest { params }) = creds {
             assert!(params.contains(&DigestRespParam::Username("Alice".to_string())));
             assert!(params.contains(&DigestRespParam::Realm("atlanta.com".to_string())));
             assert!(params.contains(&DigestRespParam::Nonce("xyz".to_string())));
