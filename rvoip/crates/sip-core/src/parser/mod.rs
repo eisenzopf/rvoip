@@ -66,7 +66,6 @@ pub use headers::{
 
 // Comment out missing exports
 // pub use message::{parse_message, IncrementalParser, ParseState };
-pub use message::{parse_message};
 
 // Maybe re-export specific header parsers if needed directly?
 // pub use headers::{parse_via, parse_cseq, ...}; 

@@ -25,12 +25,9 @@ pub use absolute::parse_absolute_uri;
 use nom::{
     branch::alt,
     bytes::complete as bytes,
-    combinator::{map, map_res, opt, pair},
+    combinator::{map, map_res, opt, pair, recognize},
     sequence::tuple,
     IResult,
-    error::ErrorKind,
-    error::Error as NomError,
-    combinator::recognize,
     error::{ErrorKind, Error as NomError, ParseError},
 };
 use std::collections::HashMap;

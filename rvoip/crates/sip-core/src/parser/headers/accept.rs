@@ -18,8 +18,6 @@ use nom::{
 };
 use std::str;
 use std::collections::HashMap;
-use crate::types::accept::Accept as AcceptHeader; // Specific header type
-use crate::types::param::Param;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 

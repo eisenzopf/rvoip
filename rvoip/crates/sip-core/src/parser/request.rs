@@ -9,7 +9,6 @@ use nom::{
     sequence::tuple,
     IResult,
 };
-use nom::character::complete::line_ending;
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
 use crate::types::{Method, Version, Uri};

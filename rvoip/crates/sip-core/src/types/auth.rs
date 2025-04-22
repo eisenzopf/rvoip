@@ -120,8 +120,7 @@ pub struct AuthParam {
 
 impl fmt::Display for AuthParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: Handle quoting if value contains separators?
-        write!(f, "{}="{}"", self.name, self.value) // Assume quoted for now
+        write!(f, "{}=\"{}\"", self.name, self.value)
     }
 }
 
@@ -151,20 +150,20 @@ pub enum DigestParam {
 impl fmt::Display for DigestParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DigestParam::Realm(v) => write!(f, "realm="{}"", v),
-            DigestParam::Nonce(v) => write!(f, "nonce="{}"", v),
-            DigestParam::Opaque(v) => write!(f, "opaque="{}"", v),
-            DigestParam::Algorithm(v) => write!(f, "algorithm={}", v), // Algorithm Display handles casing
-            DigestParam::Domain(v) => write!(f, "domain="{}"", v.join(", ")), // TODO: Check quoting needed per item?
+            DigestParam::Realm(v) => write!(f, "realm=\"{}\"", v),
+            DigestParam::Nonce(v) => write!(f, "nonce=\"{}\"", v),
+            DigestParam::Opaque(v) => write!(f, "opaque=\"{}\"", v),
+            DigestParam::Algorithm(v) => write!(f, "algorithm={}", v),
+            DigestParam::Domain(v) => write!(f, "domain=\"{}\"", v.join(", ")),
             DigestParam::Stale(v) => write!(f, "stale={}", v),
-            DigestParam::Qop(v) => write!(f, "qop="{}"", v.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(",")),
-            DigestParam::Username(v) => write!(f, "username="{}"", v),
-            DigestParam::Uri(v) => write!(f, "uri="{}"", v), // Uri Display handles formatting
-            DigestParam::Response(v) => write!(f, "response="{}"", v),
-            DigestParam::Cnonce(v) => write!(f, "cnonce="{}"", v),
-            DigestParam::MsgQop(v) => write!(f, "qop={}", v), // Qop Display handles formatting
-            DigestParam::NonceCount(v) => write!(f, "nc={:08x}", v), // Format as 8 hex digits
-            DigestParam::Param(p) => write!(f, "{}", p), // AuthParam Display handles formatting
+            DigestParam::Qop(v) => write!(f, "qop={}", v.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(",")),
+            DigestParam::Username(v) => write!(f, "username=\"{}\"", v),
+            DigestParam::Uri(v) => write!(f, "uri=\"{}\"", v),
+            DigestParam::Response(v) => write!(f, "response=\"{}\"", v),
+            DigestParam::Cnonce(v) => write!(f, "cnonce=\"{}\"", v),
+            DigestParam::MsgQop(v) => write!(f, "qop={}", v),
+            DigestParam::NonceCount(v) => write!(f, "nc={:08x}", v),
+            DigestParam::Param(p) => write!(f, "{}", p),
         }
     }
 }
@@ -182,10 +181,10 @@ pub enum AuthenticationInfoParam {
 impl fmt::Display for AuthenticationInfoParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthenticationInfoParam::NextNonce(v) => write!(f, "nextnonce="{}"", v),
+            AuthenticationInfoParam::NextNonce(v) => write!(f, "nextnonce=\"{}\"", v),
             AuthenticationInfoParam::Qop(v) => write!(f, "qop={}", v),
-            AuthenticationInfoParam::ResponseAuth(v) => write!(f, "rspauth="{}"", v),
-            AuthenticationInfoParam::Cnonce(v) => write!(f, "cnonce="{}"", v),
+            AuthenticationInfoParam::ResponseAuth(v) => write!(f, "rspauth=\"{}\"", v),
+            AuthenticationInfoParam::Cnonce(v) => write!(f, "cnonce=\"{}\"", v),
             AuthenticationInfoParam::NonceCount(v) => write!(f, "nc={:08x}", v),
         }
     }
