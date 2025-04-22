@@ -16,7 +16,7 @@ use crate::parser::common::comma_separated_list1; // Route requires at least one
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 
 // Import types (assuming)
 use crate::types::address::Address;

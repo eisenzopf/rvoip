@@ -23,7 +23,7 @@ use params::parse_contact_params; // *(SEMI contact-params)
 
 // Import types
 use crate::types::contact::{ContactHeader, ContactValue, ContactParams};
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::address::Address;
 use crate::types::param::Param;
 use crate::types::contact::ContactParamInfo;

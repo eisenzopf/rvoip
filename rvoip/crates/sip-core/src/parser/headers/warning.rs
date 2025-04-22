@@ -24,7 +24,7 @@ use crate::parser::uri::host::hostport;
 use crate::parser::whitespace::space1;
 use crate::parser::ParseResult;
 
-use crate::uri::Host;
+use crate::types::uri::Host;
 use crate::types::warning::Warning as WarningHeader; // Specific header type
 use crate::types::uri::Uri;
 use crate::types::warning::WarnCode;

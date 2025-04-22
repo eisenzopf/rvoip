@@ -22,7 +22,8 @@ use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
+use crate::types::call_info::{CallInfo as CallInfoHeader, CallInfoValue, InfoPurpose}; // Use specific header type and related types
 use serde::{Serialize, Deserialize};
 
 // Make these types public

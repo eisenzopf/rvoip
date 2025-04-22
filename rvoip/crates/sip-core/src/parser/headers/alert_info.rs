@@ -18,8 +18,10 @@ use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 
+use crate::types::uri::Uri;
+use crate::types::alert_info::AlertInfo as AlertInfoHeader; // Use specific header type
+
 use crate::types::param::Param;
-use crate::uri::Uri;
 
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;

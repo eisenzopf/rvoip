@@ -18,7 +18,7 @@ use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::address::NameAddr;
 use crate::types::address::Address;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;

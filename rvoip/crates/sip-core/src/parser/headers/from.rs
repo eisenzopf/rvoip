@@ -26,9 +26,9 @@ use crate::parser::common_params::{from_to_param, semicolon_separated_params0, g
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::address::Address;
-use crate::types::from::From as FromHeader; // Import the specific header type
+use crate::types::from::From as FromHeader; // Use specific type alias
 
 // NOTE: name_addr and addr_spec are duplicated from contact.rs for now.
 // Consider extracting to a shared address.rs module later.

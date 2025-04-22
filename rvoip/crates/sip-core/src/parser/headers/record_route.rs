@@ -20,7 +20,7 @@ use crate::parser::common::comma_separated_list1; // Changed from list0
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::address::Address; // Use Address directly
 // use crate::types::record_route::RecordRouteInfo; // Removed, seems unused
 use crate::types::record_route::RecordRoute as RecordRouteHeader; // Import specific type

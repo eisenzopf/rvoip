@@ -18,13 +18,13 @@ use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 
-use crate::types::param::Param;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
+use crate::types::error_info::ErrorInfo as ErrorInfoHeader; // Use specific header type
+use serde::{Serialize, Deserialize}; // Added serde
 
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;
-use crate::types::error_info::ErrorInfo as ErrorInfoHeader; // Specific header type
-use serde::{Serialize, Deserialize}; // Added serde
+use crate::types::param::Param;
 
 // error-uri = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 fn error_uri(input: &[u8]) -> ParseResult<ErrorInfoValue> {
