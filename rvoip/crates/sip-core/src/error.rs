@@ -241,4 +241,12 @@ impl From<std::num::ParseIntError> for Error {
     fn from(err: std::num::ParseIntError) -> Self {
         Error::ParseError(format!("Failed to parse integer: {}", err))
     }
+}
+
+// Convert owned Nom errors (Vec<u8>) to our custom Error type
+impl From<nom::Err<NomError<Vec<u8>>>> for Error {
+    fn from(err: nom::Err<NomError<Vec<u8>>>) -> Self {
+        // We lose positional info here as Vec<u8> doesn't track original input slice easily
+        Error::ParseError(format!("Nom parsing error (owned): {:?}", err))
+    }
 } 

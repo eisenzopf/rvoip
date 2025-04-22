@@ -1,10 +1,12 @@
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, ParseTypedHeader};
 use crate::types::address::Address;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use crate::error::Result;
-use crate::parser::headers::parse_address; // For FromStr
+use crate::error::{Error, Result};
+use crate::parser::parse_address; // For FromStr
 use std::ops::Deref;
+use nom::combinator;
 
 /// Represents the From header field (RFC 3261 Section 8.1.1.3).
 /// Contains the logical identity of the initiator of the request.
@@ -38,7 +40,10 @@ impl fmt::Display for From {
 impl FromStr for From {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
-        parse_address(s).map(From)
+        // Use all_consuming, handle input type, map result and error
+        nom::combinator::all_consuming(parse_address)(s.as_bytes())
+            .map(|(_rem, addr)| From(addr))
+            .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }
 

@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag, take_while1, take_while_m_n},
     character::complete::digit1,
     combinator::{map_res, opt, recognize},
-    error::{error_position, ErrorKind},
+    error::{ErrorKind},
     multi::{many0, many1},
     sequence::{pair, preceded, tuple},
     IResult,
@@ -48,17 +48,17 @@ pub(crate) fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
         ))),
         |q_bytes| {
             str::from_utf8(q_bytes)
-                .map_err(|_| nom::Err::Failure(error_position!(input, ErrorKind::Char)))
+                .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, ErrorKind::Char)))
                 .and_then(|q_str| {
                     q_str
                         .parse::<f32>()
-                        .map_err(|_| nom::Err::Failure(error_position!(input, ErrorKind::Float)))
+                        .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, ErrorKind::Float)))
                         .and_then(|q_f32| {
                             if q_f32 >= 0.0 && q_f32 <= 1.0 {
                                 NotNan::try_from(q_f32)
-                                    .map_err(|_| nom::Err::Failure(error_position!(input, ErrorKind::Verify))) // Error for NaN
+                                    .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, ErrorKind::Verify)))
                             } else {
-                                Err(nom::Err::Failure(error_position!(input, ErrorKind::Verify)))
+                                Err(nom::Err::Failure(nom::error::Error::new(input, ErrorKind::Verify)))
                             }
                         })
                 })

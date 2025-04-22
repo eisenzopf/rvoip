@@ -44,7 +44,7 @@ pub(crate) fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
 
 // name-addr = [ display-name ] LAQUOT addr-spec RAQUOT
 // Returns Address struct (params added by caller)
-pub(crate) fn name_addr(input: &[u8]) -> ParseResult<Address> {
+pub fn name_addr(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             opt(display_name), // Optional display name (String)
@@ -60,7 +60,7 @@ pub(crate) fn name_addr(input: &[u8]) -> ParseResult<Address> {
 
 // Helper to parse either name-addr or addr-spec, used by From/To/etc.
 // Returns Address struct (params added by caller)
-pub(crate) fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<Address> {
+pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<Address> {
     alt((
         name_addr, // Try name-addr first (<> required)
         // If just addr-spec (URI directly), map it into an Address struct

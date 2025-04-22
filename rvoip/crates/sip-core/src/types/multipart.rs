@@ -2,8 +2,10 @@ use bytes::Bytes;
 use crate::types::header::{Header, HeaderName};
 use crate::types::content_type::ContentType;
 use crate::error::{Error, Result};
-use crate::sdp::SdpSession;
+use crate::parser;
+use crate::SdpSession;
 use std::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Represents a parsed MIME part.
 #[derive(Debug, Clone, PartialEq)]

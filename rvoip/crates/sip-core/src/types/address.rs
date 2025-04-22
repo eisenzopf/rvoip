@@ -1,7 +1,7 @@
 use crate::types::uri::Uri;
 use crate::types::param::{Param, GenericValue};
 use crate::error::{Error, Result};
-use crate::parser::address::parse_address;
+use crate::parser::parse_address;
 use serde::{Serialize, Deserialize};
 use std::fmt;
 use std::str::FromStr;
@@ -243,7 +243,10 @@ impl FromStr for Address {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_address(s)
+        // Use all_consuming, handle input type, map result and error
+        nom::combinator::all_consuming(parse_address)(s.as_bytes())
+            .map(|(_rem, addr)| addr) // Extract the address from the tuple
+            .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }
 

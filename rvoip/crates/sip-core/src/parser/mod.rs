@@ -12,8 +12,10 @@ pub mod multipart;
 mod request;
 mod response;
 pub mod uri;
-mod utils;
+pub mod utils;
 pub mod address;
+// Re-export the address parser under the expected name
+pub use address::name_addr_or_addr_spec as parse_address;
 mod common_params;
 mod utf8;
 

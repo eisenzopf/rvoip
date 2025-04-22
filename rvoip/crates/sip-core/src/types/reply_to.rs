@@ -27,14 +27,11 @@ impl FromStr for ReplyTo {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::address::parse_address;
-
-        match all_consuming(parse_address)(s.as_bytes()) {
-            Ok((_, address)) => Ok(ReplyTo(address)),
-            Err(e) => Err(Error::ParseError( 
-                format!("Failed to parse Reply-To header: {:?}", e)
-            ))
-        }
+        use crate::parser::parse_address;
+        // Use all_consuming, handle input type, map result and error
+        nom::combinator::all_consuming(parse_address)(s.as_bytes())
+            .map(|(_rem, addr)| ReplyTo(addr))
+            .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }
 
