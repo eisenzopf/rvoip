@@ -32,7 +32,7 @@ fn parse_method_token(input: &[u8]) -> ParseResult<Method> {
 // Note: HCOLON handled elsewhere
 pub fn parse_allow(input: &[u8]) -> ParseResult<Allow> {
     map(
-        comma_separated_list0(token), // Methods are tokens
+        comma_separated_list0(parse_method_token), // Use parse_method_token to parse Method
         |methods| {
             Allow(methods)
         }
@@ -48,7 +48,7 @@ mod tests {
         let input = b"INVITE, ACK, OPTIONS, CANCEL, BYE";
         let (rem, allow_list) = parse_allow(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(allow_list, Allow(vec!["INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"].iter().map(|&m| Method::from_str(m).unwrap()).collect()));
+        assert_eq!(allow_list, Allow(vec![Method::INVITE, Method::ACK, Method::OPTIONS, Method::CANCEL, Method::BYE]));
 
         let input_empty = b"";
         let (rem_empty, allow_empty) = parse_allow(input_empty).unwrap();

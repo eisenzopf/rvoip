@@ -43,6 +43,7 @@ pub use header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait}
 pub mod max_forwards;
 pub mod record_route;
 pub mod reply_to;
+pub mod refer_to;
 pub mod route;
 pub mod sdp;
 pub mod to;
@@ -73,6 +74,7 @@ pub use from::From;
 pub use max_forwards::MaxForwards;
 pub use warning::Warning;
 pub use multipart::{MultipartBody, MimePart, ParsedBody};
+pub use refer_to::ReferTo;
 
 // Add missing pub use * directives
 pub use priority::*;

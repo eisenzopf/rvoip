@@ -15,8 +15,8 @@ use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 
 
-// Return Vec<(local_part_bytes, Option<host_bytes>)> 
-pub fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<(&[u8], Option<&[u8]>)>> {
+// Return Vec<String> - each string is a call-id
+pub fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<String>> {
     preceded(
         pair(tag_no_case(b"In-Reply-To"), hcolon),
         comma_separated_list1(callid) // Use the callid parser

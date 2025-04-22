@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::types::param::Param;
 use crate::types::uri::Uri; // Import Uri
+use crate::types::address::Address; // Add explicit import for Address
 use crate::types::contact::{Contact, ContactValue as TypesContactValue}; // Import Contact
 use crate::types::from::From as FromHeaderValue; // Rename From to avoid conflict
 use crate::types::to::To as ToHeaderValue; // Rename To to avoid conflict
@@ -48,6 +49,8 @@ use crate::parser::headers::accept_language::LanguageInfo as AcceptLanguageValue
 use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::call_info::CallInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
+use crate::types::refer_to::ReferTo; // Add ReferTo import
+use crate::parser::headers::refer_to::ReferToValue; // Import from parser
 
 // Helper From implementation for Error
 impl From<FromUtf8Error> for Error {
@@ -304,6 +307,7 @@ pub enum HeaderValue {
     Route(Vec<RouteEntry>),
     RecordRoute(Vec<RecordRouteEntry>),
     ReplyTo(ReplyToValue),
+    ReferTo(ReferToValue), // Add ReferTo variant
 
     // === Request/Response Info ===
     Via(Vec<ViaEntry>), // ViaEntry would contain the parsed tuple
@@ -478,6 +482,7 @@ pub enum TypedHeader {
     Accept(Accept), // Use types::Accept
     Allow(Allow), // Use types::Allow
     ReplyTo(ReplyTo), // Use types::ReplyTo
+    ReferTo(ReferTo), // Add ReferTo variant
     Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
 
@@ -512,7 +517,7 @@ pub enum TypedHeader {
 }
 
 impl TypedHeader {
-    /// Returns the canonical name of this header.
+    /// Returns the name of the header
     pub fn name(&self) -> HeaderName {
         match self {
             TypedHeader::Via(_) => HeaderName::Via,
@@ -535,6 +540,7 @@ impl TypedHeader {
             TypedHeader::Accept(_) => HeaderName::Accept,
             TypedHeader::Allow(_) => HeaderName::Allow,
             TypedHeader::ReplyTo(_) => HeaderName::ReplyTo,
+            TypedHeader::ReferTo(_) => HeaderName::ReferTo, // Add ReferTo variant
             TypedHeader::Warning(_) => HeaderName::Warning,
             TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
@@ -568,58 +574,187 @@ impl TypedHeader {
 impl fmt::Display for TypedHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Format known typed headers by displaying their inner value
-            // Assumes the inner types implement Display
-            TypedHeader::Via(v) => write!(f, "{}: {}", HeaderName::Via, v),
-            TypedHeader::From(v) => write!(f, "{}: {}", HeaderName::From, v),
-            TypedHeader::To(v) => write!(f, "{}: {}", HeaderName::To, v),
-            TypedHeader::Contact(v) => write!(f, "{}: {}", HeaderName::Contact, v),
-            TypedHeader::CallId(v) => write!(f, "{}: {}", HeaderName::CallId, v),
-            TypedHeader::CSeq(v) => write!(f, "{}: {}", HeaderName::CSeq, v),
-            TypedHeader::Route(v) => write!(f, "{}: {}", HeaderName::Route, v),
-            TypedHeader::RecordRoute(v) => write!(f, "{}: {}", HeaderName::RecordRoute, v),
-            TypedHeader::MaxForwards(v) => write!(f, "{}: {}", HeaderName::MaxForwards, v),
-            TypedHeader::ContentType(v) => write!(f, "{}: {}", HeaderName::ContentType, v),
-            TypedHeader::ContentLength(v) => write!(f, "{}: {}", HeaderName::ContentLength, v),
-            TypedHeader::Expires(v) => write!(f, "{}: {}", HeaderName::Expires, v),
-            TypedHeader::Authorization(v) => write!(f, "{}: {}", HeaderName::Authorization, v),
-            TypedHeader::WwwAuthenticate(v) => write!(f, "{}: {}", HeaderName::WwwAuthenticate, v),
-            TypedHeader::ProxyAuthenticate(v) => write!(f, "{}: {}", HeaderName::ProxyAuthenticate, v),
-            TypedHeader::ProxyAuthorization(v) => write!(f, "{}: {}", HeaderName::ProxyAuthorization, v),
-            TypedHeader::AuthenticationInfo(v) => write!(f, "{}: {}", HeaderName::AuthenticationInfo, v),
-            TypedHeader::Accept(v) => write!(f, "{}: {}", HeaderName::Accept, v),
-            TypedHeader::Allow(v) => write!(f, "{}: {}", HeaderName::Allow, v),
-            TypedHeader::ReplyTo(v) => write!(f, "{}: {}", HeaderName::ReplyTo, v),
-            TypedHeader::Warning(v) => write!(f, "{}: {:?}", HeaderName::Warning, v),
-            TypedHeader::ContentDisposition(v) => write!(f, "{}: {}", HeaderName::ContentDisposition, v),
-
-            // Handle placeholder types (Vec<String>, tuples, etc.) - Requires Display impl for them
-            // For now, using debug format as a placeholder if direct Display is complex
-            TypedHeader::ContentEncoding(v) => write!(f, "{}: {:?}", HeaderName::ContentEncoding, v),
-            TypedHeader::ContentLanguage(v) => write!(f, "{}: {:?}", HeaderName::ContentLanguage, v),
-            TypedHeader::AcceptEncoding(v) => write!(f, "{}: {:?}", HeaderName::AcceptEncoding, v),
-            TypedHeader::AcceptLanguage(v) => write!(f, "{}: {:?}", HeaderName::AcceptLanguage, v),
-            TypedHeader::MinExpires(v) => write!(f, "{}: {}", HeaderName::MinExpires, v),
-            TypedHeader::MimeVersion(v) => write!(f, "{}: {:?}", HeaderName::MimeVersion, v), // Assuming tuple doesn't have Display
-            TypedHeader::Require(v) => write!(f, "{}: {:?}", HeaderName::Require, v),
-            TypedHeader::Supported(v) => write!(f, "{}: {:?}", HeaderName::Supported, v),
-            TypedHeader::Unsupported(v) => write!(f, "{}: {:?}", HeaderName::Unsupported, v),
-            TypedHeader::ProxyRequire(v) => write!(f, "{}: {:?}", HeaderName::ProxyRequire, v),
-            TypedHeader::Date(v) => write!(f, "{}: {}", HeaderName::Date, v), // chrono DateTime implements Display
-            TypedHeader::Timestamp(v) => write!(f, "{}: {:?}", HeaderName::Timestamp, v), // tuple
-            TypedHeader::Organization(v) => write!(f, "{}: {}", HeaderName::Organization, v),
-            TypedHeader::Priority(v) => write!(f, "{}: {}", HeaderName::Priority, v), // Assuming PriorityValue implements Display
-            TypedHeader::Subject(v) => write!(f, "{}: {}", HeaderName::Subject, v),
-            TypedHeader::Server(v) => write!(f, "{}: {:?}", HeaderName::Server, v), // Vec<ServerVal>
-            TypedHeader::UserAgent(v) => write!(f, "{}: {:?}", HeaderName::UserAgent, v), // Vec<ServerVal>
-            TypedHeader::InReplyTo(v) => write!(f, "{}: {:?}", HeaderName::InReplyTo, v), // Vec<String>
-            TypedHeader::RetryAfter(v) => write!(f, "{}: {:?}", HeaderName::RetryAfter, v), // tuple
-            TypedHeader::ErrorInfo(v) => write!(f, "{}: {:?}", HeaderName::ErrorInfo, v), // Vec<...>
-            TypedHeader::AlertInfo(v) => write!(f, "{}: {:?}", HeaderName::AlertInfo, v), // Vec<...>
-            TypedHeader::CallInfo(v) => write!(f, "{}: {:?}", HeaderName::CallInfo, v), // Vec<...>
-
-            // Format Other headers using the name and value
-            TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value), // Assumes HeaderValue implements Display
+            TypedHeader::Via(via) => write!(f, "{}: {}", HeaderName::Via, via),
+            TypedHeader::From(from) => write!(f, "{}: {}", HeaderName::From, from),
+            TypedHeader::To(to) => write!(f, "{}: {}", HeaderName::To, to),
+            TypedHeader::Contact(contact) => write!(f, "{}: {}", HeaderName::Contact, contact),
+            TypedHeader::CallId(call_id) => write!(f, "{}: {}", HeaderName::CallId, call_id),
+            TypedHeader::CSeq(cseq) => write!(f, "{}: {}", HeaderName::CSeq, cseq),
+            TypedHeader::Route(route) => write!(f, "{}: {}", HeaderName::Route, route),
+            TypedHeader::RecordRoute(record_route) => write!(f, "{}: {}", HeaderName::RecordRoute, record_route),
+            TypedHeader::MaxForwards(max_forwards) => write!(f, "{}: {}", HeaderName::MaxForwards, max_forwards),
+            TypedHeader::ContentType(content_type) => write!(f, "{}: {}", HeaderName::ContentType, content_type),
+            TypedHeader::ContentLength(content_length) => write!(f, "{}: {}", HeaderName::ContentLength, content_length),
+            TypedHeader::Expires(expires) => write!(f, "{}: {}", HeaderName::Expires, expires),
+            TypedHeader::Authorization(auth) => write!(f, "{}: {}", HeaderName::Authorization, auth),
+            TypedHeader::WwwAuthenticate(www_auth) => write!(f, "{}: {}", HeaderName::WwwAuthenticate, www_auth),
+            TypedHeader::ProxyAuthenticate(proxy_auth) => write!(f, "{}: {}", HeaderName::ProxyAuthenticate, proxy_auth),
+            TypedHeader::ProxyAuthorization(proxy_auth) => write!(f, "{}: {}", HeaderName::ProxyAuthorization, proxy_auth),
+            TypedHeader::AuthenticationInfo(auth_info) => write!(f, "{}: {}", HeaderName::AuthenticationInfo, auth_info),
+            TypedHeader::Accept(accept) => write!(f, "{}: {}", HeaderName::Accept, accept),
+            TypedHeader::Allow(allow) => write!(f, "{}: {}", HeaderName::Allow, allow),
+            TypedHeader::ReplyTo(reply_to) => write!(f, "{}: {}", HeaderName::ReplyTo, reply_to),
+            TypedHeader::ReferTo(refer_to) => write!(f, "{}: {}", HeaderName::ReferTo, refer_to),
+            TypedHeader::Warning(warnings) => {
+                write!(f, "{}: ", HeaderName::Warning)?;
+                for (i, warning) in warnings.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", warning)?;
+                }
+                Ok(())
+            },
+            TypedHeader::ContentDisposition(content_disposition) => write!(f, "{}: {}", HeaderName::ContentDisposition, content_disposition),
+            TypedHeader::ContentEncoding(content_encoding) => {
+                write!(f, "{}: ", HeaderName::ContentEncoding)?;
+                for (i, encoding) in content_encoding.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", encoding)?;
+                }
+                Ok(())
+            },
+            TypedHeader::ContentLanguage(content_language) => {
+                write!(f, "{}: ", HeaderName::ContentLanguage)?;
+                for (i, language) in content_language.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", language)?;
+                }
+                Ok(())
+            },
+            TypedHeader::AcceptEncoding(accept_encoding) => {
+                write!(f, "{}: ", HeaderName::AcceptEncoding)?;
+                for (i, encoding) in accept_encoding.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", encoding)?;
+                }
+                Ok(())
+            },
+            TypedHeader::AcceptLanguage(accept_language) => {
+                write!(f, "{}: ", HeaderName::AcceptLanguage)?;
+                for (i, language) in accept_language.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", language)?;
+                }
+                Ok(())
+            },
+            TypedHeader::MinExpires(min_expires) => write!(f, "{}: {}", HeaderName::MinExpires, min_expires),
+            TypedHeader::MimeVersion(mime_version) => write!(f, "{}: {}", HeaderName::MimeVersion, mime_version),
+            TypedHeader::Require(require) => {
+                write!(f, "{}: ", HeaderName::Require)?;
+                for (i, requirement) in require.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", requirement)?;
+                }
+                Ok(())
+            },
+            TypedHeader::Supported(supported) => {
+                write!(f, "{}: ", HeaderName::Supported)?;
+                for (i, feature) in supported.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", feature)?;
+                }
+                Ok(())
+            },
+            TypedHeader::Unsupported(unsupported) => {
+                write!(f, "{}: ", HeaderName::Unsupported)?;
+                for (i, feature) in unsupported.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", feature)?;
+                }
+                Ok(())
+            },
+            TypedHeader::ProxyRequire(proxy_require) => {
+                write!(f, "{}: ", HeaderName::ProxyRequire)?;
+                for (i, requirement) in proxy_require.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", requirement)?;
+                }
+                Ok(())
+            },
+            TypedHeader::Date(date) => write!(f, "{}: {}", HeaderName::Date, date),
+            TypedHeader::Timestamp(timestamp) => write!(f, "{}: {:?}", HeaderName::Timestamp, timestamp),
+            TypedHeader::Organization(organization) => write!(f, "{}: {}", HeaderName::Organization, organization),
+            TypedHeader::Priority(priority) => write!(f, "{}: {}", HeaderName::Priority, priority),
+            TypedHeader::Subject(subject) => write!(f, "{}: {}", HeaderName::Subject, subject),
+            TypedHeader::Server(server) => {
+                write!(f, "{}: ", HeaderName::Server)?;
+                for (i, server_val) in server.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", server_val)?;
+                }
+                Ok(())
+            },
+            TypedHeader::UserAgent(user_agent) => {
+                write!(f, "{}: ", HeaderName::UserAgent)?;
+                for (i, agent) in user_agent.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", agent)?;
+                }
+                Ok(())
+            },
+            TypedHeader::InReplyTo(in_reply_to) => {
+                write!(f, "{}: ", HeaderName::InReplyTo)?;
+                for (i, reply) in in_reply_to.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", reply)?;
+                }
+                Ok(())
+            },
+            TypedHeader::RetryAfter(retry_after) => write!(f, "{}: {:?}", HeaderName::RetryAfter, retry_after),
+            TypedHeader::ErrorInfo(error_info) => {
+                write!(f, "{}: ", HeaderName::ErrorInfo)?;
+                for (i, info) in error_info.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", info)?;
+                }
+                Ok(())
+            },
+            TypedHeader::AlertInfo(alert_info) => {
+                write!(f, "{}: ", HeaderName::AlertInfo)?;
+                for (i, info) in alert_info.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", info)?;
+                }
+                Ok(())
+            },
+            TypedHeader::CallInfo(call_info) => {
+                write!(f, "{}: ", HeaderName::CallInfo)?;
+                for (i, info) in call_info.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", info)?;
+                }
+                Ok(())
+            },
+            TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
 }
@@ -961,6 +1096,21 @@ impl TryFrom<Header> for TypedHeader {
                      Ok(TypedHeader::CallInfo(strings))
                  })
             },
+            HeaderName::ReferTo => {
+                match header.value {
+                    HeaderValue::ReferTo(value) => {
+                        // Extract parts needed to create the ReferTo type
+                        let display_name = value.display_name;
+                        let uri = value.uri;
+                        let params = value.params;
+                        
+                        // Build Address and ReferTo
+                        let address = crate::types::address::Address::new(uri, display_name, params);
+                        Ok(TypedHeader::ReferTo(ReferTo(address)))
+                    }
+                    _ => Err(Error::ParseError(format!("Invalid header value for Refer-To header")))
+                }
+            }
 
             // Fallback for Other/Unimplemented
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),

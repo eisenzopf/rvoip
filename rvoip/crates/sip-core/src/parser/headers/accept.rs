@@ -55,7 +55,10 @@ fn accept_range(input: &[u8]) -> ParseResult<(String, String, Vec<Param>)> {
             semicolon_separated_params0(contact_param_item) // *accept-params
         ),
         |((m_type, m_subtype), params)| {
-            (m_type.to_string(), m_subtype.to_string(), params)
+            // Convert byte slices to strings using std::str::from_utf8 first
+            let type_str = std::str::from_utf8(m_type).unwrap_or_default().to_string();
+            let subtype_str = std::str::from_utf8(m_subtype).unwrap_or_default().to_string();
+            (type_str, subtype_str, params)
         }
     )(input)
 }
@@ -63,8 +66,8 @@ fn accept_range(input: &[u8]) -> ParseResult<(String, String, Vec<Param>)> {
 // media-range = ( "*/*" / ( m-type SLASH "*" ) / ( m-type SLASH m-subtype ) )
 fn media_range(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
     alt((
-        value((b"*", b"*"), tag(b"*/*".as_slice())),
-        pair(m_type, preceded(slash, tag(b"*".as_slice()))),
+        value((b"*" as &[u8], b"*" as &[u8]), tag(b"*/*")),
+        pair(m_type, preceded(slash, tag(b"*"))),
         pair(m_type, preceded(slash, m_subtype)),
     ))(input)
 }
@@ -76,10 +79,40 @@ pub fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
     map(
         comma_separated_list0(accept_range),
         |values| {
-            let media_types = values.into_iter()
-                .map(|(t, s, p)| MediaType::new(t, s, p))
+            let accept_values = values.into_iter()
+                .map(|(t, s, p)| {
+                    // Convert parameters to HashMap
+                    let mut params = HashMap::new();
+                    let mut q_value = None;
+                    
+                    for param in p {
+                        if let crate::types::param::Param::Other(name, Some(value)) = param {
+                            // Check for q parameter
+                            if name.to_lowercase() == "q" {
+                                // Parse q value as float
+                                if let Ok(q) = value.to_string().parse::<f32>() {
+                                    if let Ok(q_not_nan) = NotNan::new(q) {
+                                        q_value = Some(q_not_nan);
+                                    }
+                                }
+                            } else {
+                                // Store other parameters
+                                params.insert(name, value.to_string());
+                            }
+                        }
+                    }
+                    
+                    // Create AcceptValue directly
+                    AcceptValue {
+                        m_type: t,
+                        m_subtype: s,
+                        q: q_value,
+                        params,
+                    }
+                })
                 .collect();
-            AcceptHeader(media_types)
+            
+            AcceptHeader(accept_values)
         }
     )(input)
 }
