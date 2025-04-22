@@ -17,7 +17,7 @@ use std::str;
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma, equal, laquot, raquot};
 use crate::parser::common_params::generic_param;
-use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
+use crate::parser::uri::parse_absolute_uri; // Using the correct function name
 use crate::parser::token::token;
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;

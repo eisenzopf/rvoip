@@ -21,7 +21,7 @@ use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::address::Address;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;
-use crate::parser::address::parse_name_addr;
+use crate::parser::address::name_addr;
 use serde::{Serialize, Deserialize};
 
 // Define a struct to represent the Reply-To header value
@@ -57,7 +57,7 @@ pub fn parse_reply_to(input: &[u8]) -> ParseResult<ReplyToHeader> {
 /// Parses a Reply-To header value.
 pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<Address> {
     // For now, assume it's just a single name-addr
-    parse_name_addr(input)
+    name_addr(input)
 }
 
 #[cfg(test)]

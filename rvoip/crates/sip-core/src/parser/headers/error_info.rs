@@ -14,7 +14,7 @@ use std::str;
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma, laquot, raquot};
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
+use crate::parser::uri::parse_absolute_uri; // Using the correct function name
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 use crate::parser::uri::parse_uri; // Import the actual URI parser
@@ -34,7 +34,7 @@ use crate::types::param::Param;
 // Returns Uri directly
 fn error_uri(input: &[u8]) -> ParseResult<Uri> {
     map_res(
-        delimited(laquot, absolute_uri, raquot), // absolute_uri likely returns &[u8]
+        delimited(laquot, parse_absolute_uri, raquot), // Using parse_absolute_uri
         |uri_bytes| -> Result<Uri, CrateError> { 
             // Parse the bytes using the dedicated parser
             let (_, uri) = all_consuming(parse_uri)(uri_bytes)

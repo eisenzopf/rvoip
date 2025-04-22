@@ -15,7 +15,6 @@ use std::str;
 
 // Import from new modules
 use crate::parser::separators::hcolon;
-use crate::parser::common_chars::take_till_crlf; // Helper to take rest of line
 use crate::parser::ParseResult;
 
 // Assuming chrono is available as a dependency

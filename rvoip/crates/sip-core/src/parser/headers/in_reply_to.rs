@@ -10,7 +10,7 @@ use nom::{
 
 // Import from new modules
 use crate::parser::separators::{hcolon, comma};
-use super::call_id::callid_parser; // Reuse callid parser logic
+use super::call_id::callid; // Reuse callid parser logic
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 
@@ -19,7 +19,7 @@ use crate::parser::ParseResult;
 pub fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<(&[u8], Option<&[u8]>)>> {
     preceded(
         pair(tag_no_case(b"In-Reply-To"), hcolon),
-        comma_separated_list1(callid_parser) // Use the callid parser
+        comma_separated_list1(callid) // Use the callid parser
     )(input)
 }
 

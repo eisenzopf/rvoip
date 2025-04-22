@@ -23,8 +23,6 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::content_disposition::{ContentDisposition, DispositionType};
-use crate::parser::common_params::parse_generic_param;
-use crate::parser::token::parse_token;
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token
@@ -119,7 +117,7 @@ fn handling_param(input: &[u8]) -> ParseResult<Handling> {
 fn disp_param(input: &[u8]) -> ParseResult<DispositionParam> {
     alt((
         map(handling_param, DispositionParam::Handling),
-        map(parse_generic_param, DispositionParam::Generic), // Use existing generic_param parser
+        map(generic_param, DispositionParam::Generic), // Use existing generic_param parser
     ))(input)
 }
 

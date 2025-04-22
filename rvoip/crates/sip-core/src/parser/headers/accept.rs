@@ -3,8 +3,8 @@
 // accept-value = media-range [ accept-params ]
 
 use crate::parser::common::{comma_separated_list0};
-use crate::parser::media_type::{m_subtype, m_type};
-use crate::parser::common_params::{accept_param_item, semicolon_separated_params0, generic_param};
+use crate::parser::token::token; // Use the token parser instead
+use crate::parser::common_params::{contact_param_item, semicolon_separated_params0, generic_param};
 use crate::parser::separators::{slash, semi};
 use crate::parser::ParseResult;
 use crate::types::accept::Accept as AcceptHeader; // Specific header type
@@ -12,7 +12,7 @@ use crate::types::param::Param;
 use crate::types::media_type::MediaType;
 use nom::{
     branch::alt,
-    bytes::complete::{tag},
+    bytes::complete::{tag, tag_no_case},
     combinator::{map, map_res, value},
     sequence::{pair, preceded}
 };
@@ -20,6 +20,15 @@ use std::str;
 use std::collections::HashMap;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
+
+// Define m_type and m_subtype functions since they're not available
+fn m_type(input: &[u8]) -> ParseResult<&[u8]> {
+    token(input)
+}
+
+fn m_subtype(input: &[u8]) -> ParseResult<&[u8]> {
+    token(input)
+}
 
 // Define structure for Accept header value
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -43,7 +52,7 @@ fn accept_range(input: &[u8]) -> ParseResult<(String, String, Vec<Param>)> {
     map(
         pair(
             media_range, // (type, subtype)
-            semicolon_separated_params0(accept_param_item) // *accept-params
+            semicolon_separated_params0(contact_param_item) // *accept-params
         ),
         |((m_type, m_subtype), params)| {
             (m_type.to_string(), m_subtype.to_string(), params)

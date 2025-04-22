@@ -1,6 +1,6 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take, take_while1, take_while_m_n},
+    bytes::complete::{tag, take, take_while1, take_while_m_n, take_till},
     character::complete::{alpha1, alphanumeric1, digit1, hex_digit1},
     combinator::{map_res, recognize},
     sequence::tuple,
@@ -70,4 +70,10 @@ pub fn lalpha(input: &[u8]) -> ParseResult<&[u8]> {
 
 pub fn ualpha(input: &[u8]) -> ParseResult<&[u8]> {
     take_while1(|c: u8| c.is_ascii_uppercase())(input)
+}
+
+// Takes all bytes until a CRLF sequence (\r\n) is found
+// Useful for parsing header values that extend to the end of a line
+pub fn take_till_crlf(input: &[u8]) -> ParseResult<&[u8]> {
+    take_till(|c| c == b'\r' || c == b'\n')(input)
 } 
