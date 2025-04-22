@@ -98,10 +98,10 @@ pub fn media_type(input: &[u8]) -> ParseResult<MediaType> {
             let type_str = str::from_utf8(type_bytes)?.to_string();
             let subtype_str = str::from_utf8(subtype_bytes)?.to_string();
             let params_map = params_vec.into_iter().collect::<HashMap<_,_>>();
-            // Construct MediaType struct
+            // Construct MediaType struct with the correct field names
             Ok(MediaType { 
-                m_type: type_str, 
-                m_subtype: subtype_str, 
+                typ: type_str, 
+                subtype: subtype_str, 
                 parameters: params_map 
             })
         }
@@ -146,8 +146,8 @@ mod tests {
         let input = b"application/sdp";
         let (rem, mt) = media_type(input).unwrap(); // Returns MediaType now
         assert!(rem.is_empty());
-        assert_eq!(mt.m_type, "application");
-        assert_eq!(mt.m_subtype, "sdp");
+        assert_eq!(mt.typ, "application");
+        assert_eq!(mt.subtype, "sdp");
         assert!(mt.parameters.is_empty());
     }
 
@@ -156,8 +156,8 @@ mod tests {
         let input = b"text/html; charset=ISO-8859-4";
         let (rem, mt) = media_type(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(mt.m_type, "text");
-        assert_eq!(mt.m_subtype, "html");
+        assert_eq!(mt.typ, "text");
+        assert_eq!(mt.subtype, "html");
         assert_eq!(mt.parameters.len(), 1);
         assert_eq!(mt.parameters.get("charset"), Some(&"ISO-8859-4".to_string()));
     }
@@ -167,8 +167,8 @@ mod tests {
         let input = b"application/x-custom-app; version=1";
         let (rem, mt) = media_type(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(mt.m_type, "application");
-        assert_eq!(mt.m_subtype, "x-custom-app");
+        assert_eq!(mt.typ, "application");
+        assert_eq!(mt.subtype, "x-custom-app");
         assert_eq!(mt.parameters.get("version"), Some(&"1".to_string()));
     }
     
@@ -177,8 +177,8 @@ mod tests {
         let input = b"multipart/form-data; boundary=\"----WebKitFormBoundary7MA4YWxkTrZu0gW\" ; name=upload";
         let (rem, mt) = media_type(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(mt.m_type, "multipart");
-        assert_eq!(mt.m_subtype, "form-data");
+        assert_eq!(mt.typ, "multipart");
+        assert_eq!(mt.subtype, "form-data");
         assert_eq!(mt.parameters.len(), 2);
         assert_eq!(mt.parameters.get("boundary"), Some(&"----WebKitFormBoundary7MA4YWxkTrZu0gW".to_string()));
         assert_eq!(mt.parameters.get("name"), Some(&"upload".to_string()));

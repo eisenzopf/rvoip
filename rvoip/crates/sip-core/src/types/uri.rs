@@ -305,6 +305,120 @@ impl fmt::Display for Uri {
     }
 }
 
+impl FromStr for Uri {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // Parse URI string
+        // Format: scheme:user:password@host:port;params?headers
+        
+        // Extract scheme
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidUri(format!("Missing scheme in URI: {}", s)));
+        }
+        
+        let scheme_str = parts[0];
+        let scheme = Scheme::from_str(scheme_str)?;
+        let remainder = parts[1];
+        
+        // Extract user info and host parts
+        let (user_info, host_part) = if let Some(idx) = remainder.rfind('@') {
+            // Has user info
+            let (user_part, host_part) = remainder.split_at(idx);
+            (Some(user_part), &host_part[1..]) // Skip the @ character
+        } else {
+            // No user info
+            (None, remainder)
+        };
+        
+        // Parse user and password
+        let (user, password) = if let Some(user_info) = user_info {
+            if let Some(idx) = user_info.find(':') {
+                let (u, p) = user_info.split_at(idx);
+                (Some(unescape_user_info(u)?), Some(unescape_user_info(&p[1..])?))
+            } else {
+                (Some(unescape_user_info(user_info)?), None)
+            }
+        } else {
+            (None, None)
+        };
+        
+        // Extract parameters and headers
+        let (host_port, params_headers) = if let Some(idx) = host_part.find(|c| c == ';' || c == '?') {
+            host_part.split_at(idx)
+        } else {
+            (host_part, "")
+        };
+        
+        // Parse host and port
+        let (host_str, port) = if let Some(idx) = host_port.rfind(':') {
+            let (h, p) = host_port.split_at(idx);
+            let port_str = &p[1..];
+            match port_str.parse::<u16>() {
+                Ok(port) => (h, Some(port)),
+                Err(_) => (host_port, None), // Not a valid port, treat it as part of host
+            }
+        } else {
+            (host_port, None)
+        };
+        
+        // Create host
+        let host = Host::from_str(host_str)?;
+        
+        // Initialize the URI
+        let mut uri = Uri::new(scheme, host).with_port(port.unwrap_or(0));
+        if let Some(u) = user {
+            uri.user = Some(u);
+        }
+        if let Some(p) = password {
+            uri.password = Some(p);
+        }
+        
+        // Extract and parse parameters
+        let mut param_part = params_headers;
+        let mut header_part = "";
+        
+        if let Some(idx) = param_part.find('?') {
+            let (p, h) = param_part.split_at(idx);
+            param_part = p;
+            header_part = &h[1..]; // Skip the ? character
+        }
+        
+        // Parse parameters
+        if !param_part.is_empty() {
+            let params = param_part.trim_start_matches(';').split(';');
+            for param in params {
+                if let Some(idx) = param.find('=') {
+                    let (name, value) = param.split_at(idx);
+                    uri.parameters.push(Param::Other(
+                        name.to_string(),
+                        Some(crate::types::param::GenericValue::Token(value[1..].to_string()))
+                    ));
+                } else {
+                    uri.parameters.push(Param::Other(
+                        param.to_string(),
+                        None
+                    ));
+                }
+            }
+        }
+        
+        // Parse headers
+        if !header_part.is_empty() {
+            let headers = header_part.split('&');
+            for header in headers {
+                if let Some(idx) = header.find('=') {
+                    let (name, value) = header.split_at(idx);
+                    uri.headers.insert(name.to_string(), value[1..].to_string());
+                }
+            }
+        }
+        
+        Ok(uri)
+    }
+}
+
 // Parser-related functions need to be reimplemented or imported from parser module
 // For now we'll just include the basic utility functions used by the URI implementation
 

@@ -32,7 +32,7 @@ fn product(input: &[u8]) -> ParseResult<Product> {
         pair(token, opt(preceded(slash, product_version))),
         |(name_bytes, version_opt)| {
             let name = str::from_utf8(name_bytes)?.to_string();
-            Ok(Product { name, version: version_opt })
+            Ok::<Product, std::str::Utf8Error>(Product { name, version: version_opt })
         }
     )(input)
 }

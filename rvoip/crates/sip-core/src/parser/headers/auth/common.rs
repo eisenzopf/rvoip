@@ -174,10 +174,9 @@ pub fn digest_uri(input: &[u8]) -> ParseResult<Uri> {
      // Parse the quoted string first to get the content bytes
      let (rem, uri_bytes) = digest_uri_value_content(rem)?;
      // Now parse the URI from the content bytes
-     // We use complete::parse_uri which returns Result<Uri, Error> not ParseResult
-     // Need to handle the remainder and error conversion manually if parse_uri fails
+     // We need to return a ParseResult<Uri> which is (&[u8], Uri)
      match parse_uri(uri_bytes) { 
-        Ok(uri) => Ok((rem, uri)),
+        Ok(parsed_uri) => Ok((rem, parsed_uri)), // Return the remainder and parsed URI
         Err(_) => Err(nom::Err::Failure(NomError::from_error_kind(uri_bytes, ErrorKind::Verify))), // Indicate URI parse failure
      }
 }

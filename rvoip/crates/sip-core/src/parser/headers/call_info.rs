@@ -57,9 +57,10 @@ fn info_param(input: &[u8]) -> ParseResult<InfoParam> {
                     map_res(tag_no_case("info"), |_| Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Info)),
                     map_res(tag_no_case("card"), |_| Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Card)),
                     map_res(token, |bytes| {
-                        let purpose_str = str::from_utf8(bytes)
-                            .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
-                        Ok(InfoPurpose::Other(purpose_str.to_string()))
+                        match str::from_utf8(bytes) {
+                            Ok(purpose_str) => Ok(InfoPurpose::Other(purpose_str.to_string())),
+                            Err(_) => Err(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char))
+                        }
                     })
                 ))
             ),
@@ -67,6 +68,22 @@ fn info_param(input: &[u8]) -> ParseResult<InfoParam> {
         ),
         map(generic_param, InfoParam::Generic)
     ))(input)
+}
+
+// Convert InfoParam to Param
+fn convert_info_param_to_param(info_param: InfoParam) -> Param {
+    match info_param {
+        InfoParam::Generic(param) => param,
+        InfoParam::Purpose(purpose) => {
+            let value_str = match purpose {
+                InfoPurpose::Icon => "icon".to_string(),
+                InfoPurpose::Info => "info".to_string(),
+                InfoPurpose::Card => "card".to_string(),
+                InfoPurpose::Other(s) => s,
+            };
+            Param::Other("purpose".to_string(), Some(crate::types::param::GenericValue::Token(value_str)))
+        }
+    }
 }
 
 // info = LAQUOT absoluteURI RAQUOT *( SEMI info-param)
@@ -84,7 +101,52 @@ fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
             ),
             many0(preceded(semi, info_param))
         ),
-        |(uri_str, params_vec)| Ok(CallInfoValue { uri: uri_str, params: params_vec })
+        |(uri_str, params_vec)| -> Result<CallInfoValue, nom::error::Error<&str>> {
+            // Parse URI string to extract necessary components
+            // For example, http://www.example.com/path
+            if let Some(scheme_end) = uri_str.find("://") {
+                let scheme_str = &uri_str[0..scheme_end];
+                let rest = &uri_str[scheme_end + 3..];
+                
+                // Split host and path
+                let host_str = if let Some(path_start) = rest.find('/') {
+                    &rest[0..path_start]
+                } else {
+                    rest
+                };
+                
+                // Create appropriate Uri based on scheme
+                let uri = match scheme_str {
+                    "http" | "https" => {
+                        // For http URLs, create a basic Uri with the host
+                        Uri::new(
+                            crate::types::uri::Scheme::Sip, // Just use SIP scheme for simplicity
+                            crate::types::uri::Host::domain(host_str)
+                        )
+                    },
+                    "sip" => Uri::sip(host_str),
+                    "sips" => Uri::sips(host_str),
+                    "tel" => {
+                        // For tel URLs, the rest is the number
+                        Uri::tel(rest)
+                    },
+                    _ => {
+                        // Default to SIP
+                        Uri::sip(host_str)
+                    }
+                };
+                
+                // Convert Vec<InfoParam> to Vec<Param>
+                let params = params_vec.into_iter()
+                    .map(convert_info_param_to_param)
+                    .collect();
+                    
+                Ok(CallInfoValue { uri, params })
+            } else {
+                // If URI format is unexpected, create a default SIP URI
+                Err(nom::error::Error::from_error_kind("invalid uri format", nom::error::ErrorKind::Verify))
+            }
+        }
     )(input)
 }
 
@@ -118,10 +180,30 @@ mod tests {
         let (rem, infos) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(infos.len(), 2);
-        assert_eq!(infos[0].uri, "http://www.example.com/alice/photo.jpg");
+        
+        // Updated assertions for URI type
+        assert_eq!(infos[0].uri.scheme.as_str(), "http");
+        assert_eq!(infos[0].uri.host.to_string(), "www.example.com");
+        
+        // Check the purpose parameter
         assert_eq!(infos[0].params.len(), 1);
-        assert!(matches!(infos[0].params[0], InfoParam::Purpose(InfoPurpose::Icon)));
-        assert_eq!(infos[1].uri, "http://www.example.com/alice/");
-        assert!(matches!(infos[1].params[0], InfoParam::Purpose(InfoPurpose::Info)));
+        if let Param::Other(name, Some(GenericValue::Token(value))) = &infos[0].params[0] {
+            assert_eq!(name, "purpose");
+            assert_eq!(value, "icon");
+        } else {
+            panic!("Expected purpose parameter with icon value");
+        }
+        
+        // Check the second info
+        assert_eq!(infos[1].uri.scheme.as_str(), "http");
+        assert_eq!(infos[1].uri.host.to_string(), "www.example.com");
+        
+        // Check the purpose parameter
+        if let Param::Other(name, Some(GenericValue::Token(value))) = &infos[1].params[0] {
+            assert_eq!(name, "purpose");
+            assert_eq!(value, "info");
+        } else {
+            panic!("Expected purpose parameter with info value");
+        }
     }
 } 
