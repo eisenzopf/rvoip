@@ -24,7 +24,7 @@ pub use absolute::parse_absolute_uri;
 // Add imports for combinators and types
 use nom::{
     branch::alt,
-    bytes::{self, complete::tag, complete::take_while},
+    bytes::complete::{tag, take_while},
     character::complete::{char, digit1, one_of},
     combinator::{map, map_res, opt, recognize, value, verify},
     error::{Error as NomError, ErrorKind},
@@ -48,8 +48,8 @@ pub fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
     map_res(
         recognize(
             tuple((
-                bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
+                tag(b"sip:"),
+                opt(pair(userinfo, tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
@@ -57,37 +57,24 @@ pub fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
         ),
         |bytes_slice| {
             let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
-                bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
+                tag(b"sip:"),
+                opt(pair(userinfo, tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
-            ))(bytes_slice).map_err(|e| match e {
-                nom::Err::Error(e) => nom::Err::Error(e),
-                nom::Err::Failure(e) => nom::Err::Failure(e),
-                nom::Err::Incomplete(n) => nom::Err::Incomplete(n),
-            })?;
+            ))(bytes_slice).map_err(|e| Error::Parser(format!("Failed to parse URI: {:?}", e)))?;
 
             if !rem.is_empty() {
                  return Err(NomError::new(rem, ErrorKind::Verify));
             }
             
             let (user, password) = user_opt
-                .map(|((u, p_opt), _)| (Some(u), p_opt))
+                .map(|(user_info, _)| (Some(user_info.0), user_info.1))
                 .unwrap_or((None, None));
 
-            // Convert byte slices to UTF-8 strings
-            let user_str = user.map(|bytes| {
-                str::from_utf8(bytes)
-                    .map_err(|e| Error::from(e))
-                    .map(|s| s.to_string())
-            }).transpose()?;
-            
-            let password_str = password.map(|bytes| {
-                str::from_utf8(bytes)
-                    .map_err(|e| Error::from(e))
-                    .map(|s| s.to_string())
-            }).transpose()?;
+            // No need to convert byte slices since userinfo already returns strings
+            let user_str = user;
+            let password_str = password;
 
             Ok(Uri {
                 scheme: Scheme::Sip,
@@ -107,8 +94,8 @@ pub fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
      map_res(
         recognize(
             tuple((
-                bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
+                tag(b"sips:"),
+                opt(pair(userinfo, tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
@@ -116,37 +103,24 @@ pub fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
         ),
         |bytes_slice| {
              let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
-                bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
+                tag(b"sips:"),
+                opt(pair(userinfo, tag(b"@"))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
-            ))(bytes_slice).map_err(|e| match e {
-                nom::Err::Error(e) => nom::Err::Error(e),
-                nom::Err::Failure(e) => nom::Err::Failure(e),
-                nom::Err::Incomplete(n) => nom::Err::Incomplete(n),
-            })?;
+            ))(bytes_slice).map_err(|e| Error::Parser(format!("Failed to parse URI: {:?}", e)))?;
 
             if !rem.is_empty() {
                  return Err(NomError::new(rem, ErrorKind::Verify));
             }
 
             let (user, password) = user_opt
-                 .map(|((u, p_opt), _)| (Some(u), p_opt))
+                .map(|(user_info, _)| (Some(user_info.0), user_info.1))
                 .unwrap_or((None, None));
                 
-            // Convert byte slices to UTF-8 strings
-            let user_str = user.map(|bytes| {
-                str::from_utf8(bytes)
-                    .map_err(|e| Error::from(e))
-                    .map(|s| s.to_string())
-            }).transpose()?;
-            
-            let password_str = password.map(|bytes| {
-                str::from_utf8(bytes)
-                    .map_err(|e| Error::from(e))
-                    .map(|s| s.to_string())
-            }).transpose()?;
+            // No need to convert byte slices since userinfo already returns strings
+            let user_str = user;
+            let password_str = password;
 
             Ok(Uri {
                 scheme: Scheme::Sips,

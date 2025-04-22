@@ -55,7 +55,7 @@ pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
             tag(b"?"),
             separated_list1(tag(b"&"), header)
         ),
-        |pairs| {
+        |pairs| -> Result<HashMap<String, String>, Error> {
             let mut map = HashMap::new();
             for (name_bytes, value_bytes) in pairs {
                 // *** Unescape name and value ***

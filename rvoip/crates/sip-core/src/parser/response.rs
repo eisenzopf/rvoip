@@ -84,7 +84,7 @@ pub fn parse_status_line(input: &[u8]) -> ParseResult<(Version, StatusCode, &[u8
             status_code,
             opt(preceded(space1, reason_phrase))
         )),
-        |(version, _, status, reason_opt)| {
+        |(version, _, status, reason_opt)| -> std::result::Result<(Version, StatusCode, &[u8]), Error> {
             let reason = reason_opt.unwrap_or(&[]);
             Ok((version, status, reason))
         }

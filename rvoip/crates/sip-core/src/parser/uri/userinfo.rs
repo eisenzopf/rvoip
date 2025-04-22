@@ -55,7 +55,7 @@ pub fn userinfo(input: &[u8]) -> ParseResult<(String, Option<String>)> {
             pair(user, opt(preceded(tag(b":"), password))),
             tag(b"@")
         ),
-        |(user_bytes, pass_opt_bytes)| {
+        |(user_bytes, pass_opt_bytes)| -> Result<(String, Option<String>), Error> {
             let user_str = unescape_uri_component(user_bytes)?;
             let pass_str_opt = pass_opt_bytes
                 .map(|p| unescape_uri_component(p))
