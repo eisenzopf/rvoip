@@ -1,31 +1,12 @@
-use std::str::{self, FromStr};
-
-use bytes::Bytes;
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
-    character::complete::{char, digit1, line_ending, space0, space1},
-    combinator::{all_consuming, map, map_res, opt, recognize, verify},
-    multi::{many0, many1, many_till, separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    Err, IResult, Needed,
-};
-
-use nom::error::{Error as NomError, ErrorKind, make_error, ParseError};
-use std::collections::HashMap;
-
-use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader};
-use crate::types::uri::{Uri, Host};
 use crate::types::version::Version;
 use crate::types::{Method, StatusCode, Message, Request, Response};
 
-// Now use the new parser modules
-use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
+// Update imports to use available modules
+// use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
 use crate::parser::request::parse_request_line;
 use crate::parser::response::parse_response_line;
-use crate::parser::utils::crlf;
-use nom::bytes::complete::{take};
+// use crate::parser::utils::crlf;
+use nom::bytes::complete::{take, take_till};
 use nom::character::complete::{multispace0};
 use crate::parser::headers::{parse_cseq, parse_content_length, parse_expires, parse_max_forwards};
 use crate::types::{CSeq, ContentLength, Expires, MaxForwards};
@@ -37,6 +18,17 @@ use crate::parser::common::sip_version;
 use crate::parser::utils::unfold_lws;
 use crate::parser::common::ParseResult;
 use crate::parser::response::parse_status_line;
+use nom::combinator::{all_consuming, map, map_res, recognize};
+use nom::branch::alt;
+use nom::error::{Error as NomError, ErrorKind};
+use nom::sequence::tuple;
+use nom::multi::many_till;
+use nom::Needed;
+use bytes::Bytes;
+use std::str;
+use crate::error::{Error, Result};
+use crate::types::{Header, TypedHeader, HeaderName, HeaderValue};
+use std::str::FromStr;
 
 /// Maximum length of a single line in a SIP message
 pub const MAX_LINE_LENGTH: usize = 4096;
