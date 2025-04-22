@@ -26,7 +26,9 @@ fn priority_value(input: &[u8]) -> ParseResult<Priority> {
     map_res(
         token, // Any token is valid first
         |bytes| {
-            let s = str::from_utf8(bytes)?;
+            let s = str::from_utf8(bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Char)))?;
+            
             Ok(match s.to_ascii_lowercase().as_str() {
                 "emergency" => Priority::Emergency,
                 "urgent" => Priority::Urgent,
