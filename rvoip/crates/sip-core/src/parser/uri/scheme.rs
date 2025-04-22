@@ -9,6 +9,7 @@ use nom::{
     multi::many0,
     sequence::{pair, preceded, terminated},
     IResult,
+    error::{Error as NomError, ErrorKind},
 };
 use std::str;
 
@@ -41,7 +42,7 @@ pub fn parse_scheme(input: &[u8]) -> ParseResult<Scheme> {
                 "sip" => Ok(Scheme::Sip),
                 "sips" => Ok(Scheme::Sips),
                 "tel" => Ok(Scheme::Tel),
-                _ => Ok(Scheme::Other(scheme_str)),
+                _ => Err(Error::InvalidUri(format!("Unsupported scheme: {}", scheme_str))),
             }
         }
     )(input)
@@ -80,9 +81,8 @@ mod tests {
 
     #[test]
     fn test_parse_scheme_other() {
-        let (rem, scheme) = parse_scheme(b"http:").unwrap();
-        assert!(rem.is_empty());
-        assert!(matches!(scheme, Scheme::Other(s) if s == "http"));
+        let result = parse_scheme(b"http:");
+        assert!(result.is_err());
     }
 
     #[test]

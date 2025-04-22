@@ -22,8 +22,10 @@ pub fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1,
         |s: &[u8]| {
-            // Wrap the Option in Ok to match the Result expected by map_res
-            Ok(str::from_utf8(s).ok().and_then(|s_str| s_str.parse::<u32>().ok()))
+            str::from_utf8(s)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::new(s, ErrorKind::Char)))
+                .and_then(|s_str| s_str.parse::<u32>()
+                    .map_err(|_| nom::Err::Failure(nom::error::Error::new(s, ErrorKind::Digit))))
         }
     )(input)
 }

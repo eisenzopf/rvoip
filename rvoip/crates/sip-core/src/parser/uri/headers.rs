@@ -5,6 +5,7 @@ use nom::{
     multi::{many0, many1, separated_list1},
     sequence::{pair, preceded, separated_pair},
     IResult,
+    error::{Error as NomError, ErrorKind},
 };
 use std::collections::HashMap;
 use std::str;
@@ -62,7 +63,7 @@ pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
                 let value = unescape_uri_component(value_bytes)?;
                 map.insert(name, value);
             }
-            Ok::<HashMap<String, String>, nom::error::Error<&[u8]>>(map)
+            Ok(map)
         }
     )(input)
 }

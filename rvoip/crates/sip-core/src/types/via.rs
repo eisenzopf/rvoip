@@ -70,7 +70,7 @@ impl Via {
         self.0.first().and_then(|v| {
              v.params.iter().find_map(|p| match p {
                  Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
-                    Some(value.as_ref().and_then(|gv| gv.as_string()))
+                    Some(value.as_ref().and_then(|gv| gv.as_str().map(String::from)))
                  },
                  // Add cases for known params if needed (e.g., Branch, Tag, etc.)
                  Param::Branch(val) if "branch".eq_ignore_ascii_case(name) => Some(Some(val.to_string())),

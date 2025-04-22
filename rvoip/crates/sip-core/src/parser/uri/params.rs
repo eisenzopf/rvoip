@@ -49,15 +49,15 @@ pub fn pvalue(input: &[u8]) -> ParseResult<&[u8]> {
 fn other_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         pair(pname, opt(preceded(equal, pvalue))),
-        |(name_bytes, value_opt_bytes)| {
+        |(name_bytes, value_opt_bytes)| -> Result<Param, Error> {
             let name = unescape_uri_component(name_bytes)?;
             let value_opt = value_opt_bytes
                 .map(|v_bytes| unescape_uri_component(v_bytes))
                 .transpose()?;
+            
             // Construct Param::Other, but now the value is just Option<String>
             // This loses the Host/Token/Quoted distinction from generic_param
-            // TODO: Revisit if URI params need GenericValue like header params
-            Ok::<Param, nom::error::Error<&[u8]>>(Param::Other(name, value_opt.map(|v| GenericValue::Token(v)))) // Temp: Stuff into Token
+            Ok(Param::Other(name, value_opt.map(|v| GenericValue::Token(v))))
         }
     )(input)
 }
