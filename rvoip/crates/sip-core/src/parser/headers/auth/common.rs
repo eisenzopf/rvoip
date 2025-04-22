@@ -303,4 +303,10 @@ pub fn digest_param(input: &[u8]) -> ParseResult<DigestParam> {
         // Generic fallback MUST be last
         map(auth_param, DigestParam::Param),
     ))(input)
+}
+
+// digest-credential = digest-param *(COMMA digest-param)
+// Returns a list of DigestParam enum variants
+pub fn digest_credential(input: &[u8]) -> ParseResult<Vec<DigestParam>> {
+    crate::parser::common::comma_separated_list1(digest_param)(input)
 } 

@@ -2,7 +2,7 @@
 // Parser for the credentials part of Authorization headers
 
 // Use the new digest_param parser from common
-use super::common::{auth_scheme, digest_param, auth_param}; 
+use super::common::{auth_scheme, digest_param, auth_param, digest_credential}; 
 use crate::parser::common::comma_separated_list1;
 use crate::parser::token::token;
 use crate::parser::whitespace::lws;
@@ -41,7 +41,7 @@ pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
     match Scheme::from_str(&scheme_str) {
         Ok(Scheme::Digest) => {
             // Parse comma-separated list of digest params
-            let (rem, params) = comma_separated_list1(digest_param)(rem)?;
+            let (rem, params) = digest_credential(rem)?;
             Ok((rem, Credentials::Digest { params }))
         }
         Ok(Scheme::Basic) => {
