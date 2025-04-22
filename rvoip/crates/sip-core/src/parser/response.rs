@@ -4,8 +4,8 @@ use nom::{
     branch::alt,
     bytes::complete::{take_till, take_while_m_n, take_till1},
     character::complete::{digit1, space1, line_ending},
-    combinator::{map, map_res, recognize, opt, preceded},
-    sequence::{tuple},
+    combinator::{map, map_res, recognize, opt},
+    sequence::{tuple, preceded},
     IResult,
     error::{Error as NomError, ErrorKind, ParseError},
 };

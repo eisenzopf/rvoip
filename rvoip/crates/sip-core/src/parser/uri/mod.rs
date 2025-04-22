@@ -25,8 +25,8 @@ pub use absolute::parse_absolute_uri;
 use nom::{
     branch::alt,
     bytes::complete as bytes,
-    combinator::{map, map_res, opt, pair, recognize},
-    sequence::tuple,
+    combinator::{map, map_res, opt, recognize},
+    sequence::{tuple, pair},
     IResult,
     error::{ErrorKind, Error as NomError, ParseError},
 };

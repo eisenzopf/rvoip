@@ -7,7 +7,7 @@ use nom::{
     combinator::{recognize, map_res},
     sequence::tuple,
     IResult,
-    error::{error_position, ErrorKind},
+    error::{ErrorKind, Error as NomError},
 };
 
 // Type alias for parser result
@@ -17,7 +17,7 @@ pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 fn utf8_cont(input: &[u8]) -> ParseResult<&[u8]> {
     map_res(take(1usize), |byte: &[u8]| {
         if byte.is_empty() || !(byte[0] >= 0x80 && byte[0] <= 0xBF) {
-            Err(nom::Err::Failure(error_position!(input, ErrorKind::Verify)))
+            Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)))
         } else {
             Ok(byte)
         }
@@ -31,7 +31,7 @@ fn utf8_cont(input: &[u8]) -> ParseResult<&[u8]> {
 // Checks first byte to determine length, then takes required bytes and validates.
 pub fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
     if input.is_empty() {
-        return Err(nom::Err::Error(error_position!(input, ErrorKind::Eof)));
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
     }
 
     let first_byte = input[0];
@@ -39,7 +39,7 @@ pub fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
         0xC2..=0xDF => 2,
         0xE0..=0xEF => 3,
         0xF0..=0xF4 => 4,
-        _ => return Err(nom::Err::Error(error_position!(input, ErrorKind::Tag)))
+        _ => return Err(nom::Err::Error(NomError::new(input, ErrorKind::Tag)))
     };
 
     if input.len() < len {
@@ -62,7 +62,7 @@ pub fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
     if valid {
         Ok((&input[len..], &input[..len]))
     } else {
-        Err(nom::Err::Error(error_position!(input, ErrorKind::Verify)))
+        Err(nom::Err::Error(NomError::new(input, ErrorKind::Verify)))
     }
 }
 
@@ -72,7 +72,7 @@ pub fn text_utf8_char(input: &[u8]) -> ParseResult<&[u8]> {
         // %x21-7E (Printable US-ASCII chars excluding space)
         map_res(take(1usize), |byte: &[u8]| {
             if byte.is_empty() || !(byte[0] >= 0x21 && byte[0] <= 0x7E) {
-               Err(nom::Err::Failure(error_position!(input, ErrorKind::Verify)))
+               Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)))
             } else {
                 Ok(byte)
             }

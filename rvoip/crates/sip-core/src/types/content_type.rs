@@ -1,4 +1,3 @@
-use crate::parser::headers::parse_content_type;
 use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;

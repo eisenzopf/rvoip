@@ -22,7 +22,8 @@ use crate::types::sdp::SdpSession;
 // Import the structures from the types module
 use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::parser::ParseResult;
-use crate::parser::message::parse_header; // Import header parser
+use crate::parser::message::header_value;
+use crate::parser::message::trim_bytes;
 use crate::parser::whitespace::crlf as parse_crlf; // Alias to avoid clash
 
 
@@ -115,16 +116,15 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
         } else {
              // Process previous header (if any)
             if let Some(name) = current_header_name.take() {
-                let value_bytes_trimmed = crate::parser::message::trim_bytes(&current_header_value_bytes);
-                let parsed_value = parse_header(&name, value_bytes_trimmed)
-                                       .unwrap_or_else(|_| HeaderValue::Raw(value_bytes_trimmed.to_vec()));
+                let value_bytes_trimmed = trim_bytes(&current_header_value_bytes);
+                let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
                 headers.push(Header::new(name, parsed_value));
             }
             current_header_value_bytes.clear();
 
             // Parse new header line (name: value)
             if let Some(colon_pos) = unfolded_line.iter().position(|&b| b == b':') {
-                let name_bytes = crate::parser::message::trim_bytes(&unfolded_line[..colon_pos]);
+                let name_bytes = trim_bytes(&unfolded_line[..colon_pos]);
                 current_header_value_bytes.extend_from_slice(&unfolded_line[colon_pos + 1..]); 
                 
                 use std::str::FromStr;
@@ -143,9 +143,8 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
 
     // Process the very last header
     if let Some(name) = current_header_name.take() {
-        let value_bytes_trimmed = crate::parser::message::trim_bytes(&current_header_value_bytes);
-        let parsed_value = parse_header(&name, value_bytes_trimmed)
-                               .unwrap_or_else(|_| HeaderValue::Raw(value_bytes_trimmed.to_vec()));
+        let value_bytes_trimmed = trim_bytes(&current_header_value_bytes);
+        let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
         headers.push(Header::new(name, parsed_value));
     }
 
