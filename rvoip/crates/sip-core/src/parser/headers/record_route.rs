@@ -27,46 +27,29 @@ use crate::types::record_route::RecordRoute as RecordRouteHeader; // Import spec
 use crate::types::uri_with_params::UriWithParams; // Added
 use crate::types::uri_with_params_list::UriWithParamsList; // Added
 use serde::{Serialize, Deserialize}; // Added serde
+use crate::parser::parse_address;
 
 /// Represents a single record-route entry (typically name-addr)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct RecordRouteEntry(pub Address);
 
-// rec-route = name-addr *( SEMI rr-param )
-// rr-param = generic-param
-// Changed return type to ParseResult<Address>
-fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
-     map_res(
-        pair(
-            name_addr, // name_addr returns (Option<display_name_bytes>, Uri)
-            semicolon_separated_params0(generic_param) // rr-params are generic params
-        ),
-        |pair_result| -> Result<Address, nom::Err<NomError<&[u8]>>> { 
-            // Destructure here
-            let ((dn_bytes_opt, uri), params) = pair_result;
-            // Convert display name bytes, mapping Utf8Error to nom::Err::Failure
-             let display_name = dn_bytes_opt
-                .map(|b| std::str::from_utf8(b).map(|s| s.to_string()))
-                .transpose()
-                // Map the Utf8Error to a nom Failure
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; 
-
-            // Construct and return the Address struct wrapped in Ok
-            Ok(Address { display_name, uri, params })
-        }
-    )(input)
+// Define a simple function that just calls parse_address, so it implements Copy
+fn parse_record_route_address(input: &[u8]) -> ParseResult<Address> {
+    parse_address(input)
 }
 
 // Record-Route = "Record-Route" HCOLON rec-route *(COMMA rec-route)
 pub fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader> {
     map(
-        comma_separated_list1(record_route_entry), // Now returns Vec<Address>
-        |entries: Vec<Address>| { // Changed input type to Vec<Address>
-            let uris: Vec<UriWithParams> = entries
-                .into_iter()
-                .map(|addr| UriWithParams { uri: addr.uri, params: addr.params }) // Convert each Address
+        comma_separated_list1(parse_record_route_address), // Returns Vec<Address>
+        |addresses: Vec<Address>| {
+            // Convert each Address to a RecordRouteEntry
+            let entries = addresses.into_iter()
+                .map(|addr| RecordRouteEntry(addr))
                 .collect();
-            RecordRouteHeader(UriWithParamsList { uris }) // Construct the final type
+            
+            // Return the RecordRouteHeader with the Vec<RecordRouteEntry>
+            RecordRouteHeader(entries)
         }
     )(input)
 }

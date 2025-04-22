@@ -5,7 +5,7 @@ use nom::{
     character::complete::digit1,
     combinator::map_res,
     IResult,
-    error::{ErrorKind, Error as NomError},
+    error::{ErrorKind, Error as NomError, ParseError},
 };
 use std::str;
 
