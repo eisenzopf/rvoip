@@ -12,7 +12,7 @@ use nom::{
 };
 
 // Import from base parser modules
-use crate::parser::separators::hcolon;
+use crate::parser::separators::{hcolon, semi};
 use crate::parser::address::name_addr_or_addr_spec;
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::ParseResult;

@@ -4,9 +4,9 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::tag_no_case,
+    bytes::complete::{tag_no_case, tag},
     character::complete::char,
-    combinator::{map, opt},
+    combinator::{map, opt, map_res},
     sequence::{pair, preceded},
     IResult,
 };

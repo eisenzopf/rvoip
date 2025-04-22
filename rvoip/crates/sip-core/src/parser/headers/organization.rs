@@ -3,7 +3,7 @@
 
 use nom::{
     bytes::complete::tag_no_case,
-    combinator::{map, opt},
+    combinator::{map, opt, map_res},
     sequence::{pair, preceded},
     IResult,
 };

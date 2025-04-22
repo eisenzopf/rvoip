@@ -11,7 +11,7 @@ use nom::{
 };
 
 // Import from new modules
-use crate::parser::separators::{hcolon, comma, star};
+use crate::parser::separators::{hcolon, comma, star, semi};
 use crate::parser::address::name_addr_or_addr_spec;
 use crate::parser::common::{comma_separated_list0, comma_separated_list1};
 use crate::parser::common_params::contact_param_item;

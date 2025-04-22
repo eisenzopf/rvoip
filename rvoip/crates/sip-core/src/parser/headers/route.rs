@@ -50,7 +50,7 @@ fn route_param(input: &[u8]) -> ParseResult<Address> {
 }
 
 // route = 1#("<" addr-spec ">" *( SEMI route-param ))
-pub(crate) fn parse_route(input: &[u8]) -> ParseResult<Route> {
+pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
     map(
         comma_separated_list1(
             map(
@@ -58,7 +58,7 @@ pub(crate) fn parse_route(input: &[u8]) -> ParseResult<Route> {
                 |addr| addr // parse_address returns Address, which contains Uri and params
             )
         ),
-        Route // Wrap the Vec<Address> in the Route newtype
+        RouteHeader // Use the imported alias
     )(input)
 }
 

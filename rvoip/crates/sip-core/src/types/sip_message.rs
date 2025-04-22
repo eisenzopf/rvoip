@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use bytes::Bytes;
-// use serde::{Deserialize, Serialize}; // Commented out Serde
+use serde::{Deserialize, Serialize}; // Uncommented Serde
 
 use crate::types::header::{Header, HeaderName, TypedHeader};
 use crate::types::uri::Uri;

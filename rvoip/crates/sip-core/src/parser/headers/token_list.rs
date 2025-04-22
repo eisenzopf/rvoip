@@ -37,7 +37,7 @@ fn token_list0(input: &[u8]) -> ParseResult<Vec<&[u8]>> {
 
 /// Parses a header (long form only) with a comma-separated list of tokens (at least one required).
 /// Example: "HeaderName: token1, token2"
-pub(crate) fn parse_header_token_list1(name: &[u8], input: &[u8]) -> ParseResult<Vec<&[u8]>> {
+pub(crate) fn parse_header_token_list1<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
     preceded(
         pair(tag_no_case(name), hcolon),
         token_list1
@@ -46,7 +46,7 @@ pub(crate) fn parse_header_token_list1(name: &[u8], input: &[u8]) -> ParseResult
 
 /// Parses a header (long form only) with an optional comma-separated list of tokens.
 /// Example: "HeaderName: token1, token2" or "HeaderName:"
-pub(crate) fn parse_header_token_list0(name: &[u8], input: &[u8]) -> ParseResult<Vec<&[u8]>> {
+pub(crate) fn parse_header_token_list0<'a>(name: &'a [u8], input: &'a [u8]) -> ParseResult<'a, Vec<&'a [u8]>> {
     preceded(
         pair(tag_no_case(name), hcolon),
         token_list0

@@ -74,7 +74,7 @@ fn via_param_parser(input: &[u8]) -> ParseResult<ViaHeader> {
         tuple((
             sent_protocol,
             preceded(lws, sent_by),
-            semicolon_separated_params0(via_param_item) // Use list helper
+            semicolon_separated_params0(via_param_item) // Use list helper with imported parser
         )),
         |(protocol, (host, port), params)| ViaHeader {
             sent_protocol: protocol,
@@ -91,104 +91,6 @@ pub(crate) fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
         pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
         comma_separated_list1(via_param_parser) // Use the parser for a full via-parm
     )(input)
-}
-
-// ttl = 1*3DIGIT ; 0 to 255
-fn ttl(input: &[u8]) -> ParseResult<u8> {
-    map_res(
-        take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-        |ttl_bytes| {
-            let s = str::from_utf8(ttl_bytes)
-                .map_err(|e| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
-            s.parse::<u8>()
-                .map_err(|e| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))
-        }
-    )(input)
-}
-
-// via-ttl = "ttl" EQUAL ttl
-fn via_ttl(input: &[u8]) -> ParseResult<Param> { // Changed return type to Param
-    map(
-        preceded(pair(tag_no_case(b"ttl".as_slice()), equal), ttl),
-        Param::Ttl
-    )(input)
-}
-
-// via-maddr = "maddr" EQUAL host
-fn via_maddr(input: &[u8]) -> ParseResult<Param> { // Changed return type to Param
-    map(
-        preceded(
-            pair(tag_no_case(b"maddr".as_slice()), equal),
-            // Map Host to String for Param::Maddr
-            map_res(host, |h| Ok::<_, ()>(h.to_string())) 
-        ),
-        Param::Maddr
-    )(input)
-}
-
-// IPv4address / IPv6address (for received param)
-fn ip_address_only(input: &[u8]) -> ParseResult<std::net::IpAddr> { // Return IpAddr directly
-     alt(( 
-         map_res(ipv4_address, |h| if let Host::Address(ip) = h { Ok(ip) } else { Err("Expected IP Address") }), 
-         map_res(ipv6_reference, |h| if let Host::Address(ip) = h { Ok(ip) } else { Err("Expected IP Address") })
-     ))(input)
-}
-
-// via-received = "received" EQUAL (IPv4address / IPv6address)
-fn via_received(input: &[u8]) -> ParseResult<Param> { // Changed return type to Param
-    map(
-        preceded(pair(tag_no_case(b"received".as_slice()), equal), ip_address_only),
-        Param::Received
-    )(input)
-}
-
-// via-branch = "branch" EQUAL token
-fn via_branch(input: &[u8]) -> ParseResult<Param> { // Changed return type to Param
-    map(
-        preceded(
-            pair(tag_no_case(b"branch".as_slice()), equal),
-            map_res(token, |b| str::from_utf8(b).map(String::from))
-        ),
-        Param::Branch
-    )(input)
-}
-
-// via-params = via-ttl / via-maddr / via-received / via-branch / via-extension
-// via-extension = generic-param
-fn via_params_item(input: &[u8]) -> ParseResult<Param> { // Returns Param
-    alt((
-        via_ttl,
-        via_maddr,
-        via_received,
-        via_branch,
-        generic_param, // generic_param already returns Param::Other
-    ))(input)
-}
-
-// via-parm = sent-protocol LWS sent-by *( SEMI via-params )
-// Returns ViaHeader struct
-fn via_parm(input: &[u8]) -> ParseResult<ViaHeader> {
-    map(
-        tuple((
-            sent_protocol, // (name, version, transport)
-            preceded(lws, sent_by), // (Host, Option<u16>)
-            many0(preceded(semi, via_params_item)) // Vec<Param>
-        )),
-        |((name, version, transport), (host, port), params_vec)| ViaHeader {
-            protocol: name,
-            version: version,
-            transport: transport,
-            host: host.to_string(), // Convert Host to String
-            port: port,
-            params: params_vec,
-        }
-    )(input)
-}
-
-// Via = ("Via" / "v") HCOLON via-parm *(COMMA via-parm)
-// Note: HCOLON and compact form handled elsewhere.
-pub(crate) fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
-    comma_separated_list1(via_parm)(input)
 }
 
 #[cfg(test)]

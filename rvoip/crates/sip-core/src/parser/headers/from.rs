@@ -15,10 +15,14 @@ use nom::{
 use std::str;
 
 // Import from base parser modules
-use crate::parser::separators::hcolon;
+use crate::parser::separators::{hcolon, semi, equal, laquot, raquot};
 use crate::parser::address::name_addr_or_addr_spec; // Use shared address parser
+use crate::parser::token::token; // Added token
+use crate::parser::quoted::quoted_string; // Added quoted_string
+use crate::parser::whitespace::lws; // Added lws
+use crate::parser::uri::parse_uri; // Added parse_uri
 // Import specific param parser and list helper
-use crate::parser::common_params::{from_to_param, semicolon_separated_params0};
+use crate::parser::common_params::{from_to_param, semicolon_separated_params0, generic_param}; // Added generic_param
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
@@ -63,40 +67,17 @@ fn from_param_item(input: &[u8]) -> ParseResult<Param> {
     alt((tag_param, generic_param))(input)
 }
 
-// from-param = LAQUOT addr-spec RAQUOT *( SEMI from-tag )
-// from-tag = tag-param
-// Simplified: Use name_addr_or_addr_spec and expect tag param
-fn from_param(input: &[u8]) -> ParseResult<Address> {
-    // TODO: Should use generic parameter parser? This only looks for 'tag'.
-    map(
-        pair(
-            name_addr_or_addr_spec,
-            opt(preceded(semi, preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token))))
-        ),
-        |(mut addr, tag_opt)| { // Make addr mutable
-            if let Some(tag_bytes) = tag_opt {
-                // Attempt to convert tag_bytes to String
-                if let Ok(tag_str) = str::from_utf8(tag_bytes) {
-                    addr.params.push(Param::Tag(tag_str.to_string())); // Add tag param
-                }
-                // Silently ignore tag if not valid UTF-8? Or return error?
-                // Returning Ok for now, but might need better error handling.
-            }
-            addr
-        }
-    )(input)
-}
-
 // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
 // Returns Address struct with params included
 fn from_spec(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Returns Address{..., params: []}
-            many0(preceded(semi, from_param))
+            many0(preceded(semi, from_param_item)) // Changed to use from_param_item
         ),
-        |(mut addr, params_vec)| { // Make addr mutable
-            addr.params = params_vec; // Assign parsed params
+        |(mut addr, params_vec)| { // params_vec is now Vec<Param>
+            // Extend existing URI params (if any) with header params
+            addr.params.extend(params_vec); 
             addr // Return the modified Address
         }
     )(input)
