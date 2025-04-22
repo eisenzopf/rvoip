@@ -6,7 +6,7 @@ use nom::{
     character::complete::{alphanumeric1, char},
     combinator::{map, map_res, opt, recognize},
     multi::{many0, many1},
-    sequence::{delimited, pair, preceded, tuple},
+    sequence::{delimited, pair, preceded, tuple, terminated},
     IResult,
 };
 use std::str;
@@ -101,13 +101,9 @@ fn reg_name(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // userinfo_bytes = userinfo parser returning bytes (internal detail, assume exists or adapt)
-// Assumes userinfo from uri module returns the needed bytes before mapping
+// Use the public userinfo function instead of private user and password functions
 fn userinfo_bytes(input: &[u8]) -> ParseResult<&[u8]> {
-     recognize(terminated(
-            pair(crate::parser::uri::userinfo::user, 
-                 opt(preceded(tag(b":"), crate::parser::uri::userinfo::password))),
-            tag(b"@")
-    ))(input)
+     recognize(userinfo)(input)
 }
 
 // srvr = [ [ userinfo "@" ] hostport ]

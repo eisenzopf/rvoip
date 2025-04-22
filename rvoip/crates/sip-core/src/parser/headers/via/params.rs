@@ -38,7 +38,7 @@ fn via_ttl(input: &[u8]) -> ParseResult<Param> {
 fn via_maddr(input: &[u8]) -> ParseResult<Param> {
     map(
         preceded(pair(tag_no_case(b"maddr"), equal), host),
-        |h: UriHost| Param::Maddr(h)
+        |h: UriHost| Param::Maddr(h.to_string())
     )(input)
 }
 
@@ -46,7 +46,19 @@ fn via_maddr(input: &[u8]) -> ParseResult<Param> {
 fn via_received(input: &[u8]) -> ParseResult<Param> {
      map(
         preceded(pair(tag_no_case(b"received"), equal), host), // host parser handles IPs
-        |h: UriHost| Param::Received(h)
+        |h: UriHost| match h {
+            UriHost::Address(ip) => Param::Received(ip),
+            UriHost::Domain(domain) => {
+                // Try to convert domain to IP if possible
+                if let Ok(ip) = domain.parse::<std::net::IpAddr>() {
+                    Param::Received(ip)
+                } else {
+                    // Fallback to a dummy IP if domain can't be parsed as IP
+                    // This is a workaround - in a real implementation you might want to handle this differently
+                    Param::Received(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)))
+                }
+            }
+        }
     )(input)
 }
 

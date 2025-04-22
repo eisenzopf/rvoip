@@ -22,7 +22,7 @@ fn is_user_unreserved(c: u8) -> bool {
 
 // user = 1*( unreserved / escaped / user-unreserved )
 // Returns raw bytes, unescaping happens in userinfo
-fn user(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn user(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many1(alt((
         unreserved,
         escaped,
@@ -42,7 +42,7 @@ fn password_char(input: &[u8]) -> ParseResult<&[u8]> {
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
 // Returns raw bytes, unescaping happens in userinfo
-fn password(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn password(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many0(password_char))(input)
 }
 
