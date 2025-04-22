@@ -17,7 +17,7 @@ use crate::parser::uri::host::host; // For maddr and received
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::uri::Host as UriHost;
+use crate::types::uri::Host as UriHost;
 
 // via-ttl = "ttl" EQUAL ttl (1*3 DIGIT)
 fn via_ttl(input: &[u8]) -> ParseResult<Param> {

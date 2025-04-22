@@ -40,7 +40,7 @@ use crate::types::warning::Warning;
 use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
 use crate::parser::headers::content_type::parse_content_type_value;
-use crate::types::retry_after::RetryAfterValue;
+use crate::types::retry_after::RetryAfter;
 // CSeqValue doesn't seem to exist, CSeq struct is used directly
 // use crate::types::cseq::CSeqValue;
 use crate::parser::headers::accept_encoding::EncodingInfo as AcceptEncodingValue; // Use EncodingInfo from parser
@@ -312,7 +312,7 @@ pub enum HeaderValue {
     CallId((Vec<u8>, Option<Vec<u8>>)), // (local_part, Option<host_part>)
     Expires(Expires),
     MinExpires(u32),
-    RetryAfter(RetryAfterValue),
+    RetryAfter(RetryAfter),
     Warning(Vec<Warning>),
     Timestamp((Vec<u8>, Option<Vec<u8>>), Option<(Vec<u8>, Option<Vec<u8>>)>), // (ts, delay_opt)
     Date(Vec<u8>),
@@ -501,7 +501,7 @@ pub enum TypedHeader {
     Server(Vec<String>), // Replace with types::server::ServerVal when defined
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
     InReplyTo(Vec<String>),
-    RetryAfter((u32, Option<String>, Vec<Param>)), // Replace with types::retry_after::RetryAfter when defined
+    RetryAfter(RetryAfter), // Now using types::retry_after::RetryAfter
     ErrorInfo(Vec<ErrorInfoValue>), // Use imported parser type
     AlertInfo(Vec<AlertInfoValue>), // Use imported parser type
     CallInfo(Vec<CallInfoValue>), // Use imported parser type
@@ -903,13 +903,33 @@ impl TryFrom<Header> for TypedHeader {
                  }
              },
             HeaderName::RetryAfter => {
-                all_consuming(parser::headers::parse_retry_after)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, (delta, comment_opt, params_vec))| {
-                     let comment = comment_opt.map(|c| String::from_utf8(c.to_vec())).transpose()?;
-                     let params = params_vec.into_iter().map(Param::try_from).collect::<Result<Vec<Param>>>()?;
-                     Ok(TypedHeader::RetryAfter((delta, comment, params)))
-                 })
+                // Parse the RetryAfter header
+                parser::headers::retry_after::parse_retry_after(value_bytes)
+                    .map_err(Error::from)
+                    .and_then(|(_, ra_value)| {
+                        let delay = ra_value.delay;
+                        let comment = ra_value.comment;
+                        
+                        // Convert params from RetryParam to HashMap entries
+                        let mut parameters = HashMap::new();
+                        for param in ra_value.params {
+                            match param {
+                                crate::parser::headers::retry_after::RetryParam::Duration(d) => {
+                                    parameters.insert("duration".to_string(), d.to_string());
+                                },
+                                crate::parser::headers::retry_after::RetryParam::Generic(Param::Other(name, Some(value))) => {
+                                    parameters.insert(name, value.to_string());
+                                },
+                                _ => {} // Ignore other param types
+                            }
+                        }
+                        
+                        Ok(TypedHeader::RetryAfter(RetryAfter {
+                            delay,
+                            comment,
+                            parameters,
+                        }))
+                    })
             },
             HeaderName::ErrorInfo => {
                 all_consuming(parser::headers::parse_error_info)(value_bytes)

@@ -31,7 +31,7 @@ use params::via_param_item; // Use the parser for a single via param item
 
 // Import types
 use crate::types::via::SentProtocol;
-use crate::uri::Host;
+use crate::types::uri::Host;
 use crate::types::param::Param; // Use the main Param enum
 
 /// Represents a single Via header entry.
