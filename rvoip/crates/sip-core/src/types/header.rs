@@ -509,10 +509,9 @@ pub enum TypedHeader {
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
     InReplyTo(Vec<String>),
     RetryAfter(RetryAfter), // Now using types::retry_after::RetryAfter
-    ErrorInfo(Vec<ErrorInfoValue>), // Use imported parser type
-    AlertInfo(Vec<AlertInfoValue>), // Use imported parser type
-    CallInfo(Vec<CallInfoValue>), // Use imported parser type
-
+    ErrorInfo(Vec<crate::parser::headers::error_info::ErrorInfoValue>), // Use imported parser type
+    AlertInfo(Vec<crate::parser::headers::alert_info::AlertInfoValue>), // Use imported parser type
+    CallInfo(Vec<crate::parser::headers::call_info::CallInfoValue>), // Use imported parser type
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -927,7 +926,7 @@ impl TryFrom<Header> for TypedHeader {
                              format!("({})", comment)
                          }
                      })
-                     .collect()))
+                     .collect::<Vec<String>>()))
                  .map_err(Error::from),
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(value_bytes)
                  .map(|(_, server_vals)| TypedHeader::UserAgent(server_vals.into_iter()
@@ -939,7 +938,7 @@ impl TryFrom<Header> for TypedHeader {
                              format!("({})", comment)
                          }
                      })
-                     .collect()))
+                     .collect::<Vec<String>>()))
                  .map_err(Error::from),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
                 .map(|(_, strings)| TypedHeader::InReplyTo(strings))
