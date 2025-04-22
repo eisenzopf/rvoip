@@ -9,7 +9,7 @@ use crate::parser::ParseResult;
 
 // Min-Expires = "Min-Expires" HCOLON delta-seconds
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_min_expires(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_min_expires(input: &[u8]) -> ParseResult<u32> {
     delta_seconds(input)
 }
 
