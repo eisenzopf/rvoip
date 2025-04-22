@@ -52,7 +52,7 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
 // handling-param = "handling" EQUAL ( "optional" / "required" / other-handling )
 // other-handling = token
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Handling {
+pub enum Handling {
     Optional,
     Required,
     Other(String),
@@ -60,7 +60,7 @@ enum Handling {
 
 // disp-param = handling-param / generic-param
 #[derive(Debug, Clone, PartialEq)]
-enum DispositionParam {
+pub enum DispositionParam {
     Handling(Handling),
     Generic(Param),
 }

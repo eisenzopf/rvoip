@@ -918,46 +918,32 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, string)| TypedHeader::Subject(string))
                 .map_err(Error::from),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_list)| {
-                     let strings = v_list.into_iter()
-                         .map(|(prod_opt, comment_opt)| {
-                             let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
-                             let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
-                             Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
-                         })
-                         .collect::<Result<Vec<String>>>()?;
-                     Ok(TypedHeader::Server(strings))
-                 }),
+                 .map(|(_, server_vals)| TypedHeader::Server(server_vals.into_iter()
+                     .map(|server_val| match server_val {
+                         types::server::ServerVal::Product(product) => {
+                             format!("{}{}", product.name, product.version.map_or_else(String::new, |v| format!("/{}", v)))
+                         },
+                         types::server::ServerVal::Comment(comment) => {
+                             format!("({})", comment)
+                         }
+                     })
+                     .collect()))
+                 .map_err(Error::from),
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(value_bytes)
-                 .map_err(Error::from)
-                  .and_then(|(_, v_list)| {
-                     let strings = v_list.into_iter()
-                         .map(|(prod_opt, comment_opt)| {
-                             let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
-                             let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
-                             Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
-                         })
-                         .collect::<Result<Vec<String>>>()?;
-                     Ok(TypedHeader::UserAgent(strings))
-                 }),
+                 .map(|(_, server_vals)| TypedHeader::UserAgent(server_vals.into_iter()
+                     .map(|server_val| match server_val {
+                         types::server::ServerVal::Product(product) => {
+                             format!("{}{}", product.name, product.version.map_or_else(String::new, |v| format!("/{}", v)))
+                         },
+                         types::server::ServerVal::Comment(comment) => {
+                             format!("({})", comment)
+                         }
+                     })
+                     .collect()))
+                 .map_err(Error::from),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v)| {
-                    let strings = v.into_iter()
-                        .map(|(local_bytes, host_bytes_opt)| {
-                            let local_part = String::from_utf8(local_bytes.to_owned())?;
-                            let host_part = host_bytes_opt
-                                .map(|h_bytes| String::from_utf8(h_bytes.to_owned()))
-                                .transpose()?;
-                            match host_part {
-                                Some(host) => Ok(format!("{}@{}", local_part, host)),
-                                None => Ok(local_part),
-                            }
-                        })
-                        .collect::<Result<Vec<String>>>()?;
-                    Ok(TypedHeader::InReplyTo(strings))
-                }),
+                .map(|(_, strings)| TypedHeader::InReplyTo(strings))
+                .map_err(Error::from),
              HeaderName::Warning => {
                  let parse_result = all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);
                  match parse_result {
@@ -1018,36 +1004,15 @@ impl TryFrom<Header> for TypedHeader {
                         }))
                     })
             },
-            HeaderName::ErrorInfo => {
-                all_consuming(parser::headers::parse_error_info)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_uris)| {
-                     let strings = v_uris.into_iter().map(|val| {
-                         Ok(format!("{:?}", val))
-                     }).collect::<Result<Vec<String>>>()?;
-                     Ok(TypedHeader::ErrorInfo(strings))
-                 })
-            },
-            HeaderName::AlertInfo => {
-                all_consuming(parser::headers::parse_alert_info)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_alert_values)| {
-                     let strings = v_alert_values.into_iter().map(|val| {
-                         Ok(format!("{:?}", val))
-                     }).collect::<Result<Vec<String>>>()?;
-                     Ok(TypedHeader::AlertInfo(strings))
-                 })
-            },
-            HeaderName::CallInfo => {
-                all_consuming(parser::headers::parse_call_info)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_call_values)| {
-                     let strings = v_call_values.into_iter().map(|val| {
-                         Ok(format!("{:?}", val))
-                     }).collect::<Result<Vec<String>>>()?;
-                     Ok(TypedHeader::CallInfo(strings))
-                 })
-            },
+            HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(value_bytes)
+                .map(|(_, error_info_values)| TypedHeader::ErrorInfo(error_info_values))
+                .map_err(Error::from),
+            HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(value_bytes)
+                .map(|(_, alert_info_values)| TypedHeader::AlertInfo(alert_info_values))
+                .map_err(Error::from),
+            HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(value_bytes)
+                .map(|(_, call_info_values)| TypedHeader::CallInfo(call_info_values))
+                .map_err(Error::from),
             HeaderName::ReferTo => {
                 match header.value {
                     HeaderValue::ReferTo(value) => {
