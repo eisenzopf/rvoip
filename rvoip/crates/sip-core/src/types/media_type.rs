@@ -6,7 +6,7 @@ use std::fmt;
 use serde::{Serialize, Deserialize};
 
 /// MediaType represents a MIME media type with optional parameters
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaType {
     /// Main type (e.g., "application", "text", "audio")
     pub typ: String,

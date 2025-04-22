@@ -75,6 +75,7 @@ impl FromStr for ContentDisposition {
         all_consuming(parse_content_disposition)(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
+                // Convert Vec<u8> to String properly
                 let disp_type_str = String::from_utf8(dtype_bytes.to_owned())?;
                 let disp_type = match disp_type_str.to_lowercase().as_str() {
                     "session" => DispositionType::Session,

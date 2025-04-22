@@ -775,16 +775,16 @@ impl TryFrom<Header> for TypedHeader {
             // Address Headers
             HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
                 .map_err(Error::from)
-                .map(|(_, addr)| TypedHeader::From(FromHeaderValue(addr))),
+                .map(|(_, addr)| TypedHeader::From(addr)),
             HeaderName::To => all_consuming(parser::headers::parse_to)(value_bytes)
                 .map_err(Error::from)
-                .map(|(_, addr)| TypedHeader::To(ToHeaderValue(addr))),
+                .map(|(_, addr)| TypedHeader::To(addr)),
             HeaderName::Contact => all_consuming(parser::headers::parse_contact)(value_bytes)
                 .map_err(Error::from)
-                .map(|(_, v)| TypedHeader::Contact(Contact(v))),
+                .map(|(_, v)| TypedHeader::Contact(Contact(vec![v]))),
             HeaderName::ReplyTo => {
                 match all_consuming(parser::headers::reply_to::parse_reply_to)(value_bytes) {
-                    Ok((_, addr)) => Ok(TypedHeader::ReplyTo(ReplyTo(addr))),
+                    Ok((_, addr)) => Ok(TypedHeader::ReplyTo(addr)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
@@ -794,26 +794,16 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::Via(Via(v)))
                 .map_err(Error::from),
             HeaderName::Route => all_consuming(parser::headers::parse_route)(value_bytes)
-                .map(|(_, v)| TypedHeader::Route(Route(v)))
+                .map(|(_, v)| TypedHeader::Route(v))
                 .map_err(Error::from),
             HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(value_bytes)
-                .map(|(_, v)| TypedHeader::RecordRoute(RecordRoute(v)))
+                .map(|(_, v)| TypedHeader::RecordRoute(v))
                 .map_err(Error::from),
 
             // Dialog/Transaction IDs
             HeaderName::CallId => {
                 match all_consuming(parser::headers::parse_call_id)(value_bytes) {
-                    Ok((_, (local, host_opt))) => {
-                        let local_part = String::from_utf8(local.to_vec())?;
-                        let host_part_opt = host_opt
-                            .map(|h| String::from_utf8(h.to_vec()))
-                            .transpose()?;
-                        let call_id_string = match host_part_opt {
-                            Some(host) => format!("{}@{}", local_part, host),
-                            None => local_part,
-                        };
-                        Ok(TypedHeader::CallId(CallId(call_id_string)))
-                    }
+                    Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
                     Err(e) => Err(Error::from(e)),
                 }
             }
@@ -823,8 +813,8 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from),
 
             // Content Negotiation Headers
-            HeaderName::Accept => all_consuming(parser::headers::parse_accept)(value_bytes)
-                .map(|(_, v)| TypedHeader::Accept(Accept(v)))
+            HeaderName::Accept => all_consuming(parser::headers::accept::parse_accept)(value_bytes)
+                .map(|(_, v)| TypedHeader::Accept(v))
                 .map_err(Error::from),
             HeaderName::ContentType => all_consuming(parse_content_type_value)(value_bytes)
                 .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
@@ -891,7 +881,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
                 .map_err(Error::from),
             HeaderName::Authorization => all_consuming(parser::headers::parse_authorization)(value_bytes)
-                .map(|(_, v)| TypedHeader::Authorization(Authorization(v)))
+                .map(|(_, v)| TypedHeader::Authorization(v))
                 .map_err(Error::from),
             HeaderName::ProxyAuthenticate => all_consuming(parser::headers::parse_proxy_authenticate)(value_bytes)
                 .map(|(_, v)| TypedHeader::ProxyAuthenticate(ProxyAuthenticate(v)))
@@ -904,18 +894,9 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from),
 
             // Token List Headers
-            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, method_bytes_list)| {
-                    let methods = method_bytes_list.into_iter()
-                        .map(|m_bytes| {
-                             let method_str = std::str::from_utf8(m_bytes)?;
-                             Method::from_str(method_str)
-                                .map_err(|_| Error::ParseError(format!("Invalid Allow method: {}", method_str)))
-                        })
-                        .collect::<Result<Vec<Method>>>()?;
-                    Ok(TypedHeader::Allow(Allow(methods)))
-                }),
+            HeaderName::Allow => all_consuming(parser::headers::allow::parse_allow)(value_bytes)
+                .map(|(_, allow)| TypedHeader::Allow(allow))
+                .map_err(Error::from),
             HeaderName::Require => all_consuming(parser::headers::parse_require)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes_list)| {
@@ -958,16 +939,16 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from),
             HeaderName::Organization => all_consuming(parser::headers::parse_organization)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_owned().into())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_owned())?))),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes)| {
-                    let priority_str = String::from_utf8(v_bytes.to_owned().into())?;
+                    let priority_str = String::from_utf8(v_bytes.to_owned())?;
                     Ok(TypedHeader::Priority(priority_str))
                  }),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_owned().into())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_owned())?))),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_list)| {

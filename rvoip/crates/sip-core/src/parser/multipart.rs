@@ -173,7 +173,7 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
                 }
             }
         } else if ct.trim().starts_with("text/") {
-            match String::from_utf8(raw_content.to_vec()) {
+            match String::from_utf8(raw_content.to_owned()) {
                 Ok(text) => Some(ParsedBody::Text(text)),
                 Err(_) => Some(ParsedBody::Other(raw_content.clone())),
             }
