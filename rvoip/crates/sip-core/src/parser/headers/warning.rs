@@ -23,7 +23,6 @@ use crate::parser::separators::{hcolon, comma};
 use crate::parser::token::token;
 use crate::parser::quoted::quoted_string;
 use crate::parser::uri::host::hostport;
-use crate::parser::whitespace::space1;
 use crate::parser::ParseResult;
 
 use crate::types::uri::Host;
@@ -32,7 +31,7 @@ use crate::types::uri::Uri;
 
 use std::str::FromStr;
 use crate::parser::values::delta_seconds; // Use delta_seconds for duration
-use crate::parser::whitespace::ows;
+use crate::parser::whitespace::sws;
 
 // Define struct for parsed Warning value components
 #[derive(Debug, PartialEq, Clone)]
@@ -98,7 +97,7 @@ fn warning_value(input: &[u8]) -> ParseResult<WarningValue> {
 // Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 // Note: HCOLON handled elsewhere if parsing just the value part
 pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
-    separated_list1(preceded(ows, tag(",")), warning_value)(input)
+    separated_list1(preceded(sws, tag(",")), warning_value)(input)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case},
+    bytes::complete::{tag_no_case, tag},
     combinator::{map, map_res, opt},
     multi::{many0, separated_list0},
     sequence::{pair, preceded, tuple, delimited},
@@ -23,12 +23,6 @@ use crate::parser::whitespace::lws;
 use crate::types::param::Param;
 // use crate::types::retry_after::{RetryAfter as RetryAfterHeader, RetryAfterValue, RetryParam}; // Removed unused import
 use crate::parser::common::*;
-use crate::parser::common_params::parse_generic_param;
-use crate::parser::quoted::parse_quoted_string;
-use crate::parser::values::parse_u32;
-use crate::parser::whitespace::ows;
-// use crate::types::{HeaderError, RetryParam}; // Removed unused import
-use nom::bytes::complete::tag;
 use crate::parser::ParseResult;
 
 // Define local RetryParam enum
