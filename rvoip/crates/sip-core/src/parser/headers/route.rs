@@ -46,15 +46,15 @@ fn route_param(input: &[u8]) -> ParseResult<Address> {
     )(input)
 }
 
+// Define a simple function that just calls parse_address, so it implements Copy
+fn parse_route_address(input: &[u8]) -> ParseResult<Address> {
+    parse_address(input)
+}
+
 // route = 1#("<" addr-spec ">" *( SEMI route-param ))
 pub fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
     map(
-        comma_separated_list1(
-            map(
-                parse_address, // Use the address parser directly
-                |addr| addr // parse_address returns Address, which contains Uri and params
-            )
-        ),
+        comma_separated_list1(parse_route_address),
         RouteHeader // Use the imported alias
     )(input)
 }
