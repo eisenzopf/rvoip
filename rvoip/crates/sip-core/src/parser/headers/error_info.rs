@@ -24,7 +24,7 @@ use crate::uri::Uri;
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;
 use crate::types::error_info::ErrorInfo as ErrorInfoHeader; // Specific header type
-use crate::types::error_info::ErrorInfoValue; // Value type for the header
+use serde::{Serialize, Deserialize}; // Added serde
 
 // error-uri = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 fn error_uri(input: &[u8]) -> ParseResult<ErrorInfoValue> {
@@ -33,7 +33,7 @@ fn error_uri(input: &[u8]) -> ParseResult<ErrorInfoValue> {
 }
 
 // Define structure for Error-Info value
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct ErrorInfoValue {
     pub uri: Uri,
     pub params: Vec<Param>,

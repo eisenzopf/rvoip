@@ -640,109 +640,105 @@ impl TryFrom<Header> for TypedHeader {
         let parse_result = match &header.name {
             // Address Headers
             HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
-                .map(|(_, v)| TypedHeader::From(FromHeaderValue(v))) // Wrap the Address in FromHeaderValue
+                .map(|(_, v)| TypedHeader::From(FromHeaderValue(v)))
                 .map_err(Error::from),
             HeaderName::To => all_consuming(parser::headers::parse_to)(value_bytes)
-                .map(|(_, v)| TypedHeader::To(ToHeaderValue(v))) // Wrap the Address in ToHeaderValue
+                .map(|(_, v)| TypedHeader::To(ToHeaderValue(v)))
                 .map_err(Error::from),
             HeaderName::Contact => all_consuming(parser::headers::parse_contact)(value_bytes)
-                .map(|(_, v)| TypedHeader::Contact(Contact(v))) // Wrap Vec<ContactValue> in Contact
+                .map(|(_, v)| TypedHeader::Contact(Contact(v)))
                 .map_err(Error::from),
             HeaderName::ReplyTo => all_consuming(parser::headers::parse_reply_to)(value_bytes)
-                .map(|(_, v)| TypedHeader::ReplyTo(ReplyTo(v))) // Wrap Address in ReplyTo
+                .map(|(_, v)| TypedHeader::ReplyTo(ReplyTo(v)))
                 .map_err(Error::from),
 
             // Routing Headers
             HeaderName::Via => all_consuming(parser::headers::parse_via)(value_bytes)
-                .map(|(_, v)| TypedHeader::Via(Via(v))) // Wrap Vec<ViaHeader> in Via
+                .map(|(_, v)| TypedHeader::Via(Via(v)))
                 .map_err(Error::from),
             HeaderName::Route => all_consuming(parser::headers::parse_route)(value_bytes)
-                .map(|(_, v)| TypedHeader::Route(Route(v))) // Wrap Vec<Address> in Route
+                .map(|(_, v)| TypedHeader::Route(Route(v)))
                 .map_err(Error::from),
             HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(value_bytes)
-                .map(|(_, v)| TypedHeader::RecordRoute(RecordRoute(v))) // Wrap Vec<Address> in RecordRoute
+                .map(|(_, v)| TypedHeader::RecordRoute(RecordRoute(v)))
                 .map_err(Error::from),
 
             // Dialog/Transaction IDs
             HeaderName::CallId => {
                 match all_consuming(parser::headers::parse_call_id)(value_bytes) {
                     Ok((_, (local, host_opt))) => {
-                        let local_part = String::from_utf8(local.to_vec())?; // Handle Utf8Error
+                        let local_part = String::from_utf8(local.to_vec())?;
                         let host_part_opt = host_opt
                             .map(|h| String::from_utf8(h.to_vec()))
-                            .transpose()?; // Handle Utf8Error
+                            .transpose()?;
                         let call_id_string = match host_part_opt {
                             Some(host) => format!("{}@{}", local_part, host),
                             None => local_part,
                         };
-                        Ok(TypedHeader::CallId(CallId(call_id_string))) // Construct CallId tuple struct
+                        Ok(TypedHeader::CallId(CallId(call_id_string)))
                     }
-                    Err(e) => Err(Error::from(e)), // Map Nom error
+                    Err(e) => Err(Error::from(e)),
                 }
             }
 
             HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(value_bytes)
-                .map(|(_, (seq, method))| TypedHeader::CSeq(CSeq { seq, method })) // Use struct literal
+                .map(|(_, cseq_struct)| TypedHeader::CSeq(cseq_struct))
                 .map_err(Error::from),
 
             // Content Negotiation Headers
             HeaderName::Accept => all_consuming(parser::headers::parse_accept)(value_bytes)
-                .map(|(_, v)| TypedHeader::Accept(Accept(v))) // Wrap Vec<AcceptValue> in Accept
+                .map(|(_, v)| TypedHeader::Accept(Accept(v)))
                 .map_err(Error::from),
             HeaderName::ContentType => all_consuming(parse_content_type_value)(value_bytes)
-                // Assuming parse_content_type_value returns ContentTypeValue struct directly
-                .map(|(_, v)| TypedHeader::ContentType(ContentType(v))) // Wrap ContentTypeValue in ContentType
+                .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
                 .map_err(Error::from),
             HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(value_bytes)
-                .map_err(Error::from) // Convert NomError
+                .map_err(Error::from)
                 .and_then(|(_, v_u64)| {
-                    // Convert u64 to usize for types::ContentLength
                     let length = v_u64.try_into().map_err(|_| Error::ParseError("Invalid Content-Length value (overflow)".into()))?;
                     Ok(TypedHeader::ContentLength(ContentLength(length)))
                 }),
             HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(value_bytes)
-                // Assuming parser returns ContentDisposition struct directly
-                 .map(|(_, v)| TypedHeader::ContentDisposition(v)) // Use the struct directly
-                 .map_err(Error::from),
+                .map(|(_, v)| TypedHeader::ContentDisposition(v))
+                .map_err(Error::from),
             HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(value_bytes)
                 .map_err(Error::from)
-                .and_then(|(_, v_bytes_list)| { // Assuming parser returns Vec<Vec<u8>> or Vec<&[u8]>
+                .and_then(|(_, v_bytes_list)| {
                     let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec())) // Convert each item
-                        .collect::<std::result::Result<Vec<String>, _>>()?; // Collect and handle Utf8Error
+                        .map(|bytes| String::from_utf8(bytes.to_vec()))
+                        .collect::<std::result::Result<Vec<String>, _>>()?;
                     Ok(TypedHeader::ContentEncoding(strings))
                 }),
             HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(value_bytes)
                 .map_err(Error::from)
-                .and_then(|(_, v_bytes_list)| { // Assuming parser returns Vec<Vec<u8>> or Vec<&[u8]>
+                .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec())) // Convert each item
-                        .collect::<std::result::Result<Vec<String>, _>>()?; // Collect and handle Utf8Error
+                        .map(|bytes| String::from_utf8(bytes.to_vec()))
+                        .collect::<std::result::Result<Vec<String>, _>>()?;
                     Ok(TypedHeader::ContentLanguage(strings))
                  }),
             HeaderName::AcceptEncoding => all_consuming(parser::headers::parse_accept_encoding)(value_bytes)
-                .map(|(_, v)| TypedHeader::AcceptEncoding(v)) // Keep parser type for now
+                .map(|(_, v)| TypedHeader::AcceptEncoding(v))
                 .map_err(Error::from),
             HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(value_bytes)
-                .map(|(_, v)| TypedHeader::AcceptLanguage(v)) // Keep parser type for now
+                .map(|(_, v)| TypedHeader::AcceptLanguage(v))
                 .map_err(Error::from),
 
             // Simple Value Headers
             HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(value_bytes)
-                 .map_err(Error::from) // Convert NomError
-                 .and_then(|(_, v_u32)| { // Parser returns u32
-                    // Convert u32 to u8 for types::MaxForwards
+                 .map_err(Error::from)
+                 .and_then(|(_, v_u32)| {
                     let forwards = v_u32.try_into().map_err(|_| Error::ParseError("Invalid Max-Forwards value (overflow)".into()))?;
                     Ok(TypedHeader::MaxForwards(MaxForwards(forwards)))
                  }),
             HeaderName::Expires => all_consuming(parser::headers::parse_expires)(value_bytes)
-                .map(|(_, v)| TypedHeader::Expires(Expires(v))) // Assuming parser returns u32
+                .map(|(_, v)| TypedHeader::Expires(Expires(v)))
                 .map_err(Error::from),
             HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(value_bytes)
-                .map(|(_, v)| TypedHeader::MinExpires(v)) // Keep raw u32 for now
+                .map(|(_, v)| TypedHeader::MinExpires(v))
                 .map_err(Error::from),
             HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(value_bytes)
-                .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into()))) // Use .into() for u8 -> u32
+                .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into())))
                 .map_err(Error::from),
 
             // Auth Headers (Assuming parsers return appropriate structs/values)
@@ -765,20 +761,19 @@ impl TryFrom<Header> for TypedHeader {
             // Token List Headers
             HeaderName::Allow => all_consuming(parser::headers::parse_allow)(value_bytes)
                 .map_err(Error::from)
-                .and_then(|(_, method_bytes_list)| { // This is Vec<&[u8]> or similar
+                .and_then(|(_, method_bytes_list)| {
                     let methods = method_bytes_list.into_iter()
                         .map(|m_bytes| {
-                             // Convert bytes to &str before parsing Method
-                             let method_str = std::str::from_utf8(m_bytes)?; // Use ? for Utf8Error
+                             let method_str = std::str::from_utf8(m_bytes)?;
                              Method::from_str(method_str)
                                 .map_err(|_| Error::ParseError(format!("Invalid Allow method: {}", method_str)))
                         })
-                        .collect::<Result<Vec<Method>>>()?; // Collect Result<Vec<Method>, Error>
+                        .collect::<Result<Vec<Method>>>()?;
                     Ok(TypedHeader::Allow(Allow(methods)))
                 }),
             HeaderName::Require => all_consuming(parser::headers::parse_require)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes_list)| { // Assuming Vec<&[u8]> or similar
+                 .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
                          .map(|b| String::from_utf8(b.to_vec()))
                          .collect::<std::result::Result<Vec<String>, _>>()?;
@@ -821,18 +816,15 @@ impl TryFrom<Header> for TypedHeader {
                  .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_vec())?))),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                  .map_err(Error::from)
-                 // Assuming parse_priority returns &[u8], convert to String
                  .and_then(|(_, v_bytes)| Ok(TypedHeader::Priority(String::from_utf8(v_bytes.to_vec())?))),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
                  .map_err(Error::from)
-                 // Assuming parse_subject returns &[u8], convert to String
                  .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_vec())?))),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_list)| { // v_list = Vec<(Option<(&[u8], Option<&[u8]>)>, Option<&[u8]>)>)
+                 .and_then(|(_, v_list)| {
                      let strings = v_list.into_iter()
                          .map(|(prod_opt, comment_opt)| {
-                             // Use String::from_utf8_lossy for potentially non-UTF8 comments/products
                              let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
                              let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
                              Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
@@ -842,10 +834,9 @@ impl TryFrom<Header> for TypedHeader {
                  }),
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(value_bytes)
                  .map_err(Error::from)
-                  .and_then(|(_, v_list)| { // v_list = Vec<(Option<(&[u8], Option<&[u8]>)>, Option<&[u8]>)>)
+                  .and_then(|(_, v_list)| {
                      let strings = v_list.into_iter()
                          .map(|(prod_opt, comment_opt)| {
-                             // Use String::from_utf8_lossy
                              let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
                              let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
                              Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
@@ -855,7 +846,7 @@ impl TryFrom<Header> for TypedHeader {
                  }),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
                 .map_err(Error::from)
-                .and_then(|(_, v)| { // v is Vec<(&[u8], Option<&[u8]>)> 
+                .and_then(|(_, v)| {
                     let strings = v.into_iter()
                         .map(|(local_bytes, host_bytes_opt)| {
                             let local_part = String::from_utf8(local_bytes.to_vec())?;
@@ -872,8 +863,8 @@ impl TryFrom<Header> for TypedHeader {
                 }),
              HeaderName::Warning => {
                  all_consuming(parser::headers::parse_warning)(value_bytes)
-                     .map_err(Error::from) // Convert Nom error first
-                     .and_then(|(_, v)| { // v = Vec<(u16, &[u8], &[u8])>
+                     .map_err(Error::from)
+                     .and_then(|(_, v)| {
                          let warnings = v.into_iter().map(|(code, agent_bytes, text_bytes)| {
                              let (_, agent_uri) = all_consuming(parser::uri::parse_uri)(agent_bytes)
                                  .map_err(|e| Error::ParseError(format!("Failed to parse agent URI in Warning: {:?}", e)))?;
@@ -895,11 +886,8 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::ErrorInfo => {
                 all_consuming(parser::headers::parse_error_info)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_uris)| { // v_uris = Vec<Uri> or Vec<ErrorInfoValue>
-                     // Assuming parser returns ErrorInfoValue struct which needs a Display impl or manual formatting
+                 .and_then(|(_, v_uris)| {
                      let strings = v_uris.into_iter().map(|val| {
-                         // Handle ErrorInfoValue - Needs Display or specific formatting
-                         // Placeholder: Using Debug for now if ErrorInfoValue doesn't impl Display
                          Ok(format!("{:?}", val))
                      }).collect::<Result<Vec<String>>>()?;
                      Ok(TypedHeader::ErrorInfo(strings))
@@ -908,11 +896,8 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AlertInfo => {
                 all_consuming(parser::headers::parse_alert_info)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_alert_values)| { // v_alert_values = Vec<(Uri, Vec<Param>)> or Vec<AlertInfoValue>
-                     // Assuming parser returns AlertInfoValue which needs Display or manual formatting
+                 .and_then(|(_, v_alert_values)| {
                      let strings = v_alert_values.into_iter().map(|val| {
-                         // Handle AlertInfoValue - Needs Display or specific formatting
-                         // Placeholder: Using Debug for now
                          Ok(format!("{:?}", val))
                      }).collect::<Result<Vec<String>>>()?;
                      Ok(TypedHeader::AlertInfo(strings))
@@ -921,11 +906,8 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::CallInfo => {
                 all_consuming(parser::headers::parse_call_info)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_call_values)| { // v_call_values = Vec<(Uri, Vec<Param>)> or Vec<CallInfoValue>
-                     // Assuming parser returns CallInfoValue which needs Display or manual formatting
+                 .and_then(|(_, v_call_values)| {
                      let strings = v_call_values.into_iter().map(|val| {
-                         // Handle CallInfoValue - Needs Display or specific formatting
-                         // Placeholder: Using Debug for now
                          Ok(format!("{:?}", val))
                      }).collect::<Result<Vec<String>>>()?;
                      Ok(TypedHeader::CallInfo(strings))
@@ -933,22 +915,10 @@ impl TryFrom<Header> for TypedHeader {
             },
 
             // Fallback for Other/Unimplemented
-            _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))), // Clone bytes for Raw
+            _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
 
-        // Map nom error to crate::Error - simplified error mapping
         parse_result
-
-        // Original complex error mapping - keep if specific downcasting is needed
-        // parse_result.map_err(|e| {
-        //     // If the error is already a crate::Error, return it directly
-        //     // This requires Error to implement std::error::Error and potentially Any
-        //     // Or, if using a custom error enum that wraps Nom errors, handle that.
-        //     // Simplified approach: Assume all errors coming here can be converted via From
-        //     Error::ParseError(
-        //          format!("Failed to parse header '{:?}' value: {:?}", header.name, e)
-        //      )
-        // })
     }
 }
 

@@ -23,9 +23,10 @@ use crate::types::address::NameAddr;
 use crate::types::address::Address;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;
 use crate::parser::address::parse_name_addr;
+use serde::{Serialize, Deserialize};
 
 // Define a struct to represent the Reply-To header value
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReplyToValue {
     pub display_name: Option<String>,
     pub uri: Uri,

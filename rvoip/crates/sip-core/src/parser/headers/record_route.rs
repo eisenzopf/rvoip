@@ -26,9 +26,11 @@ use crate::types::address::Address; // Use Address directly
 use crate::types::record_route::RecordRoute as RecordRouteHeader; // Import specific type
 use crate::types::uri_with_params::UriWithParams; // Added
 use crate::types::uri_with_params_list::UriWithParamsList; // Added
+use serde::{Serialize, Deserialize}; // Added serde
 
-// Define a struct to represent a single Record-Route entry (same as RouteEntry)
-// REMOVED RecordRouteEntry struct definition
+/// Represents a single record-route entry (typically name-addr)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
+pub struct RecordRouteEntry(pub Address);
 
 // rec-route = name-addr *( SEMI rr-param )
 // rr-param = generic-param

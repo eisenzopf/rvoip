@@ -25,14 +25,11 @@ use crate::types::route::Route as RouteHeader; // Use the specific header type
 use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::types::uri_with_params::UriWithParams;
 use crate::parser::address::parse_address;
+use serde::{Serialize, Deserialize}; // Added serde
 
-// Define a struct to represent a single route entry
-#[derive(Debug, PartialEq, Clone)]
-pub struct RouteEntry {
-    pub display_name: Option<String>,
-    pub uri: Uri,
-    pub params: Vec<Param>,
-}
+/// Represents a single route entry (typically name-addr or addr-spec)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
+pub struct RouteEntry(pub Address);
 
 // route-param = name-addr *( SEMI rr-param )
 // rr-param = generic-param
