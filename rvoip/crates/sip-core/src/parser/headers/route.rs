@@ -55,7 +55,14 @@ fn parse_route_address(input: &[u8]) -> ParseResult<Address> {
 pub fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
     map(
         comma_separated_list1(parse_route_address),
-        RouteHeader // Use the imported alias
+        |addresses: Vec<Address>| {
+            // Convert Vec<Address> to Vec<RouteEntry>
+            let entries = addresses.into_iter()
+                .map(|addr| RouteEntry(addr))
+                .collect();
+            
+            RouteHeader(entries)
+        }
     )(input)
 }
 
