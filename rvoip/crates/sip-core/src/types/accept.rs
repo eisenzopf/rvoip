@@ -3,6 +3,7 @@ use crate::parser::headers::parse_accept;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed Accept header.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -52,10 +53,19 @@ impl fmt::Display for Accept {
 }
 
 impl FromStr for Accept {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_accept(s)
+        use crate::parser::headers::accept::parse_accept;
+
+        // Convert &str to &[u8] and use all_consuming
+        match all_consuming(parse_accept)(s.as_bytes()) {
+            Ok((_, values)) => Ok(Accept(values)),
+            Err(e) => Err(Error::ParseError{ 
+                message: format!("Failed to parse Accept header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

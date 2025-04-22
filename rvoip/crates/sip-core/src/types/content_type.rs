@@ -3,6 +3,7 @@ use crate::parser::headers::parse_content_type;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed Content-Type header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -22,11 +23,19 @@ impl fmt::Display for ContentType {
 }
 
 impl FromStr for ContentType {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Delegate to the parser function and wrap the result
-        parse_content_type(s).map(ContentType)
+        use crate::parser::headers::content_type::parse_content_type;
+
+        match all_consuming(parse_content_type)(s.as_bytes()) {
+            // The parser already returns the final ContentTypeValue struct
+            Ok((_, value)) => Ok(ContentType(value)),
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Content-Type header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

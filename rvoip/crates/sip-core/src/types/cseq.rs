@@ -3,6 +3,7 @@ use crate::parser::headers::parse_cseq;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed CSeq header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -25,12 +26,22 @@ impl fmt::Display for CSeq {
 }
 
 impl FromStr for CSeq {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Trim whitespace before parsing
+        use crate::parser::headers::cseq::parse_cseq;
+
         let trimmed_s = s.trim();
-        parse_cseq(trimmed_s)
+        match all_consuming(parse_cseq)(trimmed_s.as_bytes()) {
+            Ok((_, value)) => {
+                let method = Method::from_str(std::str::from_utf8(&value.method)?)?;
+                Ok(CSeq { seq: value.seq, method })
+            },
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse CSeq header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

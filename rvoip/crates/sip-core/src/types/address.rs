@@ -210,6 +210,30 @@ impl Address {
         // Add as Param::Other
         self.params.push(Param::Other(key_string, value_opt_string));
     }
+
+    // Helper to construct from parser output
+    pub(crate) fn from_parsed(
+        display_name_bytes: Option<Vec<u8>>,
+        uri: Uri,
+        params: Vec<Param>
+    ) -> Result<Self> {
+        let display_name = display_name_bytes
+            .map(|bytes| String::from_utf8(bytes)) // TODO: Handle potential quoting/unescaping
+            .transpose()?;
+        // Convert Vec<Param> to HashMap<String, Option<String>>
+        let parameters = params.into_iter()
+            .filter_map(|p| {
+                 // This conversion is lossy - only captures Other/Tag for now
+                 match p {
+                    Param::Other(k, v) => Some((k, v)),
+                    Param::Tag(t) => Some(("tag".to_string(), Some(t))),
+                    // TODO: Add other Param variants (Q, Expires, etc.) if needed for Address
+                    _ => None,
+                 }
+            })
+            .collect();
+        Ok(Address { display_name, uri, params })
+    }
 }
 
 impl FromStr for Address {

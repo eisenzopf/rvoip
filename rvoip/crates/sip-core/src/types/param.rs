@@ -5,9 +5,29 @@ use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
+use crate::types::uri::Host; // Assuming Host type exists
 
 // TODO: Add more specific parameter types (like rsip NewTypes) 
 // e.g., Branch(String), Tag(String), Expires(u32), etc.
+
+/// Represents the parsed value of a generic parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)] // Added Eq/Hash assuming Host is Eq/Hash
+pub enum GenericValue {
+    Token(String),
+    Host(Host),
+    Quoted(String),
+}
+
+// Implement Display for GenericValue for use in Param::Display
+impl fmt::Display for GenericValue {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GenericValue::Token(s) => write!(f, "{}", s),
+            GenericValue::Host(h) => write!(f, "{}", h), // Assuming Host implements Display
+            GenericValue::Quoted(s) => write!(f, "\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")), // Re-quote safely
+        }
+    }
+}
 
 /// Represents a generic URI parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,8 +54,12 @@ pub enum Param {
     User(String),
     /// Method parameter (rarely used in URIs).
     Method(String), // Consider using types::Method later
+    /// Handling parameter (added for Content-Disposition)
+    Handling(String), // Added for Content-Disposition (Need Handling enum later)
+    /// Duration parameter (added for Retry-After)
+    Duration(u32), // Added for Retry-After
     /// Generic parameter represented as key-value.
-    Other(String, Option<String>),
+    Other(String, Option<GenericValue>), // Changed value type
 }
 
 impl fmt::Display for Param {
@@ -52,7 +76,9 @@ impl fmt::Display for Param {
             Param::Transport(val) => write!(f, ";transport={}", val),
             Param::User(val) => write!(f, ";user={}", val),
             Param::Method(val) => write!(f, ";method={}", val),
-            Param::Other(key, Some(val)) => write!(f, ";{}={}", key, val),
+            Param::Handling(val) => write!(f, ";handling={}", val),
+            Param::Duration(val) => write!(f, ";duration={}", val),
+            Param::Other(key, Some(val)) => write!(f, ";{}={}", key, val), // Use GenericValue::Display
             Param::Other(key, None) => write!(f, ";{}", key),
         }
     }

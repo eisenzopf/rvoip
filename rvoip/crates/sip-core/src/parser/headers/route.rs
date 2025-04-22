@@ -1,0 +1,111 @@
+// Parser for the Route header (RFC 3261 Section 20.33)
+
+use nom::{
+    branch::alt,
+    combinator::map,
+    multi::{many0, separated_list1},
+    sequence::{pair, preceded},
+    IResult,
+};
+
+// Import from base parser modules
+use crate::parser::separators::{hcolon, comma};
+use crate::parser::address::name_addr; // Route uses name-addr strictly
+use crate::parser::common_params::{generic_param, semicolon_separated_params0};
+use crate::parser::common::comma_separated_list1; // Route requires at least one
+use crate::parser::ParseResult;
+
+use crate::types::param::Param;
+use crate::uri::Uri;
+
+// Import types (assuming)
+use crate::types.address::Address;
+use crate::types.route::RouteParamInfo; // Assuming struct { address: Address }
+use crate::types.route::Route as RouteHeader; // Import the specific header type
+
+// Define a struct to represent a single route entry
+#[derive(Debug, PartialEq, Clone)]
+pub struct RouteEntry {
+    pub display_name: Option<String>,
+    pub uri: Uri,
+    pub params: Vec<Param>,
+}
+
+// route-param = name-addr *( SEMI rr-param )
+// rr-param = generic-param
+fn route_param(input: &[u8]) -> ParseResult<RouteParamInfo> {
+    map(
+        pair(
+            name_addr, // Route requires name-addr form -> Address{..., params: []}
+            many0(preceded(semi, generic_param))
+        ),
+        |(mut addr, params_vec)| { // Make addr mutable
+            addr.params = params_vec; // Assign parsed params
+            RouteParamInfo { address: addr } // Construct the type
+        }
+    )(input)
+}
+
+// Route = "Route" HCOLON route-param *(COMMA route-param)
+// Note: HCOLON handled elsewhere
+pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
+    map(comma_separated_list1(route_param), RouteHeader)(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types.address::{Address};
+    use crate::types.param::{Param, GenericValue};
+    use crate::types.uri::Uri;
+
+    #[test]
+    fn test_parse_route_single() {
+        let input = b"<sip:ss1.example.com;lr>";
+        let result = parse_route(input);
+        assert!(result.is_ok());
+        let (rem, route_header) = result.unwrap(); // Returns RouteHeader
+        let routes = route_header.0; // Access inner Vec
+        assert!(rem.is_empty());
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].address.display_name.is_none());
+        assert_eq!(routes[0].address.uri.scheme, "sip");
+        assert_eq!(routes[0].address.params.len(), 1);
+        assert!(matches!(routes[0].address.params[0], Param::Other(ref n, None) if n == "lr"));
+    }
+    
+    #[test]
+    fn test_parse_route_multiple() {
+        let input = b"<sip:ss1.example.com;lr>, <sip:ss2.example.com;lr>";
+        let result = parse_route(input);
+        assert!(result.is_ok());
+        let (rem, route_header) = result.unwrap(); // Returns RouteHeader
+        let routes = route_header.0; // Access inner Vec
+        assert!(rem.is_empty());
+        assert_eq!(routes.len(), 2);
+        assert!(routes[0].address.params.contains(&Param::Other("lr".to_string(), None)));
+        assert!(routes[1].address.params.contains(&Param::Other("lr".to_string(), None)));
+    }
+
+    #[test]
+    fn test_parse_route_with_display_name() {
+        // Although unusual for Route, technically allowed by name-addr
+        let input = b"\"Proxy 1\" <sip:p1.example.com;lr>";
+        let result = parse_route(input);
+        assert!(result.is_ok());
+        let (rem, route_header) = result.unwrap(); // Returns RouteHeader
+        let routes = route_header.0; // Access inner Vec
+        assert!(rem.is_empty());
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].address.display_name, Some("Proxy 1".to_string()));
+        assert!(routes[0].address.params.contains(&Param::Other("lr".to_string(), None)));
+    }
+
+     #[test]
+    fn test_parse_route_addr_spec_fail() {
+        // Should fail because Route requires name-addr (with <>)
+        let input = b"sip:ss1.example.com;lr";
+        let result = parse_route(input);
+        assert!(result.is_err());
+    }
+} 

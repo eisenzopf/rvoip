@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::parser::headers::parse_content_length;
 use std::ops::Deref;
+use nom::combinator::all_consuming;
 
 /// Typed Content-Length header value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
@@ -30,10 +31,18 @@ impl fmt::Display for ContentLength {
 }
 
 impl FromStr for ContentLength {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_content_length(s)
+        use crate::parser::headers::content_length::parse_content_length;
+
+        match all_consuming(parse_content_length)(s.as_bytes()) {
+            Ok((_, value)) => Ok(ContentLength(value)),
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Content-Length header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

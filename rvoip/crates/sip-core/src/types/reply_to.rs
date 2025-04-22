@@ -3,6 +3,7 @@ use crate::parser::headers::parse_reply_to; // Use the parser
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed Reply-To header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -22,11 +23,23 @@ impl fmt::Display for ReplyTo {
 }
 
 impl FromStr for ReplyTo {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Assuming parse_reply_to is the correct entry point
-        parse_reply_to(s)
+        use crate::parser::headers::reply_to::parse_reply_to;
+        use crate::types::Address;
+
+        match all_consuming(parse_reply_to)(s.as_bytes()) {
+            Ok((_, value)) => {
+                // Convert ReplyToValue -> Address
+                let addr = Address::from_parsed(value.display_name, value.uri, value.params)?;
+                Ok(ReplyTo(addr))
+            },
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Reply-To header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

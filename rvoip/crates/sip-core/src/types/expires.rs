@@ -2,6 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 use crate::error::Result;
 use crate::parser::headers::parse_expires;
+use nom::combinator::all_consuming;
 
 /// Typed Expires header value (seconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
@@ -21,10 +22,18 @@ impl fmt::Display for Expires {
 }
 
 impl FromStr for Expires {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_expires(s)
+        use crate::parser::headers::expires::parse_expires;
+
+        match all_consuming(parse_expires)(s.as_bytes()) {
+            Ok((_, value)) => Ok(Expires(value)),
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Expires header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

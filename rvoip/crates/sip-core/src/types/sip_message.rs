@@ -1,6 +1,6 @@
 use std::fmt;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize}; // Commented out Serde
 
 use crate::error::Result;
 use crate::header::{Header, HeaderName};
@@ -10,7 +10,7 @@ use crate::version::Version;
 use crate::types::{Method, StatusCode, Via};
 
 /// A SIP request message
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     /// The method of the request
     pub method: Method,
@@ -55,22 +55,26 @@ impl Request {
 
     /// Retrieves the Call-ID header value, if present
     pub fn call_id(&self) -> Option<&str> {
-        self.header(&HeaderName::CallId).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::CallId).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
     
     /// Retrieves the From header value, if present
     pub fn from(&self) -> Option<&str> {
-        self.header(&HeaderName::From).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::From).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
     
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
-        self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::To).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
     
     /// Retrieves the CSeq header value, if present
     pub fn cseq(&self) -> Option<&str> {
-        self.header(&HeaderName::CSeq).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::CSeq).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
 
     /// Get all Via headers as structured Via objects
@@ -98,6 +102,67 @@ impl Request {
     pub fn first_via(&self) -> Option<Via> {
         self.via_headers().into_iter().next()
     }
+
+    pub fn get_header_value(&self, name: &HeaderName) -> Option<&str> {
+        // for header in &self.headers {
+        //     if &header.name == name {
+        //         if let Some(text) = header.value.as_text() {
+        //             return Some(text);
+        //         }
+        //     }
+        // }
+        None // Placeholder
+    }
+
+    /// Get Via headers as structured Via objects
+    /// Note: This relies on the Via parser being available where called.
+    /// TODO: Refactor to return `Result<Vec<Via>>` or use a dedicated typed header getter.
+    pub fn via_headers_no_body(&self) -> Vec<Via> {
+        let mut result = Vec::new();
+        for header in &self.headers {
+            if header.name == HeaderName::Via {
+                if let Some(text) = header.value.as_text() {
+                     // Ideally, parse_multiple_vias should be accessible here
+                    // For now, this will likely fail if called directly unless 
+                    // the parser module is imported and parse_multiple_vias is public.
+                   if let Ok(vias) = crate::parser::headers::parse_multiple_vias(text) {
+                        result.extend(vias);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Get the first Via header as a structured Via object
+    /// TODO: Refactor similar to via_headers.
+    pub fn first_via_no_body(&self) -> Option<Via> {
+        self.via_headers_no_body().into_iter().next()
+    }
+
+    /// Convert the message to bytes
+    pub fn to_bytes_no_body(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        
+        // Add request line: METHOD URI SIP/2.0\r\n
+        buffer.extend_from_slice(format!("{} {} {}\r\n", 
+            self.method, self.uri, self.version).as_bytes());
+        
+        // Add headers
+        for header in &self.headers {
+            // buffer.extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes()); // Commented out Display
+            buffer.extend_from_slice(format!("{}: {:?}\r\n", header.name, header.value).as_bytes()); // Use Debug for now
+        }
+        
+        // Add empty line to separate headers from body
+        buffer.extend_from_slice(b"\r\n");
+        
+        buffer
+    }
+
+    // Note: The parse method is intentionally omitted here.
+    // Parsing should be handled by the parser module.
+    // pub fn parse(data: &[u8]) -> Result<Self> { ... }
 }
 
 impl fmt::Display for Request {
@@ -121,7 +186,7 @@ impl fmt::Display for Request {
 }
 
 /// A SIP response message
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Response {
     /// The SIP version
     pub version: Version,
@@ -192,17 +257,20 @@ impl Response {
     
     /// Retrieves the Call-ID header value, if present
     pub fn call_id(&self) -> Option<&str> {
-        self.header(&HeaderName::CallId).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::CallId).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
     
     /// Retrieves the From header value, if present
     pub fn from(&self) -> Option<&str> {
-        self.header(&HeaderName::From).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::From).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
     
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
-        self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+        // self.header(&HeaderName::To).and_then(|h| h.value.as_text()) // Commented out
+        None // Placeholder
     }
 
     /// Get all Via headers as structured Via objects

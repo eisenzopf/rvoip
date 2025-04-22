@@ -4,6 +4,8 @@ use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use std::ops::Deref;
+use nom::combinator::all_consuming;
+use crate::types::Address;
 
 /// Typed Record-Route header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -23,10 +25,24 @@ impl fmt::Display for RecordRoute {
 }
 
 impl FromStr for RecordRoute {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_record_route(s)
+        use crate::parser::headers::record_route::parse_record_route;
+
+        match all_consuming(parse_record_route)(s.as_bytes()) {
+            Ok((_, entries)) => {
+                // Convert Vec<RecordRouteEntry> -> Vec<Address>
+                let addrs = entries.into_iter()
+                    .map(|entry| Address::from_parsed(entry.display_name, entry.uri, entry.params))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(RecordRoute(addrs))
+            },
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Record-Route header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

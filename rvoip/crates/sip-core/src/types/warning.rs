@@ -3,6 +3,7 @@ use crate::parser::headers::parse_warning;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed Warning header value.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -31,8 +32,18 @@ impl fmt::Display for Warning {
 impl FromStr for Warning {
     type Err = crate::error::Error;
 
-    fn from_str(s: &str) -> Result<Self> {
-        parse_warning(s)
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use crate::parser::headers::warning::parse_warning;
+        use nom::combinator::all_consuming;
+
+        match all_consuming(parse_warning)(s.as_bytes()) {
+            // The parser already returns Vec<WarningValue>
+            Ok((_, value)) => Ok(Warning(value)),
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Warning header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

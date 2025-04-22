@@ -3,6 +3,7 @@ use crate::parser::headers::parse_content_disposition;
 use crate::error::Result;
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Content Disposition Type (session, render, icon, alert, etc.)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +50,33 @@ impl fmt::Display for ContentDisposition {
 }
 
 impl FromStr for ContentDisposition {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_content_disposition(s)
+        use crate::parser::headers::content_disposition::parse_content_disposition;
+        use nom::combinator::all_consuming;
+
+        match all_consuming(parse_content_disposition)(s.as_bytes()) {
+            Ok((_, (dtype_bytes, params_vec))) => {
+                let disp_type = String::from_utf8(dtype_bytes.to_vec())?;
+                // Convert params Vec<Param> -> HashMap<String, String>
+                // TODO: Refine this conversion, especially for handling
+                let params = params_vec.into_iter()
+                    .filter_map(|p| {
+                        if let Param::Other(k, v_opt) = p {
+                            Some((k.to_lowercase(), v_opt.unwrap_or_default()))
+                        } else {
+                            None // Ignore non-Other params for now
+                        }
+                    })
+                    .collect();
+                Ok(ContentDisposition { disposition_type: disp_type, params })
+            },
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Content-Disposition header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

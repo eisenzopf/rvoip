@@ -3,6 +3,7 @@ use crate::parser::headers::parse_allow;
 use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
+use nom::combinator::all_consuming;
 
 /// Typed Allow header.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -48,10 +49,24 @@ impl fmt::Display for Allow {
 }
 
 impl FromStr for Allow {
-    type Err = crate::error::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        parse_allow(s)
+        use crate::parser::headers::allow::parse_allow;
+
+        match all_consuming(parse_allow)(s.as_bytes()) {
+            Ok((_, methods_bytes)) => {
+                // Convert Vec<&[u8]> to Vec<Method>
+                let methods = methods_bytes.iter()
+                    .map(|bytes| Method::from_str(std::str::from_utf8(bytes).unwrap_or("")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Allow(methods))
+            },
+            Err(e) => Err(Error::ParsingError{ 
+                message: format!("Failed to parse Allow header: {:?}", e), 
+                source: None 
+            })
+        }
     }
 }
 

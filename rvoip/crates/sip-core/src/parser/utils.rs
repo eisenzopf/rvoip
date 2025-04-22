@@ -1,149 +1,187 @@
-use std::collections::HashMap;
+// Utility functions for parsing
 
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_till, take_while, take_while1},
-    character::complete::{alpha1, alphanumeric1, char, digit1, space0, space1},
-    combinator::{map, map_res, opt, recognize, verify},
-    multi::{many0, many1, separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
-};
+/// Unfolds Linear White Space (LWS) according to RFC 3261.
+/// Replaces CRLF followed immediately by WSP (SP/HTAB) with a single SP.
+/// Also compresses consecutive non-folding WSP into a single SP.
+/// Returns a new Vec<u8> with the unfolded bytes.
+pub(crate) fn unfold_lws(input: &[u8]) -> Vec<u8> {
+    let mut unfolded = Vec::with_capacity(input.len());
+    let mut i = 0;
+    let len = input.len();
+    let mut last_was_wsp = false;
 
-use crate::error::{Error, Result};
-use nom::error::ErrorKind;
+    while i < len {
+        // Check for CRLF
+        if input[i] == b'\r' && i + 1 < len && input[i+1] == b'\n' {
+            // Check if followed by WSP
+            if i + 2 < len && (input[i+2] == b' ' || input[i+2] == b'\t') {
+                // It's folding LWS: skip CRLF, process subsequent WSP as a single SP
+                i += 2; // Skip CR LF
+                if !last_was_wsp { // Only add SP if not already preceded by WSP
+                    unfolded.push(b' ');
+                    last_was_wsp = true;
+                }
+                // Skip all subsequent WSP characters in this folding sequence
+                while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                    i += 1;
+                }
+            } else {
+                // Not folding LWS, treat CRLF as normal characters (e.g., part of quoted string content)
+                // Or potentially an error depending on context, but unfold just passes them through.
+                unfolded.push(input[i]);
+                unfolded.push(input[i+1]);
+                i += 2;
+                last_was_wsp = false;
+            }
+        } 
+        // Check for standalone LF (more lenient)
+        else if input[i] == b'\n' {
+             // Check if followed by WSP
+             if i + 1 < len && (input[i+1] == b' ' || input[i+1] == b'\t') {
+                 // Folding LWS
+                 i += 1; // Skip LF
+                 if !last_was_wsp {
+                     unfolded.push(b' ');
+                     last_was_wsp = true;
+                 }
+                 while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                     i += 1;
+                 }
+             } else {
+                 // Normal LF
+                 unfolded.push(input[i]);
+                 i += 1;
+                 last_was_wsp = false;
+             }
+        }
+        // Check for WSP (SP or HTAB)
+        else if input[i] == b' ' || input[i] == b'\t' {
+            // If the last character added wasn't WSP, add a single space
+            if !last_was_wsp {
+                unfolded.push(b' ');
+                last_was_wsp = true;
+            }
+            // Skip consecutive WSP
+            while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                i += 1;
+            }
+        } 
+        // Other character
+        else {
+            unfolded.push(input[i]);
+            i += 1;
+            last_was_wsp = false;
+        }
+    }
 
-/// Parser for CRLF (both \r\n and \n are accepted)
-pub fn crlf(input: &str) -> IResult<&str, &str> {
-    alt((tag("\r\n"), tag("\n")))(input)
+    unfolded
 }
 
-/// Parser for a parameter name
-pub fn parse_param_name(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| {
-        c.is_alphanumeric() || 
-        c == '-' || c == '_' || c == '.' || c == '+' || 
-        c == '!' || c == '~' || c == '*' || c == '\''
-    })(input)
+/// Decodes URI percent-encoding (%HH) within a byte slice.
+/// Returns a Result<String, Error>.
+pub(crate) fn unescape_uri_component(input: &[u8]) -> crate::error::Result<String> {
+    let mut unescaped: Vec<u8> = Vec::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < input.len() {
+        match input[i] {
+            b'%' => {
+                if i + 2 < input.len() {
+                    let h1 = input[i + 1];
+                    let h2 = input[i + 2];
+                    if let (Some(v1), Some(v2)) = (hex_val(h1), hex_val(h2)) {
+                        unescaped.push((v1 << 4) | v2);
+                        i += 3;
+                    } else {
+                        // Invalid hex digits after %
+                        return Err(crate::error::Error::ParsingError {
+                            message: format!("Invalid hex sequence: %{}{}", h1 as char, h2 as char),
+                            source: None,
+                        });
+                    }
+                } else {
+                    // Incomplete escape sequence
+                    return Err(crate::error::Error::ParsingError {
+                        message: "Incomplete escape sequence at end of input".to_string(),
+                        source: None,
+                    });
+                }
+            }
+            _ => {
+                unescaped.push(input[i]);
+                i += 1;
+            }
+        }
+    }
+
+    String::from_utf8(unescaped).map_err(|e| crate::error::Error::ParsingError {
+        message: format!("UTF-8 error after URI unescaping: {}", e),
+        source: Some(Box::new(e)),
+    })
 }
 
-/// Parser for a parameter value
-pub fn parse_param_value(input: &str) -> IResult<&str, &str> {
-    take_till(|c| c == ';' || c == ',' || c == '\r' || c == '\n')(input)
-}
-
-/// Parse a list of comma-separated values with optional whitespace
-pub fn parse_comma_separated_values(input: &str) -> IResult<&str, Vec<&str>> {
-    map(
-        separated_list0(
-            tuple((char(','), space0)), // Separator: comma + optional space
-            // Item: Take until the next comma (includes surrounding whitespace)
-            take_till(|c| c == ',' || c == '\r' || c == '\n')
-        ),
-        // Trim whitespace from each resulting item AFTER the list is parsed
-        |items: Vec<&str>| items.into_iter().map(str::trim).collect()
-    )(input)
-}
-
-/// Parser for a token value (alphanumeric, plus some special chars)
-pub fn parse_token(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| {
-        c.is_alphanumeric() ||
-        c == '-' || c == '_' || c == '.' || c == '+' || c == '~' ||
-        c == '!' || c == '*' || c == '\'' || c == '(' || c == ')'
-    })(input)
-}
-
-/// Parser for a quoted string
-pub fn parse_quoted_string(input: &str) -> IResult<&str, &str> {
-    delimited(
-        char('"'),
-        take_till(|c| c == '"'),
-        char('"')
-    )(input)
-}
-
-/// Parser for a text value (either quoted or token)
-pub fn parse_text_value(input: &str) -> IResult<&str, &str> {
-    alt((
-        parse_quoted_string,
-        parse_token
-    ))(input)
-}
-
-/// Parser for a single parameter (name=value or name)
-fn parse_one_param(input: &str) -> IResult<&str, (String, String)> {
-    alt((
-        separated_pair(
-            map(parse_param_name, |s| s.to_string()),
-            char('='),
-            map(parse_param_value, |s| s.to_string())
-        ),
-        map(
-            parse_param_name, // Flag parameter
-            |name| (name.to_string(), "".to_string())
-        )
-    ))(input)
-}
-
-/// Parse all parameters in semicolon-delimited format: ;name=value;flag
-/// Allows optional spaces after the semicolon separator.
-pub fn parse_semicolon_params(input: &str) -> IResult<&str, HashMap<String, String>> {
-    map(
-        // Use many0 to parse zero or more parameters
-        many0(
-            // Each parameter must be preceded by ';' and optional spaces
-            preceded(
-                pair(char(';'), space0), 
-                parse_one_param // Use the helper to parse name=value or flag
-            )
-        ),
-        |params| params.into_iter().collect()
-    )(input)
-}
-
-/// Clone without lifetime - helper for string handling
-pub fn clone_str(s: &str) -> String {
-    s.to_string()
+// Helper to convert a hex character (byte) to its value (0-15)
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_parse_param_name() {
-        assert_eq!(parse_param_name("branch").unwrap().1, "branch");
-        assert_eq!(parse_param_name("user-agent").unwrap().1, "user-agent");
-        assert_eq!(parse_param_name("extension.param").unwrap().1, "extension.param");
+    fn test_unfold_lws_simple() {
+        assert_eq!(unfold_lws(b"Value"), b"Value");
+        assert_eq!(unfold_lws(b"Two Words"), b"Two Words");
+        assert_eq!(unfold_lws(b"Many   Spaces Between"), b"Many Spaces Between");
+        assert_eq!(unfold_lws(b"\tTabs\t Too\t"), b" Tabs Too "); // Note: leading/trailing handled
+    }
+
+    #[test]
+    fn test_unfold_lws_folding() {
+        assert_eq!(unfold_lws(b"Line 1\r\n Line 2"), b"Line 1 Line 2");
+        assert_eq!(unfold_lws(b"Line 1\r\n\tLine 2"), b"Line 1 Line 2");
+        assert_eq!(unfold_lws(b"Line 1 \r\n Line 2"), b"Line 1 Line 2"); // Space before fold
+        assert_eq!(unfold_lws(b"Line 1\r\n  \t Line 2"), b"Line 1 Line 2"); // Multiple WSP after fold
+        assert_eq!(unfold_lws(b"Line 1\r\nLine 2"), b"Line 1\r\nLine 2"); // No WSP after CRLF (not folding)
+    }
+
+    #[test]
+    fn test_unfold_lws_mixed() {
+        assert_eq!(unfold_lws(b"Folded\r\n  Here and   also \t here."), b"Folded Here and also here.");
+        assert_eq!(unfold_lws(b" Leading\r\n space\r\n\tand trailing \t"), b" Leading space and trailing ");
     }
     
-    #[test]
-    fn test_parse_param_value() {
-        assert_eq!(parse_param_value("value").unwrap().1, "value");
-        assert_eq!(parse_param_value("value;next").unwrap().1, "value");
-        assert_eq!(parse_param_value("value,next").unwrap().1, "value");
+     #[test]
+    fn test_unfold_lenient_lf() {
+        assert_eq!(unfold_lws(b"Line 1\n Line 2"), b"Line 1 Line 2");
+        assert_eq!(unfold_lws(b"Line 1\n\tLine 2"), b"Line 1 Line 2");
+        assert_eq!(unfold_lws(b"Line 1\nLine 2"), b"Line 1\nLine 2"); // Not folding
     }
-    
+
     #[test]
-    fn test_parse_semicolon_params() {
-        let input = ";branch=z9hG4bK776asdhds;received=10.0.0.1;rport";
-        let (_, params) = parse_semicolon_params(input).unwrap();
-        
-        assert_eq!(params.get("branch").unwrap(), "z9hG4bK776asdhds");
-        assert_eq!(params.get("received").unwrap(), "10.0.0.1");
-        assert_eq!(params.get("rport").unwrap(), "");
+    fn test_unescape_uri_component() {
+        assert_eq!(unescape_uri_component(b"simple").unwrap(), "simple");
+        assert_eq!(unescape_uri_component(b"%20").unwrap(), " ");
+        assert_eq!(unescape_uri_component(b"a%20b%20c").unwrap(), "a b c");
+        assert_eq!(unescape_uri_component(b"%41%42%43").unwrap(), "ABC");
+        assert_eq!(unescape_uri_component(b"%c3%a9").unwrap(), "é"); // UTF-8
+        assert_eq!(unescape_uri_component(b"%25").unwrap(), "%"); // Escaped percent
     }
-    
+
     #[test]
-    fn test_parse_comma_separated_values() {
-        let input = "value1, value2,value3 , value4";
-        let (_, values) = parse_comma_separated_values(input).unwrap();
-        
-        assert_eq!(values.len(), 4);
-        assert_eq!(values[0], "value1");
-        assert_eq!(values[1], "value2");
-        assert_eq!(values[2], "value3");
-        assert_eq!(values[3], "value4");
+    fn test_unescape_uri_component_invalid() {
+        assert!(unescape_uri_component(b"%").is_err()); // Incomplete
+        assert!(unescape_uri_component(b"%2").is_err()); // Incomplete
+        assert!(unescape_uri_component(b"%G0").is_err()); // Invalid hex
+        assert!(unescape_uri_component(b"%2G").is_err()); // Invalid hex
+        assert!(unescape_uri_component(b"%AF%").is_err()); // Incomplete at end
+        // Test invalid UTF-8 after decoding (e.g., %C0%80)
+        assert!(unescape_uri_component(b"%C0%80").is_err()); 
     }
 } 

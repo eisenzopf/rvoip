@@ -5,6 +5,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+use crate::parser::headers::{
+    via::ViaEntry, // Assuming ViaEntry is the Vec element type
+    contact::ContactValue,
+    from::FromHeaderValue,
+    to::ToHeaderValue,
+    route::RouteEntry,
+    record_route::RecordRouteEntry,
+    cseq::CSeqValue,
+    content_type::ContentTypeValue,
+    accept::AcceptValue,
+    accept_encoding::AcceptEncodingValue,
+    accept_language::AcceptLanguageValue,
+    content_disposition::ContentDispositionValue,
+    alert_info::AlertInfoValue,
+    call_info::CallInfoValue,
+    error_info::ErrorInfoValue,
+    warning::WarningValue,
+    retry_after::RetryAfterValue,
+    reply_to::ReplyToValue,
+    // server_val is complex, use Vec<u8> for now
+    // TODO: Add auth header types
+};
+use crate::uri::Uri;
+use ordered_float::NotNan;
+use std::collections::HashMap;
+use crate::types::param::Param;
+
 /// Common SIP header names
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeaderName {
@@ -32,6 +59,8 @@ pub enum HeaderName {
     Authorization,
     /// Expires: Expiration time for registration or subscription
     Expires,
+    /// Min-Expires: Minimum expiration time for registration or subscription
+    MinExpires,
     /// Record-Route: Record of proxies that want to stay in the path
     RecordRoute,
     /// Route: Forced route for a request
@@ -54,8 +83,16 @@ pub enum HeaderName {
     WwwAuthenticate,
     /// Accept: Media types acceptable for the response
     Accept,
+    /// Accept-Encoding: Acceptable content encodings
+    AcceptEncoding,
+    /// Accept-Language: Acceptable languages for the response
+    AcceptLanguage,
     /// Content-Disposition: Presentation style for the message body
     ContentDisposition,
+    /// Content-Encoding: Content encoding of the message body
+    ContentEncoding,
+    /// Content-Language: Language of the message body
+    ContentLanguage,
     /// Warning: Additional information about the status of a response
     Warning,
     /// Proxy-Authenticate: Challenge for proxy authentication
@@ -66,6 +103,30 @@ pub enum HeaderName {
     AuthenticationInfo,
     /// Reply-To: Address for replies
     ReplyTo,
+    /// Require: Required capabilities for the request
+    Require,
+    /// Retry-After: Recommended time to wait before retrying
+    RetryAfter,
+    /// Subject: Subject of the message
+    Subject,
+    /// Timestamp: Timestamp of the message
+    Timestamp,
+    /// Organization: Organization of the message
+    Organization,
+    /// Priority: Priority of the message
+    Priority,
+    /// Date: Date of the message
+    Date,
+    /// MIME-Version: MIME version of the message
+    MimeVersion,
+    /// In-Reply-To: In-Reply-To header
+    InReplyTo,
+    /// Alert-Info: Alert-Info header
+    AlertInfo,
+    /// Call-Info: Call-Info header
+    CallInfo,
+    /// Error-Info: Error-Info header
+    ErrorInfo,
     /// Custom header name
     Other(String),
 }
@@ -86,6 +147,7 @@ impl HeaderName {
             HeaderName::Allow => "Allow",
             HeaderName::Authorization => "Authorization",
             HeaderName::Expires => "Expires",
+            HeaderName::MinExpires => "Min-Expires",
             HeaderName::RecordRoute => "Record-Route",
             HeaderName::Route => "Route",
             HeaderName::Supported => "Supported",
@@ -97,12 +159,28 @@ impl HeaderName {
             HeaderName::RAck => "RAck",
             HeaderName::WwwAuthenticate => "WWW-Authenticate",
             HeaderName::Accept => "Accept",
+            HeaderName::AcceptEncoding => "Accept-Encoding",
+            HeaderName::AcceptLanguage => "Accept-Language",
             HeaderName::ContentDisposition => "Content-Disposition",
+            HeaderName::ContentEncoding => "Content-Encoding",
+            HeaderName::ContentLanguage => "Content-Language",
             HeaderName::Warning => "Warning",
             HeaderName::ProxyAuthenticate => "Proxy-Authenticate",
             HeaderName::ProxyAuthorization => "Proxy-Authorization",
             HeaderName::AuthenticationInfo => "Authentication-Info",
             HeaderName::ReplyTo => "Reply-To",
+            HeaderName::Require => "Require",
+            HeaderName::RetryAfter => "Retry-After",
+            HeaderName::Subject => "Subject",
+            HeaderName::Timestamp => "Timestamp",
+            HeaderName::Organization => "Organization",
+            HeaderName::Priority => "Priority",
+            HeaderName::Date => "Date",
+            HeaderName::MimeVersion => "MIME-Version",
+            HeaderName::InReplyTo => "In-Reply-To",
+            HeaderName::AlertInfo => "Alert-Info",
+            HeaderName::CallInfo => "Call-Info",
+            HeaderName::ErrorInfo => "Error-Info",
             HeaderName::Other(s) => s,
         }
     }
@@ -118,7 +196,8 @@ impl FromStr for HeaderName {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
+        let lower_s = s.to_lowercase();
+        match lower_s.as_str() {
             "call-id" | "i" => Ok(HeaderName::CallId),
             "contact" | "m" => Ok(HeaderName::Contact),
             "content-length" | "l" => Ok(HeaderName::ContentLength),
@@ -131,6 +210,7 @@ impl FromStr for HeaderName {
             "allow" => Ok(HeaderName::Allow),
             "authorization" => Ok(HeaderName::Authorization),
             "expires" => Ok(HeaderName::Expires),
+            "min-expires" => Ok(HeaderName::MinExpires),
             "record-route" => Ok(HeaderName::RecordRoute),
             "route" => Ok(HeaderName::Route),
             "supported" | "k" => Ok(HeaderName::Supported),
@@ -142,129 +222,105 @@ impl FromStr for HeaderName {
             "rack" => Ok(HeaderName::RAck),
             "www-authenticate" => Ok(HeaderName::WwwAuthenticate),
             "accept" => Ok(HeaderName::Accept),
+            "accept-encoding" => Ok(HeaderName::AcceptEncoding),
+            "accept-language" => Ok(HeaderName::AcceptLanguage),
             "content-disposition" => Ok(HeaderName::ContentDisposition),
+            "content-encoding" | "e" => Ok(HeaderName::ContentEncoding),
+            "content-language" => Ok(HeaderName::ContentLanguage),
             "warning" => Ok(HeaderName::Warning),
             "proxy-authenticate" => Ok(HeaderName::ProxyAuthenticate),
             "proxy-authorization" => Ok(HeaderName::ProxyAuthorization),
             "authentication-info" => Ok(HeaderName::AuthenticationInfo),
             "reply-to" => Ok(HeaderName::ReplyTo),
+            "require" => Ok(HeaderName::Require),
+            "retry-after" => Ok(HeaderName::RetryAfter),
+            "subject" | "s" => Ok(HeaderName::Subject),
+            "timestamp" => Ok(HeaderName::Timestamp),
+            "organization" => Ok(HeaderName::Organization),
+            "priority" => Ok(HeaderName::Priority),
+            "date" => Ok(HeaderName::Date),
+            "mime-version" => Ok(HeaderName::MimeVersion),
+            "in-reply-to" => Ok(HeaderName::InReplyTo),
+            "alert-info" => Ok(HeaderName::AlertInfo),
+            "call-info" => Ok(HeaderName::CallInfo),
+            "error-info" => Ok(HeaderName::ErrorInfo),
             _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
             _ => Err(Error::InvalidHeader("Empty header name".to_string())),
         }
     }
 }
 
-/// Value of a SIP header, which can be one of several types
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Value of a SIP header, parsed into its specific structure.
+#[derive(Debug, Clone, PartialEq)]
 pub enum HeaderValue {
-    /// Simple text value
-    Text(String),
-    /// Integer value
-    Integer(i64),
-    /// List of text values
-    TextList(Vec<String>),
-    /// Raw content (for complex headers we don't parse yet)
-    Raw(String),
-}
+    // === Address Headers ===
+    Contact(ContactValue), // Can be Star or Addresses
+    From(FromHeaderValue),
+    To(ToHeaderValue),
+    Route(Vec<RouteEntry>),
+    RecordRoute(Vec<RecordRouteEntry>),
+    ReplyTo(ReplyToValue),
 
-impl HeaderValue {
-    /// Create a new text header value
-    pub fn text(value: impl Into<String>) -> Self {
-        HeaderValue::Text(value.into())
-    }
+    // === Request/Response Info ===
+    Via(Vec<ViaEntry>), // ViaEntry would contain the parsed tuple
+    CSeq(CSeqValue),
+    MaxForwards(u8),
+    CallId((Vec<u8>, Option<Vec<u8>>)), // (local_part, Option<host_part>)
+    Expires(u32),
+    MinExpires(u32),
+    RetryAfter(RetryAfterValue),
+    Warning(Vec<WarningValue>),
+    Timestamp((Vec<u8>, Option<Vec<u8>>), Option<(Vec<u8>, Option<Vec<u8>>)>), // (ts, delay_opt)
+    Date(Vec<u8>),
 
-    /// Create a new integer header value
-    pub fn integer(value: i64) -> Self {
-        HeaderValue::Integer(value)
-    }
+    // === Content Negotiation ===
+    Accept(Vec<AcceptValue>),
+    AcceptEncoding(Vec<AcceptEncodingValue>),
+    AcceptLanguage(Vec<AcceptLanguageValue>),
 
-    /// Create a new list header value
-    pub fn text_list(values: Vec<String>) -> Self {
-        HeaderValue::TextList(values)
-    }
+    // === Body Info ===
+    ContentLength(u64),
+    ContentType(ContentTypeValue),
+    ContentEncoding(Vec<Vec<u8>>), // Vec<token>
+    ContentLanguage(Vec<Vec<u8>>), // Vec<language-tag>
+    ContentDisposition((Vec<u8>, Vec<Param>)), // (disp_type, params)
+    MimeVersion((u8, u8)), // (major, minor)
 
-    /// Create a new raw header value
-    pub fn raw(value: impl Into<String>) -> Self {
-        HeaderValue::Raw(value.into())
-    }
+    // === Capabilities/Options ===
+    Allow(Vec<Vec<u8>>), // Vec<token>
+    Require(Vec<Vec<u8>>), // Vec<token>
+    Supported(Vec<Vec<u8>>), // Vec<token>
+    Unsupported(Vec<Vec<u8>>), // Vec<token>
+    ProxyRequire(Vec<Vec<u8>>), // Vec<token>
 
-    /// Try to get this value as text
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            HeaderValue::Text(text) => Some(text),
-            _ => None,
-        }
-    }
+    // === Info Headers ===
+    AlertInfo(Vec<AlertInfoValue>),
+    CallInfo(Vec<CallInfoValue>),
+    ErrorInfo(Vec<ErrorInfoValue>),
 
-    /// Try to get this value as an integer
-    pub fn as_integer(&self) -> Option<i64> {
-        match self {
-            HeaderValue::Integer(int) => Some(*int),
-            _ => None,
-        }
-    }
+    // === Misc ===
+    Organization(Option<Vec<u8>>),
+    Priority(Vec<u8>),
+    Subject(Option<Vec<u8>>),
+    Server(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
+    UserAgent(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
+    InReplyTo(Vec<(Vec<u8>, Option<Vec<u8>>)>), // Vec<callid>
 
-    /// Try to get this value as a list
-    pub fn as_text_list(&self) -> Option<&[String]> {
-        match self {
-            HeaderValue::TextList(list) => Some(list),
-            _ => None,
-        }
-    }
+    // === Authentication (Placeholders) ===
+    Authorization(Vec<u8>), // Placeholder
+    ProxyAuthorization(Vec<u8>), // Placeholder
+    WwwAuthenticate(Vec<u8>), // Placeholder
+    ProxyAuthenticate(Vec<u8>), // Placeholder
+    AuthenticationInfo(Vec<u8>), // Placeholder
 
-    /// Get this value as a string, regardless of its internal type
-    pub fn to_string_value(&self) -> String {
-        match self {
-            HeaderValue::Text(text) => text.clone(),
-            HeaderValue::Integer(int) => int.to_string(),
-            HeaderValue::TextList(list) => list.join(", "),
-            HeaderValue::Raw(raw) => raw.clone(),
-        }
-    }
-}
-
-impl fmt::Display for HeaderValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HeaderValue::Text(text) => write!(f, "{}", text),
-            HeaderValue::Integer(int) => write!(f, "{}", int),
-            HeaderValue::TextList(list) => {
-                let mut first = true;
-                for item in list {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                    first = false;
-                }
-                Ok(())
-            }
-            HeaderValue::Raw(raw) => write!(f, "{}", raw),
-        }
-    }
-}
-
-impl FromStr for HeaderValue {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        // For now, we'll just use a basic parser
-        // In a full implementation, we'd parse based on header type
-        if let Ok(int) = s.parse::<i64>() {
-            Ok(HeaderValue::Integer(int))
-        } else if s.contains(',') {
-            let items = s.split(',')
-                .map(|item| item.trim().to_string())
-                .collect();
-            Ok(HeaderValue::TextList(items))
-        } else {
-            Ok(HeaderValue::Text(s.to_string()))
-        }
-    }
+    // === Other ===
+    /// Raw value for unknown or unparsed headers
+    Raw(Vec<u8>),
+    // TODO: Add variants for other headers (Event, Subscription-State, etc.)
 }
 
 /// SIP header, consisting of a name and value
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Header {
     /// Header name
     pub name: HeaderName,
