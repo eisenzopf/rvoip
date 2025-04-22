@@ -44,10 +44,9 @@ fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
             current_input = &current_input[1..];
         }
     }
-    String::from_utf8(unescaped).map_err(|e| Error::ParsingError { 
-        message: format!("UTF8 error during unquoting: {}", e),
-        source: Some(Box::new(e))
-    })
+    String::from_utf8(unescaped).map_err(|e| Error::ParseError(
+        format!("UTF8 error during unquoting: {}", e)
+    ))
 }
 
 // gen-value = token / host / quoted-string

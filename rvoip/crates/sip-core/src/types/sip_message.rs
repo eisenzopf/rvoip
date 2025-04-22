@@ -3,7 +3,7 @@ use bytes::Bytes;
 // use serde::{Deserialize, Serialize}; // Commented out Serde
 
 use crate::error::Result;
-use crate::header::{Header, HeaderName};
+use crate::header::{Header, HeaderName, TypedHeader};
 use crate::uri::Uri;
 use crate::version::Version;
 // Use types from the current crate's types module
@@ -18,8 +18,8 @@ pub struct Request {
     pub uri: Uri,
     /// The SIP version
     pub version: Version,
-    /// The headers of the request
-    pub headers: Vec<Header>,
+    /// The headers of the request (now typed)
+    pub headers: Vec<TypedHeader>,
     /// The body of the request
     pub body: Bytes,
 }
@@ -36,10 +36,15 @@ impl Request {
         }
     }
 
-    /// Adds a header to the request
-    pub fn with_header(mut self, header: Header) -> Self {
+    /// Adds a typed header to the request
+    pub fn with_header(mut self, header: TypedHeader) -> Self {
         self.headers.push(header);
         self
+    }
+
+    /// Sets all headers from a Vec<TypedHeader> (used by parser)
+    pub fn set_headers(&mut self, headers: Vec<TypedHeader>) {
+        self.headers = headers;
     }
 
     /// Sets the body of the request
@@ -48,32 +53,30 @@ impl Request {
         self
     }
 
-    /// Retrieves the first header with the specified name, if any
-    pub fn header(&self, name: &HeaderName) -> Option<&Header> {
-        self.headers.iter().find(|h| &h.name == name)
+    /// Retrieves the first typed header with the specified name, if any
+    pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.headers.iter().find(|h| h.name() == *name)
     }
 
     /// Retrieves the Call-ID header value, if present
-    pub fn call_id(&self) -> Option<&str> {
-        // self.header(&HeaderName::CallId).and_then(|h| h.value.as_text()) // Commented out
-        None // Placeholder
+    pub fn call_id(&self) -> Option<&types::CallId> {
+        self.header(&HeaderName::CallId).and_then(|h| 
+            if let TypedHeader::CallId(cid) = h { Some(cid) } else { None }
+        )
     }
     
     /// Retrieves the From header value, if present
     pub fn from(&self) -> Option<&str> {
-        // self.header(&HeaderName::From).and_then(|h| h.value.as_text()) // Commented out
         None // Placeholder
     }
     
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
-        // self.header(&HeaderName::To).and_then(|h| h.value.as_text()) // Commented out
         None // Placeholder
     }
     
     /// Retrieves the CSeq header value, if present
     pub fn cseq(&self) -> Option<&str> {
-        // self.header(&HeaderName::CSeq).and_then(|h| h.value.as_text()) // Commented out
         None // Placeholder
     }
 
@@ -83,8 +86,8 @@ impl Request {
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name == HeaderName::Via {
-                if let Some(text) = header.value.as_text() {
+            if header.name() == HeaderName::Via {
+                if let Some(text) = header.value().as_text() {
                     // Ideally, parse_multiple_vias should be accessible here
                     // For now, this will likely fail if called directly unless 
                     // the parser module is imported and parse_multiple_vias is public.
@@ -104,13 +107,6 @@ impl Request {
     }
 
     pub fn get_header_value(&self, name: &HeaderName) -> Option<&str> {
-        // for header in &self.headers {
-        //     if &header.name == name {
-        //         if let Some(text) = header.value.as_text() {
-        //             return Some(text);
-        //         }
-        //     }
-        // }
         None // Placeholder
     }
 
@@ -120,8 +116,8 @@ impl Request {
     pub fn via_headers_no_body(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name == HeaderName::Via {
-                if let Some(text) = header.value.as_text() {
+            if header.name() == HeaderName::Via {
+                if let Some(text) = header.value().as_text() {
                      // Ideally, parse_multiple_vias should be accessible here
                     // For now, this will likely fail if called directly unless 
                     // the parser module is imported and parse_multiple_vias is public.
@@ -150,8 +146,7 @@ impl Request {
         
         // Add headers
         for header in &self.headers {
-            // buffer.extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes()); // Commented out Display
-            buffer.extend_from_slice(format!("{}: {:?}\r\n", header.name, header.value).as_bytes()); // Use Debug for now
+            buffer.extend_from_slice(format!("{}\r\n", header).as_bytes());
         }
         
         // Add empty line to separate headers from body
@@ -194,8 +189,8 @@ pub struct Response {
     pub status: StatusCode,
     /// Custom reason phrase (overrides the default for the status code)
     pub reason: Option<String>,
-    /// The headers of the response
-    pub headers: Vec<Header>,
+    /// The headers of the response (now typed)
+    pub headers: Vec<TypedHeader>,
     /// The body of the response
     pub body: Bytes,
 }
@@ -227,10 +222,15 @@ impl Response {
         Response::new(StatusCode::Ok)
     }
 
-    /// Adds a header to the response
-    pub fn with_header(mut self, header: Header) -> Self {
+    /// Adds a typed header to the response
+    pub fn with_header(mut self, header: TypedHeader) -> Self {
         self.headers.push(header);
         self
+    }
+
+    /// Sets all headers from a Vec<TypedHeader> (used by parser)
+    pub fn set_headers(&mut self, headers: Vec<TypedHeader>) {
+        self.headers = headers;
     }
 
     /// Sets a custom reason phrase for the response
@@ -245,9 +245,9 @@ impl Response {
         self
     }
 
-    /// Retrieves the first header with the specified name, if any
-    pub fn header(&self, name: &HeaderName) -> Option<&Header> {
-        self.headers.iter().find(|h| &h.name == name)
+    /// Retrieves the first typed header with the specified name, if any
+    pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.headers.iter().find(|h| h.name() == *name)
     }
 
     /// Gets the reason phrase for this response (either the custom one or the default)
@@ -256,20 +256,19 @@ impl Response {
     }
     
     /// Retrieves the Call-ID header value, if present
-    pub fn call_id(&self) -> Option<&str> {
-        // self.header(&HeaderName::CallId).and_then(|h| h.value.as_text()) // Commented out
-        None // Placeholder
+    pub fn call_id(&self) -> Option<&types::CallId> {
+        self.header(&HeaderName::CallId).and_then(|h| 
+            if let TypedHeader::CallId(cid) = h { Some(cid) } else { None }
+        )
     }
     
     /// Retrieves the From header value, if present
     pub fn from(&self) -> Option<&str> {
-        // self.header(&HeaderName::From).and_then(|h| h.value.as_text()) // Commented out
         None // Placeholder
     }
     
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
-        // self.header(&HeaderName::To).and_then(|h| h.value.as_text()) // Commented out
         None // Placeholder
     }
 
@@ -279,8 +278,8 @@ impl Response {
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name == HeaderName::Via {
-                if let Some(text) = header.value.as_text() {
+            if header.name() == HeaderName::Via {
+                if let Some(text) = header.value().as_text() {
                      // Ideally, parse_multiple_vias should be accessible here
                     // For now, this will likely fail if called directly unless 
                     // the parser module is imported and parse_multiple_vias is public.
@@ -373,7 +372,7 @@ impl Message {
     }
 
     /// Returns the headers of the message
-    pub fn headers(&self) -> &[Header] {
+    pub fn headers(&self) -> &[TypedHeader] {
         match self {
             Message::Request(req) => &req.headers,
             Message::Response(resp) => &resp.headers,
@@ -388,24 +387,26 @@ impl Message {
         }
     }
 
-    /// Retrieves the first header with the specified name, if any
-    pub fn header(&self, name: &HeaderName) -> Option<&Header> {
-        self.headers().iter().find(|h| &h.name == name)
+    /// Retrieves the first typed header with the specified name, if any
+    pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.headers().iter().find(|h| h.name() == *name)
     }
 
     /// Retrieves the Call-ID header value, if present
-    pub fn call_id(&self) -> Option<&str> {
-        self.header(&HeaderName::CallId).and_then(|h| h.value.as_text())
+    pub fn call_id(&self) -> Option<&types::CallId> {
+        self.header(&HeaderName::CallId).and_then(|h| 
+            if let TypedHeader::CallId(cid) = h { Some(cid) } else { None }
+        )
     }
     
     /// Retrieves the From header value, if present
     pub fn from(&self) -> Option<&str> {
-        self.header(&HeaderName::From).and_then(|h| h.value.as_text())
+        None // Placeholder
     }
     
     /// Retrieves the To header value, if present
     pub fn to(&self) -> Option<&str> {
-        self.header(&HeaderName::To).and_then(|h| h.value.as_text())
+        None // Placeholder
     }
 
     /// Get Via headers as structured Via objects
@@ -436,8 +437,7 @@ impl Message {
                 
                 // Add headers
                 for header in &request.headers {
-                    bytes.extend_from_slice(format!("{}: {}\r\n", 
-                        header.name, header.value).as_bytes());
+                    bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
                 }
                 
                 // Add empty line to separate headers from body
@@ -455,8 +455,7 @@ impl Message {
                 
                 // Add headers
                 for header in &response.headers {
-                    bytes.extend_from_slice(format!("{}: {}\r\n", 
-                        header.name, header.value).as_bytes());
+                    bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
                 }
                 
                 // Add empty line to separate headers from body

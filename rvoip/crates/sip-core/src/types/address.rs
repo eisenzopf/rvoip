@@ -106,8 +106,9 @@ impl Address {
     pub fn expires(&self) -> Option<u32> {
         self.params.iter().find_map(|p| match p {
             Param::Expires(val) => Some(*val),
-            // Check Other as fallback if parsing failed earlier
-            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("expires") => val.parse().ok(),
+            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("expires") => {
+                val.as_str().and_then(|s| s.parse().ok()) // Use helper
+            },
             _ => None,
         })
     }
@@ -129,9 +130,8 @@ impl Address {
     pub fn q(&self) -> Option<NotNan<f32>> {
         self.params.iter().find_map(|p| match p {
             Param::Q(val) => Some(*val),
-             // Check Other as fallback
-            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => {
-                val.parse::<f32>().ok().and_then(|f| NotNan::try_from(f).ok())
+            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => { // Match GenericValue
+                val.as_str().and_then(|s| s.parse::<f32>().ok()).and_then(|f| NotNan::try_from(f).ok())
             },
             _ => None,
         })
@@ -161,6 +161,8 @@ impl Address {
             Param::User(_) => key.eq_ignore_ascii_case("user"),
             Param::Method(_) => key.eq_ignore_ascii_case("method"),
             Param::Other(k, _) => k.eq_ignore_ascii_case(key),
+            Param::Handling(_) => key.eq_ignore_ascii_case("handling"),
+            Param::Duration(_) => key.eq_ignore_ascii_case("duration"),
         })
     }
 
@@ -180,7 +182,9 @@ impl Address {
             Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
             Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
             Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-            Param::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
+            Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => v_opt.as_ref().and_then(|gv| gv.as_str()),
+            Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
+            Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
             _ => None,
         })
     }
@@ -205,14 +209,18 @@ impl Address {
             Param::User(_) => !key_string.eq_ignore_ascii_case("user"),
             Param::Method(_) => !key_string.eq_ignore_ascii_case("method"),
             Param::Other(k, _) => !k.eq_ignore_ascii_case(&key_string),
+            Param::Handling(_) => !key_string.eq_ignore_ascii_case("handling"),
+            Param::Duration(_) => !key_string.eq_ignore_ascii_case("duration"),
         });
 
         // Add as Param::Other
-        self.params.push(Param::Other(key_string, value_opt_string));
+        // TODO: Refactor set_param to handle GenericValue properly or simplify it.
+        self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token))); // TEMPORARY: Force into Token
     }
 
     // Helper to construct from parser output
-    pub(crate) fn from_parsed(
+    // This helper seems unused now that parsers directly construct Address
+    /* pub(crate) fn from_parsed(
         display_name_bytes: Option<Vec<u8>>,
         uri: Uri,
         params: Vec<Param>
@@ -220,20 +228,9 @@ impl Address {
         let display_name = display_name_bytes
             .map(|bytes| String::from_utf8(bytes)) // TODO: Handle potential quoting/unescaping
             .transpose()?;
-        // Convert Vec<Param> to HashMap<String, Option<String>>
-        let parameters = params.into_iter()
-            .filter_map(|p| {
-                 // This conversion is lossy - only captures Other/Tag for now
-                 match p {
-                    Param::Other(k, v) => Some((k, v)),
-                    Param::Tag(t) => Some(("tag".to_string(), Some(t))),
-                    // TODO: Add other Param variants (Q, Expires, etc.) if needed for Address
-                    _ => None,
-                 }
-            })
-            .collect();
+        // Conversion of params is lossy here, params are now part of Address directly
         Ok(Address { display_name, uri, params })
-    }
+    } */
 }
 
 impl FromStr for Address {

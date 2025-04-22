@@ -31,17 +31,10 @@ impl FromStr for Route {
         use crate::parser::headers::route::parse_route;
 
         match all_consuming(parse_route)(s.as_bytes()) {
-            Ok((_, entries)) => {
-                 // Convert Vec<RouteEntry> -> Vec<Address>
-                let addrs = entries.into_iter()
-                    .map(|entry| Address::from_parsed(entry.display_name, entry.uri, entry.params))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Route(addrs))
-            },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Route header: {:?}", e), 
-                source: None 
-            })
+            Ok((_, route_header)) => Ok(route_header),
+            Err(e) => Err(Error::ParseError( 
+                format!("Failed to parse Route header: {:?}", e)
+            ))
         }
     }
 }

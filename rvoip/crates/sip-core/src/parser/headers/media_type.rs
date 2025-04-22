@@ -18,7 +18,7 @@ use crate::parser::quoted::quoted_string;
 use crate::parser::ParseResult;
 use crate::parser::common_params::unquote_string; // Re-use unquoting logic
 use crate::parser::error::Error; // For unquote error
-use crate::types.media_type::MediaType; // Import the actual type
+use crate::types::media_type::MediaType; // Import the actual type
 
 // m-attribute = token
 fn m_attribute(input: &[u8]) -> ParseResult<&[u8]> {
@@ -50,12 +50,18 @@ fn m_parameter(input: &[u8]) -> ParseResult<(String, String)> {
 // extension-token = ietf-token / x-token
 // x-token = "x-" token
 fn extension_token(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(alt((
-        pair(tag_no_case("x-"), token),
-        token
-    )))(input)
-    // Note: The official definition is ambiguous if x-token must be followed by ietf-token chars.
-    // We assume `token` covers the allowed chars after "x-".
+    // Recognize either x-token or simple token
+    // Both branches result in &[u8], compatible with alt -> recognize
+    recognize(
+       alt((
+           token, // Try token first (most common)
+           // If token fails, check specifically for x- prefix. This avoids
+           // token consuming just "x" when "x-foo" was intended.
+           // Note: This deviates slightly from pure alt((pair(..), token))
+           // but handles ambiguity better.
+           preceded(tag_no_case(b"x-"), token) 
+       ))
+    )(input)
 }
 
 // m-subtype = extension-token / iana-token

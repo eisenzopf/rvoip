@@ -127,6 +127,8 @@ pub enum HeaderName {
     CallInfo,
     /// Error-Info: Error-Info header
     ErrorInfo,
+    /// Proxy-Require: Required capabilities for the proxy
+    ProxyRequire,
     /// Custom header name
     Other(String),
 }
@@ -181,6 +183,7 @@ impl HeaderName {
             HeaderName::AlertInfo => "Alert-Info",
             HeaderName::CallInfo => "Call-Info",
             HeaderName::ErrorInfo => "Error-Info",
+            HeaderName::ProxyRequire => "Proxy-Require",
             HeaderName::Other(s) => s,
         }
     }
@@ -188,7 +191,25 @@ impl HeaderName {
 
 impl fmt::Display for HeaderName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        match self {
+            HeaderName::ProxyRequire => write!(f, "Proxy-Require"),
+            HeaderName::RecordRoute => write!(f, "Record-Route"),
+            HeaderName::ReplyTo => write!(f, "Reply-To"),
+            HeaderName::Require => write!(f, "Require"),
+            HeaderName::RetryAfter => write!(f, "Retry-After"),
+            HeaderName::Route => write!(f, "Route"),
+            HeaderName::Server => write!(f, "Server"),
+            HeaderName::Subject => write!(f, "Subject"),
+            HeaderName::Supported => write!(f, "Supported"),
+            HeaderName::Timestamp => write!(f, "Timestamp"),
+            HeaderName::To => write!(f, "To"),
+            HeaderName::Unsupported => write!(f, "Unsupported"),
+            HeaderName::UserAgent => write!(f, "User-Agent"),
+            HeaderName::Via => write!(f, "Via"),
+            HeaderName::Warning => write!(f, "Warning"),
+            HeaderName::WwwAuthenticate => write!(f, "WWW-Authenticate"),
+            HeaderName::Other(s) => write!(f, "{}", s),
+        }
     }
 }
 
@@ -213,6 +234,7 @@ impl FromStr for HeaderName {
             "min-expires" => Ok(HeaderName::MinExpires),
             "record-route" => Ok(HeaderName::RecordRoute),
             "route" => Ok(HeaderName::Route),
+            "server" => Ok(HeaderName::Server),
             "supported" | "k" => Ok(HeaderName::Supported),
             "user-agent" => Ok(HeaderName::UserAgent),
             "event" | "o" => Ok(HeaderName::Event),
@@ -244,6 +266,8 @@ impl FromStr for HeaderName {
             "alert-info" => Ok(HeaderName::AlertInfo),
             "call-info" => Ok(HeaderName::CallInfo),
             "error-info" => Ok(HeaderName::ErrorInfo),
+            "proxy-require" => Ok(HeaderName::ProxyRequire),
+            "unsupported" => Ok(HeaderName::Unsupported),
             _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
             _ => Err(Error::InvalidHeader("Empty header name".to_string())),
         }

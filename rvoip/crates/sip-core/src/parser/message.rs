@@ -67,10 +67,8 @@ fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
 fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
     // 1. Parse Start Line
     let (rest, start_line_data) = alt((
-        // Ensure Request/Response parsers return compatible error types if needed
         map(parse_request_line, |(m, u, v)| (true, Some(m), Some(u), Some(v), None, None)),
-        // Map reason phrase &[u8] to Option<String> here or modify Response constructor
-        map(parse_response_line, |(v, s, r)| {
+        map(parse_status_line, |(v, s, r)| {
             let reason_opt = if r.is_empty() { None } else { str::from_utf8(r).ok().map(String::from) };
             (false, None, None, Some(v), Some(s), reason_opt)
         })
@@ -87,12 +85,8 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
         match TypedHeader::try_from(header) {
             Ok(typed) => typed_headers.push(typed),
             Err(e) => {
-                // Handle parsing error for a specific header - e.g., log it, store as Other?
-                // For now, let's fail the whole message parse.
-                // Need NomError compatible error type.
-                eprintln!("Header parsing error: {}", e); // Log error
-                // Convert crate::Error to nom::Err::Failure
-                 return Err(NomErr::Failure(NomError::new(input, ErrorKind::Verify))); 
+                eprintln!("Header parsing error: {}", e); 
+                 return Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify))); 
             }
         }
     }
@@ -106,7 +100,7 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
 
     // 5. Parse Body based on Content-Length
     if rest.len() < content_length {
-        return Err(NomErr::Incomplete(Needed::new(content_length - rest.len())));
+        return Err(nom::Err::Incomplete(Needed::new(content_length - rest.len())));
     }
     let (final_rest, body_slice) = take(content_length)(rest)?;
     
@@ -136,15 +130,14 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
 pub fn parse_message(input: &[u8]) -> Result<Message> {
     match all_consuming(full_message_parser)(input) {
         Ok((_, message)) => Ok(message),
-        Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => {
-             let offset = input.len() - e.input.len(); // Calculate offset
-            Err(Error::ParsingError { 
-                message: format!("Failed to parse message near offset {}: {:?}", offset, e.code),
-                source: None 
-            })
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+             let offset = input.len() - e.input.len();
+            Err(Error::ParseError( 
+                format!("Failed to parse message near offset {}: {:?}", offset, e.code)
+            ))
         },
-        Err(NomErr::Incomplete(needed)) => {
-            Err(Error::ParsingError{ message: format!("Incomplete message: Needed {:?}", needed), source: None })
+        Err(nom::Err::Incomplete(needed)) => {
+            Err(Error::ParseError(format!("Incomplete message: Needed {:?}", needed)))
         },
     }
 }

@@ -20,9 +20,9 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::uri::Uri;
-use crate::types.address::Address;
-use crate::types.record_route::RecordRouteInfo;
-use crate::types.record_route::RecordRoute as RecordRouteHeader; // Import specific type
+use crate::types::address::Address;
+use crate::types::record_route::RecordRouteInfo;
+use crate::types::record_route::RecordRoute as RecordRouteHeader; // Import specific type
 
 // Define a struct to represent a single Record-Route entry (same as RouteEntry)
 #[derive(Debug, PartialEq, Clone)]
@@ -60,7 +60,7 @@ pub(crate) fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::{AddressSpec, NameAddr};
+    use crate::types::address::Address;
     use crate::types::param::{Param, GenericValue};
     use crate::types::uri::Uri;
 

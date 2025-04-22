@@ -27,10 +27,14 @@ use crate::parser::ParseResult;
 use crate::uri::Host;
 
 // warn-code = 3DIGIT
-fn warn_code(input: &[u8]) -> ParseResult<u16> {
+fn warn_code(input: &[u8]) -> ParseResult<WarnCode> {
     map_res(
         take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        |b| str::from_utf8(b)?.parse::<u16>()
+        |bytes| -> Result<WarnCode, &str> { // Specify error type
+            let s = str::from_utf8(bytes).map_err(|_| "Invalid UTF8")?;
+            let code = s.parse::<u16>().map_err(|_| "Invalid u16")?;
+            Ok(WarnCode(code)) // Assuming WarnCode is a tuple struct
+        }
     )(input)
 }
 

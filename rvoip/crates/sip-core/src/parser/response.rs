@@ -54,14 +54,11 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 pub(crate) fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
     map_res(
         take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        |code_bytes: &[u8]| {
-            str::from_utf8(code_bytes)?
-                .parse::<u16>()
-                .map_err(|_| "Invalid u16") // Should not happen if digits matched
-                .and_then(|code_u16| {
-                    StatusCode::from_u16(code_u16)
-                         .map_err(|_| "Invalid StatusCode") // Map StatusCode specific error
-                })
+        |code_bytes: &[u8]| -> Result<StatusCode, &str> {
+            let s = str::from_utf8(code_bytes).map_err(|_| "Invalid UTF8")?;
+            let code_u16 = s.parse::<u16>().map_err(|_| "Invalid u16")?;
+            StatusCode::from_u16(code_u16)
+                 .map_err(|_| "Invalid StatusCode")
         }
     )(input)
 }

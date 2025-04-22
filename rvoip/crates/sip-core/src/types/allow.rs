@@ -62,10 +62,10 @@ impl FromStr for Allow {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Allow(methods))
             },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Allow header: {:?}", e), 
-                source: None 
-            })
+            Ok((_, list)) => Ok(Allow(list)),
+            Err(e) => Err(Error::ParseError(
+                format!("Failed to parse Allow header: {:?}", e)
+            ))
         }
     }
 }

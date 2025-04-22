@@ -106,14 +106,14 @@ pub(crate) fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
             tag_no_case("algorithm"),
             preceded(
                 equal,
-                alt((tag_no_case("MD5-sess"), tag_no_case("MD5"), token)),
+                alt((tag_no_case(b"MD5-sess"), tag_no_case(b"MD5"), token)),
             ),
         ),
         |bytes| {
             let s = str::from_utf8(bytes)?;
             Ok(match s.to_ascii_uppercase().as_str() {
-                "MD5" => Algorithm::MD5,
-                "MD5-SESS" => Algorithm::MD5Sess,
+                "MD5" => Algorithm::Md5,
+                "MD5-SESS" => Algorithm::Md5Sess,
                 other => Algorithm::Other(other.to_string()),
             })
         },
@@ -123,7 +123,7 @@ pub(crate) fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
 // qop-value = "auth" / "auth-int" / token
 fn qop_value(input: &[u8]) -> ParseResult<Qop> {
     map_res(
-        alt((tag_no_case("auth-int"), tag_no_case("auth"), token)),
+        alt((tag_no_case(b"auth-int"), tag_no_case(b"auth"), token)),
         |bytes| {
             let s = str::from_utf8(bytes)?;
             Ok(match s.to_ascii_lowercase().as_str() {
@@ -144,7 +144,7 @@ pub(crate) fn qop_options(input: &[u8]) -> ParseResult<Vec<Qop>> {
             equal,
             delimited(
                 ldquot,
-                separated_list1(tag(","), qop_value),
+                separated_list1(tag(b","), qop_value),
                 rdquot,
             ),
         ),

@@ -210,7 +210,7 @@ impl WwwAuthenticate {
 
 impl FromStr for WwwAuthenticate {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_www_authenticate(s) }
+    fn from_str(s: &str) -> Result<Self> { parse_www_authenticate(s.as_bytes()).map(|(_,v)| WwwAuthenticate(v)) }
 }
 
 /// Typed Authorization header.
@@ -318,7 +318,7 @@ impl Authorization {
 
 impl FromStr for Authorization {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_authorization(s) }
+    fn from_str(s: &str) -> Result<Self> { parse_authorization(s.as_bytes()).map(|(_,v)| Authorization(v)) }
 }
 
 /// Typed Proxy-Authenticate header.
@@ -338,7 +338,7 @@ impl ProxyAuthenticate {
 
 impl FromStr for ProxyAuthenticate {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_proxy_authenticate(s) }
+    fn from_str(s: &str) -> Result<Self> { parse_proxy_authenticate(s.as_bytes()).map(|(_,v)| ProxyAuthenticate(v)) }
 }
 
 /// Typed Proxy-Authorization header.
@@ -358,7 +358,7 @@ impl ProxyAuthorization {
 
 impl FromStr for ProxyAuthorization {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_proxy_authorization(s) }
+    fn from_str(s: &str) -> Result<Self> { parse_proxy_authorization(s.as_bytes()).map(|(_,v)| ProxyAuthorization(v)) }
 }
 
 /// Typed Authentication-Info header.
@@ -433,7 +433,7 @@ impl AuthenticationInfo {
 
 impl FromStr for AuthenticationInfo {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_authentication_info(s) }
+    fn from_str(s: &str) -> Result<Self> { parse_authentication_info(s.as_bytes()).map(|(_,v)| AuthenticationInfo(v)) }
 }
 
 // TODO: Implement default values, helper methods, and parsing logic for each. 

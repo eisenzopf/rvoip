@@ -18,6 +18,26 @@ pub enum GenericValue {
     Quoted(String),
 }
 
+// Add helper methods
+impl GenericValue {
+    /// Returns the value as a string slice if it's Token or Quoted.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            GenericValue::Token(s) => Some(s.as_str()),
+            GenericValue::Quoted(s) => Some(s.as_str()),
+            GenericValue::Host(_) => None, // Host is not a simple string slice
+        }
+    }
+
+    /// Returns the underlying Host if it's the Host variant.
+    pub fn as_host(&self) -> Option<&Host> {
+        match self {
+            GenericValue::Host(h) => Some(h),
+            _ => None,
+        }
+    }
+}
+
 // Implement Display for GenericValue for use in Param::Display
 impl fmt::Display for GenericValue {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

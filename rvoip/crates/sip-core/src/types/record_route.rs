@@ -28,20 +28,11 @@ impl FromStr for RecordRoute {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::record_route::parse_record_route;
-
         match all_consuming(parse_record_route)(s.as_bytes()) {
-            Ok((_, entries)) => {
-                // Convert Vec<RecordRouteEntry> -> Vec<Address>
-                let addrs = entries.into_iter()
-                    .map(|entry| Address::from_parsed(entry.display_name, entry.uri, entry.params))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(RecordRoute(addrs))
-            },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Record-Route header: {:?}", e), 
-                source: None 
-            })
+            Ok((_, rr_header)) => Ok(rr_header),
+            Err(e) => Err(Error::ParseError( 
+                format!("Failed to parse Record-Route header: {:?}", e)
+            ))
         }
     }
 }

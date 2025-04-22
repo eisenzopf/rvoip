@@ -27,9 +27,11 @@ impl FromStr for ReplyTo {
 
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::reply_to::parse_reply_to;
-        use crate::types::Address;
 
         match all_consuming(parse_reply_to)(s.as_bytes()) {
+            Ok((_, reply_to_header)) => Ok(reply_to_header),
+            Err(e) => Err(Error::ParseError( 
+                format!("Failed to parse Reply-To header: {:?}", e)
             Ok((_, value)) => {
                 // Convert ReplyToValue -> Address
                 let addr = Address::from_parsed(value.display_name, value.uri, value.params)?;

@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io;
 use thiserror::Error;
+use std::str::Utf8Error;
+use std::string::FromUtf8Error;
 
 /// A type alias for handling `Result`s with `Error`
 pub type Result<T> = std::result::Result<T, Error>;
@@ -202,5 +204,19 @@ impl fmt::Display for LocationAwareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Error at line {}, column {}: {}\nContext: '{}'", 
                self.line, self.column, self.message, self.context)
+    }
+}
+
+// Implement From<Utf8Error> for Error
+impl From<Utf8Error> for Error {
+    fn from(err: Utf8Error) -> Error {
+        Error::Parser(format!("UTF-8 decoding error: {}", err))
+    }
+}
+
+// Implement From<FromUtf8Error> for Error
+impl From<FromUtf8Error> for Error {
+    fn from(err: FromUtf8Error) -> Error {
+        Error::Parser(format!("UTF-8 conversion error: {}", err))
     }
 } 

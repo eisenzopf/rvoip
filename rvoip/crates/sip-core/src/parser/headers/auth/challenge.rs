@@ -30,7 +30,7 @@ fn domain(input: &[u8]) -> ParseResult<String> {
             tag_no_case("domain"),
             preceded(
                 equal,
-                delimited(ldquot, recognize(many0(alt((token, tag(" "))))), rdquot), // Very simplified URI grabber
+                delimited(ldquot, recognize(many0(alt((token, tag(b" "))))), rdquot), // Use b" "
             ),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),

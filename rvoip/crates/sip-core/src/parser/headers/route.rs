@@ -19,9 +19,9 @@ use crate::types::param::Param;
 use crate::uri::Uri;
 
 // Import types (assuming)
-use crate::types.address::Address;
-use crate::types.route::RouteParamInfo; // Assuming struct { address: Address }
-use crate::types.route::Route as RouteHeader; // Import the specific header type
+use crate::types::address::Address;
+use crate::types::route::RouteParamInfo; // Assuming struct { address: Address }
+use crate::types::route::Route as RouteHeader; // Import the specific header type
 
 // Define a struct to represent a single route entry
 #[derive(Debug, PartialEq, Clone)]
@@ -55,9 +55,9 @@ pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types.address::{Address};
-    use crate::types.param::{Param, GenericValue};
-    use crate::types.uri::Uri;
+    use crate::types::address::{Address};
+    use crate::types::param::{Param, GenericValue};
+    use crate::types::uri::Uri;
 
     #[test]
     fn test_parse_route_single() {

@@ -15,7 +15,10 @@ use crate::parser::ParseResult;
 pub(crate) fn parse_max_forwards(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1, 
-        |bytes| str::from_utf8(bytes)?.parse::<u32>()
+        |bytes| {
+            let s = str::from_utf8(bytes).map_err(|_| "Invalid UTF8")?;
+            s.parse::<u32>().map_err(|_| "Invalid u32")
+        }
     )(input)
 }
 

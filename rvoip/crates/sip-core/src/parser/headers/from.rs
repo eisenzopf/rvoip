@@ -89,8 +89,8 @@ pub(crate) fn parse_from(input: &[u8]) -> ParseResult<FromHeader> {
 mod tests {
     use super::*;
     use crate::types::address::{Address};
-    use crate::types.uri::Host;
-    use crate::types.param::{Param, GenericValue};
+    use crate::types::uri::Host;
+    use crate::types::param::{Param, GenericValue};
     use std::collections::HashMap;
 
     #[test]

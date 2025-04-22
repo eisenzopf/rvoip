@@ -39,7 +39,7 @@ pub struct TimestampValue {
 fn float_val(input: &[u8]) -> ParseResult<NotNan<f32>> {
     map_res(
         recognize(
-            pair(digit1, opt(pair(tag("."), digit1))) // Allow optional fractional part
+            pair(digit1, opt(pair(tag(b"."), digit1))) // Use b"."
         ),
         |bytes| {
             str::from_utf8(bytes)?

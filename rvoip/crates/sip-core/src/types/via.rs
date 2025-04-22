@@ -62,7 +62,9 @@ impl Via {
     /// Get the first value associated with a parameter name (case-insensitive for key).
     pub fn get(&self, name: &str) -> Option<Option<&str>> {
         self.params.iter().find_map(|p| match p {
-            Param::Other(key, val) if key.eq_ignore_ascii_case(name) => Some(val.as_deref()),
+            Param::Other(key, val_opt) if key.eq_ignore_ascii_case(name) => {
+                val_opt.as_ref().and_then(|gv| gv.as_str())
+            },
             Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
             Param::Tag(val) if name.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
             Param::Expires(val) if name.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
@@ -97,6 +99,8 @@ impl Via {
              Param::Transport(_) => !key_string.eq_ignore_ascii_case("transport"),
              Param::User(_) => !key_string.eq_ignore_ascii_case("user"),
              Param::Method(_) => !key_string.eq_ignore_ascii_case("method"),
+             Param::Handling(_) => !key_string.eq_ignore_ascii_case("handling"),
+             Param::Duration(_) => !key_string.eq_ignore_ascii_case("duration"),
         });
 
         // Add the new parameter (attempt to use specific type if possible)
@@ -112,7 +116,9 @@ impl Via {
             "transport" => Param::Transport(value_opt_string.unwrap_or_default()),
             "user" => Param::User(value_opt_string.unwrap_or_default()),
             "method" => Param::Method(value_opt_string.unwrap_or_default()),
-            _ => Param::Other(key_string, value_opt_string),
+            "handling" => Param::Handling(value_opt_string.unwrap_or_default()),
+            "duration" => Param::Duration(value_opt_string.unwrap_or_default()),
+            _ => Param::Other(key_string, value_opt_string.map(GenericValue::Token)),
         };
         self.params.push(param);
     }
@@ -132,6 +138,8 @@ impl Via {
             Param::Transport(_) => name.eq_ignore_ascii_case("transport"),
             Param::User(_) => name.eq_ignore_ascii_case("user"),
             Param::Method(_) => name.eq_ignore_ascii_case("method"),
+            Param::Handling(_) => name.eq_ignore_ascii_case("handling"),
+            Param::Duration(_) => name.eq_ignore_ascii_case("duration"),
         })
     }
     
@@ -162,12 +170,8 @@ impl Via {
         self.params.iter().find_map(|p| {
             match p {
                 Param::Received(ip) => Some(*ip),
-                Param::Other(key, Some(val)) => {
-                    if key.eq_ignore_ascii_case("received") {
-                        IpAddr::from_str(val).ok()
-                    } else {
-                        None
-                    }
+                Param::Other(key, val_opt) if key.eq_ignore_ascii_case("received") => {
+                    val_opt.as_ref().and_then(|gv| gv.as_str()).and_then(|s| IpAddr::from_str(s).ok())
                 }
                 _ => None,
             }
@@ -191,12 +195,8 @@ impl Via {
          self.params.iter().find_map(|p| {
             match p {
                 Param::Maddr(val) => Some(val.as_str()),
-                Param::Other(key, Some(val)) => {
-                    if key.eq_ignore_ascii_case("maddr") {
-                        Some(val.as_str())
-                    } else {
-                        None
-                    }
+                Param::Other(key, val_opt) if key.eq_ignore_ascii_case("maddr") => {
+                    val_opt.as_ref().and_then(|gv| gv.as_str())
                 }
                 _ => None,
             }
@@ -221,13 +221,9 @@ impl Via {
         self.params.iter().find_map(|p| {
             match p {
                 Param::Ttl(val) => Some(*val),
-                 Param::Other(key, Some(val)) => {
-                     if key.eq_ignore_ascii_case("ttl") {
-                         val.parse::<u8>().ok()
-                     } else {
-                         None
-                     }
-                }
+                 Param::Other(key, val_opt) if key.eq_ignore_ascii_case("ttl") => {
+                     val_opt.as_ref().and_then(|gv| gv.as_str()).and_then(|s| s.parse::<u8>().ok())
+                 }
                 _ => None,
             }
         })

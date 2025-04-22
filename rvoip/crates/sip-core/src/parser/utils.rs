@@ -94,17 +94,15 @@ pub(crate) fn unescape_uri_component(input: &[u8]) -> crate::error::Result<Strin
                         i += 3;
                     } else {
                         // Invalid hex digits after %
-                        return Err(crate::error::Error::ParsingError {
-                            message: format!("Invalid hex sequence: %{}{}", h1 as char, h2 as char),
-                            source: None,
-                        });
+                        return Err(crate::error::Error::ParseError(
+                            format!("Invalid hex sequence: %{}{}", h1 as char, h2 as char)
+                        ));
                     }
                 } else {
                     // Incomplete escape sequence
-                    return Err(crate::error::Error::ParsingError {
-                        message: "Incomplete escape sequence at end of input".to_string(),
-                        source: None,
-                    });
+                    return Err(crate::error::Error::ParseError(
+                        "Incomplete escape sequence at end of input".to_string()
+                    ));
                 }
             }
             _ => {
@@ -114,10 +112,9 @@ pub(crate) fn unescape_uri_component(input: &[u8]) -> crate::error::Result<Strin
         }
     }
 
-    String::from_utf8(unescaped).map_err(|e| crate::error::Error::ParsingError {
-        message: format!("UTF-8 error after URI unescaping: {}", e),
-        source: Some(Box::new(e)),
-    })
+    String::from_utf8(unescaped).map_err(|e| crate::error::Error::ParseError(
+        format!("UTF-8 error after URI unescaping: {}", e)
+    ))
 }
 
 // Helper to convert a hex character (byte) to its value (0-15)

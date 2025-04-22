@@ -24,24 +24,46 @@ fn utf8_cont(input: &[u8]) -> ParseResult<&[u8]> {
     })(input)
 }
 
-// UTF8-NONASCII = %xC0-DF 1UTF8-CONT
+// UTF8-NONASCII = %xC2-DF 1UTF8-CONT
 //               / %xE0-EF 2UTF8-CONT
 //               / %xF0-F7 3UTF8-CONT
-//               / %xF8-Fb 4UTF8-CONT
-//               / %xFC-FD 5UTF8-CONT
+// Adjusted ranges based on RFC 3629 (excluding overlong sequences C0, C1, etc.)
+// Checks first byte to determine length, then takes required bytes and validates.
 pub(crate) fn utf8_nonascii(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(alt((
-        // %xC0-DF 1UTF8-CONT (Note: C0, C1 are technically invalid starts in RFC 3629)
-        tuple((map_res(take(1usize), |b: &[u8]| if !b.is_empty() && b[0] >= 0xC2 && b[0] <= 0xDF { Ok(b) } else { Err(()) }), utf8_cont)),
-        // %xE0-EF 2UTF8-CONT
-        tuple((map_res(take(1usize), |b: &[u8]| if !b.is_empty() && b[0] >= 0xE0 && b[0] <= 0xEF { Ok(b) } else { Err(()) }), utf8_cont, utf8_cont)),
-        // %xF0-F7 3UTF8-CONT
-        tuple((map_res(take(1usize), |b: &[u8]| if !b.is_empty() && b[0] >= 0xF0 && b[0] <= 0xF7 { Ok(b) } else { Err(()) }), utf8_cont, utf8_cont, utf8_cont)),
-        // %xF8-Fb 4UTF8-CONT (Technically invalid in RFC 3629)
-        // tuple((map_res(take(1usize), |b: &[u8]| if !b.is_empty() && b[0] >= 0xF8 && b[0] <= 0xFB { Ok(b) } else { Err(()) }), utf8_cont, utf8_cont, utf8_cont, utf8_cont)),
-        // %xFC-FD 5UTF8-CONT (Technically invalid in RFC 3629)
-        // tuple((map_res(take(1usize), |b: &[u8]| if !b.is_empty() && b[0] >= 0xFC && b[0] <= 0xFD { Ok(b) } else { Err(()) }), utf8_cont, utf8_cont, utf8_cont, utf8_cont, utf8_cont)),
-    )))(input)
+    if input.is_empty() {
+        return Err(nom::Err::Error(error_position!(input, ErrorKind::Eof)));
+    }
+
+    let first_byte = input[0];
+    let len = match first_byte {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return Err(nom::Err::Error(error_position!(input, ErrorKind::Tag)))
+    };
+
+    if input.len() < len {
+        return Err(nom::Err::Incomplete(nom::Needed::new(len - input.len())));
+    }
+
+    // Validate the sequence according to RFC 3629 rules
+    // (Prevents overlong sequences and surrogates)
+    let valid = match (first_byte, len) {
+        (0xE0, 3) => input[1] >= 0xA0 && input[1] <= 0xBF && input[2] >= 0x80 && input[2] <= 0xBF,
+        (0xED, 3) => input[1] >= 0x80 && input[1] <= 0x9F && input[2] >= 0x80 && input[2] <= 0xBF,
+        (0xF0, 4) => input[1] >= 0x90 && input[1] <= 0xBF && input[2] >= 0x80 && input[2] <= 0xBF && input[3] >= 0x80 && input[3] <= 0xBF,
+        (0xF4, 4) => input[1] >= 0x80 && input[1] <= 0x8F && input[2] >= 0x80 && input[2] <= 0xBF && input[3] >= 0x80 && input[3] <= 0xBF,
+        (_, 2)    => input[1] >= 0x80 && input[1] <= 0xBF,
+        (_, 3)    => input[1] >= 0x80 && input[1] <= 0xBF && input[2] >= 0x80 && input[2] <= 0xBF,
+        (_, 4)    => input[1] >= 0x80 && input[1] <= 0xBF && input[2] >= 0x80 && input[2] <= 0xBF && input[3] >= 0x80 && input[3] <= 0xBF,
+        _         => false, // Should be unreachable due to first match
+    };
+
+    if valid {
+        Ok((&input[len..], &input[..len]))
+    } else {
+        Err(nom::Err::Error(error_position!(input, ErrorKind::Verify)))
+    }
 }
 
 // TEXT-UTF8char = %x21-7E / UTF8-NONASCII

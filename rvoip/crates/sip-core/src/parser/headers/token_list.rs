@@ -76,7 +76,7 @@ pub(crate) fn parse_header_token_list0_short<'a>(
 
 // Parse a single token and convert to String
 fn token_string(input: &[u8]) -> ParseResult<String> {
-    map_res(token, |bytes| str::from_utf8(bytes).map(String::from))(input)
+    map_res(token, |bytes| std::str::from_utf8(bytes).map(String::from))(input)
 }
 
 // Parses an optional, comma-separated list of tokens.

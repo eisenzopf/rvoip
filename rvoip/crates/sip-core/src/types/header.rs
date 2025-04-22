@@ -3,7 +3,8 @@ use crate::header::{Header, HeaderName, HeaderValue}; // Basic header parts
 use crate::types; // Import the types module itself
 use crate::parser; // Import the parser module
 use std::convert::TryFrom;
-use nom::all_consuming;
+use nom::combinator::all_consuming;
+use chrono; // Add use statement
 
 /// Represents any parsed SIP header in a strongly-typed way.
 #[derive(Debug, Clone, PartialEq)] // Add necessary derives
@@ -35,6 +36,30 @@ pub enum TypedHeader {
     ReplyTo(types::reply_to::ReplyTo),
     Warning(types::Warning),
     ContentDisposition(types::ContentDisposition),
+
+    // Placeholder Types (replace with actual types from types/*)
+    ContentEncoding(Vec<String>),
+    ContentLanguage(Vec<String>),
+    AcceptEncoding(Vec<types::accept::EncodingInfo>),
+    AcceptLanguage(Vec<types::accept::LanguageInfo>),
+    MinExpires(u32),
+    MimeVersion((u32, u32)),
+    Require(Vec<String>),
+    Supported(Vec<String>),
+    Unsupported(Vec<String>),
+    ProxyRequire(Vec<String>),
+    Date(chrono::DateTime<chrono::FixedOffset>),
+    Timestamp((ordered_float::NotNan<f32>, Option<ordered_float::NotNan<f32>>)),
+    Organization(String),
+    Priority(types::priority::PriorityValue),
+    Subject(String),
+    Server(Vec<types::server::ServerVal>),
+    UserAgent(Vec<types::server::ServerVal>),
+    InReplyTo(Vec<String>),
+    RetryAfter((u32, Option<String>, Vec<types::retry_after::RetryParam>)),
+    ErrorInfo(Vec<types::error_info::ErrorInfoValue>),
+    AlertInfo(Vec<types::alert_info::AlertInfoValue>),
+    CallInfo(Vec<types::call_info::CallInfoValue>),
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -119,10 +144,9 @@ impl TryFrom<Header> for TypedHeader {
         
         // Map nom error to crate::Error
         parse_result.map_err(|e| {
-            Error::ParsingError {
-                message: format!("Failed to parse header '{:?}' value: {:?}", header.name, e),
-                source: None,
-            }
+            Error::ParseError(
+                format!("Failed to parse header '{:?}' value: {:?}", header.name, e)
+            )
         })
     }
 }

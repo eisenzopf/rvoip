@@ -25,14 +25,14 @@ use std::collections::HashMap;
 
 // Import from base parser modules
 use crate::parser::separators::hcolon;
-use crate::parser::ParseResult;
+use crate::parser.ParseResult;
 
 // Import from sibling header modules
 use super::media_type::{parse_media_type, media_params_to_hashmap}; // Use the specific media_type parser
 
 // Import the shared media_type parser
 use super::media_type::media_type;
-use crate::types.media_type::MediaType;
+use crate::types::media_type::MediaType;
 use crate::types.content_type::ContentType; // Import specific type
 
 // m-type, m-subtype are just tokens
@@ -82,8 +82,8 @@ pub(crate) fn parse_content_type(input: &[u8]) -> ParseResult<ContentType> { // 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types.content_type::ContentType; // Use specific type
-    use crate::types::media_type::MediaType;
+    use crate::types::content_type::ContentType;
+    use crate::types::media_type::MediaType
 
     #[test]
     fn test_parse_content_type_simple() {

@@ -39,7 +39,7 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
                 "session" => DispositionType::Session,
                 "icon" => DispositionType::Icon,
                 "alert" => DispositionType::Alert,
-                other => DispositionType::Extension(other.to_string()),
+                other => DispositionType::Other(other.to_string()),
             })
         }
     )(input)
