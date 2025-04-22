@@ -73,16 +73,20 @@ pub fn parse_retry_after(input: &[u8]) -> ParseResult<RetryAfterValue> { // New 
             opt(many0(preceded(semi, retry_param))) 
         )),
         |(delta, comment_bytes_opt, params_opt)| {
-            let comment_opt_res = comment_bytes_opt
-                .map(|b| str::from_utf8(b).map(String::from))
-                .transpose()
-                // Map Utf8Error, remove ?
-                .map_err(|_e| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)));
+            // Refactor using and_then
+            let comment_opt_result = comment_bytes_opt
+                .map(|b| {
+                    str::from_utf8(b)
+                        .map(|s| s.to_string())
+                        // Map Utf8Error to nom::Err::Failure
+                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(b, ErrorKind::Char))) 
+                })
+                .transpose(); // Option<Result<String, nom::Err>> -> Result<Option<String>, nom::Err>
 
-            let comment_opt = comment_opt_res?; // Handle Result here
-
-            let params_vec = params_opt.unwrap_or_default();
-            Ok::<RetryAfterValue, nom::error::Error<&[u8]>>(RetryAfterValue { delay: delta, comment: comment_opt, params: params_vec })
+            comment_opt_result.map(|comment_opt| { // Only proceed if comment parsing succeeded
+                 let params_vec = params_opt.unwrap_or_default();
+                 RetryAfterValue { delay: delta, comment: comment_opt, params: params_vec }
+            })
         }
     )(input)
 }

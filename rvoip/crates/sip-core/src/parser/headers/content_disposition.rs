@@ -35,17 +35,18 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
             tag_no_case("icon"), tag_no_case("alert"),
             token // Fallback for extension token
         )),
-        |bytes| {
-            let s_res = str::from_utf8(bytes)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)));
-            let s = s_res?;
-            Ok::<DispositionType, nom::error::Error<&[u8]>>(match s.to_ascii_lowercase().as_str() {
-                "render" => DispositionType::Render,
-                "session" => DispositionType::Session,
-                "icon" => DispositionType::Icon,
-                "alert" => DispositionType::Alert,
-                other => DispositionType::Other(other.to_string()),
-            })
+        |bytes| { 
+            str::from_utf8(bytes)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))
+                .and_then(|s| {
+                    Ok::<DispositionType, nom::Err<NomError<&[u8]>>>(match s.to_ascii_lowercase().as_str() {
+                        "render" => DispositionType::Render,
+                        "session" => DispositionType::Session,
+                        "icon" => DispositionType::Icon,
+                        "alert" => DispositionType::Alert,
+                        other => DispositionType::Other(other.to_string()),
+                    })
+                })
         }
     )(input)
 }
@@ -99,15 +100,16 @@ fn handling_param(input: &[u8]) -> ParseResult<Handling> {
         pair(tag_no_case("handling"), equal),
         map_res(
             alt((tag_no_case("optional"), tag_no_case("required"), token)),
-            |bytes| {
-                let s_res = str::from_utf8(bytes)
-                    .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)));
-                let s = s_res?;
-                Ok::<Handling, nom::error::Error<&[u8]>>(match s {
-                    "optional" => Handling::Optional,
-                    "required" => Handling::Required,
-                    other => Handling::Other(other.to_string()),
-                })
+            |bytes| { 
+                 str::from_utf8(bytes)
+                    .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))
+                    .and_then(|s| {
+                        Ok::<Handling, nom::Err<NomError<&[u8]>>>(match s {
+                            "optional" => Handling::Optional,
+                            "required" => Handling::Required,
+                            other => Handling::Other(other.to_string()),
+                        })
+                    })
             }
         )
     )(input)

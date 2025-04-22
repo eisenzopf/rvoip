@@ -173,12 +173,16 @@ fn message_header(input: &[u8]) -> ParseResult<Header> {
             crlf
         )),
         |(name_bytes, _, raw_value_bytes, _)| {
-            let name_str = str::from_utf8(name_bytes)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(name_bytes, nom::error::ErrorKind::Char)))?;
-            let header_name = HeaderName::from_str(name_str)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(name_bytes, nom::error::ErrorKind::MapRes)))?;
-            let header_value = HeaderValue::Raw(raw_value_bytes.to_vec());
-            Ok::<Header, nom::error::Error<&[u8]>>(Header::new(header_name, header_value))
+            str::from_utf8(name_bytes)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(name_bytes, ErrorKind::Char)))
+                .and_then(|name_str| {
+                    HeaderName::from_str(name_str)
+                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(name_bytes, ErrorKind::Verify)))
+                        .map(|header_name| {
+                            let header_value = HeaderValue::Raw(raw_value_bytes.to_vec());
+                            Header::new(header_name, header_value)
+                        })
+                })
         }
     )(input)
 }
