@@ -61,7 +61,7 @@ pub(crate) fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
 // delay = *(DIGIT) [ "." *(DIGIT) ]
 // Note: HCOLON handled elsewhere
 // Returns (timestamp: f32, delay: Option<f32>)
-pub(crate) fn parse_timestamp(input: &[u8]) -> ParseResult<(NotNan<f32>, Option<NotNan<f32>>)> {
+pub fn parse_timestamp(input: &[u8]) -> ParseResult<(NotNan<f32>, Option<NotNan<f32>>)> {
     tuple((
         parse_timestamp_value, // timestamp-value
         opt(preceded(space0, parse_timestamp_value)) // [ LWS delay-value ]

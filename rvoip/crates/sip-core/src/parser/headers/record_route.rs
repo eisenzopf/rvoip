@@ -57,7 +57,7 @@ fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
 }
 
 // Record-Route = "Record-Route" HCOLON rec-route *(COMMA rec-route)
-pub(crate) fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader> {
+pub fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader> {
     map(
         comma_separated_list1(record_route_entry), // Now returns Vec<Address>
         |entries: Vec<Address>| { // Changed input type to Vec<Address>

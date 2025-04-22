@@ -47,7 +47,7 @@ fn route_param(input: &[u8]) -> ParseResult<Address> {
 }
 
 // route = 1#("<" addr-spec ">" *( SEMI route-param ))
-pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
+pub fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
     map(
         comma_separated_list1(
             map(

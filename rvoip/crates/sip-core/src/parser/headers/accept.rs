@@ -64,7 +64,7 @@ fn media_range(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
 
 // Accept = "Accept" HCOLON [ accept-value *(COMMA accept-value) ]
 // Note: HCOLON handled elsewhere.
-pub(crate) fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
+pub fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
     // Use comma_separated_list0 as the list can be empty
     map(
         comma_separated_list0(accept_range),
@@ -75,11 +75,6 @@ pub(crate) fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
             AcceptHeader(media_types)
         }
     )(input)
-}
-
-/// Parses an Accept header value.
-pub fn parse_accept(input: &[u8]) -> ParseResult<Vec<AcceptValue>> {
-    separated_list1(comma, accept_range)(input)
 }
 
 // #[cfg(test)]

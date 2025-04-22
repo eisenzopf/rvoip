@@ -51,7 +51,7 @@ fn rplyto_spec(input: &[u8]) -> ParseResult<Address> {
 
 // Reply-To = "Reply-To" HCOLON rplyto-spec
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_reply_to(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_reply_to(input: &[u8]) -> ParseResult<Address> {
     map(rplyto_spec, ReplyToHeader)(input)
 }
 
