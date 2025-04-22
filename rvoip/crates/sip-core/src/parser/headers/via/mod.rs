@@ -125,30 +125,30 @@ mod tests {
     fn test_sent_protocol() {
         let (rem, sp) = sent_protocol(b"SIP/2.0/UDP").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(sp.0, "SIP");
-        assert_eq!(sp.1, "2.0");
-        assert_eq!(sp.2, "UDP");
+        assert_eq!(sp.name, "SIP");
+        assert_eq!(sp.version, "2.0");
+        assert_eq!(sp.transport, "UDP");
     }
     
      #[test]
     fn test_via_params() {
-        let (rem_ttl, p_ttl) = via_params_item(b"ttl=10").unwrap();
+        let (rem_ttl, p_ttl) = via_param_item(b"ttl=10").unwrap();
         assert!(rem_ttl.is_empty());
         assert!(matches!(p_ttl, Param::Ttl(10)));
 
-        let (rem_maddr, p_maddr) = via_params_item(b"maddr=192.0.2.1").unwrap();
+        let (rem_maddr, p_maddr) = via_param_item(b"maddr=192.0.2.1").unwrap();
         assert!(rem_maddr.is_empty());
         assert!(matches!(p_maddr, Param::Maddr(h) if h == "192.0.2.1"));
 
-        let (rem_rec, p_rec) = via_params_item(b"received=1.2.3.4").unwrap();
+        let (rem_rec, p_rec) = via_param_item(b"received=1.2.3.4").unwrap();
         assert!(rem_rec.is_empty());
         assert!(matches!(p_rec, Param::Received(ip) if ip == Ipv4Addr::new(1,2,3,4)));
 
-        let (rem_br, p_br) = via_params_item(b"branch=z9hG4bKabcdef").unwrap();
+        let (rem_br, p_br) = via_param_item(b"branch=z9hG4bKabcdef").unwrap();
         assert!(rem_br.is_empty());
         assert!(matches!(p_br, Param::Branch(s) if s == "z9hG4bKabcdef"));
 
-        let (rem_ext, p_ext) = via_params_item(b"custom=value").unwrap();
+        let (rem_ext, p_ext) = via_param_item(b"custom=value").unwrap();
         assert!(rem_ext.is_empty());
         assert!(matches!(p_ext, Param::Other(n, Some(GenericValue::Token(v))) if n == "custom" && v == "value"));
     }
@@ -156,26 +156,26 @@ mod tests {
     #[test]
     fn test_via_parm_simple() {
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        let result = via_parm(input);
+        let result = via_param_parser(input);
         assert!(result.is_ok());
         let (rem, via) = result.unwrap(); // Now returns ViaHeader
         assert!(rem.is_empty());
-        assert_eq!(via.transport, "UDP");
-        assert_eq!(via.host, "pc33.atlanta.com");
-        assert_eq!(via.port, None);
+        assert_eq!(via.sent_protocol.transport, "UDP");
+        assert_eq!(via.sent_by_host.to_string(), "pc33.atlanta.com");
+        assert_eq!(via.sent_by_port, None);
         assert_eq!(via.params.len(), 1);
-        assert!(matches!(via.params[0], Param::Branch(_)));
+        assert!(matches!(&via.params[0], Param::Branch(_)));
     }
     
     #[test]
     fn test_via_parm_complex() {
         let input = b"SIP/2.0/TCP client.biloxi.com:5060;branch=z9hG4bK74bf9;received=192.0.2.4;ttl=64";
-         let result = via_parm(input);
+         let result = via_param_parser(input);
         assert!(result.is_ok());
         let (rem, via) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(via.transport, "TCP");
-        assert_eq!(via.port, Some(5060));
+        assert_eq!(via.sent_protocol.transport, "TCP");
+        assert_eq!(via.sent_by_port, Some(5060));
         assert_eq!(via.params.len(), 3);
         assert!(via.params.contains(&Param::Branch("z9hG4bK74bf9".to_string())));
         assert!(via.params.contains(&Param::Received(Ipv4Addr::new(192,0,2,4).into())));
@@ -190,7 +190,7 @@ mod tests {
         let (rem, vias) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vias.len(), 2);
-        assert_eq!(vias[0].port, Some(4000));
+        assert_eq!(vias[0].sent_by_port, Some(4000));
         assert_eq!(vias[1].params.len(), 2); 
     }
 }

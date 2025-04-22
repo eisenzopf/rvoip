@@ -51,7 +51,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(uri, "http://example.com/error");
         assert_eq!(params.len(), 1);
-        assert!(matches!(params[0], Param::Other(n, Some(GenericValue::Token(v))) if n == "reason" && v == "BadValue"));
+        assert!(matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) if n == "reason" && v == "BadValue"));
     }
     
     #[test]

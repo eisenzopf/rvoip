@@ -63,6 +63,7 @@ pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<Address> {
 mod tests {
     use super::*;
     use crate::types::address::Address;
+    use crate::types::uri::Scheme;
     use crate::types::param::{Param, GenericValue};
     use std::collections::HashMap;
 
@@ -71,12 +72,11 @@ mod tests {
         let input = b"<sip:user@example.com>";
         let result = parse_refer_to_public(input);
         assert!(result.is_ok());
-        let (rem, header) = result.unwrap();
-        let addr = header.0;
+        let (rem, address) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(addr.display_name, None);
-        assert_eq!(addr.uri.scheme, "sip");
-        assert!(addr.params.is_empty());
+        assert_eq!(address.display_name, None);
+        assert_eq!(address.uri.scheme, Scheme::Sip);
+        assert!(address.params.is_empty());
     }
     
     #[test]
@@ -84,12 +84,11 @@ mod tests {
         let input = b"\"Transfer Target\" <sip:target@example.com>;method=INVITE";
         let result = parse_refer_to_public(input);
         assert!(result.is_ok());
-        let (rem, header) = result.unwrap();
-        let addr = header.0;
+        let (rem, address) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(addr.display_name, Some("Transfer Target".to_string()));
-        assert_eq!(addr.uri.scheme, "sip");
-        assert_eq!(addr.params.len(), 1);
-        assert!(addr.params.contains(&Param::Other("method".to_string(), Some(GenericValue::Token("INVITE".to_string())))));
+        assert_eq!(address.display_name, Some("Transfer Target".to_string()));
+        assert_eq!(address.uri.scheme, Scheme::Sip);
+        assert_eq!(address.params.len(), 1);
+        assert!(address.params.contains(&Param::Other("method".to_string(), Some(GenericValue::Token("INVITE".to_string())))));
     }
 } 
