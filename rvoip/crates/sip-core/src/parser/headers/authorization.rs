@@ -1,27 +1,13 @@
 // RFC 3261 Section 22.2 Authorization
 
-use super::auth::common::{auth_scheme, digest_credential};
+use super::auth::common::auth_scheme;
+use super::auth::credentials::credentials;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 use crate::types::auth::{Credentials, Authorization as AuthorizationHeader};
 use nom::IResult;
 use nom::sequence::{pair, preceded};
-use nom::map;
-
-// credentials = auth-scheme 1*SP digest-response
-// Note: digest-response is what digest_credential returns
-// Make this function public
-pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
-    map(
-        pair(auth_scheme, preceded(lws, digest_credential)), // Use lws for 1*SP
-        // Construct Credentials::Digest based on parsed scheme and params
-        |(scheme, cred_params)| { // Assuming digest_credential returns Vec<DigestParam>
-             // TODO: Handle non-Digest schemes if necessary
-             // For now, assuming digest_credential only succeeds for Digest scheme
-             Credentials::Digest { params: cred_params }
-        }
-    )(input)
-}
+use nom::combinator::map;
 
 // Authorization = "Authorization" HCOLON credentials
 // Note: HCOLON is handled by the top-level message_header parser.

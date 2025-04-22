@@ -4,7 +4,7 @@
 // Use the new digest_param parser from common
 use super::common::{auth_scheme, digest_param, auth_param}; 
 use crate::parser::common::comma_separated_list1;
-use crate::parser::common_chars::token; // Need token for Basic scheme
+use crate::parser::token::token;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth

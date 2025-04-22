@@ -6,7 +6,7 @@ use crate::types::auth::{Challenge, AuthParam}; // Add AuthParam for test
 use nom::IResult;
 use nom::sequence::{pair, preceded};
 use nom::bytes::complete::take_while;
-use nom::character::complete::{space, lws};
+use crate::parser::whitespace::lws; // Import lws from our whitespace module
 use nom::combinator::map;
 
 // WWW-Authenticate = "WWW-Authenticate" HCOLON challenge

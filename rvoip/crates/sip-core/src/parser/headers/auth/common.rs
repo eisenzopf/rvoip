@@ -1,10 +1,11 @@
 // RFC 3261 Section 25.1 & Authentication Sections
 // Common components for challenge/credentials parsing
 
-use crate::parser::common_chars::{lhex, token, digit};
+use crate::parser::common_chars::{lhex, digit};
+use crate::parser::token::token;
 use crate::parser::quoted::quoted_string;
 use crate::parser::separators::{comma, equal, ldquot, rdquot};
-use crate::parser::complete::parse_uri;
+use crate::parser::uri::parse_uri;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Keep types used internally or returned by base parsers
