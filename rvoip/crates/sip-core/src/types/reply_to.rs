@@ -32,15 +32,7 @@ impl FromStr for ReplyTo {
             Ok((_, reply_to_header)) => Ok(reply_to_header),
             Err(e) => Err(Error::ParseError( 
                 format!("Failed to parse Reply-To header: {:?}", e)
-            Ok((_, value)) => {
-                // Convert ReplyToValue -> Address
-                let addr = Address::from_parsed(value.display_name, value.uri, value.params)?;
-                Ok(ReplyTo(addr))
-            },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Reply-To header: {:?}", e), 
-                source: None 
-            })
+            ))
         }
     }
 }

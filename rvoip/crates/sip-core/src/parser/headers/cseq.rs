@@ -9,6 +9,7 @@ use nom::{
     IResult,
 };
 use std::str;
+use std::str::FromStr;
 
 // Import from new modules
 use crate::parser::separators::hcolon;

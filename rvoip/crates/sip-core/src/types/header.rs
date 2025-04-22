@@ -1,10 +1,423 @@
 use crate::error::{Error, Result};
-use crate::header::{Header, HeaderName, HeaderValue}; // Basic header parts
 use crate::types; // Import the types module itself
 use crate::parser; // Import the parser module
 use std::convert::TryFrom;
 use nom::combinator::all_consuming;
+use ordered_float::NotNan;
 use chrono; // Add use statement
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use crate::types::param::Param;
+
+use crate::parser::headers::{
+    via::ViaEntry, 
+    contact::ContactValue,
+    from::FromHeaderValue,
+    to::ToHeaderValue,
+    route::RouteEntry,
+    record_route::RecordRouteEntry,
+    cseq::CSeqValue,
+    content_type::ContentTypeValue,
+    accept::AcceptValue,
+    accept_encoding::AcceptEncodingValue,
+    accept_language::AcceptLanguageValue,
+    content_disposition::ContentDispositionValue,
+    alert_info::AlertInfoValue,
+    call_info::CallInfoValue,
+    error_info::ErrorInfoValue,
+    warning::WarningValue,
+    retry_after::RetryAfterValue,
+    reply_to::ReplyToValue,
+};
+
+/// Common SIP header names
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HeaderName {
+    /// Call-ID: Unique identifier for this call
+    CallId,
+    /// Contact: Where subsequent requests should be sent
+    Contact,
+    /// Content-Length: Size of the message body
+    ContentLength,
+    /// Content-Type: Media type of the message body
+    ContentType,
+    /// CSeq: Command sequence number
+    CSeq,
+    /// From: Initiator of the request
+    From,
+    /// Max-Forwards: Limit on the number of proxies or gateways
+    MaxForwards,
+    /// To: Logical recipient of the request
+    To,
+    /// Via: Path taken by the request so far
+    Via,
+    /// Allow: Methods supported by the UA
+    Allow,
+    /// Authorization: Credentials provided by a UA
+    Authorization,
+    /// Expires: Expiration time for registration or subscription
+    Expires,
+    /// Min-Expires: Minimum expiration time for registration or subscription
+    MinExpires,
+    /// Record-Route: Record of proxies that want to stay in the path
+    RecordRoute,
+    /// Route: Forced route for a request
+    Route,
+    /// Supported: Features supported by the UA
+    Supported,
+    /// User-Agent: Product information
+    UserAgent,
+    /// Event: Event package for SUBSCRIBE/NOTIFY
+    Event,
+    /// Subscription-State: State of subscription in NOTIFY
+    SubscriptionState,
+    /// Refer-To: Target URI in REFER
+    ReferTo,
+    /// Referred-By: Identity of referrer in REFER
+    ReferredBy,
+    /// RAck: Acknowledge receipt of a reliable provisional response
+    RAck,
+    /// WWW-Authenticate: Challenge for authentication
+    WwwAuthenticate,
+    /// Accept: Media types acceptable for the response
+    Accept,
+    /// Accept-Encoding: Acceptable content encodings
+    AcceptEncoding,
+    /// Accept-Language: Acceptable languages for the response
+    AcceptLanguage,
+    /// Content-Disposition: Presentation style for the message body
+    ContentDisposition,
+    /// Content-Encoding: Content encoding of the message body
+    ContentEncoding,
+    /// Content-Language: Language of the message body
+    ContentLanguage,
+    /// Warning: Additional information about the status of a response
+    Warning,
+    /// Proxy-Authenticate: Challenge for proxy authentication
+    ProxyAuthenticate,
+    /// Proxy-Authorization: Credentials for proxy authentication
+    ProxyAuthorization,
+    /// Authentication-Info: Information related to authentication
+    AuthenticationInfo,
+    /// Reply-To: Address for replies
+    ReplyTo,
+    /// Require: Required capabilities for the request
+    Require,
+    /// Retry-After: Recommended time to wait before retrying
+    RetryAfter,
+    /// Subject: Subject of the message
+    Subject,
+    /// Timestamp: Timestamp of the message
+    Timestamp,
+    /// Organization: Organization of the message
+    Organization,
+    /// Priority: Priority of the message
+    Priority,
+    /// Date: Date of the message
+    Date,
+    /// MIME-Version: MIME version of the message
+    MimeVersion,
+    /// In-Reply-To: In-Reply-To header
+    InReplyTo,
+    /// Alert-Info: Alert-Info header
+    AlertInfo,
+    /// Call-Info: Call-Info header
+    CallInfo,
+    /// Error-Info: Error-Info header
+    ErrorInfo,
+    /// Proxy-Require: Required capabilities for the proxy
+    ProxyRequire,
+    /// Custom header name
+    Other(String),
+    /// Server: Server header
+    Server,
+    /// Unsupported: Features not supported by the UA
+    Unsupported,
+}
+
+impl HeaderName {
+    /// Returns the canonical name of the header
+    pub fn as_str(&self) -> &str {
+        match self {
+            HeaderName::CallId => "Call-ID",
+            HeaderName::Contact => "Contact",
+            HeaderName::ContentLength => "Content-Length",
+            HeaderName::ContentType => "Content-Type",
+            HeaderName::CSeq => "CSeq",
+            HeaderName::From => "From",
+            HeaderName::MaxForwards => "Max-Forwards",
+            HeaderName::To => "To",
+            HeaderName::Via => "Via",
+            HeaderName::Allow => "Allow",
+            HeaderName::Authorization => "Authorization",
+            HeaderName::Expires => "Expires",
+            HeaderName::MinExpires => "Min-Expires",
+            HeaderName::RecordRoute => "Record-Route",
+            HeaderName::Route => "Route",
+            HeaderName::Supported => "Supported",
+            HeaderName::UserAgent => "User-Agent",
+            HeaderName::Event => "Event",
+            HeaderName::SubscriptionState => "Subscription-State",
+            HeaderName::ReferTo => "Refer-To",
+            HeaderName::ReferredBy => "Referred-By",
+            HeaderName::RAck => "RAck",
+            HeaderName::WwwAuthenticate => "WWW-Authenticate",
+            HeaderName::Accept => "Accept",
+            HeaderName::AcceptEncoding => "Accept-Encoding",
+            HeaderName::AcceptLanguage => "Accept-Language",
+            HeaderName::ContentDisposition => "Content-Disposition",
+            HeaderName::ContentEncoding => "Content-Encoding",
+            HeaderName::ContentLanguage => "Content-Language",
+            HeaderName::Warning => "Warning",
+            HeaderName::ProxyAuthenticate => "Proxy-Authenticate",
+            HeaderName::ProxyAuthorization => "Proxy-Authorization",
+            HeaderName::AuthenticationInfo => "Authentication-Info",
+            HeaderName::ReplyTo => "Reply-To",
+            HeaderName::Require => "Require",
+            HeaderName::RetryAfter => "Retry-After",
+            HeaderName::Subject => "Subject",
+            HeaderName::Timestamp => "Timestamp",
+            HeaderName::Organization => "Organization",
+            HeaderName::Priority => "Priority",
+            HeaderName::Date => "Date",
+            HeaderName::MimeVersion => "MIME-Version",
+            HeaderName::InReplyTo => "In-Reply-To",
+            HeaderName::AlertInfo => "Alert-Info",
+            HeaderName::CallInfo => "Call-Info",
+            HeaderName::ErrorInfo => "Error-Info",
+            HeaderName::ProxyRequire => "Proxy-Require",
+            HeaderName::Server => "Server",
+            HeaderName::Unsupported => "Unsupported",
+            HeaderName::Other(s) => s,
+        }
+    }
+}
+
+impl fmt::Display for HeaderName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for HeaderName {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let lower_s = s.to_lowercase();
+        match lower_s.as_str() {
+            "call-id" | "i" => Ok(HeaderName::CallId),
+            "contact" | "m" => Ok(HeaderName::Contact),
+            "content-length" | "l" => Ok(HeaderName::ContentLength),
+            "content-type" | "c" => Ok(HeaderName::ContentType),
+            "cseq" => Ok(HeaderName::CSeq),
+            "from" | "f" => Ok(HeaderName::From),
+            "max-forwards" => Ok(HeaderName::MaxForwards),
+            "to" | "t" => Ok(HeaderName::To),
+            "via" | "v" => Ok(HeaderName::Via),
+            "allow" => Ok(HeaderName::Allow),
+            "authorization" => Ok(HeaderName::Authorization),
+            "expires" => Ok(HeaderName::Expires),
+            "min-expires" => Ok(HeaderName::MinExpires),
+            "record-route" => Ok(HeaderName::RecordRoute),
+            "route" => Ok(HeaderName::Route),
+            "server" => Ok(HeaderName::Server),
+            "supported" | "k" => Ok(HeaderName::Supported),
+            "user-agent" => Ok(HeaderName::UserAgent),
+            "event" | "o" => Ok(HeaderName::Event),
+            "subscription-state" => Ok(HeaderName::SubscriptionState),
+            "refer-to" | "r" => Ok(HeaderName::ReferTo),
+            "referred-by" | "b" => Ok(HeaderName::ReferredBy),
+            "rack" => Ok(HeaderName::RAck),
+            "www-authenticate" => Ok(HeaderName::WwwAuthenticate),
+            "accept" => Ok(HeaderName::Accept),
+            "accept-encoding" => Ok(HeaderName::AcceptEncoding),
+            "accept-language" => Ok(HeaderName::AcceptLanguage),
+            "content-disposition" => Ok(HeaderName::ContentDisposition),
+            "content-encoding" | "e" => Ok(HeaderName::ContentEncoding),
+            "content-language" => Ok(HeaderName::ContentLanguage),
+            "warning" => Ok(HeaderName::Warning),
+            "proxy-authenticate" => Ok(HeaderName::ProxyAuthenticate),
+            "proxy-authorization" => Ok(HeaderName::ProxyAuthorization),
+            "authentication-info" => Ok(HeaderName::AuthenticationInfo),
+            "reply-to" => Ok(HeaderName::ReplyTo),
+            "require" => Ok(HeaderName::Require),
+            "retry-after" => Ok(HeaderName::RetryAfter),
+            "subject" | "s" => Ok(HeaderName::Subject),
+            "timestamp" => Ok(HeaderName::Timestamp),
+            "organization" => Ok(HeaderName::Organization),
+            "priority" => Ok(HeaderName::Priority),
+            "date" => Ok(HeaderName::Date),
+            "mime-version" => Ok(HeaderName::MimeVersion),
+            "in-reply-to" => Ok(HeaderName::InReplyTo),
+            "alert-info" => Ok(HeaderName::AlertInfo),
+            "call-info" => Ok(HeaderName::CallInfo),
+            "error-info" => Ok(HeaderName::ErrorInfo),
+            "proxy-require" => Ok(HeaderName::ProxyRequire),
+            "unsupported" => Ok(HeaderName::Unsupported),
+            _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
+            _ => Err(Error::InvalidHeader("Empty header name".to_string())),
+        }
+    }
+}
+
+/// Value of a SIP header, parsed into its specific structure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeaderValue {
+    // === Address Headers ===
+    Contact(ContactValue), // Can be Star or Addresses
+    From(FromHeaderValue),
+    To(ToHeaderValue),
+    Route(Vec<RouteEntry>),
+    RecordRoute(Vec<RecordRouteEntry>),
+    ReplyTo(ReplyToValue),
+
+    // === Request/Response Info ===
+    Via(Vec<ViaEntry>), // ViaEntry would contain the parsed tuple
+    CSeq(CSeqValue),
+    MaxForwards(u8),
+    CallId((Vec<u8>, Option<Vec<u8>>)), // (local_part, Option<host_part>)
+    Expires(u32),
+    MinExpires(u32),
+    RetryAfter(RetryAfterValue),
+    Warning(Vec<WarningValue>),
+    Timestamp((Vec<u8>, Option<Vec<u8>>), Option<(Vec<u8>, Option<Vec<u8>>)>), // (ts, delay_opt)
+    Date(Vec<u8>),
+
+    // === Content Negotiation ===
+    Accept(Vec<AcceptValue>),
+    AcceptEncoding(Vec<AcceptEncodingValue>),
+    AcceptLanguage(Vec<AcceptLanguageValue>),
+
+    // === Body Info ===
+    ContentLength(u64),
+    ContentType(ContentTypeValue),
+    ContentEncoding(Vec<Vec<u8>>), // Vec<token>
+    ContentLanguage(Vec<Vec<u8>>), // Vec<language-tag>
+    ContentDisposition((Vec<u8>, Vec<Param>)), // (disp_type, params)
+    MimeVersion((u8, u8)), // (major, minor)
+
+    // === Capabilities/Options ===
+    Allow(Vec<Vec<u8>>), // Vec<token>
+    Require(Vec<Vec<u8>>), // Vec<token>
+    Supported(Vec<Vec<u8>>), // Vec<token>
+    Unsupported(Vec<Vec<u8>>), // Vec<token>
+    ProxyRequire(Vec<Vec<u8>>), // Vec<token>
+
+    // === Info Headers ===
+    AlertInfo(Vec<AlertInfoValue>),
+    CallInfo(Vec<CallInfoValue>),
+    ErrorInfo(Vec<ErrorInfoValue>),
+
+    // === Misc ===
+    Organization(Option<Vec<u8>>),
+    Priority(Vec<u8>),
+    Subject(Option<Vec<u8>>),
+    Server(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
+    UserAgent(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
+    InReplyTo(Vec<(Vec<u8>, Option<Vec<u8>>)>), // Vec<callid>
+
+    // === Authentication (Placeholders) ===
+    Authorization(Vec<u8>), // Placeholder
+    ProxyAuthorization(Vec<u8>), // Placeholder
+    WwwAuthenticate(Vec<u8>), // Placeholder
+    ProxyAuthenticate(Vec<u8>), // Placeholder
+    AuthenticationInfo(Vec<u8>), // Placeholder
+
+    // === Other ===
+    /// Raw value for unknown or unparsed headers
+    Raw(Vec<u8>),
+}
+
+impl HeaderValue {
+    pub fn text(value: impl Into<String>) -> Self {
+        HeaderValue::Raw(value.into().into_bytes())
+    }
+
+    pub fn integer(value: i64) -> Self {
+        HeaderValue::Raw(value.to_string().into_bytes())
+    }
+
+    pub fn text_list(values: Vec<String>) -> Self {
+        HeaderValue::Raw(values.join(", ").into_bytes())
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            HeaderValue::Raw(bytes) => std::str::from_utf8(bytes).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_integer(&self) -> Option<i64> {
+        self.as_text().and_then(|s| s.parse().ok())
+    }
+
+    pub fn as_text_list(&self) -> Option<Vec<&str>> {
+        self.as_text().map(|s| {
+            s.split(',')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+    }
+}
+
+impl fmt::Display for HeaderValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    write!(f, "{}", s)
+                } else {
+                    // Fall back to printing the raw bytes for non-UTF8 values
+                    write!(f, "{:?}", bytes)
+                }
+            },
+            // Add handling for other variant types as needed
+            _ => write!(f, "[Complex Value]"),
+        }
+    }
+}
+
+/// SIP header, consisting of a name and value
+#[derive(Debug, Clone, PartialEq)]
+pub struct Header {
+    /// Header name
+    pub name: HeaderName,
+    /// Header value
+    pub value: HeaderValue,
+}
+
+impl Header {
+    /// Create a new header
+    pub fn new(name: HeaderName, value: HeaderValue) -> Self {
+        Header { name, value }
+    }
+
+    /// Create a new text header
+    pub fn text(name: HeaderName, value: impl Into<String>) -> Self {
+        Header::new(name, HeaderValue::text(value))
+    }
+
+    /// Create a new integer header
+    pub fn integer(name: HeaderName, value: i64) -> Self {
+        Header::new(name, HeaderValue::integer(value))
+    }
+
+    /// Get the header as a formatted string, ready for wire transmission
+    pub fn to_wire_format(&self) -> String {
+        format!("{}: {}", self.name, self.value)
+    }
+}
+
+impl fmt::Display for Header {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.name, self.value)
+    }
+}
 
 /// Represents any parsed SIP header in a strongly-typed way.
 #[derive(Debug, Clone, PartialEq)] // Add necessary derives
@@ -96,7 +509,7 @@ impl TryFrom<Header> for TypedHeader {
             // Content Negotiation Headers
             HeaderName::Accept => all_consuming(parser::headers::parse_accept)(&value_bytes).map(|(_, v)| TypedHeader::Accept(v)),
             HeaderName::ContentType => all_consuming(parser::headers::parse_content_type)(&value_bytes).map(|(_, v)| TypedHeader::ContentType(v)),
-            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes).map(|(_, v)| TypedHeader::ContentLength(v)),
+            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes).map(|(_, v)| TypedHeader::ContentLength(types::ContentLength(v))),
             HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(&value_bytes).map(|(_, v)| TypedHeader::ContentDisposition(v)),
             HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(&value_bytes).map(|(_, v)| TypedHeader::ContentEncoding(v)), // Placeholder type
             HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(&value_bytes).map(|(_, v)| TypedHeader::ContentLanguage(v)), // Placeholder type
@@ -104,8 +517,8 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(&value_bytes).map(|(_, v)| TypedHeader::AcceptLanguage(v)), // Placeholder type
 
             // Simple Value Headers
-            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes).map(|(_, v)| TypedHeader::MaxForwards(v)),
-            HeaderName::Expires => all_consuming(parser::headers::parse_expires)(&value_bytes).map(|(_, v)| TypedHeader::Expires(v)),
+            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes).map(|(_, v)| TypedHeader::MaxForwards(types::MaxForwards(v))),
+            HeaderName::Expires => all_consuming(parser::headers::parse_expires)(&value_bytes).map(|(_, v)| TypedHeader::Expires(types::Expires(v))),
             HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(&value_bytes).map(|(_, v)| TypedHeader::MinExpires(v)), // Placeholder type
             HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(&value_bytes).map(|(_, v)| TypedHeader::MimeVersion(v)), // Placeholder type
 
@@ -117,7 +530,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AuthenticationInfo => all_consuming(parser::headers::parse_authentication_info)(&value_bytes).map(|(_, v)| TypedHeader::AuthenticationInfo(v)),
 
             // Token List Headers
-            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes).map(|(_, v)| TypedHeader::Allow(v)),
+            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes).map(|(_, v)| TypedHeader::Allow(types::Allow(v))),
             HeaderName::Require => all_consuming(parser::headers::parse_require)(&value_bytes).map(|(_, v)| TypedHeader::Require(v)), // Placeholder type
             HeaderName::Supported => all_consuming(parser::headers::parse_supported)(&value_bytes).map(|(_, v)| TypedHeader::Supported(v)), // Placeholder type
             HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(&value_bytes).map(|(_, v)| TypedHeader::Unsupported(v)), // Placeholder type
@@ -131,8 +544,8 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(&value_bytes).map(|(_, v)| TypedHeader::Subject(v)), // Placeholder type
             HeaderName::Server => all_consuming(parser::headers::parse_server)(&value_bytes).map(|(_, v)| TypedHeader::Server(v)), // Placeholder type
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(&value_bytes).map(|(_, v)| TypedHeader::UserAgent(v)), // Placeholder type
-            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::InReplyTo(v)), // Placeholder type
-            HeaderName::Warning => all_consuming(parser::headers::parse_warning)(&value_bytes).map(|(_, v)| TypedHeader::Warning(v)),
+            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::InReplyTo(v)), // Assuming InReplyTo type holds Vec<String>
+            HeaderName::Warning => all_consuming(parser::headers::parse_warning)(&value_bytes).map(|(_, v)| TypedHeader::Warning(types::Warning(v))),
             HeaderName::RetryAfter => all_consuming(parser::headers::parse_retry_after)(&value_bytes).map(|(_, v)| TypedHeader::RetryAfter(v)), // Placeholder type
             HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(&value_bytes).map(|(_, v)| TypedHeader::ErrorInfo(v)), // Placeholder type
             HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(&value_bytes).map(|(_, v)| TypedHeader::AlertInfo(v)), // Placeholder type
@@ -151,14 +564,76 @@ impl TryFrom<Header> for TypedHeader {
     }
 }
 
-// TODO: Implement From implementations for each specific type to TypedHeader
-// Example:
-// impl From<types::Via> for TypedHeader {
-//     fn from(via: types::Via) -> Self {
-//         TypedHeader::Via(via)
-//     }
-// }
+/// Trait for typed headers
+pub trait TypedHeaderTrait: Sized {
+    /// Type of header name
+    type Name: Into<HeaderName> + Copy;
+    
+    /// Header name
+    fn header_name() -> Self::Name;
+    
+    /// Convert to an untyped Header
+    fn to_header(&self) -> Header;
+    
+    /// Try to convert from an untyped Header
+    fn from_header(header: &Header) -> Result<Self>;
+}
 
-// TODO: Implement TryFrom<crate::header::Header> for TypedHeader
-// This will be the core logic to convert a raw Header into a TypedHeader
-// involving calling the appropriate parser based on HeaderName. 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_name_from_str() {
+        assert_eq!(HeaderName::from_str("Via").unwrap(), HeaderName::Via);
+        assert_eq!(HeaderName::from_str("v").unwrap(), HeaderName::Via);
+        assert_eq!(HeaderName::from_str("To").unwrap(), HeaderName::To);
+        assert_eq!(HeaderName::from_str("t").unwrap(), HeaderName::To);
+        assert_eq!(HeaderName::from_str("cSeq").unwrap(), HeaderName::CSeq);
+        
+        // Extension header
+        let custom = HeaderName::from_str("X-Custom").unwrap();
+        assert!(matches!(custom, HeaderName::Other(s) if s == "X-Custom"));
+        
+        // Empty header name is invalid
+        assert!(HeaderName::from_str("").is_err());
+    }
+
+    #[test]
+    fn test_header_value_creation() {
+        let text = HeaderValue::text("Hello");
+        assert_eq!(text.as_text(), Some("Hello"));
+        
+        let int = HeaderValue::integer(42);
+        assert_eq!(int.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_header_creation() {
+        let h = Header::text(HeaderName::To, "sip:alice@example.com");
+        assert_eq!(h.name, HeaderName::To);
+        assert_eq!(h.value.as_text(), Some("sip:alice@example.com"));
+        
+        let h = Header::integer(HeaderName::ContentLength, 42);
+        assert_eq!(h.name, HeaderName::ContentLength);
+        assert_eq!(h.value.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_header_wire_format() {
+        let h = Header::text(HeaderName::To, "sip:alice@example.com");
+        assert_eq!(h.to_wire_format(), "To: sip:alice@example.com");
+        
+        let h = Header::integer(HeaderName::ContentLength, 42);
+        assert_eq!(h.to_wire_format(), "Content-Length: 42");
+        
+        let h = Header::new(
+            HeaderName::Via, 
+            HeaderValue::text("SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds")
+        );
+        assert_eq!(
+            h.to_wire_format(), 
+            "Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds"
+        );
+    }
+} 

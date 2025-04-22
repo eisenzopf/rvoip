@@ -20,7 +20,7 @@ pub use absolute::parse_absolute_uri;
 // Add imports for combinators and types
 use nom::{
     branch::alt,
-    bytes::complete::tag,
+    bytes::complete as bytes,
     combinator::{map, map_res, opt},
     sequence::tuple,
     IResult,
@@ -36,7 +36,7 @@ use crate::parser::ParseResult;
 fn sip_uri(input: &[u8]) -> ParseResult<Uri> {
     map_res(
         tuple((
-            tag("sip:"),
+            bytes::tag(b"sip:"),
             opt(userinfo),
             hostport,       // Returns (Host, Option<u16>)
             uri_parameters, // Returns Vec<Param>
@@ -70,7 +70,7 @@ fn sip_uri(input: &[u8]) -> ParseResult<Uri> {
 fn sips_uri(input: &[u8]) -> ParseResult<Uri> {
      map_res(
         tuple((
-            tag("sips:"),
+            bytes::tag(b"sips:"),
             opt(userinfo),
             hostport,
             uri_parameters,

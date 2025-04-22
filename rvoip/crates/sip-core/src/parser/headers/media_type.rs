@@ -50,16 +50,10 @@ fn m_parameter(input: &[u8]) -> ParseResult<(String, String)> {
 // extension-token = ietf-token / x-token
 // x-token = "x-" token
 fn extension_token(input: &[u8]) -> ParseResult<&[u8]> {
-    // Recognize either x-token or simple token
-    // Both branches result in &[u8], compatible with alt -> recognize
     recognize(
        alt((
-           token, // Try token first (most common)
-           // If token fails, check specifically for x- prefix. This avoids
-           // token consuming just "x" when "x-foo" was intended.
-           // Note: This deviates slightly from pure alt((pair(..), token))
-           // but handles ambiguity better.
-           preceded(tag_no_case(b"x-"), token) 
+           token,
+           preceded(tag_no_case(b"x-"), token)
        ))
     )(input)
 }

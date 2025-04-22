@@ -283,13 +283,14 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
         Ok((_, body)) => Ok(body),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = content.len() - e.input.len(); // Calculate offset
-            Err(Error::ParsingError { 
-                message: format!("Failed to parse multipart body near offset {}: {:?}", offset, e.code),
-                source: None 
-            })
+            Err(Error::ParseError(
+                format!("Failed to parse multipart body near offset {}: {:?}", offset, e.code)
+            ))
         },
         Err(nom::Err::Incomplete(needed)) => {
-            Err(Error::ParsingError{ message: format!("Incomplete multipart body: Needed {:?}", needed), source: None })
+            Err(Error::ParseError(
+                format!("Incomplete multipart body: Needed {:?}", needed)
+            ))
         },
     }
 }

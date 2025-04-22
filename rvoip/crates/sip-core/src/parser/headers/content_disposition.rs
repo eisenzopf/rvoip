@@ -34,7 +34,7 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
         )),
         |bytes| {
             let s = str::from_utf8(bytes)?;
-            Ok(match s.to_ascii_lowercase().as_str() {
+            Ok::<DispositionType, _>(match s.to_ascii_lowercase().as_str() {
                 "render" => DispositionType::Render,
                 "session" => DispositionType::Session,
                 "icon" => DispositionType::Icon,

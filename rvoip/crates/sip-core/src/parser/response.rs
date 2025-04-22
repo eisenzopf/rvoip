@@ -10,8 +10,8 @@ use nom::{
 };
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
-use crate::types::{StatusCode};
-use crate::version::Version;
+use crate::types::version::Version;
+use crate::types::StatusCode;
 use crate::parser::common::sip_version;
 use crate::parser::whitespace::crlf;
 use crate::parser::ParseResult;
@@ -54,11 +54,11 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 pub(crate) fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
     map_res(
         take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        |code_bytes: &[u8]| -> Result<StatusCode, &str> {
-            let s = str::from_utf8(code_bytes).map_err(|_| "Invalid UTF8")?;
-            let code_u16 = s.parse::<u16>().map_err(|_| "Invalid u16")?;
+        |code_bytes| { 
+            let s = str::from_utf8(code_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Char)))?;
+            let code_u16 = s.parse::<u16>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Digit)))?;
             StatusCode::from_u16(code_u16)
-                 .map_err(|_| "Invalid StatusCode")
+                 .map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Verify)))
         }
     )(input)
 }

@@ -6,6 +6,7 @@ use nom::{
     multi::{many0, many1},
     sequence::{pair, preceded, separated_pair},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -92,7 +93,13 @@ fn method_param(input: &[u8]) -> ParseResult<Param> {
 fn ttl_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         preceded(tag("ttl="), take_while_m_n(1, 3, |c: u8| c.is_ascii_digit())),
-        |ttl_bytes| str::from_utf8(ttl_bytes)?.parse::<u8>().map(Param::Ttl)
+        |ttl_bytes| {
+            let s = str::from_utf8(ttl_bytes)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
+            s.parse::<u8>()
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))
+                .map(Param::Ttl)
+        }
     )(input)
 }
 

@@ -170,23 +170,25 @@ impl Address {
     /// Returns Some(Some(value)) for key-value pairs, Some(None) for flags, None if not found.
     /// Note: For typed params like Expires, this returns the string representation.
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
-         self.params.iter().find_map(|p| match p {
-            Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
-            Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
-            Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
-            Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
-            Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None),
-            Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
-            Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
-            Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-            Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => v_opt.as_ref().and_then(|gv| gv.as_str()),
-            Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
-            Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            _ => None,
-        })
+        Some(
+            self.params.iter().find_map(|p| match p {
+                Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
+                Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
+                Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
+                Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
+                Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None),
+                Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
+                Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
+                Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
+                Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => v_opt.as_ref().and_then(|gv| gv.as_str()),
+                Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
+                Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                _ => None,
+            })
+        )
     }
 
     /// Sets or replaces a parameter, storing it as Param::Other.
@@ -214,8 +216,7 @@ impl Address {
         });
 
         // Add as Param::Other
-        // TODO: Refactor set_param to handle GenericValue properly or simplify it.
-        self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token))); // TEMPORARY: Force into Token
+        self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token)));
     }
 
     // Helper to construct from parser output

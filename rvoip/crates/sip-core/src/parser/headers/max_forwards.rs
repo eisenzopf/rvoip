@@ -5,6 +5,7 @@ use nom::{
     character::complete::digit1,
     combinator::map_res,
     IResult,
+    error::{ErrorKind, NomError},
 };
 use std::str;
 
@@ -16,8 +17,8 @@ pub(crate) fn parse_max_forwards(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1, 
         |bytes| {
-            let s = str::from_utf8(bytes).map_err(|_| "Invalid UTF8")?;
-            s.parse::<u32>().map_err(|_| "Invalid u32")
+            let s = str::from_utf8(bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;
+            s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
         }
     )(input)
 }

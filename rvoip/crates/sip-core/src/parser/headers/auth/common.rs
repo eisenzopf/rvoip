@@ -11,7 +11,7 @@ use crate::types::auth::{Algorithm, Qop, AuthParam, DigestResponseValue, Authent
 use crate::types::Uri;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
+    bytes::complete as bytes,
     character::complete::char,
     combinator::{map, map_res, opt, value},
     multi::{many0, separated_list0, separated_list1},
@@ -59,7 +59,7 @@ fn realm_value(input: &[u8]) -> ParseResult<&[u8]> {
 // realm = "realm" EQUAL realm-value
 pub(crate) fn realm(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("realm"), preceded(equal, realm_value)),
+        preceded(bytes::tag_no_case("realm"), preceded(equal, realm_value)),
         |bytes| str::from_utf8(bytes).map(String::from), // Assuming realm_value returns content
     )(input)
 }
@@ -72,7 +72,7 @@ pub(crate) fn nonce_value(input: &[u8]) -> ParseResult<&[u8]> {
 // nonce = "nonce" EQUAL nonce-value
 pub(crate) fn nonce(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("nonce"), preceded(equal, nonce_value)),
+        preceded(bytes::tag_no_case("nonce"), preceded(equal, nonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
@@ -80,7 +80,7 @@ pub(crate) fn nonce(input: &[u8]) -> ParseResult<String> {
 // opaque = "opaque" EQUAL quoted-string
 pub(crate) fn opaque(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("opaque"), preceded(equal, quoted_string)),
+        preceded(bytes::tag_no_case("opaque"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
@@ -88,12 +88,12 @@ pub(crate) fn opaque(input: &[u8]) -> ParseResult<String> {
 // stale = "stale" EQUAL ( "true" / "false" )
 pub(crate) fn stale(input: &[u8]) -> ParseResult<bool> {
     preceded(
-        tag_no_case("stale"),
+        bytes::tag_no_case("stale"),
         preceded(
             equal,
             alt((
-                value(true, tag_no_case("true")),
-                value(false, tag_no_case("false")),
+                value(true, bytes::tag_no_case("true")),
+                value(false, bytes::tag_no_case("false")),
             )),
         ),
     )(input)
@@ -103,11 +103,8 @@ pub(crate) fn stale(input: &[u8]) -> ParseResult<bool> {
 pub(crate) fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
     map_res(
         preceded(
-            tag_no_case("algorithm"),
-            preceded(
-                equal,
-                alt((tag_no_case(b"MD5-sess"), tag_no_case(b"MD5"), token)),
-            ),
+            pair(bytes::tag_no_case(b"algorithm"), equal),
+            alt((bytes::tag_no_case(b"MD5-sess"), bytes::tag_no_case(b"MD5"), token)),
         ),
         |bytes| {
             let s = str::from_utf8(bytes)?;
@@ -123,7 +120,7 @@ pub(crate) fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
 // qop-value = "auth" / "auth-int" / token
 fn qop_value(input: &[u8]) -> ParseResult<Qop> {
     map_res(
-        alt((tag_no_case(b"auth-int"), tag_no_case(b"auth"), token)),
+        alt((bytes::tag_no_case(b"auth-int"), bytes::tag_no_case(b"auth"), token)),
         |bytes| {
             let s = str::from_utf8(bytes)?;
             Ok(match s.to_ascii_lowercase().as_str() {
@@ -139,14 +136,11 @@ fn qop_value(input: &[u8]) -> ParseResult<Qop> {
 // Returns Vec<Qop>
 pub(crate) fn qop_options(input: &[u8]) -> ParseResult<Vec<Qop>> {
     preceded(
-        tag_no_case("qop"),
-        preceded(
-            equal,
-            delimited(
-                ldquot,
-                separated_list1(tag(b","), qop_value),
-                rdquot,
-            ),
+        pair(bytes::tag_no_case(b"qop"), equal),
+        delimited(
+            ldquot,
+            separated_list1(bytes::tag(b","), qop_value),
+            rdquot,
         ),
     )(input)
 }
@@ -159,7 +153,7 @@ fn username_value(input: &[u8]) -> ParseResult<&[u8]> {
 // username = "username" EQUAL username-value
 pub(crate) fn username(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("username"), preceded(equal, username_value)),
+        preceded(bytes::tag_no_case("username"), preceded(equal, username_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
@@ -173,7 +167,7 @@ fn digest_uri_value(input: &[u8]) -> ParseResult<Uri> {
 // digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT
 pub(crate) fn digest_uri(input: &[u8]) -> ParseResult<Uri> {
     preceded(
-        tag_no_case("uri"),
+        bytes::tag_no_case("uri"),
         preceded(
             equal,
             delimited(ldquot, digest_uri_value, rdquot)
@@ -189,7 +183,7 @@ fn request_digest(input: &[u8]) -> ParseResult<&[u8]> {
 // dresponse = "response" EQUAL request-digest
 pub(crate) fn dresponse(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("response"), preceded(equal, request_digest)),
+        preceded(bytes::tag_no_case("response"), preceded(equal, request_digest)),
         |bytes| str::from_utf8(bytes).map(String::from)
     )(input)
 }
@@ -202,7 +196,7 @@ fn cnonce_value(input: &[u8]) -> ParseResult<&[u8]> {
 // cnonce = "cnonce" EQUAL cnonce-value
 pub(crate) fn cnonce(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("cnonce"), preceded(equal, cnonce_value)),
+        preceded(bytes::tag_no_case("cnonce"), preceded(equal, cnonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from)
     )(input)
 }
@@ -211,7 +205,7 @@ pub(crate) fn cnonce(input: &[u8]) -> ParseResult<String> {
 // Note: This is different from qop-options in challenge
 pub(crate) fn message_qop(input: &[u8]) -> ParseResult<Qop> {
     preceded(
-        tag_no_case("qop"),
+        bytes::tag_no_case("qop"),
         preceded(equal, qop_value)
     )(input)
 }
@@ -224,7 +218,7 @@ fn nc_value(input: &[u8]) -> ParseResult<&[u8]> {
 // nonce-count = "nc" EQUAL nc-value
 pub(crate) fn nonce_count(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("nc"), preceded(equal, nc_value)),
+        preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value)),
         |bytes| str::from_utf8(bytes).map(String::from)
     )(input)
 }
@@ -232,7 +226,7 @@ pub(crate) fn nonce_count(input: &[u8]) -> ParseResult<String> {
 // nextnonce = "nextnonce" EQUAL nonce-value
 pub(crate) fn nextnonce(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("nextnonce"), preceded(equal, nonce_value)),
+        preceded(bytes::tag_no_case("nextnonce"), preceded(equal, nonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from)
     )(input)
 }
@@ -245,7 +239,7 @@ fn response_digest(input: &[u8]) -> ParseResult<&[u8]> {
 // response-auth = "rspauth" EQUAL response-digest
 pub(crate) fn response_auth(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(tag_no_case("rspauth"), preceded(equal, response_digest)),
+        preceded(bytes::tag_no_case("rspauth"), preceded(equal, response_digest)),
         |bytes| str::from_utf8(bytes).map(String::from)
     )(input)
 }

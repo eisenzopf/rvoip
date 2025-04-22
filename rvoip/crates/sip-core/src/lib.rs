@@ -7,21 +7,23 @@
 
 // Declare modules
 pub mod error;
-pub mod header;
-pub mod method;
 pub mod parser;
-pub mod status;
 pub mod types;
-pub mod uri;
 pub mod sdp;
-pub mod version;
+
+// Remove these commented out modules - they're now part of types/
+// // pub mod header;
+// // pub mod method;
+// // pub mod status;
+// // pub mod uri;
+// // pub mod version;
 
 // Re-export key public items
 pub use error::{Error, Result};
-pub use header::{Header, HeaderName, HeaderValue};
-pub use crate::types::Method;
+pub use types::header::{Header, HeaderName, HeaderValue};
+pub use types::Method;
 pub use parser::{parse_message, IncrementalParser, ParseState};
-pub use crate::types::StatusCode;
+pub use types::StatusCode;
 pub use types::{
     Address, 
     CallId, 
@@ -39,6 +41,7 @@ pub use types::{
     sip_message::Response,
     sdp::SdpSession,
     TypedHeader, 
+    TypedHeaderTrait,
     via::Via,
     Warning,
     sdp::MediaDescription, 
@@ -47,19 +50,21 @@ pub use types::{
     sdp::TimeDescription,
     auth::*,
     sdp::ParsedAttribute,
+    Version,
 };
-pub use uri::Uri;
+pub use types::uri::{Uri, Host, Scheme}; // Updated path
 pub use sdp::attributes::MediaDirection;
 
 /// Re-export of common types and functions
 pub mod prelude {
     pub use crate::error::{Error, Result};
-    pub use crate::header::{Header, HeaderName, HeaderValue};
-    pub use crate::uri::{Uri, Host, Scheme};
+    pub use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
+    pub use crate::types::uri::{Uri, Host, Scheme}; // Updated path
     pub use crate::types::Method;
     pub use crate::types::StatusCode;
     pub use crate::types::sip_message::{Request, Response, Message};
     pub use crate::types::via::Via;
+    pub use crate::types::Version; // Added Version
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
     pub use crate::parser::{parse_message, IncrementalParser, ParseState};
     pub use crate::parser::multipart::{MultipartBody, MimePart};

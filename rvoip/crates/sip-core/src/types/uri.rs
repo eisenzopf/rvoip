@@ -1,3 +1,6 @@
+// URI implementation moved from root directory
+// Implements URI types according to RFC 3261
+
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -14,7 +17,7 @@ use nom::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::types::Param; // Import the Param enum
+use crate::types::param::Param; // Updated import path
 
 /// SIP URI schema types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -151,7 +154,7 @@ pub struct Uri {
     /// Port (optional)
     pub port: Option<u16>,
     /// URI parameters (;key=value or ;key)
-    pub parameters: Vec<Param>, // Changed from HashMap<String, Option<String>>
+    pub parameters: Vec<Param>,
     /// URI headers (?key=value)
     pub headers: HashMap<String, String>,
 }
@@ -165,7 +168,7 @@ impl Uri {
             password: None,
             host,
             port: None,
-            parameters: Vec::new(), // Initialize as Vec
+            parameters: Vec::new(),
             headers: HashMap::new(),
         }
     }
@@ -220,7 +223,6 @@ impl Uri {
 
     /// Add a parameter to the URI
     pub fn with_parameter(mut self, param: Param) -> Self {
-        // TODO: Handle replacing existing parameters if needed?
         self.parameters.push(param);
         self
     }
@@ -290,144 +292,8 @@ impl fmt::Display for Uri {
     }
 }
 
-// Parse the scheme of a URI (sip, sips, tel)
-fn scheme_parser(input: &str) -> IResult<&str, Scheme> {
-    map_res(
-        alt((
-            tag("sip"),
-            tag("sips"),
-            tag("tel"),
-        )),
-        |s: &str| Scheme::from_str(s)
-    )(input)
-}
-
-// Parse the userinfo part (user:password@)
-fn userinfo_parser(input: &str) -> IResult<&str, (Option<String>, Option<String>)> {
-    match opt(terminated(
-        pair(
-            map(
-                take_till(|c| c == ':' || c == '@'),
-                |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
-            ),
-            opt(preceded(
-                char(':'),
-                map(
-                    take_till(|c| c == '@'),
-                    |s: &str| unescape_user_info(s).unwrap_or_else(|_| s.to_string())
-                )
-            ))
-        ),
-        char('@')
-    ))(input) {
-        Ok((remaining, Some((user, password)))) => Ok((remaining, (Some(user), password))),
-        Ok((remaining, None)) => Ok((remaining, (None, None))),
-        Err(e) => Err(e),
-    }
-}
-
-// Parse IPv4 address
-fn ipv4_parser(input: &str) -> IResult<&str, Host> {
-    let ip_parser = verify(
-        take_while1(|c: char| c.is_ascii_digit() || c == '.'),
-        |s: &str| is_valid_ipv4(s)
-    );
-
-    map(ip_parser, |s: &str| Host::IPv4(s.to_string()))(input)
-}
-
-// Parse IPv6 address
-fn ipv6_parser(input: &str) -> IResult<&str, Host> {
-    let ip_parser = delimited(
-        char('['),
-        take_while1(|c: char| c.is_ascii_hexdigit() || c == ':' || c == '.'),
-        char(']')
-    );
-
-    map(ip_parser, |s: &str| Host::IPv6(s.to_string()))(input)
-}
-
-// Parse domain name
-fn domain_parser(input: &str) -> IResult<&str, Host> {
-    let domain_parser = take_while1(|c: char| c.is_alphanumeric() || c == '.' || c == '-' || c == '+');
-
-    map(domain_parser, |s: &str| Host::Domain(s.to_string()))(input)
-}
-
-// Parse the host part (either IPv4, IPv6, or domain)
-fn host_parser(input: &str) -> IResult<&str, Host> {
-    alt((
-        ipv6_parser,
-        ipv4_parser,
-        domain_parser
-    ))(input)
-}
-
-// Parse the port part
-fn port_parser(input: &str) -> IResult<&str, u16> {
-    map_res(
-        preceded(char(':'), digit1),
-        |s: &str| s.parse::<u16>()
-    )(input)
-}
-
-// Note: parameter_parser and parameters_parser are now in parser/uri.rs
-// We might need to import them or adjust the uri_parser below
-
-// Parse a single header
-fn header_parser(input: &str) -> IResult<&str, (String, String)> {
-    separated_pair(
-        map(
-            take_till(|c| c == '=' || c == '&'),
-            |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-        ),
-        char('='),
-        map(
-            take_till(|c| c == '&'),
-            |s: &str| unescape_param(s).unwrap_or_else(|_| s.to_string())
-        )
-    )(input)
-}
-
-// Parse all headers
-fn headers_parser(input: &str) -> IResult<&str, HashMap<String, String>> {
-    preceded(
-        char('?'),
-        map(
-            separated_list0(char('&'), header_parser),
-            |headers| headers.into_iter().collect()
-        )
-    )(input)
-}
-
-// Parser for a complete URI
-// Note: Assumes parameter_parser and parameters_parser are available
-// We need to import them from parser::uri
-fn uri_parser(input: &str) -> IResult<&str, Uri> {
-    use crate::parser::uri::parameters_parser; // Import the refactored parser
-
-    let (input, scheme) = terminated(scheme_parser, char(':'))(input)?;
-    let (input, (user, password)) = userinfo_parser(input)?;
-    let (input, host) = host_parser(input)?;
-    let (input, port) = opt(port_parser)(input)?;
-
-    let (input, parameters_vec) = opt(parameters_parser)(input)?;
-    let (input, headers_map) = opt(headers_parser)(input)?;
-
-    let mut uri = Uri::new(scheme, host);
-
-    uri.user = user;
-    uri.password = password;
-    uri.port = port;
-
-    uri.parameters = parameters_vec.unwrap_or_default();
-
-    if let Some(hdrs) = headers_map {
-        uri.headers = hdrs;
-    }
-
-    Ok((input, uri))
-}
+// Parser-related functions need to be reimplemented or imported from parser module
+// For now we'll just include the basic utility functions used by the URI implementation
 
 // --- Helper functions (escape/unescape, validation) ---
 

@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::fmt;
 use bytes::Bytes;
 // use serde::{Deserialize, Serialize}; // Commented out Serde
 
-use crate::error::Result;
-use crate::header::{Header, HeaderName, TypedHeader};
-use crate::uri::Uri;
-use crate::version::Version;
+use crate::types::header::{Header, HeaderName, TypedHeader};
+use crate::types::uri::Uri;
+use crate::types::version::Version;
 // Use types from the current crate's types module
-use crate::types::{Method, StatusCode, Via};
+use crate::types::Method;
+use crate::types::StatusCode;
+use crate::error::{Error, Result};
+// Use types from the current crate's types module
+use crate::types::{Via};
 
 /// A SIP request message
 #[derive(Debug, Clone, PartialEq)]

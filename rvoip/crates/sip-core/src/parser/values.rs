@@ -19,13 +19,8 @@ pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // delta-seconds = 1*DIGIT
 pub(crate) fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
-    map_res(digit1, |b| {
-        str::from_utf8(b)
-            .map_err(|_| nom::Err::Failure(error_position!(input, ErrorKind::Char)))
-            .and_then(|s| {
-                s.parse::<u32>()
-                    .map_err(|_| nom::Err::Failure(error_position!(input, ErrorKind::Digit)))
-            })
+    map_res(digit1, |s: &[u8]| {
+        str::from_utf8(s).ok().and_then(|s_str| s_str.parse::<u32>().ok())
     })(input)
 }
 

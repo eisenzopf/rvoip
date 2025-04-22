@@ -1,3 +1,6 @@
+// Version implementation moved from root directory
+// Implements SIP protocol version as defined in RFC 3261
+
 use std::fmt;
 use std::str::FromStr;
 

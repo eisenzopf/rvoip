@@ -30,10 +30,10 @@ use crate::uri::Host;
 fn warn_code(input: &[u8]) -> ParseResult<WarnCode> {
     map_res(
         take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        |bytes| -> Result<WarnCode, &str> { // Specify error type
-            let s = str::from_utf8(bytes).map_err(|_| "Invalid UTF8")?;
-            let code = s.parse::<u16>().map_err(|_| "Invalid u16")?;
-            Ok(WarnCode(code)) // Assuming WarnCode is a tuple struct
+        |bytes| {
+            let s = str::from_utf8(bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))?;
+            let code = s.parse::<u16>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;
+            Ok(WarnCode(code))
         }
     )(input)
 }

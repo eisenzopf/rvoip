@@ -15,6 +15,14 @@ pub use sip_message::{Request, Response, Message};
 pub mod param;
 pub use param::Param;
 
+// Add new URI module
+pub mod uri;
+pub use uri::{Uri, Host, Scheme};
+
+// Add Version module
+pub mod version;
+pub use version::Version;
+
 // SIP Core Types
 
 pub mod accept;
@@ -30,6 +38,7 @@ pub mod cseq;
 pub mod expires;
 pub mod from;
 pub mod header;
+pub use header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 pub mod max_forwards;
 pub mod record_route;
 pub mod reply_to;
@@ -53,7 +62,6 @@ pub use content_type::ContentType;
 pub use cseq::CSeq;
 pub use expires::Expires;
 pub use from::From;
-pub use header::TypedHeader;
 pub use max_forwards::MaxForwards;
 pub use warning::Warning;
 pub use multipart::{MultipartBody, MimePart, ParsedBody};

@@ -58,7 +58,8 @@ impl FromStr for ContentDisposition {
 
         match all_consuming(parse_content_disposition)(s.as_bytes()) {
             Ok((_, (dtype_bytes, params_vec))) => {
-                let disp_type = String::from_utf8(dtype_bytes.to_vec())?;
+                let disp_type_str = String::from_utf8(dtype_bytes.to_vec())?;
+                let disp_type = DispositionType::Other(disp_type_str);
                 // Convert params Vec<Param> -> HashMap<String, String>
                 // TODO: Refine this conversion, especially for handling
                 let params = params_vec.into_iter()

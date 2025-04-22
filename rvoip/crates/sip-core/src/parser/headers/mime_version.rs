@@ -7,6 +7,7 @@ use nom::{
     combinator::map_res,
     sequence::{pair, separated_pair},
     IResult,
+    error::{ErrorKind, NomError},
 };
 use std::str;
 
@@ -17,13 +18,13 @@ use crate::parser::ParseResult;
 // mime-version-val = 1*DIGIT "." 1*DIGIT
 fn mime_version_val(input: &[u8]) -> ParseResult<(u32, u32)> {
     map_res(
-        separated_pair(digit1, tag(b"."), digit1),
-        |(major_bytes, minor_bytes)| -> Result<(u32, u32), &str> {
-            let major_s = str::from_utf8(major_bytes).map_err(|_| "UTF8 Error Major")?;
-            let minor_s = str::from_utf8(minor_bytes).map_err(|_| "UTF8 Error Minor")?;
-            let major = major_s.parse::<u32>().map_err(|_| "Parse Error Major")?;
-            let minor = minor_s.parse::<u32>().map_err(|_| "Parse Error Minor")?;
-            Ok((major, minor))
+        separated_pair(bytes::tag(b"."), digit1),
+        |(major_bytes, minor_bytes)| {
+            let major_s = str::from_utf8(major_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Char)))?;
+            let minor_s = str::from_utf8(minor_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Char)))?;
+            let major = major_s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(major_bytes, ErrorKind::Digit)))?;
+            let minor = minor_s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(minor_bytes, ErrorKind::Digit)))?;
+            Ok::<(u32, u32), _>((major, minor))
         }
     )(input)
 }

@@ -61,23 +61,27 @@ impl Via {
     
     /// Get the first value associated with a parameter name (case-insensitive for key).
     pub fn get(&self, name: &str) -> Option<Option<&str>> {
-        self.params.iter().find_map(|p| match p {
-            Param::Other(key, val_opt) if key.eq_ignore_ascii_case(name) => {
-                val_opt.as_ref().and_then(|gv| gv.as_str())
-            },
-            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
-            Param::Tag(val) if name.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
-            Param::Expires(val) if name.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Received(val) if name.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
-            Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Q(val) if name.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-            Param::Transport(val) if name.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
-            Param::User(val) if name.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
-            Param::Method(val) if name.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-            Param::Lr if name.eq_ignore_ascii_case("lr") => Some(None),
-            _ => None,
-        })
+        Some(
+            self.params.iter().find_map(|p| match p {
+                Param::Other(key, val_opt) if key.eq_ignore_ascii_case(name) => {
+                    val_opt.as_ref().and_then(|gv| gv.as_str())
+                },
+                Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(val.as_str()),
+                Param::Tag(val) if name.eq_ignore_ascii_case("tag") => Some(val.as_str()),
+                Param::Expires(val) if name.eq_ignore_ascii_case("expires") => Some(Box::leak(val.to_string().into_boxed_str())),
+                Param::Received(val) if name.eq_ignore_ascii_case("received") => Some(Box::leak(val.to_string().into_boxed_str())),
+                Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(val.as_str()),
+                Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(Box::leak(val.to_string().into_boxed_str())),
+                Param::Q(val) if name.eq_ignore_ascii_case("q") => Some(Box::leak(val.to_string().into_boxed_str())),
+                Param::Transport(val) if name.eq_ignore_ascii_case("transport") => Some(val.as_str()),
+                Param::User(val) if name.eq_ignore_ascii_case("user") => Some(val.as_str()),
+                Param::Method(val) if name.eq_ignore_ascii_case("method") => Some(val.as_str()),
+                Param::Lr if name.eq_ignore_ascii_case("lr") => None,
+                Param::Handling(val) if name.eq_ignore_ascii_case("handling") => Some(val.as_str()),
+                Param::Duration(val) if name.eq_ignore_ascii_case("duration") => Some(Box::leak(val.to_string().into_boxed_str())),
+                _ => None,
+            })
+        )
     }
     
     /// Set or replace a parameter. Adds as Param::Other if the key isn't known.
@@ -117,7 +121,7 @@ impl Via {
             "user" => Param::User(value_opt_string.unwrap_or_default()),
             "method" => Param::Method(value_opt_string.unwrap_or_default()),
             "handling" => Param::Handling(value_opt_string.unwrap_or_default()),
-            "duration" => Param::Duration(value_opt_string.unwrap_or_default()),
+            "duration" => Param::Duration(value_opt_string.unwrap_or_default().parse().unwrap_or(0)),
             _ => Param::Other(key_string, value_opt_string.map(GenericValue::Token)),
         };
         self.params.push(param);

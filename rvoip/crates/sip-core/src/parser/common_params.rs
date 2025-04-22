@@ -7,6 +7,7 @@ use nom::{
     multi::many0,
     sequence::{pair, preceded},
     IResult,
+    error::{Error as NomError, ErrorKind},
 };
 use std::str;
 use std::collections::HashMap;

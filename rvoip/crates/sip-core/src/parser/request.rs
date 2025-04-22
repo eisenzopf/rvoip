@@ -32,10 +32,10 @@ pub(crate) fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Vers
             crlf
         )),
         |(method_bytes, _, uri, _, version, _)| {
-            let method_str = str::from_utf8(method_bytes).map_err(|_| "Invalid UTF8")?;
+            let method_str = str::from_utf8(method_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(method_bytes, ErrorKind::Char)))?;
             method_str.parse::<Method>()
                 .map(|m| (m, uri, version))
-                .map_err(|_| "Invalid Method")
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(method_bytes, ErrorKind::Verify)))
         }
     )(input)
 }

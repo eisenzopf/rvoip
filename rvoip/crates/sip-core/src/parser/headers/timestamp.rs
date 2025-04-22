@@ -39,13 +39,12 @@ pub struct TimestampValue {
 fn float_val(input: &[u8]) -> ParseResult<NotNan<f32>> {
     map_res(
         recognize(
-            pair(digit1, opt(pair(tag(b"."), digit1))) // Use b"."
+            pair(digit1, opt(pair(bytes::tag(b"."), digit1)))
         ),
         |bytes| {
-            str::from_utf8(bytes)?
-                .parse::<f32>()
-                .map_err(|e| format!("Float parse error: {}", e))
-                .and_then(|f| NotNan::new(f).map_err(|_| "NaN detected".to_string()))
+            let s = str::from_utf8(bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))?;
+            let f = s.parse::<f32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Float)))?;
+            NotNan::new(f).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Verify)))
         }
     )(input)
 }

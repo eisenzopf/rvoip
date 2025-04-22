@@ -12,11 +12,12 @@ use nom::{
     character::complete::{digit1},
     combinator::{map_res, recognize},
     sequence::tuple,
+    error::{ErrorKind, ParseError, Error as NomError}
 };
 use crate::types::Version;
 
-// Type alias for parser result
-pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
+// Type alias for parser result - Added NomError back
+pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O, NomError<&'a [u8]>>;
 
 /// Parses a comma-separated list of items using a provided item parser.
 /// Handles optional whitespace around the commas.
@@ -49,23 +50,30 @@ pub(crate) fn sip_version(input: &[u8]) -> ParseResult<Version> {
     map_res(
         recognize(
             tuple((
-                tag("SIP"),
-                tag("/"),
+                tag(b"SIP"),
+                tag(b"/"),
                 digit1,
-                tag("."),
+                tag(b"."),
                 digit1,
             ))
         ),
-        |bytes| {
-            // Expect format like "SIP/2.0"
-            let s = str::from_utf8(bytes)?;
+        // This closure must return Result<Version, E> where E can be handled by map_res.
+        // Let's make E = NomError<&[u8]>
+        |bytes: &[u8]| -> Result<Version, NomError<&[u8]>> {
+            let s = str::from_utf8(bytes)
+                // Map Utf8Error to NomError
+                .map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Char))?; 
             if let Some(parts) = s.strip_prefix("SIP/").and_then(|v| v.split_once('.')) {
-                let major = parts.0.parse::<u8>()?;
-                let minor = parts.1.parse::<u8>()?;
+                let major = parts.0.parse::<u8>()
+                    // Map ParseIntError to NomError
+                    .map_err(|_| NomError::from_error_kind(parts.0.as_bytes(), ErrorKind::Digit))?; 
+                let minor = parts.1.parse::<u8>()
+                     // Map ParseIntError to NomError
+                    .map_err(|_| NomError::from_error_kind(parts.1.as_bytes(), ErrorKind::Digit))?; 
                 Ok(Version::new(major, minor))
             } else {
-                // This indicates a logic error in the parser if reached
-                Err("Invalid SIP version format parsed") 
+                // Map logic error to NomError
+                Err(NomError::from_error_kind(bytes, ErrorKind::Verify))
             }
         }
     )(input)

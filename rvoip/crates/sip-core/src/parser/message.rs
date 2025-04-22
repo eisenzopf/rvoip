@@ -15,10 +15,10 @@ use nom::error::{Error as NomError, ErrorKind, make_error};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::header::{Header, HeaderName, HeaderValue, TypedHeader};
-use crate::types::{Message, Request, Response, StatusCode, Method};
-use crate::uri::Uri;
-use crate::version::Version;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader};
+use crate::types::uri::{Uri, Host};
+use crate::types::version::Version;
+use crate::types::{Method, StatusCode, Message, Request, Response};
 
 // Now use the new parser modules
 use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
@@ -44,7 +44,7 @@ pub const MAX_HEADER_COUNT: usize = 100;
 pub const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MB
 
 /// Helper for trimming leading/trailing ASCII whitespace from a byte slice
-fn trim_bytes(bytes: &[u8]) -> &[u8] {
+fn trim_bytes<'a>(bytes: &'a [u8]) -> &'a [u8] {
     let start = bytes.iter().position(|&b| !b.is_ascii_whitespace()).unwrap_or(0);
     let end = bytes.iter().rposition(|&b| !b.is_ascii_whitespace()).map_or(0, |p| p + 1);
     &bytes[start..end]
@@ -193,7 +193,6 @@ mod tests {
     use bytes::Bytes;
     use crate::uri::Host;
     use crate::types::{Request, Response, CSeq, HeaderName, HeaderValue, Method, Version};
-    use crate::header::headers::ViaParam;
     use std::collections::HashMap;
 
     #[test]

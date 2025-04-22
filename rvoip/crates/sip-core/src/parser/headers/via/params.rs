@@ -5,6 +5,7 @@ use nom::{
     combinator::{map, map_res, opt},
     sequence::{pair, preceded},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -23,7 +24,13 @@ fn via_ttl(input: &[u8]) -> ParseResult<Param> {
     map_res(
         preceded(pair(tag_no_case(b"ttl"), equal),
                  take_while_m_n(1, 3, |c: u8| c.is_ascii_digit())),
-        |b| str::from_utf8(b)?.parse::<u8>().map(Param::Ttl)
+        |b| {
+            let s = str::from_utf8(b)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
+            s.parse::<u8>()
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))
+                .map(Param::Ttl)
+        }
     )(input)
 }
 
