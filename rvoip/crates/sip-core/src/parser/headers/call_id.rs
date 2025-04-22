@@ -36,9 +36,20 @@ pub(crate) fn callid(input: &[u8]) -> ParseResult<String> {
 }
 
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
-pub(crate) fn parse_call_id(input: &[u8]) -> ParseResult<CallId> { // Return CallId
+pub fn parse_call_id(input: &[u8]) -> ParseResult<CallId> { // Return CallId
     // Map the String result into the CallId newtype
-    map(callid, CallId)(input)
+    map(
+        pair(word, opt(preceded(tag(b"."), word))),
+        |(word1, opt_word2)| {
+            let s1 = str::from_utf8(word1)?;
+            if let Some(word2) = opt_word2 {
+                let s2 = str::from_utf8(word2)?;
+                Ok::<CallId, std::str::Utf8Error>(CallId(format!("{}@{}", s1, s2)))
+            } else {
+                Ok::<CallId, std::str::Utf8Error>(CallId(s1.to_string()))
+            }
+        }
+    )(input)
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use crate::parser::ParseResult;
 
 // Max-Forwards = "Max-Forwards" HCOLON 1*DIGIT
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_max_forwards(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_max_forwards(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1, 
         |bytes| {

@@ -44,7 +44,7 @@ fn language_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
     comma_separated_list1(language_tag)(input)
 }
 
-pub(crate) fn parse_content_language(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_content_language(input: &[u8]) -> ParseResult<Vec<String>> {
     preceded(
         pair(tag(b"Content-Language"), hcolon),
         language_tag_list // Requires at least one

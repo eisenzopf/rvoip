@@ -47,7 +47,7 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
 
 // CSeq = "CSeq" HCOLON CSeq-value 
 // Note: HCOLON handled elsewhere.
-pub(crate) fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
+pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
     map(
         cseq_value_method, // Use the combined parser
         |(seq, method)| CSeq::new(seq, method)

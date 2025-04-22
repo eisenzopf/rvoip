@@ -31,24 +31,11 @@ fn parse_method_token(input: &[u8]) -> ParseResult<Method> {
 
 // Allow = "Allow" HCOLON [ Method *(COMMA Method) ]
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_allow(input: &[u8]) -> ParseResult<Allow> {
-    // Use manual parsing instead of comma_separated_list0 to avoid Copy trait issue
+pub fn parse_allow(input: &[u8]) -> ParseResult<Allow> {
     map(
-        // Parse first item optionally, then many preceded by comma
-        opt(pair(
-            parse_method_token,
-            many0(preceded(comma, parse_method_token))
-        )),
-        |opt_pair| {
-            let methods = match opt_pair {
-                Some((first, mut rest)) => {
-                    let mut result = vec![first];
-                    result.append(&mut rest);
-                    result
-                }
-                None => vec![],
-            };
-            Allow(methods) 
+        comma_separated_list0(token), // Methods are tokens
+        |methods| {
+            Allow(methods)
         }
     )(input)
 }

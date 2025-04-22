@@ -28,7 +28,7 @@ fn content_coding(input: &[u8]) -> ParseResult<String> {
     map_res(token, |bytes| str::from_utf8(bytes).map(String::from))(input)
 }
 
-pub(crate) fn parse_content_encoding(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_content_encoding(input: &[u8]) -> ParseResult<ContentEncoding> {
     // Use comma_separated_list1 as at least one coding is needed if header is present
     comma_separated_list1(content_coding)(input)
 }

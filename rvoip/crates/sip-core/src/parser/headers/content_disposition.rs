@@ -36,8 +36,9 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
             token // Fallback for extension token
         )),
         |bytes| {
-            let s = str::from_utf8(bytes)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
+            let s_res = str::from_utf8(bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)));
+            let s = s_res?;
             Ok::<DispositionType, nom::error::Error<&[u8]>>(match s.to_ascii_lowercase().as_str() {
                 "render" => DispositionType::Render,
                 "session" => DispositionType::Session,
@@ -99,8 +100,9 @@ fn handling_param(input: &[u8]) -> ParseResult<Handling> {
         map_res(
             alt((tag_no_case("optional"), tag_no_case("required"), token)),
             |bytes| {
-                let s = str::from_utf8(bytes)
-                    .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
+                let s_res = str::from_utf8(bytes)
+                    .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)));
+                let s = s_res?;
                 Ok::<Handling, nom::error::Error<&[u8]>>(match s {
                     "optional" => Handling::Optional,
                     "required" => Handling::Required,

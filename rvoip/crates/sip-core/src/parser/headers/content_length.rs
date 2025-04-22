@@ -13,7 +13,7 @@ use std::str;
 use crate::parser::separators::hcolon;
 use crate::parser::ParseResult;
 
-pub(crate) fn parse_content_length(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_content_length(input: &[u8]) -> ParseResult<u32> {
     map_res(
         digit1, 
         |bytes| {
