@@ -26,6 +26,7 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::accept::EncodingInfo; // Assuming struct { coding: String, params: Vec<Param> }
+use crate::types::accept_encoding::AcceptEncoding as AcceptEncodingHeader; // Specific type
 
 // codings = content-coding / "*"
 // content-coding = token
@@ -52,7 +53,7 @@ fn encoding(input: &[u8]) -> ParseResult<EncodingInfo> {
     )(input)
 }
 
-// Define structure for Accept-Encoding header value (simplified)
+// Define structure for Accept-Encoding header value
 #[derive(Debug, PartialEq, Clone)]
 pub struct AcceptEncodingValue {
     pub coding: String,
@@ -61,8 +62,11 @@ pub struct AcceptEncodingValue {
 }
 
 // Accept-Encoding = "Accept-Encoding" HCOLON [ encoding *(COMMA encoding) ]
-pub(crate) fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> {
-    comma_separated_list0(encoding)(input)
+pub(crate) fn parse_accept_encoding(input: &[u8]) -> ParseResult<AcceptEncodingHeader> {
+    map(
+        comma_separated_list0(encoding),
+        AcceptEncodingHeader // Wrap Vec<...> in AcceptEncoding newtype
+    )(input)
 }
 
 #[cfg(test)]

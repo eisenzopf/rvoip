@@ -90,15 +90,14 @@ impl Request {
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name() == HeaderName::Via {
-                if let Some(text) = header.value().as_text() {
-                    // Ideally, parse_multiple_vias should be accessible here
-                    // For now, this will likely fail if called directly unless 
-                    // the parser module is imported and parse_multiple_vias is public.
-                    if let Ok(vias) = crate::parser::headers::parse_multiple_vias(text) {
-                        result.extend(vias);
-                    }
-                }
+            // Directly match the TypedHeader::Via variant
+            if let TypedHeader::Via(via_data) = header {
+                // via_data should be of type types::Via which might contain Vec<ViaHeader> or similar
+                // Assuming types::Via can be directly used or converted
+                // If types::Via holds a Vec<ViaHeader>, we might need to clone/extend
+                // Let's assume types::Via can be cloned directly for now.
+                // If it holds a Vec<ViaHeader>, we'd use result.extend(via_data.0.clone());
+                result.push(via_data.clone()); // Adjust based on actual types::Via structure
             }
         }
         result
@@ -107,7 +106,14 @@ impl Request {
     /// Get the first Via header as a structured Via object
     /// TODO: Refactor similar to via_headers.
     pub fn first_via(&self) -> Option<Via> {
-        self.via_headers().into_iter().next()
+        self.headers.iter().find_map(|h| {
+             if let TypedHeader::Via(via_data) = h {
+                 Some(via_data.clone()) // Clone if necessary
+             } else {
+                 None
+             }
+        })
+        // Original implementation: self.via_headers().into_iter().next() - less efficient
     }
 
     pub fn get_header_value(&self, name: &HeaderName) -> Option<&str> {
@@ -120,15 +126,10 @@ impl Request {
     pub fn via_headers_no_body(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name() == HeaderName::Via {
-                if let Some(text) = header.value().as_text() {
-                     // Ideally, parse_multiple_vias should be accessible here
-                    // For now, this will likely fail if called directly unless 
-                    // the parser module is imported and parse_multiple_vias is public.
-                   if let Ok(vias) = crate::parser::headers::parse_multiple_vias(text) {
-                        result.extend(vias);
-                    }
-                }
+            // Directly match the TypedHeader::Via variant (similar to via_headers)
+            if let TypedHeader::Via(via_data) = header {
+                 // Adjust cloning/extending based on actual types::Via structure
+                 result.push(via_data.clone()); 
             }
         }
         result
@@ -137,7 +138,14 @@ impl Request {
     /// Get the first Via header as a structured Via object
     /// TODO: Refactor similar to via_headers.
     pub fn first_via_no_body(&self) -> Option<Via> {
-        self.via_headers_no_body().into_iter().next()
+        self.headers.iter().find_map(|h| {
+             if let TypedHeader::Via(via_data) = h {
+                 Some(via_data.clone()) // Clone if necessary
+             } else {
+                 None
+             }
+        })
+        // Original implementation: self.via_headers_no_body().into_iter().next()
     }
 
     /// Convert the message to bytes
@@ -282,15 +290,10 @@ impl Response {
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            if header.name() == HeaderName::Via {
-                if let Some(text) = header.value().as_text() {
-                     // Ideally, parse_multiple_vias should be accessible here
-                    // For now, this will likely fail if called directly unless 
-                    // the parser module is imported and parse_multiple_vias is public.
-                   if let Ok(vias) = crate::parser::headers::parse_multiple_vias(text) {
-                        result.extend(vias);
-                    }
-                }
+            // Directly match the TypedHeader::Via variant
+            if let TypedHeader::Via(via_data) = header {
+                 // Adjust cloning/extending based on actual types::Via structure
+                 result.push(via_data.clone()); 
             }
         }
         result
@@ -299,7 +302,13 @@ impl Response {
     /// Get the first Via header as a structured Via object
     /// TODO: Refactor similar to via_headers.
     pub fn first_via(&self) -> Option<Via> {
-        self.via_headers().into_iter().next()
+         self.headers.iter().find_map(|h| {
+              if let TypedHeader::Via(via_data) = h {
+                  Some(via_data.clone()) // Clone if necessary
+              } else {
+                  None
+              }
+         })
     }
 }
 
@@ -417,16 +426,27 @@ impl Message {
     /// Note: This relies on the Via parser being available where called.
     /// TODO: Refactor to return `Result<Vec<Via>>` or use a dedicated typed header getter.
     pub fn via_headers(&self) -> Vec<Via> {
-        match self {
-            Message::Request(req) => req.via_headers(),
-            Message::Response(resp) => resp.via_headers(),
+        let mut result = Vec::new();
+        for header in self.headers() {
+             // Directly match the TypedHeader::Via variant
+             if let TypedHeader::Via(via_data) = header {
+                  // Adjust cloning/extending based on actual types::Via structure
+                  result.push(via_data.clone()); 
+             }
         }
+        result
     }
 
     /// Get the first Via header as a structured Via object
     /// TODO: Refactor similar to via_headers.
     pub fn first_via(&self) -> Option<Via> {
-        self.via_headers().into_iter().next()
+         self.headers().iter().find_map(|h| {
+              if let TypedHeader::Via(via_data) = h {
+                  Some(via_data.clone()) // Clone if necessary
+              } else {
+                  None
+              }
+         })
     }
 
     /// Convert the message to bytes

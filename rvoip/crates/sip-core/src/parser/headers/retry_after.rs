@@ -17,11 +17,10 @@ use crate::parser::separators::{hcolon, semi, equal};
 use crate::parser::common_params::generic_param;
 use crate::parser::values::delta_seconds;
 use crate::parser::quoted::comment;
-use crate::parser::ParseResult;
 use crate::parser::whitespace::lws;
 
 use crate::types::param::Param;
-use crate::types::retry_after::RetryParam; // Assuming enum { Duration(u32), Generic(Param::Other) }
+use crate::types::retry_after::{RetryAfter as RetryAfterHeader, RetryAfterValue, RetryParam}; // Specific types
 
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
 fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {

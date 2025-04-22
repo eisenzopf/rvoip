@@ -13,7 +13,7 @@ mod request;
 mod response;
 pub mod uri;
 mod utils;
-mod address;
+pub mod address;
 mod common_params;
 mod utf8;
 
@@ -23,7 +23,8 @@ pub use message::{parse_message, IncrementalParser, ParseState};
 // pub use response::response_parser; // Removed
 // Commenting out potentially unresolved imports
 pub use uri::{parse_uri /*, parse_uri_params, parse_host_port*/ };
-pub use multipart::{parse_multipart, MimePart, MultipartBody};
+pub use multipart::{parse_multipart};
+pub use crate::types::multipart::{MimePart, MultipartBody};
 
 // Re-export specific header parsers needed by types/header.rs
 // TODO: Update these exports once individual header parsers are implemented in headers/
@@ -46,45 +47,34 @@ pub use headers::{
     parse_content_disposition,
     parse_accept,
     parse_warning,
-    // parse_content_encoding,
-    // parse_call_id,
-    // parse_expires,
-    // parse_max_forwards,
-    // parse_www_authenticate,
-    // parse_authorization,
-    // parse_proxy_authenticate,
-    // parse_proxy_authorization,
-    // parse_authentication_info,
-    // parse_reply_to,
+    parse_accept_encoding,
+    parse_accept_language,
+    parse_content_encoding,
+    parse_content_language,
+    parse_alert_info,
+    parse_call_info,
+    parse_error_info,
+    parse_retry_after,
+    parse_www_authenticate,
+    parse_authorization,
+    parse_proxy_authenticate,
+    parse_proxy_authorization,
+    parse_authentication_info,
 };
 
 // Maybe re-export specific header parsers if needed directly?
 // pub use headers::{parse_via, parse_cseq, ...}; 
 
 // Type alias for parser result
-pub type ParseResult<'a, O> = nom::IResult<&'a [u8], O>;
+pub type ParseResult<'a, O> = nom::IResult<&'a [u8], O, nom::error::Error<&'a [u8]>>;
 
+// Declare parser submodules
 pub mod common_chars;
 pub mod whitespace;
 pub mod separators;
 pub mod token;
 pub mod quoted;
 pub mod values;
-
-pub mod address;
-pub mod common;
-pub mod common_params;
-pub mod headers;
-pub mod message;
-pub mod multipart;
-pub mod request;
-pub mod response;
-pub mod uri;
-pub mod utf8;
-pub mod utils;
-
-// Re-export common types or functions if needed, e.g.:
-// pub use common_params::parse_parameter;
 
 // pub(crate) use basic_rules::{ParseResult, ...}; // REMOVE OR UPDATE COMMENT
 

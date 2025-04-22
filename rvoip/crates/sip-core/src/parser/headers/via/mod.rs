@@ -32,6 +32,16 @@ use crate::types::via::{ViaHeader, SentProtocol};
 use crate::uri::Host;
 use crate::types::param::Param; // Use the main Param enum
 
+/// Represents a single Via header entry.
+/// Making this struct public for use in types/header.rs
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViaHeader {
+    pub sent_protocol: SentProtocol,
+    pub sent_by_host: Host,
+    pub sent_by_port: Option<u16>,
+    pub params: Vec<Param>,
+}
+
 // sent-protocol = protocol-name SLASH protocol-version SLASH transport
 // protocol-name = "SIP" / token
 // protocol-version = token

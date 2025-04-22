@@ -25,6 +25,18 @@ use crate::parser::whitespace::space1;
 use crate::parser::ParseResult;
 
 use crate::uri::Host;
+use crate::types::warning::Warning as WarningHeader; // Specific header type
+use crate::types::uri::Uri;
+use crate::types::warning::WarnCode;
+use nom::{
+    bytes::complete::{tag_no_case, take_while_m_n},
+    character::complete::{digit1, char as nom_char},
+    combinator::{map, map_res, opt},
+    sequence::{pair, preceded, tuple},
+    error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
+    IResult,
+};
+use std::str::{self, FromStr};
 
 // warn-code = 3DIGIT
 fn warn_code(input: &[u8]) -> ParseResult<WarnCode> {
@@ -93,6 +105,19 @@ pub(crate) fn parse_warning(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
             }).collect()
         }
     )(input)
+}
+
+// Define structure for Warning value
+#[derive(Debug, PartialEq, Clone)]
+pub struct WarningValue { // Make struct pub
+    pub code: WarnCode,
+    pub agent: String, // Use String, can be host or pseudo-host
+    pub text: String, // Quoted string
+}
+
+// warn-value = warn-code SP warn-agent SP warn-text
+fn warn_value(input: &[u8]) -> ParseResult<WarningValue> { 
+    // ... implementation ...
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
-use crate::error::Result;
+use crate::parser;
+use crate::error::{Result, Error};
 use crate::parser::headers::parse_content_length;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
@@ -36,13 +37,11 @@ impl FromStr for ContentLength {
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::content_length::parse_content_length;
 
-        match all_consuming(parse_content_length)(s.as_bytes()) {
-            Ok((_, value)) => Ok(ContentLength(value)),
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Content-Length header: {:?}", e), 
-                source: None 
+        all_consuming(parse_content_length)(s.as_bytes())
+            .map_err(Error::from)
+            .and_then(|(_, value)| {
+                Ok(ContentLength(value.try_into().map_err(|_| Error::ParseError("Content-Length value out of range for usize".to_string()))?))
             })
-        }
     }
 }
 

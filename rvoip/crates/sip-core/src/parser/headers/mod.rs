@@ -1,57 +1,60 @@
 // Declare header parser modules
-mod via; // Now contains pub mod via;
-mod contact; // Now contains pub mod contact;
-mod from;
-mod to;
-mod route;
-mod record_route;
-mod cseq;
-mod max_forwards;
-mod expires;
-mod content_length;
-mod call_id;
-mod min_expires;
-mod mime_version;
-mod priority;
-mod subject;
-mod timestamp;
-mod server_val; // Shared module
-mod user_agent;
-mod server;
-mod reply_to;
-mod organization;
-mod date;
-mod token_list; // Shared module
-mod allow;
-mod require;
-mod supported;
-mod unsupported;
-mod proxy_require;
-mod in_reply_to;
-mod content_type;
-mod content_disposition;
-mod accept;
-mod accept_encoding;
-mod accept_language;
-mod content_encoding;
-mod content_language;
-mod alert_info;
-mod call_info;
-mod error_info;
-mod warning;
-mod retry_after;
-mod media_type; // Shared module for Accept/Content-Type
-mod auth; // Group for auth parsers
-mod www_authenticate;
-mod proxy_authenticate;
-mod authorization;
-mod proxy_authorization;
-mod authentication_info;
-mod uri_with_params; // Added
+pub mod via;
+/// Contact Header Parsing
+pub mod contact;
+pub mod from;
+pub mod to;
+pub mod route;
+pub mod record_route;
+pub mod cseq;
+pub mod max_forwards;
+pub mod expires;
+pub mod content_length;
+pub mod call_id;
+pub mod min_expires;
+pub mod mime_version;
+pub mod priority;
+pub mod subject;
+pub mod timestamp;
+pub mod user_agent;
+pub mod server;
+pub mod reply_to;
+pub mod organization;
+pub mod date;
+pub mod allow;
+pub mod require;
+pub mod supported;
+pub mod unsupported;
+pub mod proxy_require;
+pub mod in_reply_to;
+pub mod content_type;
+pub mod content_disposition;
+pub mod accept;
+pub mod accept_encoding;
+pub mod accept_language;
+pub mod content_encoding;
+pub mod content_language;
+pub mod alert_info;
+pub mod call_info;
+pub mod error_info;
+pub mod warning;
+pub mod retry_after;
+pub mod auth; // Group for auth parsers
+pub mod www_authenticate;
+pub mod proxy_authenticate;
+pub mod authorization;
+pub mod proxy_authorization;
+pub mod authentication_info;
+pub mod uri_with_params; // Added
+
+// Keep internal modules private
+mod server_val;
+mod token_list;
+mod media_type;
 
 // Re-export public parser functions
-pub use via::via::parse_via; // Updated path
-pub use contact::contact::parse_contact; // Updated path
+pub use via::parse_via;
+pub use contact::contact::parse_contact;
 pub use from::parse_from;
 pub use to::parse_to;
 pub use route::parse_route;
@@ -89,7 +92,6 @@ pub use call_info::parse_call_info;
 pub use error_info::parse_error_info;
 pub use warning::parse_warning;
 pub use retry_after::parse_retry_after;
-// Auth headers
 pub use www_authenticate::parse_www_authenticate;
 pub use proxy_authenticate::parse_proxy_authenticate;
 pub use authorization::parse_authorization;

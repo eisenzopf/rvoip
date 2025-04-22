@@ -15,7 +15,6 @@ use ordered_float::NotNan; // For parsing float strings
 
 // Import from new modules
 use crate::parser::separators::hcolon;
-use crate::parser::common_chars::digit1;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 

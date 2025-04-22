@@ -11,10 +11,11 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::types::param::Param;
+use crate::types::uri::Uri; // Import Uri
+use crate::types::contact::ContactValue as TypesContactValue; // Import type directly
 
 use crate::parser::headers::{
     via::ViaEntry, 
-    contact::ContactValue,
     from::FromHeaderValue,
     to::ToHeaderValue,
     route::RouteEntry,
@@ -267,7 +268,7 @@ impl FromStr for HeaderName {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeaderValue {
     // === Address Headers ===
-    Contact(ContactValue), // Can be Star or Addresses
+    Contact(TypesContactValue), // Use imported type
     From(FromHeaderValue),
     To(ToHeaderValue),
     Route(Vec<RouteEntry>),
@@ -478,6 +479,119 @@ pub enum TypedHeader {
     Other(HeaderName, HeaderValue),
 }
 
+impl TypedHeader {
+    /// Returns the canonical name of this header.
+    pub fn name(&self) -> HeaderName {
+        match self {
+            TypedHeader::Via(_) => HeaderName::Via,
+            TypedHeader::From(_) => HeaderName::From,
+            TypedHeader::To(_) => HeaderName::To,
+            TypedHeader::Contact(_) => HeaderName::Contact,
+            TypedHeader::CallId(_) => HeaderName::CallId,
+            TypedHeader::CSeq(_) => HeaderName::CSeq,
+            TypedHeader::Route(_) => HeaderName::Route,
+            TypedHeader::RecordRoute(_) => HeaderName::RecordRoute,
+            TypedHeader::MaxForwards(_) => HeaderName::MaxForwards,
+            TypedHeader::ContentType(_) => HeaderName::ContentType,
+            TypedHeader::ContentLength(_) => HeaderName::ContentLength,
+            TypedHeader::Expires(_) => HeaderName::Expires,
+            TypedHeader::Authorization(_) => HeaderName::Authorization,
+            TypedHeader::WwwAuthenticate(_) => HeaderName::WwwAuthenticate,
+            TypedHeader::ProxyAuthenticate(_) => HeaderName::ProxyAuthenticate,
+            TypedHeader::ProxyAuthorization(_) => HeaderName::ProxyAuthorization,
+            TypedHeader::AuthenticationInfo(_) => HeaderName::AuthenticationInfo,
+            TypedHeader::Accept(_) => HeaderName::Accept,
+            TypedHeader::Allow(_) => HeaderName::Allow,
+            TypedHeader::ReplyTo(_) => HeaderName::ReplyTo,
+            TypedHeader::Warning(_) => HeaderName::Warning,
+            TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
+            TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
+            TypedHeader::ContentLanguage(_) => HeaderName::ContentLanguage,
+            TypedHeader::AcceptEncoding(_) => HeaderName::AcceptEncoding,
+            TypedHeader::AcceptLanguage(_) => HeaderName::AcceptLanguage,
+            TypedHeader::MinExpires(_) => HeaderName::MinExpires,
+            TypedHeader::MimeVersion(_) => HeaderName::MimeVersion,
+            TypedHeader::Require(_) => HeaderName::Require,
+            TypedHeader::Supported(_) => HeaderName::Supported,
+            TypedHeader::Unsupported(_) => HeaderName::Unsupported,
+            TypedHeader::ProxyRequire(_) => HeaderName::ProxyRequire,
+            TypedHeader::Date(_) => HeaderName::Date,
+            TypedHeader::Timestamp(_) => HeaderName::Timestamp,
+            TypedHeader::Organization(_) => HeaderName::Organization,
+            TypedHeader::Priority(_) => HeaderName::Priority,
+            TypedHeader::Subject(_) => HeaderName::Subject,
+            TypedHeader::Server(_) => HeaderName::Server,
+            TypedHeader::UserAgent(_) => HeaderName::UserAgent,
+            TypedHeader::InReplyTo(_) => HeaderName::InReplyTo,
+            TypedHeader::RetryAfter(_) => HeaderName::RetryAfter,
+            TypedHeader::ErrorInfo(_) => HeaderName::ErrorInfo,
+            TypedHeader::AlertInfo(_) => HeaderName::AlertInfo,
+            TypedHeader::CallInfo(_) => HeaderName::CallInfo,
+            TypedHeader::Other(name, _) => name.clone(),
+        }
+    }
+}
+
+// Add Display implementation for TypedHeader
+impl fmt::Display for TypedHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // Format known typed headers by displaying their inner value
+            // Assumes the inner types implement Display
+            TypedHeader::Via(v) => write!(f, "{}: {}", HeaderName::Via, v),
+            TypedHeader::From(v) => write!(f, "{}: {}", HeaderName::From, v),
+            TypedHeader::To(v) => write!(f, "{}: {}", HeaderName::To, v),
+            TypedHeader::Contact(v) => write!(f, "{}: {}", HeaderName::Contact, v),
+            TypedHeader::CallId(v) => write!(f, "{}: {}", HeaderName::CallId, v),
+            TypedHeader::CSeq(v) => write!(f, "{}: {}", HeaderName::CSeq, v),
+            TypedHeader::Route(v) => write!(f, "{}: {}", HeaderName::Route, v),
+            TypedHeader::RecordRoute(v) => write!(f, "{}: {}", HeaderName::RecordRoute, v),
+            TypedHeader::MaxForwards(v) => write!(f, "{}: {}", HeaderName::MaxForwards, v),
+            TypedHeader::ContentType(v) => write!(f, "{}: {}", HeaderName::ContentType, v),
+            TypedHeader::ContentLength(v) => write!(f, "{}: {}", HeaderName::ContentLength, v),
+            TypedHeader::Expires(v) => write!(f, "{}: {}", HeaderName::Expires, v),
+            TypedHeader::Authorization(v) => write!(f, "{}: {}", HeaderName::Authorization, v),
+            TypedHeader::WwwAuthenticate(v) => write!(f, "{}: {}", HeaderName::WwwAuthenticate, v),
+            TypedHeader::ProxyAuthenticate(v) => write!(f, "{}: {}", HeaderName::ProxyAuthenticate, v),
+            TypedHeader::ProxyAuthorization(v) => write!(f, "{}: {}", HeaderName::ProxyAuthorization, v),
+            TypedHeader::AuthenticationInfo(v) => write!(f, "{}: {}", HeaderName::AuthenticationInfo, v),
+            TypedHeader::Accept(v) => write!(f, "{}: {}", HeaderName::Accept, v),
+            TypedHeader::Allow(v) => write!(f, "{}: {}", HeaderName::Allow, v),
+            TypedHeader::ReplyTo(v) => write!(f, "{}: {}", HeaderName::ReplyTo, v),
+            TypedHeader::Warning(v) => write!(f, "{}: {}", HeaderName::Warning, v),
+            TypedHeader::ContentDisposition(v) => write!(f, "{}: {}", HeaderName::ContentDisposition, v),
+
+            // Handle placeholder types (Vec<String>, tuples, etc.) - Requires Display impl for them
+            // For now, using debug format as a placeholder if direct Display is complex
+            TypedHeader::ContentEncoding(v) => write!(f, "{}: {:?}", HeaderName::ContentEncoding, v),
+            TypedHeader::ContentLanguage(v) => write!(f, "{}: {:?}", HeaderName::ContentLanguage, v),
+            TypedHeader::AcceptEncoding(v) => write!(f, "{}: {:?}", HeaderName::AcceptEncoding, v),
+            TypedHeader::AcceptLanguage(v) => write!(f, "{}: {:?}", HeaderName::AcceptLanguage, v),
+            TypedHeader::MinExpires(v) => write!(f, "{}: {}", HeaderName::MinExpires, v),
+            TypedHeader::MimeVersion(v) => write!(f, "{}: {:?}", HeaderName::MimeVersion, v), // Assuming tuple doesn't have Display
+            TypedHeader::Require(v) => write!(f, "{}: {:?}", HeaderName::Require, v),
+            TypedHeader::Supported(v) => write!(f, "{}: {:?}", HeaderName::Supported, v),
+            TypedHeader::Unsupported(v) => write!(f, "{}: {:?}", HeaderName::Unsupported, v),
+            TypedHeader::ProxyRequire(v) => write!(f, "{}: {:?}", HeaderName::ProxyRequire, v),
+            TypedHeader::Date(v) => write!(f, "{}: {}", HeaderName::Date, v), // chrono DateTime implements Display
+            TypedHeader::Timestamp(v) => write!(f, "{}: {:?}", HeaderName::Timestamp, v), // tuple
+            TypedHeader::Organization(v) => write!(f, "{}: {}", HeaderName::Organization, v),
+            TypedHeader::Priority(v) => write!(f, "{}: {}", HeaderName::Priority, v), // Assuming PriorityValue implements Display
+            TypedHeader::Subject(v) => write!(f, "{}: {}", HeaderName::Subject, v),
+            TypedHeader::Server(v) => write!(f, "{}: {:?}", HeaderName::Server, v), // Vec<ServerVal>
+            TypedHeader::UserAgent(v) => write!(f, "{}: {:?}", HeaderName::UserAgent, v), // Vec<ServerVal>
+            TypedHeader::InReplyTo(v) => write!(f, "{}: {:?}", HeaderName::InReplyTo, v), // Vec<String>
+            TypedHeader::RetryAfter(v) => write!(f, "{}: {:?}", HeaderName::RetryAfter, v), // tuple
+            TypedHeader::ErrorInfo(v) => write!(f, "{}: {:?}", HeaderName::ErrorInfo, v), // Vec<...>
+            TypedHeader::AlertInfo(v) => write!(f, "{}: {:?}", HeaderName::AlertInfo, v), // Vec<...>
+            TypedHeader::CallInfo(v) => write!(f, "{}: {:?}", HeaderName::CallInfo, v), // Vec<...>
+
+            // Format Other headers using the name and value
+            TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value), // Assumes HeaderValue implements Display
+        }
+    }
+}
+
 impl TryFrom<Header> for TypedHeader {
     type Error = Error;
 
@@ -545,7 +659,15 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Server => all_consuming(parser::headers::parse_server)(&value_bytes).map(|(_, v)| TypedHeader::Server(v)), // Placeholder type
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(&value_bytes).map(|(_, v)| TypedHeader::UserAgent(v)), // Placeholder type
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::InReplyTo(v)), // Assuming InReplyTo type holds Vec<String>
-            HeaderName::Warning => all_consuming(parser::headers::parse_warning)(&value_bytes).map(|(_, v)| TypedHeader::Warning(types::Warning(v))),
+            HeaderName::Warning => all_consuming(parser::headers::parse_warning)(&value_bytes).map(|(_, v)| {
+                // Assuming parse_warning returns Ok((rest, (code, agent_uri_bytes, text_bytes)))
+                // Need to parse agent_uri_bytes to Uri and text_bytes to String
+                // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
+                let (code, agent_uri_bytes, text_bytes) = v; // Placeholder destructuring
+                let agent = Uri::from_str(std::str::from_utf8(agent_uri_bytes)?).map_err(|e| Error::ParseError(format!("Invalid agent URI in Warning: {}", e)))?;
+                let text = String::from_utf8(text_bytes.to_vec())?;
+                TypedHeader::Warning(types::Warning { code, agent, text })
+            }),
             HeaderName::RetryAfter => all_consuming(parser::headers::parse_retry_after)(&value_bytes).map(|(_, v)| TypedHeader::RetryAfter(v)), // Placeholder type
             HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(&value_bytes).map(|(_, v)| TypedHeader::ErrorInfo(v)), // Placeholder type
             HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(&value_bytes).map(|(_, v)| TypedHeader::AlertInfo(v)), // Placeholder type

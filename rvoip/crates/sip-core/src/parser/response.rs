@@ -55,17 +55,16 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 pub(crate) fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
     map_res(
         digit1,
-        |code_bytes: &[u8]| -> Result<StatusCode, NomError<&[u8]>> {
+        |code_bytes: &[u8]| -> Result<StatusCode> {
             if code_bytes.len() != 3 {
-                return Err(NomError::from_error_kind(code_bytes, ErrorKind::Verify));
+                return Err(Error::ParseError("Status code must be 3 digits".to_string()));
             }
-            let s = str::from_utf8(code_bytes)
-                 .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Char))?;
+            let s = str::from_utf8(code_bytes)?;
             let code = s.parse::<u16>()
-                .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Digit))?;
+                .map_err(|e| Error::ParseError(format!("Invalid status code digit: {}", e)))?;
                 
             StatusCode::from_u16(code)
-                .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Verify))
+                .map_err(|_| Error::InvalidStatusCode(code))
         }
     )(input)
 }

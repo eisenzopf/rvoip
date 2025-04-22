@@ -1,9 +1,11 @@
 use crate::types::media_type::MediaType;
 use crate::parser::headers::parse_accept;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use std::collections::HashMap;
+use ordered_float::NotNan;
 
 /// Typed Accept header.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

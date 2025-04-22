@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use crate::parser::headers::parse_content_disposition;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use crate::types::param::Param;
 
 /// Content Disposition Type (session, render, icon, alert, etc.)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,28 +57,30 @@ impl FromStr for ContentDisposition {
         use crate::parser::headers::content_disposition::parse_content_disposition;
         use nom::combinator::all_consuming;
 
-        match all_consuming(parse_content_disposition)(s.as_bytes()) {
-            Ok((_, (dtype_bytes, params_vec))) => {
+        all_consuming(parse_content_disposition)(s.as_bytes())
+            .map_err(Error::from)
+            .and_then(|(_, (dtype_bytes, params_vec))| {
                 let disp_type_str = String::from_utf8(dtype_bytes.to_vec())?;
-                let disp_type = DispositionType::Other(disp_type_str);
-                // Convert params Vec<Param> -> HashMap<String, String>
-                // TODO: Refine this conversion, especially for handling
+                let disp_type = match disp_type_str.to_lowercase().as_str() {
+                    "session" => DispositionType::Session,
+                    "render" => DispositionType::Render,
+                    "icon" => DispositionType::Icon,
+                    "alert" => DispositionType::Alert,
+                    _ => DispositionType::Other(disp_type_str),
+                };
+                
                 let params = params_vec.into_iter()
                     .filter_map(|p| {
                         if let Param::Other(k, v_opt) = p {
-                            Some((k.to_lowercase(), v_opt.unwrap_or_default()))
+                            let value_str = v_opt.map(|gv| gv.to_string()).unwrap_or_default();
+                            Some((k.to_lowercase(), value_str))
                         } else {
-                            None // Ignore non-Other params for now
+                            None
                         }
                     })
                     .collect();
                 Ok(ContentDisposition { disposition_type: disp_type, params })
-            },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Content-Disposition header: {:?}", e), 
-                source: None 
             })
-        }
     }
 }
 

@@ -1,6 +1,6 @@
-use crate::types::Method;
-use crate::parser::headers::parse_cseq;
-use crate::error::Result;
+use crate::types::method::Method;
+use crate::parser;
+use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
@@ -32,16 +32,9 @@ impl FromStr for CSeq {
         use crate::parser::headers::cseq::parse_cseq;
 
         let trimmed_s = s.trim();
-        match all_consuming(parse_cseq)(trimmed_s.as_bytes()) {
-            Ok((_, value)) => {
-                let method = Method::from_str(std::str::from_utf8(&value.method)?)?;
-                Ok(CSeq { seq: value.seq, method })
-            },
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse CSeq header: {:?}", e), 
-                source: None 
-            })
-        }
+        let (_, value) = all_consuming(parse_cseq)(trimmed_s.as_bytes()).map_err(Error::from)?;
+        let method = Method::from_str(std::str::from_utf8(&value.method)?).map_err(|_| Error::ParseError("Invalid method in CSeq".to_string()))?;
+        Ok(CSeq { seq: value.seq, method })
     }
 }
 

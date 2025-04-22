@@ -67,7 +67,7 @@ pub mod prelude {
     pub use crate::types::Version; // Added Version
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
     pub use crate::parser::{parse_message, IncrementalParser, ParseState};
-    pub use crate::parser::multipart::{MultipartBody, MimePart};
+    pub use crate::types::multipart::{MultipartBody, MimePart};
 }
 
 #[cfg(test)]

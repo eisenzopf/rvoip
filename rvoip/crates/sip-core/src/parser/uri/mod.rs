@@ -27,6 +27,7 @@ use nom::{
     error::ErrorKind,
     error::Error as NomError,
     combinator::recognize,
+    error::{ErrorKind, Error as NomError, ParseError},
 };
 use std::collections::HashMap;
 use std::str;
@@ -57,7 +58,7 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
             ))(bytes)?;
 
             if !rem.is_empty() {
-                 return Err(NomError::from_error_kind(rem, ErrorKind::Verify));
+                 return Err(NomError::new(rem, ErrorKind::Verify));
             }
             
             let (user, password) = user_opt
@@ -70,7 +71,7 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
                 password: password.map(String::from),
                 host,
                 port,
-                params: params_opt.unwrap_or_default(),
+                parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
             })
         }
@@ -99,7 +100,7 @@ pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
             ))(bytes)?;
 
             if !rem.is_empty() {
-                 return Err(NomError::from_error_kind(rem, ErrorKind::Verify));
+                 return Err(NomError::new(rem, ErrorKind::Verify));
             }
 
             let (user, password) = user_opt
@@ -112,7 +113,7 @@ pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
                 password: password.map(String::from),
                 host,
                 port,
-                params: params_opt.unwrap_or_default(),
+                parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
             })
         }

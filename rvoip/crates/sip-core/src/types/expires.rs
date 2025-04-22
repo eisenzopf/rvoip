@@ -1,6 +1,7 @@
+use crate::parser;
+use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
-use crate::error::Result;
 use crate::parser::headers::parse_expires;
 use nom::combinator::all_consuming;
 
@@ -26,14 +27,11 @@ impl FromStr for Expires {
 
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::expires::parse_expires;
-
-        match all_consuming(parse_expires)(s.as_bytes()) {
-            Ok((_, value)) => Ok(Expires(value)),
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Expires header: {:?}", e), 
-                source: None 
-            })
-        }
+        
+        // Use map_err and From to convert Nom error to crate::Error::ParseError
+        all_consuming(parse_expires)(s.as_bytes())
+            .map_err(Error::from)
+            .map(|(_, value)| Expires(value))
     }
 }
 

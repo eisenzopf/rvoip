@@ -12,6 +12,7 @@ use std::str;
 
 use crate::types::uri::Host;
 use crate::parser::ParseResult;
+use crate::error::{Error, Result};
 
 // hostname = *( domainlabel "." ) toplabel [ "." ]
 // domainlabel = alphanum / alphanum *( alphanum / "-" ) alphanum
@@ -32,14 +33,13 @@ fn domain_part(input: &[u8]) -> ParseResult<&[u8]> {
 pub(crate) fn hostname(input: &[u8]) -> ParseResult<Host> {
     map_res(
         domain_part,
-        |bytes| {
+        |bytes: &[u8]| -> Result<Host> {
             // Basic validation: Ensure not empty and doesn't start/end with hyphen (common basic check)
             if bytes.is_empty() || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
-                Err(NomError::from_error_kind(bytes, ErrorKind::Verify))
+                Err(Error::ParseError(format!("Invalid hostname format: {:?}", bytes)))
             } else {
-                str::from_utf8(bytes)
-                    .map(|s| Host::Domain(s.to_string()))
-                    .map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Char)))
+                let s = str::from_utf8(bytes)?;
+                Ok(Host::Domain(s.to_string()))
             }
         }
     )(input)

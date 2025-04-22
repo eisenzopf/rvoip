@@ -1,9 +1,13 @@
 use crate::types::media_type::MediaType;
 use crate::parser::headers::parse_content_type;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use crate::types::param::Param;
+use bytes::Bytes;
+use std::collections::HashMap;
+use crate::parser;
 
 /// Typed Content-Type header.
 #[derive(Debug, Clone, PartialEq, Eq)] // Add derives as needed
@@ -28,14 +32,9 @@ impl FromStr for ContentType {
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::content_type::parse_content_type;
 
-        match all_consuming(parse_content_type)(s.as_bytes()) {
-            // The parser already returns the final ContentTypeValue struct
-            Ok((_, value)) => Ok(ContentType(value)),
-            Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Content-Type header: {:?}", e), 
-                source: None 
-            })
-        }
+        all_consuming(parse_content_type)(s.as_bytes())
+            .map_err(Error::from)
+            .map(|(_, value)| ContentType(value))
     }
 }
 

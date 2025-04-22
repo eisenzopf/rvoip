@@ -3,12 +3,13 @@ use std::io;
 use thiserror::Error;
 use std::str::Utf8Error;
 use std::string::FromUtf8Error;
+use nom::error::{Error as NomError, ErrorKind};
 
 /// A type alias for handling `Result`s with `Error`
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in SIP protocol handling
-#[derive(Error, Debug, Clone, PartialEq)]
+#[derive(Error, Debug)]
 pub enum Error {
     /// Invalid SIP method
     #[error("Invalid SIP method")]
@@ -119,6 +120,25 @@ pub enum Error {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// I/O error
+    #[error("I/O Error: {0}")]
+    IoError(#[from] io::Error),
+
+    /// SDP parsing error
+    #[error("SDP Parsing Error: {0}")]
+    SdpParseError(String),
+
+    /// SDP generation error
+    #[error("SDP Generation Error: {0}")]
+    SdpFormatError(String),
+
+    /// Invalid UTF-8 sequence
+    #[error("Invalid UTF-8 sequence: {0}")]
+    Utf8Error(#[from] Utf8Error),
+
+    /// Internal error
+    #[error("Internal Error: {0}")]
+    InternalError(String),
 }
 
 impl From<nom::Err<nom::error::Error<&str>>> for Error {
@@ -165,12 +185,6 @@ impl From<String> for Error {
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Error::Io(err.to_string())
-    }
-}
-
 /// Calculate the line and column position from an input string
 fn calculate_position(input: &str) -> (usize, usize) {
     let mut line = 1;
@@ -207,16 +221,17 @@ impl fmt::Display for LocationAwareError {
     }
 }
 
-// Implement From<Utf8Error> for Error
-impl From<Utf8Error> for Error {
-    fn from(err: Utf8Error) -> Error {
-        Error::Parser(format!("UTF-8 decoding error: {}", err))
+// Convert Nom errors to our custom Error type
+// This allows using `?` with nom parsers in functions returning `Result<T>`.
+impl<'a> From<nom::Err<NomError<&'a [u8]>>> for Error {
+    fn from(err: nom::Err<NomError<&'a [u8]>>) -> Self {
+        Error::ParseError(format!("Nom parsing error: {:?}", err))
     }
 }
 
-// Implement From<FromUtf8Error> for Error
-impl From<FromUtf8Error> for Error {
-    fn from(err: FromUtf8Error) -> Error {
-        Error::Parser(format!("UTF-8 conversion error: {}", err))
+// Add conversion from NomError directly if needed within map_res closures
+impl<'a> From<NomError<&'a [u8]>> for Error {
+    fn from(err: NomError<&'a [u8]>) -> Self {
+        Error::ParseError(format!("Nom error detail: {:?}", err))
     }
 } 

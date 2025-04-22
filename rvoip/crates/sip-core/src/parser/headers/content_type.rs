@@ -33,7 +33,8 @@ use super::media_type::{parse_media_type, media_params_to_hashmap}; // Use the s
 // Import the shared media_type parser
 use super::media_type::media_type;
 use crate::types::media_type::MediaType;
-use crate::types::content_type::ContentType; // Import specific type
+use crate::types::content_type::ContentType as ContentTypeHeader; // Specific header type
+use crate::types::param::Param;
 
 // m-type, m-subtype are just tokens
 fn m_token(input: &[u8]) -> ParseResult<&[u8]> {
@@ -53,17 +54,21 @@ fn m_parameter(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
 
 // media-type = m-type SLASH m-subtype *(SEMI m-parameter)
 // Returns (type, subtype, Vec<(attr, val)>)
-fn media_type(input: &[u8]) -> ParseResult<(&[u8], &[u8], Vec<(&[u8], &[u8])>)> {
-    map(
+fn media_type(input: &[u8]) -> ParseResult<MediaType> {
+    map_res(
         pair(
-            separated_pair(m_token, slash, m_token),
-            many0(preceded(semi, m_parameter))
+            pair(m_type, preceded(slash, m_subtype)),
+            semicolon_separated_params0(generic_param)
         ),
-        |((mtype, msubtype), params)| (mtype, msubtype, params)
+        |(((type_bytes, subtype_bytes), params_vec))| {
+            let media_type = str::from_utf8(type_bytes)?.to_string();
+            let sub_type = str::from_utf8(subtype_bytes)?.to_string();
+            Ok(MediaType::new(media_type, sub_type, params_vec))
+        }
     )(input)
 }
 
-// Define a struct to represent the Content-Type value
+// Define structure for Content-Type value
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContentTypeValue {
     pub m_type: String,
@@ -74,9 +79,8 @@ pub struct ContentTypeValue {
 
 // Content-Type = "Content-Type" HCOLON media-type
 // Note: HCOLON and compact form handled elsewhere.
-pub(crate) fn parse_content_type(input: &[u8]) -> ParseResult<ContentType> { // Return ContentType
-    // Map the MediaType result into the ContentType newtype
-    map(media_type, ContentType)(input)
+pub(crate) fn parse_content_type(input: &[u8]) -> ParseResult<ContentTypeHeader> {
+    map(media_type, ContentTypeHeader)(input)
 }
 
 #[cfg(test)]

@@ -187,10 +187,9 @@ impl FromStr for Contact {
         // Use the actual parser function which returns ContactValue
         match all_consuming(crate::parser::headers::contact::parse_contact)(s.as_bytes()) {
             Ok((_, value)) => Ok(Contact(value)), // Wrap the parsed ContactValue
-            Err(e) => Err(crate::error::Error::ParseError{ 
-                message: format!("Failed to parse Contact header: {:?}", e), 
-                source: None 
-            })
+            Err(e) => Err(crate::error::Error::ParseError( // Use tuple variant syntax
+                format!("Failed to parse Contact header: {:?}", e)
+            ))
         }
     }
 }

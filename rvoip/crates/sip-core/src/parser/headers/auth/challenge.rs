@@ -86,7 +86,7 @@ fn other_response_auth(input: &[u8]) -> ParseResult<Vec<Param>> {
 // quoted-string from RFC 2616, Section 2.2
 // quoted-pair = "\\" CHAR
 fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(pair(tag(b"\\"), take(1usize)))(input) // Take any 1 byte after \
+    recognize(pair(tag(b"\\".as_slice()), take(1usize)))(input) // Use .as_slice() for b"\\"
 }
 
 // qdtext = <any TEXT except <"> >

@@ -112,28 +112,24 @@ impl FromStr for Host {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if s.starts_with('[') && s.ends_with(']') {
-            // IPv6 address
-            let ip = &s[1..s.len()-1];
-            if !is_valid_ipv6(ip) {
-                return Err(Error::MalformedUriComponent {
-                    component: "host".to_string(),
-                    message: format!("Invalid IPv6 address: {}", ip),
-                });
-            }
-            Ok(Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip).unwrap())))
-        } else if s.chars().all(|c| c.is_ascii_digit() || c == '.') && s.contains('.') {
-            // Probably an IPv4 address
-            if !is_valid_ipv4(s) {
-                return Err(Error::MalformedUriComponent {
-                    component: "host".to_string(),
-                    message: format!("Invalid IPv4 address: {}", s),
-                });
-            }
-            Ok(Host::Address(IpAddr::V4(Ipv4Addr::from_str(s).unwrap())))
+        // Attempt to parse as IP address first
+        if let Ok(addr) = IpAddr::from_str(s) {
+            return Ok(Host::Address(addr));
+        } else if s.starts_with('[') && s.ends_with(']') {
+             // Maybe IPv6 literal without brackets parsed?
+             if let Ok(addr) = Ipv6Addr::from_str(&s[1..s.len()-1]) {
+                 return Ok(Host::Address(IpAddr::V6(addr)));
+             }
+             // If it looked like IPv6 but failed, treat as domain
+             Ok(Host::Domain(s.to_string()))
         } else {
-            // Domain name
-            Ok(Host::Domain(s.to_string()))
+            // Assume domain name if not a valid IP
+            // TODO: Add stricter domain name validation?
+             if s.is_empty() {
+                 Err(Error::ParseError("Host cannot be empty".to_string()))
+             } else {
+                Ok(Host::Domain(s.to_string()))
+             }
         }
     }
 }

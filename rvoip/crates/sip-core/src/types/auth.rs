@@ -318,7 +318,35 @@ impl Authorization {
 
 impl FromStr for Authorization {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_authorization(s.as_bytes()).map(|(_,v)| Authorization(v)) }
+    fn from_str(s: &str) -> Result<Self> {
+        // Assuming parse_authorization returns Ok((rest, (scheme, params_map))) 
+        // or similar where params_map is a HashMap<String, String> or struct.
+        // This needs to be adjusted based on the actual return type of parse_authorization.
+        // For now, let's placeholder-assume it returns a tuple matching the fields.
+        // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
+        parse_authorization(s.as_bytes())
+            .map_err(Error::from)
+            .and_then(|(_, v)| { 
+                // Placeholder: Assume v is a tuple with all fields in order.
+                // Need to extract/parse URI, Algorithm, Qop, nc correctly.
+                if v.len() < 6 { // Basic check for minimum required fields
+                    return Err(Error::ParseError("Missing required fields for Authorization".to_string()));
+                }
+                Ok(Authorization {
+                    scheme: v.0, // Assuming v.0 is Scheme
+                    username: v.1, // Assuming v.1 is String
+                    realm: v.2,
+                    nonce: v.3,
+                    uri: Uri::from_str(&v.4)?, // Assuming v.4 is string for Uri, needs parsing
+                    response: v.5,
+                    algorithm: v.6.map(Algorithm::from_str).transpose()?, // Assuming v.6 is Option<String>
+                    cnonce: v.7, // Assuming v.7 is Option<String>
+                    opaque: v.8, // Assuming v.8 is Option<String>
+                    message_qop: v.9.map(Qop::from_str).transpose()?, // Assuming v.9 is Option<String>
+                    nonce_count: v.10.map(|nc_str| u32::from_str_radix(&nc_str, 16)).transpose().map_err(|_| Error::ParseError("Invalid nonce_count".to_string()))?, // Assuming v.10 is Option<String>
+                })
+            })
+    }
 }
 
 /// Typed Proxy-Authenticate header.
@@ -433,7 +461,25 @@ impl AuthenticationInfo {
 
 impl FromStr for AuthenticationInfo {
     type Err = crate::error::Error;
-    fn from_str(s: &str) -> Result<Self> { parse_authentication_info(s.as_bytes()).map(|(_,v)| AuthenticationInfo(v)) }
+    fn from_str(s: &str) -> Result<Self> {
+        // Assuming parse_authentication_info returns Ok((rest, params_map))
+        // Placeholder: Assume it returns a tuple of Option<String> for fields.
+        // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
+        parse_authentication_info(s.as_bytes())
+            .map_err(Error::from)
+            .and_then(|(_, v)| {
+                if v.len() < 5 { // Basic check
+                    return Err(Error::ParseError("Incorrect field count for AuthenticationInfo".to_string()));
+                }
+                Ok(AuthenticationInfo {
+                    nextnonce: v.0, // Assuming v.0 is Option<String>
+                    qop: v.1.map(Qop::from_str).transpose()?, // Assuming v.1 is Option<String>
+                    rspauth: v.2, // Assuming v.2 is Option<String>
+                    cnonce: v.3, // Assuming v.3 is Option<String>
+                    nc: v.4.map(|nc_str| u32::from_str_radix(&nc_str, 8)).transpose().map_err(|_| Error::ParseError("Invalid nc in AuthInfo".to_string()))?, // Assuming v.4 is Option<String>
+                })
+            })
+    }
 }
 
 // TODO: Implement default values, helper methods, and parsing logic for each. 

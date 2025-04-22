@@ -21,7 +21,7 @@ use crate::parser::common_params::generic_param;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::content_disposition::{DispositionType, DispositionParam, Handling};
+use crate::types::content_disposition::{DispositionType, DispositionParam, Handling, ContentDisposition as ContentDispositionHeader};
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token

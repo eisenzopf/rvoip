@@ -13,8 +13,8 @@ use std::str;
 
 // Import parsers from other modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::{from_to_param}; // Reuse specific param parser
-use crate::parser::separators::semi;
+use crate::parser::common_params::{from_to_param, semicolon_separated_params0};
+use crate::parser::separators::{hcolon, semi};
 use crate::parser::ParseResult;
 
 // Import types
@@ -23,7 +23,7 @@ use crate::types::param::Param;
 use crate::types::to::To as ToHeader; // Import the specific header type
 
 // to-spec = ( name-addr / addr-spec ) *( SEMI to-param )
-// to-param = tag-param / generic-param (handled by from_to_param)
+// to-param = tag-param / generic-param
 // Returns Address struct with params included
 fn to_spec(input: &[u8]) -> ParseResult<Address> {
     map(

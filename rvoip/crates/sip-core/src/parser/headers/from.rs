@@ -53,7 +53,7 @@ fn name_addr(input: &[u8]) -> ParseResult<(Option<&[u8]>, Uri)> {
 // tag-param = "tag" EQUAL token
 fn tag_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
-        preceded(tag_no_case(b"tag"), preceded(equal, token)),
+        preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)),
         |tag_bytes| str::from_utf8(tag_bytes).map(|s| Param::Tag(s.to_string()))
     )(input)
 }
@@ -71,7 +71,7 @@ fn from_param(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             name_addr_or_addr_spec,
-            opt(preceded(semi, preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)))) // Use .as_slice()
+            opt(preceded(semi, preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token))))
         ),
         |(mut addr, tag_opt)| { // Make addr mutable
             if let Some(tag_bytes) = tag_opt {

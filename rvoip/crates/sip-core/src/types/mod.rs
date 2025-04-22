@@ -50,6 +50,14 @@ pub mod uri_with_params_list;
 pub mod warning;
 pub mod multipart;
 
+// Modules missing re-exports - Add them
+pub mod priority;
+pub mod server;
+pub mod retry_after;
+pub mod error_info;
+pub mod alert_info;
+pub mod call_info;
+
 pub use accept::Accept;
 pub use address::Address;
 pub use allow::Allow;
@@ -65,3 +73,11 @@ pub use from::From;
 pub use max_forwards::MaxForwards;
 pub use warning::Warning;
 pub use multipart::{MultipartBody, MimePart, ParsedBody};
+
+// Add missing pub use * directives
+pub use priority::*;
+pub use server::*;
+pub use retry_after::*;
+pub use error_info::*;
+pub use alert_info::*;
+pub use call_info::*;

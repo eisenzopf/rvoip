@@ -1,6 +1,6 @@
 use crate::types::address::Address; // Or maybe UriWithParams?
 use crate::parser::headers::parse_reply_to; // Use the parser
-use crate::error::Result;
+use crate::error::{Error, Result};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
@@ -26,10 +26,10 @@ impl FromStr for ReplyTo {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::reply_to::parse_reply_to;
+        use crate::parser::address::parse_address;
 
-        match all_consuming(parse_reply_to)(s.as_bytes()) {
-            Ok((_, reply_to_header)) => Ok(reply_to_header),
+        match all_consuming(parse_address)(s.as_bytes()) {
+            Ok((_, address)) => Ok(ReplyTo(address)),
             Err(e) => Err(Error::ParseError( 
                 format!("Failed to parse Reply-To header: {:?}", e)
             ))

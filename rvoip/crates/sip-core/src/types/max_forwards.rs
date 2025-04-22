@@ -1,8 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
-use crate::error::Result;
-use crate::parser::headers::parse_max_forwards;
 use nom::combinator::all_consuming;
+use crate::error::{Error, Result};
 
 /// Typed Max-Forwards header value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Add derives as needed
@@ -39,15 +38,11 @@ impl FromStr for MaxForwards {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::max_forwards::parse_max_forwards;
-
-        match all_consuming(parse_max_forwards)(s.as_bytes()) {
-            Ok((_, value)) => Ok(MaxForwards(value)),
-             Err(e) => Err(Error::ParsingError{ 
-                message: format!("Failed to parse Max-Forwards header: {:?}", e), 
-                source: None 
-            })
-        }
+        s.trim().parse::<u8>()
+            .map(MaxForwards)
+            .map_err(|e| Error::ParseError(
+                format!("Invalid Max-Forwards value: {}", e)
+            ))
     }
 }
 

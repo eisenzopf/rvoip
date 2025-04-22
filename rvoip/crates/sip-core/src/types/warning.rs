@@ -41,14 +41,12 @@ impl FromStr for Warning {
             // TODO: Fix this logic. parse_warning likely returns Vec<WarningValue> or similar
             //       We need to map that result to a single Warning struct.
             //       Placeholder: return error for now.
-            Ok((_, _value)) => Err(Error::ParseError{ 
-                message: "FromStr<Warning> not fully implemented yet".to_string(), 
-                source: None 
-            }),
-            Err(e) => Err(Error::ParseError{ 
-                message: format!("Failed to parse Warning header: {:?}", e), 
-                source: None 
-            })
+            Ok((_, _value)) => Err(Error::ParseError(
+                "FromStr<Warning> not fully implemented yet".to_string()
+            )),
+            Err(e) => Err(Error::ParseError(
+                format!("Failed to parse Warning header: {:?}", e)
+            ))
         }
     }
 }

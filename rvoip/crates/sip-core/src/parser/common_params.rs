@@ -25,29 +25,10 @@ use crate::error::Error;
 
 use ordered_float::NotNan;
 
-// Helper to unescape quoted-pairs within a byte slice
-// Assumes the input is the raw content *inside* the DQUOTEs
-fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
-    let mut unescaped = Vec::new();
-    let mut current_input = input;
-
-    while !current_input.is_empty() {
-        // Try parsing a quoted-pair
-        if let Ok((remaining, pair_bytes)) = quoted_pair(current_input) {
-            // pair_bytes includes the leading backslash, take the second byte
-            if pair_bytes.len() == 2 {
-                unescaped.push(pair_bytes[1]);
-            }
-            current_input = remaining;
-        } else {
-            // Otherwise, take the next non-backslash byte
-            unescaped.push(current_input[0]);
-            current_input = &current_input[1..];
-        }
-    }
-    String::from_utf8(unescaped).map_err(|e| Error::ParseError(
-        format!("UTF8 error during unquoting: {}", e)
-    ))
+/// Helper to unquote a quoted string (represented as bytes).
+/// Returns Ok(String) if successful, Err(Error) otherwise.
+pub(crate) fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
+    unquote_bytes(input).map_err(|_| Error::ParseError("Invalid quoted string escape sequence".to_string()))
 }
 
 // gen-value = token / host / quoted-string

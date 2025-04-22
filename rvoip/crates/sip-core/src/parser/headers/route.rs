@@ -1,4 +1,4 @@
-// Parser for the Route header (RFC 3261 Section 20.33)
+// Parser for the Route header (RFC 3261 Section 20.34)
 
 use nom::{
     branch::alt,
@@ -21,7 +21,9 @@ use crate::uri::Uri;
 // Import types (assuming)
 use crate::types::address::Address;
 use crate::types::route::RouteParamInfo; // Assuming struct { address: Address }
-use crate::types::route::Route as RouteHeader; // Import the specific header type
+use crate::types::route::Route as RouteHeader; // Use the specific header type
+use crate::types::uri_with_params_list::UriWithParamsList;
+use crate::types::uri_with_params::UriWithParams;
 
 // Define a struct to represent a single route entry
 #[derive(Debug, PartialEq, Clone)]
@@ -33,23 +35,34 @@ pub struct RouteEntry {
 
 // route-param = name-addr *( SEMI rr-param )
 // rr-param = generic-param
-fn route_param(input: &[u8]) -> ParseResult<RouteParamInfo> {
+fn route_param(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
-            name_addr, // Route requires name-addr form -> Address{..., params: []}
-            many0(preceded(semi, generic_param))
+            name_addr, // Requires name-addr format (must have < >)
+            semicolon_separated_params0(generic_param) // rr-param = generic-param
         ),
-        |(mut addr, params_vec)| { // Make addr mutable
-            addr.params = params_vec; // Assign parsed params
-            RouteParamInfo { address: addr } // Construct the type
+        |(mut addr, params_vec)| {
+            addr.params = params_vec;
+            addr
         }
     )(input)
 }
 
 // Route = "Route" HCOLON route-param *(COMMA route-param)
-// Note: HCOLON handled elsewhere
+// Note: HCOLON handled elsewhere.
 pub(crate) fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
-    map(comma_separated_list1(route_param), RouteHeader)(input)
+    map(
+        comma_separated_list1(route_param), 
+        |addrs: Vec<Address>| {
+            // Convert Vec<Address> to Vec<UriWithParams>
+            let uris_with_params: Vec<UriWithParams> = addrs.into_iter()
+                .map(|addr| UriWithParams::new(addr.uri, addr.params)) // Use assumed constructor
+                .collect();
+            // Construct UriWithParamsList using struct literal syntax
+            let list = UriWithParamsList { uris: uris_with_params }; 
+            RouteHeader(list) // Construct the final header
+        }
+    )(input)
 }
 
 #[cfg(test)]

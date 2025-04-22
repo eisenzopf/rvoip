@@ -1,7 +1,7 @@
-use crate::uri::Uri;
-use crate::types::Param;
-use crate::parser::headers::parse_address;
-use crate::error::Result;
+use crate::types::uri::Uri;
+use crate::types::param::{Param, GenericValue};
+use crate::error::{Error, Result};
+use crate::parser::address::parse_address;
 use std::fmt;
 use std::str::FromStr;
 use ordered_float::NotNan;

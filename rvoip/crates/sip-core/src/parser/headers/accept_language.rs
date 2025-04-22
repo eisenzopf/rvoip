@@ -27,6 +27,7 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::accept::LanguageInfo; // Assuming struct { range: String, params: Vec<Param> }
+use crate::types::accept_language::AcceptLanguage as AcceptLanguageHeader; // Specific type
 
 // primary-tag = 1*8ALPHA
 // subtag = 1*8ALPHA
@@ -72,8 +73,11 @@ pub struct AcceptLanguageValue {
 }
 
 // Accept-Language = "Accept-Language" HCOLON [ language *(COMMA language) ]
-pub(crate) fn parse_accept_language(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
-    comma_separated_list0(language)(input)
+pub(crate) fn parse_accept_language(input: &[u8]) -> ParseResult<AcceptLanguageHeader> {
+    map(
+        comma_separated_list0(language),
+        AcceptLanguageHeader // Wrap Vec<...> in AcceptLanguage newtype
+    )(input)
 }
 
 #[cfg(test)]

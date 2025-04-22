@@ -4,7 +4,7 @@
 
 use nom::{
     bytes::complete::tag_no_case,
-    combinator::{map, opt},
+    combinator::{map, opt, map_res},
     sequence::{pair, preceded},
     IResult,
 };
@@ -18,13 +18,39 @@ use crate::parser::ParseResult;
 // Import shared parser
 use super::token_list::parse_token_list0;
 
-// Parse the comma-separated list of Methods (tokens)
-fn method_list(input: &[u8]) -> ParseResult<Vec<&[u8]>> {
-    comma_separated_list0(token)(input)
+use crate::types::allow::Allow;
+use crate::types::method::Method;
+use nom::combinator::{map, map_res, opt};
+use nom::multi::many0; // Import many0
+use std::str::{self, FromStr}; // Import self for FromStr
+
+// Define a separate function for the item parser
+fn parse_method_token(input: &[u8]) -> ParseResult<Method> {
+     map_res(token, |m| Method::from_str(std::str::from_utf8(m)?))(input) // Ensure std::str::from_utf8 is used
 }
 
-pub(crate) fn parse_allow(input: &[u8]) -> ParseResult<Vec<String>> {
-    parse_token_list0(input)
+// Allow = "Allow" HCOLON [ Method *(COMMA Method) ]
+// Note: HCOLON handled elsewhere
+pub(crate) fn parse_allow(input: &[u8]) -> ParseResult<Allow> {
+    // Use manual parsing instead of comma_separated_list0 to avoid Copy trait issue
+    map(
+        // Parse first item optionally, then many preceded by comma
+        opt(pair(
+            parse_method_token,
+            many0(preceded(comma, parse_method_token))
+        )),
+        |opt_pair| {
+            let methods = match opt_pair {
+                Some((first, mut rest)) => {
+                    let mut result = vec![first];
+                    result.append(&mut rest);
+                    result
+                }
+                None => vec![],
+            };
+            Allow(methods) 
+        }
+    )(input)
 }
 
 #[cfg(test)]
@@ -36,7 +62,7 @@ mod tests {
         let input = b"INVITE, ACK, OPTIONS, CANCEL, BYE";
         let (rem, allow_list) = parse_allow(input).unwrap();
         assert!(rem.is_empty());
-        assert_eq!(allow_list, vec!["INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"]);
+        assert_eq!(allow_list, Allow(vec!["INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"].iter().map(|&m| Method::from_str(m).unwrap()).collect()));
 
         let input_empty = b"";
         let (rem_empty, allow_empty) = parse_allow(input_empty).unwrap();

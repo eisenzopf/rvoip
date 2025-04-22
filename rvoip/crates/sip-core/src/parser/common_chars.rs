@@ -62,4 +62,12 @@ fn is_hex_digit_byte(c: u8) -> bool {
 pub(crate) fn escaped(input: &[u8]) -> ParseResult<&[u8]> {
     // escaped = "%" HEXDIG HEXDIG
     recognize(tuple((tag(b"%"), take_while_m_n(2, 2, is_hex_digit_byte))))(input)
+}
+
+pub(crate) fn lalpha(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while1(|c: u8| c.is_ascii_lowercase())(input)
+}
+
+pub(crate) fn ualpha(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while1(|c: u8| c.is_ascii_uppercase())(input)
 } 

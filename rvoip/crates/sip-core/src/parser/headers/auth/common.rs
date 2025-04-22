@@ -111,7 +111,7 @@ pub(crate) fn algorithm(input: &[u8]) -> ParseResult<&[u8]> {
 // qop-value = "auth" / "auth-int" / token
 fn qop_value(input: &[u8]) -> ParseResult<Qop> {
     map_res(
-        alt((bytes::tag_no_case(b"auth-int"), bytes::tag_no_case(b"auth"), token)),
+        alt((bytes::tag_no_case(b"auth-int".as_slice()), bytes::tag_no_case(b"auth".as_slice()), token)),
         |bytes| {
             let s = str::from_utf8(bytes)?;
             Ok(match s.to_ascii_lowercase().as_str() {
