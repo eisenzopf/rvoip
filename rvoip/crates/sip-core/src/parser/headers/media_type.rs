@@ -94,7 +94,7 @@ pub fn media_type(input: &[u8]) -> ParseResult<MediaType> {
             preceded(slash, m_subtype),
             many0(preceded(semi, m_parameter)) // Returns Vec<(String, String)>
         )),
-        |(type_bytes, subtype_bytes, params_vec)| {
+        |(type_bytes, subtype_bytes, params_vec)| -> Result<MediaType, std::str::Utf8Error> {
             let type_str = str::from_utf8(type_bytes)?.to_string();
             let subtype_str = str::from_utf8(subtype_bytes)?.to_string();
             let params_map = params_vec.into_iter().collect::<HashMap<_,_>>();
@@ -111,10 +111,10 @@ pub fn media_type(input: &[u8]) -> ParseResult<MediaType> {
 /// Helper to convert parsed media parameters (Vec<(&[u8], &[u8])>) into a HashMap.
 /// Lowers keys, leaves values as Strings.
 /// TODO: Handle unescaping of quoted values.
-pub fn media_params_to_hashmap(params_b: Vec<(&[u8], &[u8])>) -> Result<HashMap<String, String>, str::Utf8Error> {
+pub fn media_params_to_hashmap(params_b: Vec<(&[u8], &[u8])>) -> Result<HashMap<String, String>, std::str::Utf8Error> {
     params_b.into_iter().map(|(attr_b, val_b)| {
-        let attr = str::from_utf8(attr_b)?.to_lowercase();
-        let val = str::from_utf8(val_b)?.to_string();
+        let attr = std::str::from_utf8(attr_b)?.to_lowercase();
+        let val = std::str::from_utf8(val_b)?.to_string();
         Ok((attr, val))
     }).collect()
 }

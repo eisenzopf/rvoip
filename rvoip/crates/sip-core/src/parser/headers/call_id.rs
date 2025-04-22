@@ -37,18 +37,26 @@ pub fn callid(input: &[u8]) -> ParseResult<String> {
 
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
 pub fn parse_call_id(input: &[u8]) -> ParseResult<CallId> { // Return CallId
-    // Map the String result into the CallId newtype using map_res to handle the Result
-    map_res(
-        pair(word, opt(preceded(tag(b"."), word))),
-        |(word1, opt_word2)| -> Result<CallId, std::str::Utf8Error> {
-            let s1 = str::from_utf8(word1)?;
-            if let Some(word2) = opt_word2 {
-                let s2 = str::from_utf8(word2)?;
-                Ok(CallId(format!("{}@{}", s1, s2)))
-            } else {
-                Ok(CallId(s1.to_string()))
+    preceded(
+        pair(
+            alt((
+                tag_no_case(b"Call-ID"),
+                tag_no_case(b"i")
+            )),
+            hcolon
+        ),
+        map_res(
+            pair(word, opt(preceded(tag(b"@"), word))),
+            |(word1, opt_word2)| -> Result<CallId, std::str::Utf8Error> {
+                let s1 = str::from_utf8(word1)?;
+                if let Some(word2) = opt_word2 {
+                    let s2 = str::from_utf8(word2)?;
+                    Ok(CallId(format!("{}@{}", s1, s2)))
+                } else {
+                    Ok(CallId(s1.to_string()))
+                }
             }
-        }
+        )
     )(input)
 }
 
@@ -58,7 +66,7 @@ mod tests {
 
     #[test]
     fn test_parse_call_id_simple() {
-        let input = b"f81d4fae-7dec-11d0-a765-00a0c91e6bf6@foo.bar.com";
+        let input = b"Call-ID: f81d4fae-7dec-11d0-a765-00a0c91e6bf6@foo.bar.com";
         let result = parse_call_id(input);
         assert!(result.is_ok());
         let (rem, val) = result.unwrap(); // Returns CallId
@@ -67,21 +75,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_call_id_no_host() {
-        let input = b"123456789@"; // Allowed by ABNF? word requires 1*char, so this case is invalid
-        // Let's test a valid one without host part
-        let input_valid = b"local-id-123.abc";
-        let result_valid = parse_call_id(input_valid);
-        assert!(result_valid.is_ok());
-        let (rem_valid, val_valid) = result_valid.unwrap();
-        assert!(rem_valid.is_empty());
-        assert_eq!(val_valid.0, "local-id-123.abc");
+    fn test_parse_call_id_short_form() {
+        let input = b"i: local-id-123";
+        let result = parse_call_id(input);
+        assert!(result.is_ok());
+        let (rem, val) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(val.0, "local-id-123");
     }
 
     #[test]
     fn test_parse_call_id_complex_word() {
         // Example from RFC 3261
-        let input = b"asd<.(!%*_+`'~)-:>\"/[]?{}=asd@example.com";
+        let input = b"Call-ID: asd<.(!%*_+`'~)-:>\"/[]?{}=asd@example.com";
         let result = parse_call_id(input);
         assert!(result.is_ok());
         let (rem, val) = result.unwrap();

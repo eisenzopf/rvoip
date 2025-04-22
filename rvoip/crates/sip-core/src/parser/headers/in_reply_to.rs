@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_parse_in_reply_to() {
-        let input = b"70710@saturn.bell-tel.com, 17320@saturn.bell-tel.com";
+        let input = b"In-Reply-To: 70710@saturn.bell-tel.com, 17320@saturn.bell-tel.com";
         let result = parse_in_reply_to(input);
         assert!(result.is_ok());
         let (rem, ids) = result.unwrap();
@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_parse_in_reply_to_single() {
-        let input = b"local-id";
+        let input = b"In-Reply-To: local-id";
         let result = parse_in_reply_to(input);
         assert!(result.is_ok());
         let (rem, ids) = result.unwrap();

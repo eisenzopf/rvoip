@@ -169,16 +169,18 @@ fn digest_uri_value_content(input: &[u8]) -> ParseResult<&[u8]> {
 
 // digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT ; Corrected grammar
 // Returns Uri struct
-pub fn digest_uri(input: &[u8]) -> ParseResult<Uri> {
-     let (rem, _) = preceded(bytes::tag_no_case("uri"), equal)(input)?;
-     // Parse the quoted string first to get the content bytes
-     let (rem, uri_bytes) = digest_uri_value_content(rem)?;
-     // Now parse the URI from the content bytes
-     // We need to return a ParseResult<Uri> which is (&[u8], Uri)
-     match parse_uri(uri_bytes) { 
-        Ok(parsed_uri) => Ok((rem, parsed_uri)), // Return the remainder and parsed URI
-        Err(_) => Err(nom::Err::Failure(NomError::from_error_kind(uri_bytes, ErrorKind::Verify))), // Indicate URI parse failure
-     }
+pub fn digest_uri<'a>(input: &'a [u8]) -> ParseResult<'a, Uri> {
+    let (rest, _) = preceded(
+        bytes::tag_no_case("uri"),
+        equal
+    )(input)?;
+    
+    let (rest, value) = quoted_string(rest)?;
+    
+    // Parse the URI from the quoted string
+    let (_, uri) = parse_uri(value)?;
+    
+    Ok((rest, uri))
 }
 
 
