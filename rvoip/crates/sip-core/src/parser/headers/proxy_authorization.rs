@@ -5,6 +5,8 @@ use crate::parser::ParseResult;
 use crate::types::auth::Credentials;
 use nom::IResult;
 use nom::combinator::map;
+use crate::types::auth::{DigestParam, Qop, Algorithm};
+use crate::types::uri::Uri;
 
 // Proxy-Authorization = "Proxy-Authorization" HCOLON credentials
 // Note: HCOLON is handled by the top-level message_header parser.
@@ -16,7 +18,8 @@ pub fn parse_proxy_authorization(input: &[u8]) -> ParseResult<Credentials> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{DigestParam, Qop, Algorithm, Uri};
+    use crate::types::auth::{DigestParam, Qop, Algorithm};
+    use crate::types::uri::Uri;
 
     #[test]
     fn test_parse_proxy_authorization_digest() {

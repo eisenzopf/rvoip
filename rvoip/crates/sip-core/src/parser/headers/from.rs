@@ -97,7 +97,7 @@ pub fn parse_from(input: &[u8]) -> ParseResult<FromHeader> {
 mod tests {
     use super::*;
     use crate::types::address::{Address};
-    use crate::types::uri::Host;
+    use crate::types::uri::{Uri, Host, Scheme};
     use crate::types::param::{Param, GenericValue};
     use std::collections::HashMap;
 
@@ -110,7 +110,7 @@ mod tests {
         let addr = from_header.0; // Access the inner Address
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, None);
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
         assert_eq!(addr.params.len(), 1);
         assert!(matches!(addr.params[0], Param::Tag(ref s) if s == "asdf"));
     }
@@ -124,7 +124,7 @@ mod tests {
         let addr = from_header.0;
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, Some("Bob".to_string()));
-        assert_eq!(addr.uri.scheme, "sips");
+        assert_eq!(addr.uri.scheme, Scheme::Sips);
         assert_eq!(addr.params.len(), 1);
         assert!(matches!(addr.params[0], Param::Tag(ref s) if s == "12345"));
     }

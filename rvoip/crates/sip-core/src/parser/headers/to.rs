@@ -21,6 +21,7 @@ use crate::parser::ParseResult;
 use crate::types::address::Address;
 use crate::types::param::Param;
 use crate::types::to::To as ToHeader; // Import the specific header type
+use crate::types::uri::{Host, Scheme};
 
 // to-spec = ( name-addr / addr-spec ) *( SEMI to-param )
 // to-param = tag-param / generic-param
@@ -49,7 +50,7 @@ pub fn parse_to(input: &[u8]) -> ParseResult<ToHeader> {
 mod tests {
     use super::*;
     use crate::types::address::Address;
-    use crate::types::uri::Host;
+    use crate::types::uri::{Host, Scheme};
     use crate::types::param::{Param, GenericValue};
     use std::collections::HashMap;
 
@@ -62,7 +63,7 @@ mod tests {
         let addr = to_header.0; // Access inner Address
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, None);
-        assert_eq!(addr.uri.scheme, "sip");
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
         assert!(addr.params.is_empty());
     }
     
@@ -75,7 +76,7 @@ mod tests {
         let addr = to_header.0;
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, Some("Receiver".to_string()));
-        assert_eq!(addr.uri.scheme, "sips");
+        assert_eq!(addr.uri.scheme, Scheme::Sips);
         assert_eq!(addr.params.len(), 1);
         assert!(matches!(addr.params[0], Param::Tag(ref s) if s == "zxcv"));
     }

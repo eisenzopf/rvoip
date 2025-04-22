@@ -964,7 +964,7 @@ impl TryFrom<Header> for TypedHeader {
                                  }
                              };
 
-                             let text_string = String::from_utf8(parsed_value.text)
+                             let text_string = String::from_utf8(parsed_value.text.to_vec())
                                  .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in warning text: {}", e)))?;
 
                              typed_warnings.push(Warning::new(parsed_value.code, agent_uri, text_string));

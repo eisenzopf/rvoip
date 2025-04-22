@@ -129,8 +129,10 @@ pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::ParamValue;
+    use crate::types::uri::Scheme;
     use crate::types::uri::Host;
+    use crate::types::param::Param;
+    use crate::types::param::GenericValue;
     use std::net::Ipv4Addr;
     use nom::error::ErrorKind;
 

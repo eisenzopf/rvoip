@@ -75,9 +75,8 @@ pub fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::{Address};
-    use crate::types::param::{Param, GenericValue};
-    use crate::types::uri::Uri;
+    use crate::types::param::Param;
+    use crate::types::uri::{Uri, Scheme};
 
     #[test]
     fn test_parse_route_single() {
@@ -88,10 +87,10 @@ mod tests {
         let routes = route_header.0; // Access inner Vec
         assert!(rem.is_empty());
         assert_eq!(routes.len(), 1);
-        assert!(routes[0].address.display_name.is_none());
-        assert_eq!(routes[0].address.uri.scheme, "sip");
-        assert_eq!(routes[0].address.params.len(), 1);
-        assert!(matches!(routes[0].address.params[0], Param::Other(ref n, None) if n == "lr"));
+        assert!(routes[0].0.display_name.is_none());
+        assert_eq!(routes[0].0.uri.scheme, Scheme::Sip);
+        assert_eq!(routes[0].0.params.len(), 1);
+        assert!(matches!(routes[0].0.params[0], Param::Other(ref n, None) if n == "lr"));
     }
     
     #[test]
@@ -103,8 +102,8 @@ mod tests {
         let routes = route_header.0; // Access inner Vec
         assert!(rem.is_empty());
         assert_eq!(routes.len(), 2);
-        assert!(routes[0].address.params.contains(&Param::Other("lr".to_string(), None)));
-        assert!(routes[1].address.params.contains(&Param::Other("lr".to_string(), None)));
+        assert!(routes[0].0.params.contains(&Param::Other("lr".to_string(), None)));
+        assert!(routes[1].0.params.contains(&Param::Other("lr".to_string(), None)));
     }
 
     #[test]
@@ -117,11 +116,11 @@ mod tests {
         let routes = route_header.0; // Access inner Vec
         assert!(rem.is_empty());
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].address.display_name, Some("Proxy 1".to_string()));
-        assert!(routes[0].address.params.contains(&Param::Other("lr".to_string(), None)));
+        assert_eq!(routes[0].0.display_name, Some("Proxy 1".to_string()));
+        assert!(routes[0].0.params.contains(&Param::Other("lr".to_string(), None)));
     }
 
-     #[test]
+    #[test]
     fn test_parse_route_addr_spec_fail() {
         // Should fail because Route requires name-addr (with <>)
         let input = b"sip:ss1.example.com;lr";

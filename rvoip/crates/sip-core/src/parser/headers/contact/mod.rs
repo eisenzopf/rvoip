@@ -24,7 +24,7 @@ use crate::parser::ParseResult;
 // Import types
 // use crate::types::contact::{ContactHeader, ContactValue, ContactParams}; // Old import
 use crate::types::contact::{ContactValue, ContactParamInfo}; // Corrected import
-use crate::types::uri::Uri;
+use crate::types::uri::{Uri, Scheme};
 use crate::types::address::Address;
 use crate::types::param::Param;
 // use crate::types::contact::ContactParamInfo; // Already included above
@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use crate::types::address::{Address};
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::Uri;
+    use crate::types::uri::{Uri, Scheme};
     use ordered_float::NotNan;
 
     #[test]
@@ -88,7 +88,7 @@ mod tests {
         if let ContactValue::Params(params) = val {
             assert_eq!(params.len(), 1);
             assert!(params[0].address.display_name.is_none());
-            assert_eq!(params[0].address.uri.scheme, "sip");
+            assert_eq!(params[0].address.uri.scheme, Scheme::Sip);
             assert!(params[0].address.params.is_empty()); // Check params on Address
         } else {
             panic!("Expected Params variant");
@@ -105,7 +105,7 @@ mod tests {
         if let ContactValue::Params(params) = val {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].address.display_name, Some("Mr. Watson".to_string()));
-            assert_eq!(params[0].address.uri.scheme, "sip");
+            assert_eq!(params[0].address.uri.scheme, Scheme::Sip);
             assert_eq!(params[0].address.params.len(), 2);
             assert!(params[0].address.params.contains(&Param::Q(NotNan::new(0.7).unwrap())));
             assert!(params[0].address.params.contains(&Param::Expires(3600)));
