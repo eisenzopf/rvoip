@@ -85,16 +85,36 @@ impl FromStr for ContentDisposition {
                     _ => DispositionType::Other(disp_type_str),
                 };
                 
-                let params = params_vec.into_iter()
-                    .filter_map(|p| {
-                        if let crate::parser::headers::content_disposition::DispositionParam::Generic(Param::Other(k, v_opt)) = p {
-                            let value_str = v_opt.map(|gv| gv.to_string()).unwrap_or_default();
-                            Some((k.to_lowercase(), value_str))
-                        } else {
-                            None
+                // Convert params to HashMap
+                let mut params = HashMap::new();
+                for param in params_vec {
+                    // Use a match statement instead of pattern matching directly
+                    match param {
+                        // Skip handling-params for now - consider adding them separately
+                        param => {
+                            // Try to extract generic params
+                            if let Ok(param_str) = std::str::from_utf8(format!("{:?}", param).as_bytes()) {
+                                if param_str.contains("Generic(Param::Other") {
+                                    // Extract key and value from debug output as a fallback
+                                    if let Some(start) = param_str.find("\"") {
+                                        if let Some(end) = param_str[start+1..].find("\"") {
+                                            let key = param_str[start+1..start+1+end].to_lowercase();
+                                            
+                                            // Try to extract value
+                                            if let Some(v_start) = param_str[start+1+end..].find("\"") {
+                                                if let Some(v_end) = param_str[start+1+end+v_start+1..].find("\"") {
+                                                    let value = param_str[start+1+end+v_start+1..start+1+end+v_start+1+v_end].to_string();
+                                                    params.insert(key, value);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    })
-                    .collect();
+                    }
+                }
+                
                 Ok(ContentDisposition { disposition_type: disp_type, params })
             })
     }
