@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use crate::header::{Header, HeaderName};
+use crate::types::header::{Header, HeaderName};
+use crate::types::content_type::ContentType;
+use crate::error::{Error, Result};
 use crate::sdp::SdpSession;
 use std::fmt;
 

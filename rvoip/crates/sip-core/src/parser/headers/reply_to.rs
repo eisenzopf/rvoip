@@ -22,6 +22,7 @@ use crate::uri::Uri;
 use crate::types::address::NameAddr;
 use crate::types::address::Address;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;
+use crate::parser::address::parse_name_addr;
 
 // Define a struct to represent the Reply-To header value
 #[derive(Debug, PartialEq, Clone)]
@@ -49,8 +50,14 @@ fn rplyto_spec(input: &[u8]) -> ParseResult<Address> {
 
 // Reply-To = "Reply-To" HCOLON rplyto-spec
 // Note: HCOLON handled elsewhere
-pub(crate) fn parse_reply_to(input: &[u8]) -> ParseResult<ReplyToHeader> {
+pub(crate) fn parse_reply_to(input: &[u8]) -> ParseResult<Address> {
     map(rplyto_spec, ReplyToHeader)(input)
+}
+
+/// Parses a Reply-To header value.
+pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<Address> {
+    // For now, assume it's just a single name-addr
+    parse_name_addr(input)
 }
 
 #[cfg(test)]
@@ -63,7 +70,7 @@ mod tests {
     #[test]
     fn test_parse_reply_to_simple() {
         let input = b"<sip:user@example.com>";
-        let result = parse_reply_to(input);
+        let result = parse_reply_to_public(input);
         assert!(result.is_ok());
         let (rem, header) = result.unwrap();
         let addr = header.0;
@@ -76,7 +83,7 @@ mod tests {
     #[test]
     fn test_parse_reply_to_name_addr_params() {
         let input = b"\"Support\" <sip:support@example.com>;dept=billing";
-        let result = parse_reply_to(input);
+        let result = parse_reply_to_public(input);
         assert!(result.is_ok());
         let (rem, header) = result.unwrap();
         let addr = header.0;

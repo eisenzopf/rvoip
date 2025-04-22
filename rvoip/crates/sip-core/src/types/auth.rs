@@ -9,7 +9,8 @@ use crate::parser::headers::auth::{
     AuthenticationInfoValue, AuthorizationValue, ProxyAuthenticateValue, ProxyAuthorizationValue,
     WwwAuthenticateValue,
 };
-use crate::{DigestChallenge, Method};
+use crate::types::auth::DigestChallenge;
+use crate::types::method::Method;
 
 /// Authentication Scheme (Digest, Basic, etc.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

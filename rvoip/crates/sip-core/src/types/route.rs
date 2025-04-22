@@ -6,17 +6,19 @@ use std::str::FromStr;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use crate::types::Address;
-use crate::parser::headers::route::RouteValue;
+use crate::parser::headers::route::RouteValue as ParserRouteValue;
 use serde::{Deserialize, Serialize};
+use crate::parser::ParseResult;
+use crate::types::param::Param;
 
 /// Represents the Route header field (RFC 3261 Section 8.1.1.1).
 /// Contains a list of route entries (typically Addresses).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Route(pub Vec<RouteValue>);
+pub struct Route(pub Vec<ParserRouteValue>);
 
 impl Route {
     /// Creates a new Route header.
-    pub fn new(list: Vec<RouteValue>) -> Self {
+    pub fn new(list: Vec<ParserRouteValue>) -> Self {
         Self(list)
     }
 }
@@ -43,7 +45,7 @@ impl FromStr for Route {
 }
 
 impl Deref for Route {
-    type Target = Vec<RouteValue>;
+    type Target = Vec<ParserRouteValue>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

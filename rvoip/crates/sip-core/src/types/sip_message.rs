@@ -7,18 +7,14 @@ use crate::types::header::{Header, HeaderName, TypedHeader};
 use crate::types::uri::Uri;
 use crate::types::version::Version;
 // Use types from the current crate's types module
-use crate::types::Method;
+use crate::types::method::Method;
 use crate::types::StatusCode;
 use crate::error::{Error, Result};
 // Use types from the current crate's types module
 use crate::types::{Via};
 use crate::types; // Add import
-use crate::method::Method;
-use crate::uri::Uri;
-use crate::version::Version;
-use crate::header::Header;
-use crate::header::HeaderName;
-use crate::header::TypedHeader;
+use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
+use crate::types::sdp::SdpSession; // Assuming SdpSession is in types::sdp
 use crate::types::via::Via; // Import Via specifically
 
 /// A SIP request message

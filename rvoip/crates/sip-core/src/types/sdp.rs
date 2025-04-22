@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use bytes::Bytes;
 use std::str::FromStr;
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};

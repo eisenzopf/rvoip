@@ -83,8 +83,9 @@ fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
 }
 
 // Call-Info = "Call-Info" HCOLON info *(COMMA info)
-pub(crate) fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
-    comma_separated_list1(info)(input)
+/// Parses a Call-Info header value.
+pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
+    separated_list1(comma, info)(input)
 }
 
 #[cfg(test)]

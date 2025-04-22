@@ -39,8 +39,8 @@ fn alert_param(input: &[u8]) -> ParseResult<AlertInfoValue> {
     Ok((remaining, AlertInfoValue { uri, params }))
 }
 
-// Alert-Info = "Alert-Info" HCOLON alert-param *(COMMA alert-param)
-pub(crate) fn parse_alert_info(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
+/// Parses an Alert-Info header value.
+pub fn parse_alert_info(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
     comma_separated_list1(alert_param)(input)
 }
 

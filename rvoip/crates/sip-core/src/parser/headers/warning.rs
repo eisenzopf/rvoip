@@ -38,6 +38,8 @@ use nom::{
 };
 use std::str::{self, FromStr};
 use crate::types::WarningValue;
+use crate::parser::values::delta_seconds; // Use delta_seconds for duration
+use crate::parser::whitespace::ows;
 
 // warn-code = 3DIGIT
 fn warn_code(input: &[u8]) -> ParseResult<WarnCode> {
@@ -82,8 +84,8 @@ pub enum WarnAgent {
     Pseudonym(Vec<u8>),
 }
 
-// Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
-pub(crate) fn parse_warning(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
+/// Parses a Warning header value.
+pub fn parse_warning(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
     map(
         preceded(
             pair(tag_no_case(b"Warning"), hcolon),

@@ -1,4 +1,4 @@
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::types::param::Param;
 use std::fmt;
 use serde::{Serialize, Deserialize};

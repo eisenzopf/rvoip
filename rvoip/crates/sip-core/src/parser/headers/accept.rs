@@ -77,5 +77,10 @@ pub(crate) fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
     )(input)
 }
 
+/// Parses an Accept header value.
+pub fn parse_accept(input: &[u8]) -> ParseResult<Vec<AcceptValue>> {
+    separated_list1(comma, accept_range)(input)
+}
+
 // #[cfg(test)]
 // mod tests { ... } 

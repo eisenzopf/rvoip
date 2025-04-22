@@ -40,7 +40,8 @@ pub struct ErrorInfoValue {
 }
 
 // Error-Info = "Error-Info" HCOLON error-uri *(COMMA error-uri)
-pub(crate) fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
+/// Parses an Error-Info header value.
+pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
     comma_separated_list1(error_uri)(input)
 }
 

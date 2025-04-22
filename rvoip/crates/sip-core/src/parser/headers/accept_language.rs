@@ -81,11 +81,8 @@ pub struct AcceptLanguageValue {
 }
 
 // Accept-Language = "Accept-Language" HCOLON [ language *(COMMA language) ]
-pub(crate) fn parse_accept_language(input: &[u8]) -> ParseResult<AcceptLanguageHeader> {
-    map(
-        comma_separated_list0(language),
-        AcceptLanguageHeader // Wrap Vec<...> in AcceptLanguage newtype
-    )(input)
+pub fn parse_accept_language(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
+    separated_list1(comma, language)(input)
 }
 
 #[cfg(test)]

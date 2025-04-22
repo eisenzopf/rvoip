@@ -17,12 +17,12 @@ use nom::{
 use bytes::Bytes;
 
 use crate::error::{Error, Result};
-use crate::header::{Header, HeaderName, HeaderValue};
+use crate::types::header::{Header, HeaderName, HeaderValue};
 use crate::types::sdp::SdpSession; 
 // Import the structures from the types module
 use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::parser::ParseResult;
-use crate::parser::message::parse_known_header; // Use the main header dispatcher
+use crate::parser::message::parse_header; // Import header parser
 use crate::parser::whitespace::crlf as parse_crlf; // Alias to avoid clash
 
 
@@ -116,7 +116,7 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
              // Process previous header (if any)
             if let Some(name) = current_header_name.take() {
                 let value_bytes_trimmed = crate::parser::message::trim_bytes(&current_header_value_bytes);
-                let parsed_value = parse_known_header(&name, value_bytes_trimmed)
+                let parsed_value = parse_header(&name, value_bytes_trimmed)
                                        .unwrap_or_else(|_| HeaderValue::Raw(value_bytes_trimmed.to_vec()));
                 headers.push(Header::new(name, parsed_value));
             }
@@ -144,7 +144,7 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
     // Process the very last header
     if let Some(name) = current_header_name.take() {
         let value_bytes_trimmed = crate::parser::message::trim_bytes(&current_header_value_bytes);
-        let parsed_value = parse_known_header(&name, value_bytes_trimmed)
+        let parsed_value = parse_header(&name, value_bytes_trimmed)
                                .unwrap_or_else(|_| HeaderValue::Raw(value_bytes_trimmed.to_vec()));
         headers.push(Header::new(name, parsed_value));
     }

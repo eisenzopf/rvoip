@@ -22,6 +22,8 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::content_disposition::{DispositionType, DispositionParam, Handling, ContentDisposition as ContentDispositionHeader};
+use crate::parser::common_params::parse_generic_param;
+use crate::parser::token::parse_token;
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token
@@ -79,11 +81,23 @@ pub struct ContentDispositionValue {
     pub params: Vec<Param>,
 }
 
-// Content-Disposition = "Content-Disposition" HCOLON disp-type *( SEMI disp-param )
-pub(crate) fn parse_content_disposition(input: &[u8]) -> ParseResult<(DispositionType, Vec<DispositionParam>)> {
-    pair(
-        disp_type,
-        many0(preceded(semi, disp_param))
+/// Parses the Content-Disposition header value.
+pub fn parse_content_disposition(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
+    map(
+        pair(
+            disp_type,
+            many0(preceded(semi, disp_param))
+        ),
+        |(dtype, params)| {
+            let disp_type = match dtype {
+                DispositionType::Render => "render",
+                DispositionType::Session => "session",
+                DispositionType::Icon => "icon",
+                DispositionType::Alert => "alert",
+                DispositionType::Other(s) => s,
+            };
+            Ok((disp_type.to_string(), params))
+        }
     )(input)
 }
 
@@ -110,7 +124,7 @@ mod tests {
         assert!(result.is_ok());
         let (rem, (dtype, params)) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(dtype, DispositionType::Session);
+        assert_eq!(dtype, "session");
         assert!(params.is_empty());
     }
     
@@ -121,7 +135,7 @@ mod tests {
         assert!(result.is_ok());
         let (rem, (dtype, params)) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(dtype, DispositionType::Extension("attachment".to_string())); // Common non-SIP value
+        assert_eq!(dtype, "attachment");
         assert_eq!(params.len(), 2);
         assert!(params.contains(&DispositionParam::Generic(Param::Other("filename".to_string(), Some(GenericValue::Token("pic.jpg".to_string()))))));
         assert!(params.contains(&DispositionParam::Handling(Handling::Optional)));

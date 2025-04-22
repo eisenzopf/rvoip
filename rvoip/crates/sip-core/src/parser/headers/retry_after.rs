@@ -54,8 +54,8 @@ pub struct RetryAfterValue {
     pub params: Vec<RetryParam>, // Only duration or generic params expected
 }
 
-// Retry-After = "Retry-After" HCOLON delta-seconds [ comment ] *( SEMI retry-param )
-pub(crate) fn parse_retry_after(input: &[u8]) -> ParseResult<(u32, Option<String>, Vec<RetryParam>)> {
+/// Parses a Retry-After header value.
+pub fn parse_retry_after(input: &[u8]) -> ParseResult<(u32, Option<&[u8]>, Vec<Param>)> {
     map_res(
         tuple((
             delta_seconds,

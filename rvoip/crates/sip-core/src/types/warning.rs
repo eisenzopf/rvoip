@@ -1,4 +1,4 @@
-use crate::uri::Uri;
+use crate::types::uri::Uri;
 use crate::parser::headers::parse_warning;
 use crate::error::Result;
 use std::fmt;

@@ -9,7 +9,7 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     combinator::{map, opt, value},
-    multi::{many0, separated_list0},
+    multi::{many0, separated_list0, separated_list1},
     sequence::{pair, preceded},
     IResult,
 };
@@ -69,11 +69,9 @@ pub struct AcceptEncodingValue {
 }
 
 // Accept-Encoding = "Accept-Encoding" HCOLON [ encoding *(COMMA encoding) ]
-pub(crate) fn parse_accept_encoding(input: &[u8]) -> ParseResult<AcceptEncodingHeader> {
-    map(
-        comma_separated_list0(encoding),
-        AcceptEncodingHeader // Wrap Vec<...> in AcceptEncoding newtype
-    )(input)
+/// Parses an Accept-Encoding header value.
+pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> {
+    separated_list1(comma, encoding)(input)
 }
 
 #[cfg(test)]
