@@ -44,8 +44,8 @@ fn media_range(input: &[u8]) -> ParseResult<MediaRange> {
         pair(
             // Parser for type/subtype with wildcards
             alt((
-                value((b"*", b"*"), tag(b"*/*")),
-                pair(m_type, preceded(slash, tag(b"*"))),
+                value((b"*", b"*"), tag(b"*/*".as_slice())),
+                pair(m_type, preceded(slash, tag(b"*".as_slice()))),
                 pair(m_type, preceded(slash, m_subtype)),
             )),
             // Parameters

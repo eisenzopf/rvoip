@@ -21,9 +21,12 @@ pub use absolute::parse_absolute_uri;
 use nom::{
     branch::alt,
     bytes::complete as bytes,
-    combinator::{map, map_res, opt},
+    combinator::{map, map_res, opt, pair},
     sequence::tuple,
     IResult,
+    error::ErrorKind,
+    error::Error as NomError,
+    combinator::recognize,
 };
 use std::collections::HashMap;
 use std::str;
@@ -33,77 +36,93 @@ use crate::types::param::Param;
 use crate::parser::ParseResult;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
-fn sip_uri(input: &[u8]) -> ParseResult<Uri> {
+pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
     map_res(
-        tuple((
-            bytes::tag(b"sip:"),
-            opt(userinfo),
-            hostport,       // Returns (Host, Option<u16>)
-            uri_parameters, // Returns Vec<Param>
-            opt(uri_headers), // Returns Option<HashMap<String, String>>
-        )),
-        |(_, userinfo_opt, (host_val, port_opt), params, headers_opt)| {
-            // Convert userinfo bytes to Strings, handling potential UTF-8 errors
-            let converted_userinfo = userinfo_opt
-                .map(|(user_bytes, pass_opt_bytes)| {
-                    let user_str = str::from_utf8(user_bytes)?.to_string();
-                    let pass_str_opt = pass_opt_bytes
-                        .map(|p| str::from_utf8(p).map(|s| s.to_string()))
-                        .transpose()?;
-                    Ok::<_, str::Utf8Error>((user_str, pass_str_opt))
-                })
-                .transpose()?;
+        recognize(
+            tuple((
+                bytes::tag(b"sip:".as_slice()),
+                opt(pair(userinfo, at)),
+                hostport,
+                opt(uri_parameters),
+                opt(uri_headers),
+            ))
+        ),
+        |bytes| {
+            let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
+                bytes::tag(b"sip:".as_slice()),
+                opt(pair(userinfo, at)),
+                hostport,
+                opt(uri_parameters),
+                opt(uri_headers),
+            ))(bytes)?;
+
+            if !rem.is_empty() {
+                 return Err(NomError::from_error_kind(rem, ErrorKind::Verify));
+            }
             
+            let (user, password) = user_opt
+                .map(|(u, p_opt, _)| (Some(u), p_opt))
+                .unwrap_or((None, None));
+
             Ok(Uri {
-                scheme: "sip".to_string(),
-                userinfo: converted_userinfo,
-                host: host_val,
-                port: port_opt,
-                parameters: params,
-                headers: headers_opt,
+                scheme: Scheme::Sip,
+                user: user.map(String::from),
+                password: password.map(String::from),
+                host,
+                port,
+                params: params_opt.unwrap_or_default(),
+                headers: headers_opt.unwrap_or_default(),
             })
-        },
+        }
     )(input)
 }
 
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
-fn sips_uri(input: &[u8]) -> ParseResult<Uri> {
+pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
      map_res(
-        tuple((
-            bytes::tag(b"sips:"),
-            opt(userinfo),
-            hostport,
-            uri_parameters,
-            opt(uri_headers),
-        )),
-        |(_, userinfo_opt, (host_val, port_opt), params, headers_opt)| {
-             // Convert userinfo bytes to Strings
-            let converted_userinfo = userinfo_opt
-                .map(|(user_bytes, pass_opt_bytes)| {
-                    let user_str = str::from_utf8(user_bytes)?.to_string();
-                    let pass_str_opt = pass_opt_bytes
-                        .map(|p| str::from_utf8(p).map(|s| s.to_string()))
-                        .transpose()?;
-                    Ok::<_, str::Utf8Error>((user_str, pass_str_opt))
-                })
-                .transpose()?;
+        recognize(
+            tuple((
+                bytes::tag(b"sips:".as_slice()),
+                opt(pair(userinfo, at)),
+                hostport,
+                opt(uri_parameters),
+                opt(uri_headers),
+            ))
+        ),
+        |bytes| {
+             let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
+                bytes::tag(b"sips:".as_slice()),
+                opt(pair(userinfo, at)),
+                hostport,
+                opt(uri_parameters),
+                opt(uri_headers),
+            ))(bytes)?;
 
+            if !rem.is_empty() {
+                 return Err(NomError::from_error_kind(rem, ErrorKind::Verify));
+            }
+
+            let (user, password) = user_opt
+                .map(|(u, p_opt, _)| (Some(u), p_opt))
+                .unwrap_or((None, None));
+                
             Ok(Uri {
-                scheme: "sips".to_string(),
-                userinfo: converted_userinfo,
-                host: host_val,
-                port: port_opt,
-                parameters: params,
-                headers: headers_opt,
+                scheme: Scheme::Sips,
+                user: user.map(String::from),
+                password: password.map(String::from),
+                host,
+                port,
+                params: params_opt.unwrap_or_default(),
+                headers: headers_opt.unwrap_or_default(),
             })
-        },
+        }
     )(input)
 }
 
 /// Public entry point for parsing a SIP or SIPS URI
 /// Can be re-exported by the main parser mod.rs
 pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
-    alt((sip_uri, sips_uri))(input)
+    alt((parse_sip_uri, parse_sips_uri))(input)
 }
 
 

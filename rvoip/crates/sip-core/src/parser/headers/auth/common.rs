@@ -99,22 +99,13 @@ pub(crate) fn stale(input: &[u8]) -> ParseResult<bool> {
     )(input)
 }
 
-// algorithm = "algorithm" EQUAL ( "MD5" / "MD5-sess" / token )
-pub(crate) fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
-    map_res(
-        preceded(
-            pair(bytes::tag_no_case(b"algorithm"), equal),
-            alt((bytes::tag_no_case(b"MD5-sess"), bytes::tag_no_case(b"MD5"), token)),
-        ),
-        |bytes| {
-            let s = str::from_utf8(bytes)?;
-            Ok(match s.to_ascii_uppercase().as_str() {
-                "MD5" => Algorithm::Md5,
-                "MD5-SESS" => Algorithm::Md5Sess,
-                other => Algorithm::Other(other.to_string()),
-            })
-        },
-    )(input)
+// algorithm = "MD5" / "MD5-sess" / token
+pub(crate) fn algorithm(input: &[u8]) -> ParseResult<&[u8]> {
+    recognize(alt((
+        bytes::tag_no_case(b"MD5-sess".as_slice()), 
+        bytes::tag_no_case(b"MD5".as_slice()), 
+        token
+    )))(input)
 }
 
 // qop-value = "auth" / "auth-int" / token

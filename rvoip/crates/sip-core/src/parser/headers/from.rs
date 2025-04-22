@@ -63,13 +63,37 @@ fn from_param_item(input: &[u8]) -> ParseResult<Param> {
     alt((tag_param, generic_param))(input)
 }
 
+// from-param = LAQUOT addr-spec RAQUOT *( SEMI from-tag )
+// from-tag = tag-param
+// Simplified: Use name_addr_or_addr_spec and expect tag param
+fn from_param(input: &[u8]) -> ParseResult<Address> {
+    // TODO: Should use generic parameter parser? This only looks for 'tag'.
+    map(
+        pair(
+            name_addr_or_addr_spec,
+            opt(preceded(semi, preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)))) // Use .as_slice()
+        ),
+        |(mut addr, tag_opt)| { // Make addr mutable
+            if let Some(tag_bytes) = tag_opt {
+                // Attempt to convert tag_bytes to String
+                if let Ok(tag_str) = str::from_utf8(tag_bytes) {
+                    addr.params.push(Param::Tag(tag_str.to_string())); // Add tag param
+                }
+                // Silently ignore tag if not valid UTF-8? Or return error?
+                // Returning Ok for now, but might need better error handling.
+            }
+            addr
+        }
+    )(input)
+}
+
 // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
 // Returns Address struct with params included
 fn from_spec(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Returns Address{..., params: []}
-            many0(preceded(semi, from_to_param))
+            many0(preceded(semi, from_param))
         ),
         |(mut addr, params_vec)| { // Make addr mutable
             addr.params = params_vec; // Assign parsed params

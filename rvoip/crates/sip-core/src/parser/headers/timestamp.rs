@@ -4,10 +4,11 @@
 
 use nom::{
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
-    character::complete::char,
+    character::complete::{char, digit1, space0},
     combinator::{map, map_res, opt, recognize},
     sequence::{pair, preceded, tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 use ordered_float::NotNan; // For parsing float strings
@@ -36,15 +37,23 @@ pub struct TimestampValue {
 }
 
 // Parses 1*(DIGIT) [ "." *(DIGIT) ] into NotNan<f32>
-fn float_val(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub(crate) fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
     map_res(
+        // Recognize a sequence like "123" or "123.456"
         recognize(
-            pair(digit1, opt(pair(bytes::tag(b"."), digit1)))
+            pair(
+                digit1, 
+                opt(pair(tag(b".".as_slice()), take_while(|c: u8| c.is_ascii_digit()))) // Use .as_slice()
+            )
         ),
-        |bytes| {
-            let s = str::from_utf8(bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))?;
-            let f = s.parse::<f32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Float)))?;
-            NotNan::new(f).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Verify)))
+        |bytes: &[u8]| -> Result<NotNan<f32>, NomError<&[u8]>> { // Return Result<_, NomError>
+            let s = str::from_utf8(bytes)
+                .map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Char))?; // Map to NomError
+            let f = s.parse::<f32>()
+                .map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Float))?; // Map to NomError
+                
+            NotNan::new(f)
+                .map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Verify)) // Map NotNan error to NomError
         }
     )(input)
 }
@@ -54,10 +63,10 @@ fn float_val(input: &[u8]) -> ParseResult<NotNan<f32>> {
 // Note: HCOLON handled elsewhere
 // Returns (timestamp: f32, delay: Option<f32>)
 pub(crate) fn parse_timestamp(input: &[u8]) -> ParseResult<(NotNan<f32>, Option<NotNan<f32>>)> {
-    pair(
-        float_val, // Parse the main timestamp value
-        opt(preceded(lws, float_val)) // Optional LWS + delay value
-    )(input)
+    tuple((
+        parse_timestamp_value, // timestamp-value
+        opt(preceded(space0, parse_timestamp_value)) // [ LWS delay-value ]
+    ))(input)
 }
 
 #[cfg(test)]
@@ -66,13 +75,13 @@ mod tests {
 
     #[test]
     fn test_float_val() {
-        let (rem, f) = float_val(b"123.456").unwrap();
+        let (rem, f) = float_digits(b"123.456").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(f.into_inner(), 123.456f32);
+        assert_eq!(f, b"123.456");
 
-        let (rem_int, f_int) = float_val(b"789").unwrap();
+        let (rem_int, f_int) = float_digits(b"789").unwrap();
         assert!(rem_int.is_empty());
-        assert_eq!(f_int.into_inner(), 789f32);
+        assert_eq!(f_int, b"789");
     }
     
     #[test]

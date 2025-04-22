@@ -76,4 +76,37 @@ pub(crate) fn challenge(input: &[u8]) -> ParseResult<Challenge> {
         ),
         other_challenge,
     ))(input)
-} 
+}
+
+// other-response-auth = auth-param *(COMMA auth-param)
+fn other_response_auth(input: &[u8]) -> ParseResult<Vec<Param>> {
+    comma_separated_list1(auth_param)(input)
+}
+
+// quoted-string from RFC 2616, Section 2.2
+// quoted-pair = "\\" CHAR
+fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
+    recognize(pair(tag(b"\\"), take(1usize)))(input) // Take any 1 byte after \
+}
+
+// qdtext = <any TEXT except <"> >
+fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while1(|c| c != b'"' && c != b'\r' && c != b'\n')(input) // Exclude " and CR/LF
+}
+
+// quoted-string = ( <"> *(qdtext / quoted-pair ) <"> )
+fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
+    delimited(
+        ldquot, 
+        recognize(many0(alt((qdtext, quoted_pair)))), 
+        rdquot
+    )(input)
+}
+
+// Convenience function for quoted string within auth params
+fn auth_quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
+     delimited(ldquot, recognize(many0(alt((token, tag(b" ".as_slice()))))), rdquot)(input) // Use b" ".as_slice()
+}
+
+// auth-param = token EQUAL ( token / quoted-string )
+// ... existing code ... 

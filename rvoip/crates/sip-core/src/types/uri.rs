@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use nom::{
     branch::alt,
@@ -63,15 +64,14 @@ impl FromStr for Scheme {
     }
 }
 
-/// Host type for SIP URIs
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Represents the host part of a URI.
+/// Can be a domain name or an IP address.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Host {
-    /// Domain name (e.g., example.com)
+    /// A domain name (e.g., "example.com").
     Domain(String),
-    /// IPv4 address (e.g., 192.168.1.1)
-    IPv4(String),
-    /// IPv6 address (e.g., 2001:db8::1)
-    IPv6(String),
+    /// An IP address (v4 or v6).
+    Address(IpAddr),
 }
 
 impl Host {
@@ -82,20 +82,19 @@ impl Host {
 
     /// Create a new host from an IPv4 address
     pub fn ipv4(ip: impl Into<String>) -> Self {
-        Host::IPv4(ip.into())
+        Host::Address(IpAddr::V4(Ipv4Addr::from_str(ip.into().as_str()).unwrap()))
     }
 
     /// Create a new host from an IPv6 address
     pub fn ipv6(ip: impl Into<String>) -> Self {
-        Host::IPv6(ip.into())
+        Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip.into().as_str()).unwrap()))
     }
 
     /// Returns this host as a string
     pub fn as_str(&self) -> &str {
         match self {
             Host::Domain(domain) => domain,
-            Host::IPv4(ip) => ip,
-            Host::IPv6(ip) => ip,
+            Host::Address(addr) => addr.to_string().as_str(),
         }
     }
 }
@@ -104,8 +103,7 @@ impl fmt::Display for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Host::Domain(domain) => write!(f, "{}", domain),
-            Host::IPv4(ip) => write!(f, "{}", ip),
-            Host::IPv6(ip) => write!(f, "[{}]", ip),
+            Host::Address(addr) => write!(f, "{}", addr),
         }
     }
 }
@@ -123,7 +121,7 @@ impl FromStr for Host {
                     message: format!("Invalid IPv6 address: {}", ip),
                 });
             }
-            Ok(Host::IPv6(ip.to_string()))
+            Ok(Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip).unwrap())))
         } else if s.chars().all(|c| c.is_ascii_digit() || c == '.') && s.contains('.') {
             // Probably an IPv4 address
             if !is_valid_ipv4(s) {
@@ -132,11 +130,29 @@ impl FromStr for Host {
                     message: format!("Invalid IPv4 address: {}", s),
                 });
             }
-            Ok(Host::IPv4(s.to_string()))
+            Ok(Host::Address(IpAddr::V4(Ipv4Addr::from_str(s).unwrap())))
         } else {
             // Domain name
             Ok(Host::Domain(s.to_string()))
         }
+    }
+}
+
+impl From<IpAddr> for Host {
+    fn from(addr: IpAddr) -> Self {
+        Host::Address(addr)
+    }
+}
+
+impl From<Ipv4Addr> for Host {
+    fn from(addr: Ipv4Addr) -> Self {
+        Host::Address(IpAddr::V4(addr))
+    }
+}
+
+impl From<Ipv6Addr> for Host {
+    fn from(addr: Ipv6Addr) -> Self {
+        Host::Address(IpAddr::V6(addr))
     }
 }
 

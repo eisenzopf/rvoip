@@ -2,11 +2,12 @@ use std::str;
 use std::str::FromStr;
 use nom::{
     branch::alt,
-    bytes::complete::{take_till, take_while_m_n},
-    character::complete::{digit1, space1},
-    combinator::{map, map_res, recognize},
+    bytes::complete::{take_till, take_while_m_n, take_till1},
+    character::complete::{digit1, space1, line_ending},
+    combinator::{map, map_res, recognize, opt, preceded},
     sequence::{tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
@@ -53,20 +54,26 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 // Status-Code = 3DIGIT
 pub(crate) fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
     map_res(
-        take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        |code_bytes| { 
-            let s = str::from_utf8(code_bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Char)))?;
-            let code_u16 = s.parse::<u16>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Digit)))?;
-            StatusCode::from_u16(code_u16)
-                 .map_err(|_| nom::Err::Failure(NomError::from_error_kind(code_bytes, ErrorKind::Verify)))
+        digit1,
+        |code_bytes: &[u8]| -> Result<StatusCode, NomError<&[u8]>> {
+            if code_bytes.len() != 3 {
+                return Err(NomError::from_error_kind(code_bytes, ErrorKind::Verify));
+            }
+            let s = str::from_utf8(code_bytes)
+                 .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Char))?;
+            let code = s.parse::<u16>()
+                .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Digit))?;
+                
+            StatusCode::from_u16(code)
+                .map_err(|_| NomError::from_error_kind(code_bytes, ErrorKind::Verify))
         }
     )(input)
 }
 
-// Reason-Phrase = *(any char except CR or LF)
-// Returns as &[u8] initially, conversion to String can happen later if needed
+// Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
+// Simplified: take bytes until CRLF
 pub(crate) fn reason_phrase(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
+    recognize(take_till1(|c| c == b'\r' || c == b'\n'))(input)
 }
 
 // Status-Line = SIP-Version SP Status-Code SP Reason-Phrase CRLF
@@ -76,11 +83,10 @@ pub(crate) fn parse_status_line(input: &[u8]) -> ParseResult<(Version, StatusCod
             sip_version, 
             space1, 
             status_code,
-            space1, 
-            reason_phrase,
-            crlf
+            opt(preceded(space1, reason_phrase))
         )),
-        |(version, _, status, _, reason, _)| {
+        |(version, _, status, reason_opt)| {
+            let reason = reason_opt.unwrap_or(&[]);
             Ok((version, status, reason))
         }
     )(input)

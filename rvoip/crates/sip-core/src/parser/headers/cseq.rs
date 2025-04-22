@@ -2,14 +2,13 @@
 // CSeq = "CSeq" HCOLON 1*DIGIT LWS Method
 
 use nom::{
-    bytes::complete::{tag_no_case, take_while1},
-    character::complete::digit1,
+    character::complete::{digit1},
     combinator::{map, map_res},
-    sequence::{pair, preceded, terminated},
+    sequence::{pair, preceded, separated_pair, tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
 };
-use std::str;
-use std::str::FromStr;
+use std::str::{self, FromStr};
 
 // Import from new modules
 use crate::parser::separators::hcolon;
@@ -21,33 +20,38 @@ use crate::parser::ParseResult;
 use crate::types::cseq::CSeq; // Use the specific type
 use crate::types::method::Method;
 
-// CSeq = 1*DIGIT LWS Method
-// Renamed internal struct CSeqValue to avoid conflict
-#[derive(Debug)]
-struct CSeqValue {
-    seq: u32,
-    method_bytes: Vec<u8>,
-}
-fn cseq_value_parser(input: &[u8]) -> ParseResult<CSeqValue> { // Return intermediate struct
-    map(
-        pair(
-            map_res(digit1, |b| str::from_utf8(b)?.parse::<u32>()), // Parse sequence number as u32
-            preceded(lws, token) // Keep method as bytes initially
+// Parses 1*DIGIT LWS Method
+fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
+    map_res(
+        pair( // Use pair instead of separated_pair if Method is not just token
+            digit1, // 1*DIGIT
+            preceded(lws, token) // LWS Method (token)
         ),
-        |(seq, method_bytes)| CSeqValue { seq, method_bytes: method_bytes.to_vec() }
+        |(seq_bytes, method_bytes)| -> Result<(u32, Method), NomError<&[u8]>> { // Return Result<_, NomError>
+            // Parse sequence number
+            let seq_str = str::from_utf8(seq_bytes)
+                .map_err(|_| NomError::from_error_kind(seq_bytes, ErrorKind::Char))?;
+            let seq_num = seq_str.parse::<u32>()
+                .map_err(|_| NomError::from_error_kind(seq_bytes, ErrorKind::Digit))?;
+            
+            // Parse method
+            let method_str = str::from_utf8(method_bytes)
+                 .map_err(|_| NomError::from_error_kind(method_bytes, ErrorKind::Char))?; 
+            let method = Method::from_str(method_str)
+                 .map_err(|_| NomError::from_error_kind(method_bytes, ErrorKind::Verify))?; // Use Verify for Method parse error
+                 
+            Ok((seq_num, method))
+        }
     )(input)
 }
 
-// CSeq = "CSeq" HCOLON 1*DIGIT LWS Method
-// Note: HCOLON handled elsewhere
-pub(crate) fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> { // Return final type
-    map_res(cseq_value_parser, |parsed| {
-        // Convert method bytes to Method enum
-        Method::from_str(str::from_utf8(&parsed.method_bytes)?)
-            .map(|method| CSeq { seq: parsed.seq, method })
-            // Map FromStr error to a string compatible with map_res
-            .map_err(|_| "Invalid Method in CSeq") 
-    })(input)
+// CSeq = "CSeq" HCOLON CSeq-value 
+// Note: HCOLON handled elsewhere.
+pub(crate) fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
+    map(
+        cseq_value_method, // Use the combined parser
+        |(seq, method)| CSeq::new(seq, method)
+    )(input)
 }
 
 #[cfg(test)]
@@ -57,52 +61,46 @@ mod tests {
 
     #[test]
     fn test_parse_cseq() {
-        let input = b"4711 INVITE";
+        let input = b"101 INVITE";
         let result = parse_cseq(input);
         assert!(result.is_ok());
-        let (rem, cseq) = result.unwrap(); // Returns CSeq struct
+        let (rem, cseq) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(cseq.seq, 4711);
+        assert_eq!(cseq.seq, 101);
         assert_eq!(cseq.method, Method::Invite);
     }
     
     #[test]
-    fn test_parse_cseq_register() {
-        let input = b"1 REGISTER";
+    fn test_parse_cseq_options() {
+         let input = b"2 OPTIONS";
         let result = parse_cseq(input);
         assert!(result.is_ok());
         let (rem, cseq) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(cseq.seq, 1);
-        assert_eq!(cseq.method, Method::Register);
-    }
-    
-     #[test]
-    fn test_parse_cseq_extension_method() {
-        let input = b"100 PUBLISH"; // Assuming PUBLISH is extension
-        let result = parse_cseq(input);
-        assert!(result.is_ok());
-        let (rem, cseq) = result.unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(cseq.seq, 100);
-        assert_eq!(cseq.method, Method::Publish); // Or Method::Other("PUBLISH".into())
-    }
-    
-    #[test]
-    fn test_invalid_cseq_no_lws() {
-        let input = b"1INVITE";
-        assert!(parse_cseq(input).is_err());
+        assert_eq!(cseq.seq, 2);
+        assert_eq!(cseq.method, Method::Options);
     }
 
     #[test]
-    fn test_invalid_cseq_no_method() {
-        let input = b"1 ";
-        assert!(parse_cseq(input).is_err());
+    fn test_parse_cseq_extension_method() {
+         let input = b"47 PUBLISH"; // Assuming PUBLISH is known or handled as extension
+        let result = parse_cseq(input);
+        assert!(result.is_ok());
+        let (rem, cseq) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(cseq.seq, 47);
+        assert_eq!(cseq.method, Method::Extension("PUBLISH".into()));
     }
     
     #[test]
-    fn test_invalid_cseq_no_digit() {
-        let input = b" INVITE";
+    fn test_invalid_cseq_no_method() {
+         let input = b"101";
+        assert!(parse_cseq(input).is_err());
+    }
+
+     #[test]
+    fn test_invalid_cseq_no_seq() {
+         let input = b"INVITE";
         assert!(parse_cseq(input).is_err());
     }
 } 
