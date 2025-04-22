@@ -198,7 +198,8 @@ fn find_next_boundary<'a>(input: &'a [u8], boundary: &[u8], end_boundary: &[u8])
 }
 
 /// nom parser for a multipart body using byte slices
-fn multipart_parser<'a>(mut input: &'a [u8], boundary: &str, end_boundary: &str) -> IResult<&'a [u8], MultipartBody> {
+fn multipart_parser<'a>(mut input: &'a [u8], boundary: String, end_boundary: String) -> IResult<&'a [u8], MultipartBody> {
+    // Use as_bytes() on owned Strings
     let boundary_bytes = boundary.as_bytes();
     let end_boundary_bytes = end_boundary.as_bytes();
 
@@ -278,8 +279,8 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
     let full_boundary = format!("--{}", boundary);
     let end_boundary = format!("--{}--", boundary);
     
-    // Call the internal nom parser
-    match all_consuming(|i| multipart_parser(i, &full_boundary, &end_boundary))(content) {
+    // Call the internal nom parser, passing owned Strings to the closure
+    match all_consuming(|i| multipart_parser(i, full_boundary.clone(), end_boundary.clone()))(content) {
         Ok((_, body)) => Ok(body),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = content.len() - e.input.len(); // Calculate offset

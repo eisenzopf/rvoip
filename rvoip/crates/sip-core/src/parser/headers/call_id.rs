@@ -27,9 +27,9 @@ pub(crate) fn callid(input: &[u8]) -> ParseResult<String> {
             let s1 = str::from_utf8(word1)?;
             if let Some(word2) = opt_word2 {
                 let s2 = str::from_utf8(word2)?;
-                Ok(format!("{}@{}", s1, s2))
+                Ok::<String, std::str::Utf8Error>(format!("{}@{}", s1, s2))
             } else {
-                Ok(s1.to_string())
+                Ok::<String, std::str::Utf8Error>(s1.to_string())
             }
         }
     )(input)

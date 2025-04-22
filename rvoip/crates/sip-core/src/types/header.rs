@@ -12,27 +12,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::types::param::Param;
 use crate::types::uri::Uri; // Import Uri
-use crate::types::contact::ContactValue as TypesContactValue; // Import type directly
-
-use crate::parser::headers::{
-    via::ViaEntry, 
-    from::FromHeaderValue,
-    to::ToHeaderValue,
-    route::RouteEntry,
-    record_route::RecordRouteEntry,
-    cseq::CSeqValue,
-    content_type::ContentTypeValue,
-    accept::AcceptValue,
-    accept_encoding::AcceptEncodingValue,
-    accept_language::AcceptLanguageValue,
-    content_disposition::ContentDispositionValue,
-    alert_info::AlertInfoValue,
-    call_info::CallInfoValue,
-    error_info::ErrorInfoValue,
-    warning::WarningValue,
-    retry_after::RetryAfterValue,
-    reply_to::ReplyToValue,
-};
+use crate::types::contact::Contact;
+use crate::types::from::From;
+use crate::types::to::To;
+use crate::types::route::Route;
+use crate::types::record_route::RecordRoute;
+use crate::types::via::Via;
+use crate::types::cseq::CSeq;
+use crate::types::call_id::CallId;
+use crate::types::content_length::ContentLength;
+use crate::types::content_type::ContentType;
+use crate::types::expires::Expires;
+use crate::types::max_forwards::MaxForwards;
+use crate::types::allow::Allow;
+use crate::types::accept::Accept;
+use crate::types::auth::{Authorization, WwwAuthenticate, ProxyAuthenticate, ProxyAuthorization, AuthenticationInfo};
+use crate::types::reply_to::ReplyTo;
+use crate::types::warning::Warning;
+use crate::types::content_disposition::ContentDisposition;
+use crate::types::method::Method; // Needed for Allow parsing
+use crate::parser::headers::content_type::parse_content_type_value;
+use crate::types::contact::ContactValue as TypesContactValue; // Renamed to avoid conflict
 
 /// Common SIP header names
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -424,18 +424,18 @@ impl fmt::Display for Header {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // Add Serialize, Deserialize
 pub enum TypedHeader {
     // Core Headers (Examples)
-    Via(types::Via),
-    From(types::From),
-    To(types::to::To),
-    Contact(types::Contact),
-    CallId(types::CallId),
-    CSeq(types::CSeq),
-    Route(types::route::Route),
-    RecordRoute(types::record_route::RecordRoute),
-    MaxForwards(types::MaxForwards),
-    ContentType(types::ContentType),
-    ContentLength(types::ContentLength),
-    Expires(types::Expires),
+    Via(types::Via), // Use types::Via
+    From(types::From), // Use types::From
+    To(types::To), // Use types::To
+    Contact(types::Contact), // Use types::Contact
+    CallId(types::CallId), // Use types::CallId
+    CSeq(types::CSeq), // Use types::CSeq
+    Route(types::Route), // Use types::Route
+    RecordRoute(types::RecordRoute), // Use types::RecordRoute
+    MaxForwards(types::MaxForwards), // Use types::MaxForwards
+    ContentType(types::ContentType), // Use types::ContentType
+    ContentLength(types::ContentLength), // Use types::ContentLength
+    Expires(types::Expires), // Use types::Expires
 
     // Auth Headers
     Authorization(types::auth::Authorization),
@@ -445,35 +445,37 @@ pub enum TypedHeader {
     AuthenticationInfo(types::auth::AuthenticationInfo),
 
     // Add other typed headers here as they are defined...
-    Accept(types::Accept),
-    Allow(types::Allow),
-    ReplyTo(types::reply_to::ReplyTo),
-    Warning(types::Warning),
-    ContentDisposition(types::ContentDisposition),
+    Accept(types::Accept), // Use types::Accept
+    Allow(types::Allow), // Use types::Allow
+    ReplyTo(types::ReplyTo), // Use types::ReplyTo
+    Warning(types::Warning), // Use types::Warning
+    ContentDisposition(types::ContentDisposition), // Use types::ContentDisposition
 
-    // Placeholder Types (replace with actual types from types/*)
+    // Placeholder Types (replace with actual types from types/* where available)
+    // These might still need Serialize/Deserialize if not using a types::* struct
     ContentEncoding(Vec<String>),
     ContentLanguage(Vec<String>),
-    AcceptEncoding(Vec<parser::headers::accept_encoding::EncodingInfo>),
-    AcceptLanguage(Vec<parser::headers::accept_language::LanguageInfo>),
-    MinExpires(u32),
-    MimeVersion((u32, u32)),
+    AcceptEncoding(Vec<parser::headers::accept_encoding::EncodingInfo>), // Keep parser type if no types::* yet
+    AcceptLanguage(Vec<parser::headers::accept_language::LanguageInfo>), // Keep parser type if no types::* yet
+    MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
+    MimeVersion((u32, u32)), // Keep tuple if no types::* yet
     Require(Vec<String>),
     Supported(Vec<String>),
     Unsupported(Vec<String>),
     ProxyRequire(Vec<String>),
-    Date(chrono::DateTime<chrono::FixedOffset>),
-    Timestamp((ordered_float::NotNan<f32>, Option<ordered_float::NotNan<f32>>)),
+    Date(chrono::DateTime<chrono::FixedOffset>), // Keep chrono type
+    Timestamp((ordered_float::NotNan<f32>, Option<ordered_float::NotNan<f32>>)), // Keep tuple
     Organization(String),
-    Priority(types::priority::PriorityValue),
+    Priority(String), // Replace with types::priority::PriorityValue when defined
     Subject(String),
-    Server(Vec<types::server::ServerVal>),
-    UserAgent(Vec<types::server::ServerVal>),
+    Server(Vec<String>), // Replace with types::server::ServerVal when defined
+    UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
     InReplyTo(Vec<String>),
-    RetryAfter((u32, Option<String>, Vec<types::retry_after::RetryParam>)),
-    ErrorInfo(Vec<types::error_info::ErrorInfoValue>),
-    AlertInfo(Vec<parser::headers::alert_info::AlertInfoValue>),
-    CallInfo(Vec<parser::headers::call_info::CallInfoValue>),
+    RetryAfter((u32, Option<String>, Vec<types::param::Param>)), // Replace with types::retry_after::RetryAfter when defined
+    ErrorInfo(Vec<String>), // Replace with types::error_info::ErrorInfo when defined
+    AlertInfo(Vec<String>), // Replace with types::alert_info::AlertInfo when defined
+    CallInfo(Vec<String>), // Replace with types::call_info::CallInfo when defined
+
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -606,58 +608,214 @@ impl TryFrom<Header> for TypedHeader {
         // Use all_consuming to ensure the specific parser consumes the entire value
         let parse_result = match &header.name {
             // Address Headers
-            HeaderName::From => all_consuming(parser::headers::parse_from)(&value_bytes).map(|(_, v)| TypedHeader::From(v)),
-            HeaderName::To => all_consuming(parser::headers::parse_to)(&value_bytes).map(|(_, v)| TypedHeader::To(v)),
-            HeaderName::Contact => all_consuming(parser::headers::parse_contact)(&value_bytes).map(|(_, v)| TypedHeader::Contact(v)), // Assuming ContactValue is handled
-            HeaderName::ReplyTo => all_consuming(parser::headers::parse_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::ReplyTo(v)),
+            HeaderName::From => all_consuming(parser::headers::parse_from)(&value_bytes)
+                .map(|(_, v)| TypedHeader::From(types::From(v))) // Use v directly if parse_from returns Address
+                .map_err(Error::from),
+            HeaderName::To => all_consuming(parser::headers::parse_to)(&value_bytes)
+                .map(|(_, v)| TypedHeader::To(types::To(v))) // Use v directly if parse_to returns Address
+                .map_err(Error::from),
+            HeaderName::Contact => all_consuming(parser::headers::parse_contact)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Contact(types::Contact(v))) // Assuming parse_contact returns Vec<ContactValue>
+                .map_err(Error::from),
+            HeaderName::ReplyTo => all_consuming(parser::headers::parse_reply_to)(&value_bytes)
+                .map(|(_, v)| TypedHeader::ReplyTo(types::ReplyTo(v))) // Assuming parse_reply_to returns Address
+                .map_err(Error::from),
 
             // Routing Headers
-            HeaderName::Via => all_consuming(parser::headers::parse_via)(&value_bytes).map(|(_, v)| TypedHeader::Via(types::via::Via(v))), // Assuming Via type wraps Vec<ViaHeader>
-            HeaderName::Route => all_consuming(parser::headers::parse_route)(&value_bytes).map(|(_, v)| TypedHeader::Route(v)),
-            HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(&value_bytes).map(|(_, v)| TypedHeader::RecordRoute(v)),
+            HeaderName::Via => all_consuming(parser::headers::parse_via)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Via(types::Via(v))) // Assuming parse_via returns Vec<parser::headers::via::ViaHeader>
+                .map_err(Error::from),
+            HeaderName::Route => all_consuming(parser::headers::parse_route)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Route(types::Route(v))) // Assuming parse_route returns Vec<Address>
+                .map_err(Error::from),
+            HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(&value_bytes)
+                .map(|(_, v)| TypedHeader::RecordRoute(types::RecordRoute(v))) // Assuming parse_record_route returns Vec<Address>
+                .map_err(Error::from),
 
             // Dialog/Transaction IDs
-            HeaderName::CallId => all_consuming(parser::headers::parse_call_id)(&value_bytes).map(|(_, v)| TypedHeader::CallId(v)),
-            HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(&value_bytes).map(|(_, v)| TypedHeader::CSeq(v)),
-            
+            HeaderName::CallId => all_consuming(parser::headers::parse_call_id)(&value_bytes)
+                .map_res(|(local, host_opt)| -> Result<types::CallId, Error> { // Explicit Result type
+                    let local_part = String::from_utf8(local.to_vec())?;
+                    let host_part_opt = host_opt
+                        .map(|h| String::from_utf8(h.to_vec()))
+                        .transpose()?;
+                    let call_id_string = match host_part_opt {
+                        Some(host) => format!("{}@{}", local_part, host),
+                        None => local_part,
+                    };
+                    Ok(types::CallId(call_id_string)) // Construct CallId tuple struct
+                })
+                .map(|call_id| TypedHeader::CallId(call_id)) // Map CallId to TypedHeader variant
+                .map_err(Error::from), // Map the map_res error (Nom or Utf8Error via From) to Error
+
+            HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(&value_bytes)
+                .map(|(_, v)| TypedHeader::CSeq(types::CSeq(v))) // Assuming parse_cseq returns (u32, Method)
+                .map_err(Error::from),
+
             // Content Negotiation Headers
-            HeaderName::Accept => all_consuming(parser::headers::parse_accept)(&value_bytes).map(|(_, v)| TypedHeader::Accept(v)),
-            HeaderName::ContentType => all_consuming(parser::headers::parse_content_type_value)(&value_bytes).map(|(_, v)| TypedHeader::ContentType(types::ContentType(v))),
-            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes).map(|(_, v)| TypedHeader::ContentLength(types::ContentLength(v.try_into().unwrap()))),
-            HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(&value_bytes).map(|(_, v)| TypedHeader::ContentDisposition(v)),
-            HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(&value_bytes).map(|(_, v)| TypedHeader::ContentEncoding(v)), // Placeholder type
-            HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(&value_bytes).map(|(_, v)| TypedHeader::ContentLanguage(v)), // Placeholder type
-            HeaderName::AcceptEncoding => all_consuming(parser::headers::parse_accept_encoding)(&value_bytes).map(|(_, v)| TypedHeader::AcceptEncoding(v)), // Placeholder type
-            HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(&value_bytes).map(|(_, v)| TypedHeader::AcceptLanguage(v)), // Placeholder type
+            HeaderName::Accept => all_consuming(parser::headers::parse_accept)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Accept(types::Accept(v))) // Assuming parse_accept returns Vec<AcceptValue>
+                .map_err(Error::from),
+            HeaderName::ContentType => all_consuming(parse_content_type_value)(&value_bytes)
+                .map(|(_, v)| TypedHeader::ContentType(types::ContentType(v))) // Assuming parse_content_type_value returns (String, String, Vec<Param>)
+                .map_err(Error::from),
+            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes)
+                .map_err(Error::from) // Convert NomError
+                .and_then(|(_, v_u64)| {
+                    // Convert u64 to usize for types::ContentLength
+                    let length = v_u64.try_into().map_err(|_| Error::ParseError("Invalid Content-Length value (overflow)".into()))?;
+                    Ok(TypedHeader::ContentLength(types::ContentLength(length)))
+                }),
+            HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(&value_bytes)
+                .map(|(_, v)| TypedHeader::ContentDisposition(types::ContentDisposition(v))) // Assuming parser returns (String, Vec<Param>)
+                .map_err(Error::from),
+            HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(&value_bytes)
+                .map_err(Error::from)
+                .and_then(|(_, v_bytes_list)| { // Assuming parser returns Vec<Vec<u8>> or Vec<&[u8]>
+                    let strings = v_bytes_list.into_iter()
+                        .map(|bytes| String::from_utf8(bytes.to_vec()).map_err(Error::from)) // Convert each item
+                        .collect::<Result<Vec<String>>>()?;
+                    Ok(TypedHeader::ContentEncoding(strings))
+                }),
+            HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(&value_bytes)
+                .map_err(Error::from)
+                .and_then(|(_, v_bytes_list)| { // Assuming parser returns Vec<Vec<u8>> or Vec<&[u8]>
+                     let strings = v_bytes_list.into_iter()
+                        .map(|bytes| String::from_utf8(bytes.to_vec()).map_err(Error::from)) // Convert each item
+                        .collect::<Result<Vec<String>>>()?;
+                    Ok(TypedHeader::ContentLanguage(strings))
+                 }),
+            HeaderName::AcceptEncoding => all_consuming(parser::headers::parse_accept_encoding)(&value_bytes)
+                .map(|(_, v)| TypedHeader::AcceptEncoding(v)) // Keep parser type for now
+                .map_err(Error::from),
+            HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(&value_bytes)
+                .map(|(_, v)| TypedHeader::AcceptLanguage(v)) // Keep parser type for now
+                .map_err(Error::from),
 
             // Simple Value Headers
-            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes).map(|(_, v)| TypedHeader::MaxForwards(types::MaxForwards(v.try_into().unwrap()))),
-            HeaderName::Expires => all_consuming(parser::headers::parse_expires)(&value_bytes).map(|(_, v)| TypedHeader::Expires(types::Expires(v))),
-            HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(&value_bytes).map(|(_, v)| TypedHeader::MinExpires(v)), // Placeholder type
-            HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(&value_bytes).map(|(_, v)| TypedHeader::MimeVersion((v.major, v.minor))), // Use fields from Version
+            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes)
+                 .map_err(Error::from) // Convert NomError
+                 .and_then(|(_, v_u32)| { // Parser returns u32
+                    // Convert u32 to u8 for types::MaxForwards
+                    let forwards = v_u32.try_into().map_err(|_| Error::ParseError("Invalid Max-Forwards value (overflow)".into()))?;
+                    Ok(TypedHeader::MaxForwards(types::MaxForwards(forwards)))
+                 }),
+            HeaderName::Expires => all_consuming(parser::headers::parse_expires)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Expires(types::Expires(v))) // Assuming parser returns u32
+                .map_err(Error::from),
+            HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(&value_bytes)
+                .map(|(_, v)| TypedHeader::MinExpires(v)) // Keep raw u32 for now
+                .map_err(Error::from),
+            HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(&value_bytes)
+                .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into()))) // Use .into() for u8 -> u32
+                .map_err(Error::from),
 
-            // Auth Headers
-            HeaderName::WwwAuthenticate => all_consuming(parser::headers::parse_www_authenticate)(&value_bytes).map(|(_, v)| TypedHeader::WwwAuthenticate(v)),
-            HeaderName::Authorization => all_consuming(parser::headers::parse_authorization)(&value_bytes).map(|(_, v)| TypedHeader::Authorization(v)),
-            HeaderName::ProxyAuthenticate => all_consuming(parser::headers::parse_proxy_authenticate)(&value_bytes).map(|(_, v)| TypedHeader::ProxyAuthenticate(v)),
-            HeaderName::ProxyAuthorization => all_consuming(parser::headers::parse_proxy_authorization)(&value_bytes).map(|(_, v)| TypedHeader::ProxyAuthorization(v)),
-            HeaderName::AuthenticationInfo => all_consuming(parser::headers::parse_authentication_info)(&value_bytes).map(|(_, v)| TypedHeader::AuthenticationInfo(v)),
+            // Auth Headers (Assuming parsers return appropriate structs/values)
+            HeaderName::WwwAuthenticate => all_consuming(parser::headers::parse_www_authenticate)(&value_bytes)
+                .map(|(_, v)| TypedHeader::WwwAuthenticate(types::auth::WwwAuthenticate(v)))
+                .map_err(Error::from),
+            HeaderName::Authorization => all_consuming(parser::headers::parse_authorization)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Authorization(types::auth::Authorization(v)))
+                .map_err(Error::from),
+            HeaderName::ProxyAuthenticate => all_consuming(parser::headers::parse_proxy_authenticate)(&value_bytes)
+                .map(|(_, v)| TypedHeader::ProxyAuthenticate(types::auth::ProxyAuthenticate(v)))
+                .map_err(Error::from),
+            HeaderName::ProxyAuthorization => all_consuming(parser::headers::parse_proxy_authorization)(&value_bytes)
+                .map(|(_, v)| TypedHeader::ProxyAuthorization(types::auth::ProxyAuthorization(v)))
+                .map_err(Error::from),
+            HeaderName::AuthenticationInfo => all_consuming(parser::headers::parse_authentication_info)(&value_bytes)
+                .map(|(_, v)| TypedHeader::AuthenticationInfo(types::auth::AuthenticationInfo(v)))
+                .map_err(Error::from),
 
             // Token List Headers
-            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes).map(|(_, v)| TypedHeader::Allow(types::allow::Allow(v))),
-            HeaderName::Require => all_consuming(parser::headers::parse_require)(&value_bytes).map(|(_, v)| TypedHeader::Require(v)), // Placeholder type
-            HeaderName::Supported => all_consuming(parser::headers::parse_supported)(&value_bytes).map(|(_, v)| TypedHeader::Supported(v)), // Placeholder type
-            HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(&value_bytes).map(|(_, v)| TypedHeader::Unsupported(v)), // Placeholder type
-            HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(&value_bytes).map(|(_, v)| TypedHeader::ProxyRequire(v)), // Placeholder type
+            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes)
+                .map_err(Error::from)
+                .and_then(|(_, method_bytes_list)| { // This is Vec<&[u8]> or similar
+                    let methods = method_bytes_list.into_iter()
+                        .map(|m_bytes| {
+                             // Convert bytes to &str before parsing Method
+                             let method_str = std::str::from_utf8(m_bytes)?;
+                             Method::from_str(method_str)
+                                .map_err(|_| Error::ParseError(format!("Invalid Allow method: {}", method_str)))
+                        })
+                        .collect::<Result<Vec<Method>>>()?;
+                    Ok(TypedHeader::Allow(types::Allow(methods)))
+                }),
+            HeaderName::Require => all_consuming(parser::headers::parse_require)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes_list)| { // Assuming Vec<&[u8]> or similar
+                     let strings = v_bytes_list.into_iter()
+                         .map(|b| String::from_utf8(b.to_vec()).map_err(Error::from))
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::Require(strings))
+                 }),
+            HeaderName::Supported => all_consuming(parser::headers::parse_supported)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes_list)| {
+                     let strings = v_bytes_list.into_iter()
+                         .map(|b| String::from_utf8(b.to_vec()).map_err(Error::from))
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::Supported(strings))
+                 }),
+            HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes_list)| {
+                     let strings = v_bytes_list.into_iter()
+                         .map(|b| String::from_utf8(b.to_vec()).map_err(Error::from))
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::Unsupported(strings))
+                 }),
+            HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes_list)| {
+                     let strings = v_bytes_list.into_iter()
+                         .map(|b| String::from_utf8(b.to_vec()).map_err(Error::from))
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::ProxyRequire(strings))
+                 }),
 
             // Miscellaneous Headers
-            HeaderName::Date => all_consuming(parser::headers::parse_date)(&value_bytes).map(|(_, v)| TypedHeader::Date(v)), // Placeholder type
-            HeaderName::Timestamp => all_consuming(parser::headers::parse_timestamp)(&value_bytes).map(|(_, v)| TypedHeader::Timestamp(v)), // Placeholder type
-            HeaderName::Organization => all_consuming(parser::headers::parse_organization)(&value_bytes).map(|(_, v)| TypedHeader::Organization(v)), // Placeholder type
-            HeaderName::Priority => all_consuming(parser::headers::parse_priority)(&value_bytes).map(|(_, v)| TypedHeader::Priority(v)), // Placeholder type
-            HeaderName::Subject => all_consuming(parser::headers::parse_subject)(&value_bytes).map(|(_, v)| TypedHeader::Subject(v)), // Placeholder type
-            HeaderName::Server => all_consuming(parser::headers::parse_server)(&value_bytes).map(|(_, v)| TypedHeader::Server(v)), // Placeholder type
-            HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(&value_bytes).map(|(_, v)| TypedHeader::UserAgent(v)), // Placeholder type
+            HeaderName::Date => all_consuming(parser::headers::parse_date)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Date(v))
+                .map_err(Error::from),
+            HeaderName::Timestamp => all_consuming(parser::headers::parse_timestamp)(&value_bytes)
+                .map(|(_, v)| TypedHeader::Timestamp(v))
+                .map_err(Error::from),
+            HeaderName::Organization => all_consuming(parser::headers::parse_organization)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_vec())?))), // Use to_vec() and ?
+            HeaderName::Priority => all_consuming(parser::headers::parse_priority)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Priority(String::from_utf8(v_bytes.to_vec())?))), // Use to_vec() and ?
+            HeaderName::Subject => all_consuming(parser::headers::parse_subject)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_vec())?))), // Use to_vec() and ?
+            HeaderName::Server => all_consuming(parser::headers::parse_server)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_list)| { // v_list = Vec<(Option<(&[u8], Option<&[u8]>)>, Option<&[u8]>)>)
+                     let strings = v_list.into_iter()
+                         .map(|(prod_opt, comment_opt)| {
+                             // Use String::from_utf8_lossy for potentially non-UTF8 comments/products
+                             let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
+                             let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
+                             Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
+                         })
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::Server(strings))
+                 }),
+            HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(&value_bytes)
+                 .map_err(Error::from)
+                  .and_then(|(_, v_list)| { // v_list = Vec<(Option<(&[u8], Option<&[u8]>)>, Option<&[u8]>)>)
+                     let strings = v_list.into_iter()
+                         .map(|(prod_opt, comment_opt)| {
+                             // Use String::from_utf8_lossy
+                             let prod_str = prod_opt.map(|(p, v_opt)| format!("{}{}", String::from_utf8_lossy(p), v_opt.map(|v| format!("/{}", String::from_utf8_lossy(v))).unwrap_or_default())).unwrap_or_default();
+                             let comment_str = comment_opt.map(|c| format!(" ({})", String::from_utf8_lossy(c))).unwrap_or_default();
+                             Ok(format!("{}{}", prod_str, comment_str).trim().to_string())
+                         })
+                         .collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::UserAgent(strings))
+                 }),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes)
                 .map_err(Error::from)
                 .and_then(|(_, v)| { // v is Vec<(&[u8], Option<&[u8]>)> 
@@ -666,42 +824,76 @@ impl TryFrom<Header> for TypedHeader {
                             let local_part = String::from_utf8(local_bytes.to_vec())?;
                             let host_part = host_bytes_opt
                                 .map(|h_bytes| String::from_utf8(h_bytes.to_vec()))
-                                .transpose()?; // Option<Result<String>> -> Result<Option<String>>
+                                .transpose()?;
                             match host_part {
                                 Some(host) => Ok(format!("{}@{}", local_part, host)),
                                 None => Ok(local_part),
                             }
                         })
-                        .collect::<Result<Vec<String>, Error>>()?; // Collect results into Vec<String>
+                        .collect::<Result<Vec<String>>>()?;
                     Ok(TypedHeader::InReplyTo(strings))
                 }),
-            HeaderName::Warning => {
-                all_consuming(parser::headers::parse_warning)(&value_bytes)
-                    .map_err(Error::from) // Convert Nom error first
-                    .and_then(|(_, v)| { // v = (code, agent_bytes, text_bytes)
-                        let (code, agent_bytes, text_bytes) = v;
-                        // Parse agent URI using the dedicated parser
-                        let (_, agent_uri) = all_consuming(parser::uri::parse_uri)(agent_bytes)
-                            .map_err(|e| Error::ParseError(format!("Failed to parse agent URI in Warning: {:?}", e)))?;
-                        // Convert text bytes to String
-                        let text = String::from_utf8(text_bytes.to_vec())?; // Implicit FromUtf8Error -> Error::from
-                        Ok(TypedHeader::Warning(types::Warning { code, agent: agent_uri, text }))
-                    })
+             HeaderName::Warning => {
+                 all_consuming(parser::headers::parse_warning)(&value_bytes)
+                     .map_err(Error::from) // Convert Nom error first
+                     .and_then(|(_, v)| { // v = Vec<(u16, &[u8], &[u8])>
+                         let warnings = v.into_iter().map(|(code, agent_bytes, text_bytes)| {
+                             let (_, agent_uri) = all_consuming(parser::uri::parse_uri)(agent_bytes)
+                                 .map_err(|e| Error::ParseError(format!("Failed to parse agent URI in Warning: {:?}", e)))?;
+                             let text = String::from_utf8(text_bytes.to_vec())?;
+                             Ok(types::Warning { code, agent: agent_uri, text })
+                         }).collect::<Result<Vec<types::Warning>>>()?;
+                         Ok(TypedHeader::Warning(warnings))
+                     })
+             },
+            HeaderName::RetryAfter => {
+                all_consuming(parser::headers::parse_retry_after)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, (delta, comment_opt, params_vec))| {
+                     let comment = comment_opt.map(|c| String::from_utf8(c.to_vec())).transpose()?;
+                     let params = params_vec.into_iter().map(types::Param::try_from).collect::<Result<Vec<types::Param>>>()?;
+                     Ok(TypedHeader::RetryAfter((delta, comment, params)))
+                 })
             },
-            HeaderName::RetryAfter => all_consuming(parser::headers::parse_retry_after)(&value_bytes).map(|(_, v)| TypedHeader::RetryAfter(v)), // Placeholder type
-            HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(&value_bytes).map(|(_, v)| TypedHeader::ErrorInfo(v)), // Placeholder type
-            HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(&value_bytes).map(|(_, v)| TypedHeader::AlertInfo(v)), // Placeholder type
-            HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(&value_bytes).map(|(_, v)| TypedHeader::CallInfo(v)), // Placeholder type
-            
+            HeaderName::ErrorInfo => {
+                all_consuming(parser::headers::parse_error_info)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_uris)| { // v_uris = Vec<Uri>
+                     let strings = v_uris.into_iter().map(|uri| Ok(uri.to_string())).collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::ErrorInfo(strings))
+                 })
+            },
+            HeaderName::AlertInfo => {
+                all_consuming(parser::headers::parse_alert_info)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_alert_values)| { // v_alert_values = Vec<(Uri, Vec<Param>)>)
+                     let strings = v_alert_values.into_iter().map(|(uri, _params)| Ok(uri.to_string())).collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::AlertInfo(strings))
+                 })
+            },
+            HeaderName::CallInfo => {
+                all_consuming(parser::headers::parse_call_info)(&value_bytes)
+                 .map_err(Error::from)
+                 .and_then(|(_, v_call_values)| { // v_call_values = Vec<(Uri, Vec<Param>)>)
+                     let strings = v_call_values.into_iter().map(|(uri, _params)| Ok(uri.to_string())).collect::<Result<Vec<String>>>()?;
+                     Ok(TypedHeader::CallInfo(strings))
+                 })
+            },
+
             // Fallback for Other/Unimplemented
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes))), // Return Raw if unknown
         };
         
         // Map nom error to crate::Error
         parse_result.map_err(|e| {
-            Error::ParseError(
-                format!("Failed to parse header '{:?}' value: {:?}", header.name, e)
-            )
+            // If the error is already a crate::Error, return it directly
+            if let Ok(crate_err) = e.downcast::<Error>() {
+                 *crate_err
+             } else {
+                 Error::ParseError(
+                     format!("Failed to parse header '{:?}' value: {:?}", header.name, e)
+                 )
+             }
         })
     }
 }

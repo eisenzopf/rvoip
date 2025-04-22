@@ -8,7 +8,7 @@ use std::ops::Deref;
 use crate::types::param::Param;
 use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
-use crate::parser::headers::contact::ContactValue;
+use crate::types::contact::ContactValue;
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.
@@ -68,21 +68,27 @@ impl Contact {
     }
 
     /// Gets all addresses from the Params variant.
-    /// Returns None for wildcard contacts.
-    pub fn addresses(&self) -> Option<impl Iterator<Item = &Address>> {
-        Some(self.0.iter().flat_map(|value| match value {
-            ContactValue::Params(params) => Some(params.iter().map(|cp| &cp.address)),
-            ContactValue::Star => None,
-        }))
+    /// Returns an empty iterator for wildcard contacts or empty lists.
+    pub fn addresses(&self) -> impl Iterator<Item = &Address> {
+        // Use Box to erase the specific Map type from each arm
+        self.0.iter().flat_map(|value| -> Box<dyn Iterator<Item = &Address>> { 
+            match value {
+                ContactValue::Params(params) => Box::new(params.iter().map(|cp| &cp.address)),
+                ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty for efficiency
+            }
+        })
     }
     
      /// Gets mutable references to all addresses from the Params variant.
-    /// Returns None for wildcard contacts.
-    pub fn addresses_mut(&mut self) -> Option<impl Iterator<Item = &mut Address>> {
-        Some(self.0.iter_mut().flat_map(|value| match value {
-            ContactValue::Params(params) => Some(params.iter_mut().map(|cp| &mut cp.address)),
-            ContactValue::Star => None,
-        }))
+    /// Returns an empty iterator for wildcard contacts or empty lists.
+    pub fn addresses_mut(&mut self) -> impl Iterator<Item = &mut Address> {
+        // Use Box to erase the specific Map type from each arm
+        self.0.iter_mut().flat_map(|value| -> Box<dyn Iterator<Item = &mut Address>> { 
+            match value {
+                ContactValue::Params(params) => Box::new(params.iter_mut().map(|cp| &mut cp.address)),
+                ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty
+            }
+        })
     }
 
     /// Gets the expires parameter value from the *first* contact, if present.
@@ -193,12 +199,11 @@ impl FromStr for Contact {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
         use nom::combinator::all_consuming;
-        // Use the actual parser function which returns ContactValue
+        // The parser `parse_contact` correctly returns Vec<ContactValue>
         match all_consuming(crate::parser::headers::contact::parse_contact)(s.as_bytes()) {
-            Ok((_, value)) => Ok(Contact(value)), // Wrap the parsed ContactValue
-            Err(e) => Err(crate::error::Error::ParseError( // Use tuple variant syntax
-                format!("Failed to parse Contact header: {:?}", e)
-            ))
+             // Ensure the parsed value is wrapped correctly based on Contact definition
+            Ok((_, value)) => Ok(Contact(value)), // Assuming parse_contact returns Vec<ContactValue>
+            Err(e) => Err(crate::error::Error::from(e)), // Use From trait
         }
     }
 }

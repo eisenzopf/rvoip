@@ -9,6 +9,7 @@ use nom::{
     multi::{many0, separated_list1},
     sequence::{pair, preceded},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 
 // Import from base parser modules
@@ -43,10 +44,12 @@ fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
              let display_name = dn_bytes_opt
                 .map(|b| std::str::from_utf8(b).map(|s| s.to_string()))
                 .transpose()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; // Added error mapping
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; // Correct error mapping
 
-            // Return Address directly (Result type is now compatible)
-            Ok::<_, nom::Err<NomError<&[u8]>>>(Address { display_name, uri, params })
+            // Return Address directly, ensuring the Ok variant matches the map_res expectation
+            // The error type E in Result<O, E> for map_res needs to be convertible From<Utf8Error>
+            // We handle Utf8Error above, so we just need to return Ok(Address)
+            Ok(Address { display_name, uri, params })
         }
     )(input)
 }

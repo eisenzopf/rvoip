@@ -54,8 +54,10 @@ pub(crate) fn generic_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         pair(token, opt(preceded(equal, gen_value))),
         |(name_b, val_opt)| {
-            let name = str::from_utf8(name_b)?.to_string();
-            Ok::<Param, nom::Err<nom::error::Error<&[u8]>>>(Param::Other(name, val_opt))
+            let name = str::from_utf8(name_b)
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(name_b, ErrorKind::Char)))?
+                .to_string();
+            Ok::<_, nom::Err<NomError<&[u8]>>>(Param::Other(name, val_opt))
         }
     )(input)
 }

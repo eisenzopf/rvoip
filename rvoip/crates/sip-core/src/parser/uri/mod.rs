@@ -49,7 +49,7 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
         recognize(
             tuple((
                 bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, bytes::tag(b"@"))),
+                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
@@ -58,7 +58,7 @@ pub(crate) fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
         |bytes_slice| {
             let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
                 bytes::tag(b"sip:".as_slice()),
-                opt(pair(userinfo, bytes::tag(b"@"))),
+                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
@@ -91,7 +91,7 @@ pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
         recognize(
             tuple((
                 bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, bytes::tag(b"@"))),
+                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),
@@ -100,7 +100,7 @@ pub(crate) fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
         |bytes_slice| {
              let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
                 bytes::tag(b"sips:".as_slice()),
-                opt(pair(userinfo, bytes::tag(b"@"))),
+                opt(pair(userinfo, bytes::tag("@".as_bytes()))),
                 hostport,
                 opt(uri_parameters),
                 opt(uri_headers),

@@ -234,4 +234,11 @@ impl<'a> From<NomError<&'a [u8]>> for Error {
     fn from(err: NomError<&'a [u8]>) -> Self {
         Error::ParseError(format!("Nom error detail: {:?}", err))
     }
+}
+
+// Add conversion from ParseIntError
+impl From<std::num::ParseIntError> for Error {
+    fn from(err: std::num::ParseIntError) -> Self {
+        Error::ParseError(format!("Failed to parse integer: {}", err))
+    }
 } 

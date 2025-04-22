@@ -67,18 +67,18 @@ impl Via {
     }
 
     /// Get the first value associated with a parameter name from the first Via entry (case-insensitive for key).
-    pub fn get(&self, name: &str) -> Option<Option<&str>> {
+    pub fn get(&self, name: &str) -> Option<Option<String>> {
         self.0.first().and_then(|v| {
              v.params.iter().find_map(|p| match p {
                  Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
-                    Some(value.as_ref().and_then(|gv| gv.as_str()))
+                    Some(value.as_ref().and_then(|gv| gv.as_string()))
                  },
                  // Add cases for known params if needed (e.g., Branch, Tag, etc.)
-                 Param::Branch(val) if "branch".eq_ignore_ascii_case(name) => Some(Some(val.as_str())),
-                 Param::Received(val) if "received".eq_ignore_ascii_case(name) => Some(Some(val.to_string().as_str())), // Needs conversion
-                 Param::Maddr(val) if "maddr".eq_ignore_ascii_case(name) => Some(Some(val.as_str())),
-                 Param::Ttl(val) if "ttl".eq_ignore_ascii_case(name) => Some(Some(val.to_string().as_str())), // Needs conversion
-                 // Add more known params...
+                 Param::Branch(val) if "branch".eq_ignore_ascii_case(name) => Some(Some(val.to_string())),
+                 Param::Received(val) if "received".eq_ignore_ascii_case(name) => Some(Some(val.to_string())), // Return owned String
+                 Param::Maddr(val) if "maddr".eq_ignore_ascii_case(name) => Some(Some(val.to_string())),
+                 Param::Ttl(val) if "ttl".eq_ignore_ascii_case(name) => Some(Some(val.to_string())), // Return owned String
+                 Param::Lr if "lr".eq_ignore_ascii_case(name) => Some(None), // Flag parameter has no value
                  _ => None,
              })
         })

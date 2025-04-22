@@ -4,6 +4,7 @@ use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
+use crate::parser::headers::cseq::parse_cseq;
 use serde::{Serialize, Deserialize};
 
 /// Represents the CSeq header field (RFC 3261 Section 8.1.1.5).
