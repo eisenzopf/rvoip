@@ -54,7 +54,7 @@ mod media_type;
 
 // Re-export public parser functions
 pub use via::parse_via;
-pub use contact::contact::parse_contact;
+pub use contact::parse_contact;
 pub use from::parse_from;
 pub use to::parse_to;
 pub use route::parse_route;

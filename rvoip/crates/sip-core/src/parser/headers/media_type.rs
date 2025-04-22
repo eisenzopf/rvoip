@@ -17,7 +17,6 @@ use crate::parser::separators::{slash, semi, equal};
 use crate::parser::quoted::quoted_string;
 use crate::parser::ParseResult;
 use crate::parser::common_params::unquote_string; // Re-use unquoting logic
-use crate::parser::error::Error; // For unquote error
 use crate::types::media_type::MediaType; // Import the actual type
 
 // m-attribute = token
