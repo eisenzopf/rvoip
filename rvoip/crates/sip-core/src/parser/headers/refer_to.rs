@@ -62,7 +62,7 @@ pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::{AddressSpec, NameAddr};
+    use crate::types::address::Address;
     use crate::types::param::{Param, GenericValue};
     use std::collections::HashMap;
 

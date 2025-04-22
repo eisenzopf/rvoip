@@ -30,6 +30,7 @@ use std::str;
 use crate::error::{Error, Result};
 use crate::types::{Header, TypedHeader, HeaderName, HeaderValue};
 use std::str::FromStr;
+use crate::types::uri::Host;
 
 /// Maximum length of a single line in a SIP message
 pub const MAX_LINE_LENGTH: usize = 4096;
@@ -184,7 +185,7 @@ fn message_header(input: &[u8]) -> ParseResult<Header> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use crate::uri::Host;
+    use crate::types::uri::Host;
     use crate::types::{Request, Response, CSeq, HeaderName, HeaderValue, Method, Version};
     use std::collections::HashMap;
 
