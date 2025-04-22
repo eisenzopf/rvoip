@@ -74,7 +74,7 @@ impl FromStr for Priority {
             // Try to parse as a number for extensions
             _ => match s.parse::<u8>() {
                 Ok(val) => Ok(Self::Other(val)),
-                Err(_) => Err(Error::InvalidValue("Invalid Priority value".to_string())),
+                Err(_) => Err(Error::InvalidInput("Invalid Priority value".to_string())),
             },
         }
     }

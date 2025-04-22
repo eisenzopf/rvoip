@@ -838,7 +838,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::ContentDisposition => {
                 match all_consuming(parser::headers::content_disposition::parse_content_disposition)(value_bytes) {
                     Ok((_, (disp_type_bytes, params_vec))) => {
-                        let disp_type_str = String::from_utf8(disp_type_bytes.to_vec())?;
+                        let disp_type_str = String::from_utf8(disp_type_bytes.to_owned())?;
                         let disposition_type = DispositionType::from_str(&disp_type_str)?;
                         let typed_params = params_vec;
                         Ok(TypedHeader::ContentDisposition(ContentDisposition { disposition_type, params: typed_params }))
@@ -850,7 +850,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from)
                 .and_then(|(_, v_bytes_list)| {
                     let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec()))
+                        .map(|bytes| String::from_utf8(bytes.to_owned()))
                         .collect::<std::result::Result<Vec<String>, _>>()?;
                     Ok(TypedHeader::ContentEncoding(strings))
                 }),
@@ -858,7 +858,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from)
                 .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                        .map(|bytes| String::from_utf8(bytes.to_vec()))
+                        .map(|bytes| String::from_utf8(bytes.to_owned()))
                         .collect::<std::result::Result<Vec<String>, _>>()?;
                     Ok(TypedHeader::ContentLanguage(strings))
                  }),
@@ -920,7 +920,7 @@ impl TryFrom<Header> for TypedHeader {
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
+                         .map(|b| String::from_utf8(b.to_owned()))
                          .collect::<std::result::Result<Vec<String>, _>>()?;
                      Ok(TypedHeader::Require(strings))
                  }),
@@ -928,7 +928,7 @@ impl TryFrom<Header> for TypedHeader {
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
+                         .map(|b| String::from_utf8(b.to_owned()))
                          .collect::<std::result::Result<Vec<String>, _>>()?;
                      Ok(TypedHeader::Supported(strings))
                  }),
@@ -936,7 +936,7 @@ impl TryFrom<Header> for TypedHeader {
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
+                         .map(|b| String::from_utf8(b.to_owned()))
                          .collect::<std::result::Result<Vec<String>, _>>()?;
                      Ok(TypedHeader::Unsupported(strings))
                  }),
@@ -944,7 +944,7 @@ impl TryFrom<Header> for TypedHeader {
                  .map_err(Error::from)
                  .and_then(|(_, v_bytes_list)| {
                      let strings = v_bytes_list.into_iter()
-                         .map(|b| String::from_utf8(b.to_vec()))
+                         .map(|b| String::from_utf8(b.to_owned()))
                          .collect::<std::result::Result<Vec<String>, _>>()?;
                      Ok(TypedHeader::ProxyRequire(strings))
                  }),
@@ -958,13 +958,13 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from),
             HeaderName::Organization => all_consuming(parser::headers::parse_organization)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_vec())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_owned())?))),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Priority(String::from_utf8(v_bytes.to_vec())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Priority(String::from_utf8(v_bytes.to_owned())?))),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_vec())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_owned())?))),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_list)| {
@@ -994,9 +994,9 @@ impl TryFrom<Header> for TypedHeader {
                 .and_then(|(_, v)| {
                     let strings = v.into_iter()
                         .map(|(local_bytes, host_bytes_opt)| {
-                            let local_part = String::from_utf8(local_bytes.to_vec())?;
+                            let local_part = String::from_utf8(local_bytes.to_owned())?;
                             let host_part = host_bytes_opt
-                                .map(|h_bytes| String::from_utf8(h_bytes.to_vec()))
+                                .map(|h_bytes| String::from_utf8(h_bytes.to_owned()))
                                 .transpose()?;
                             match host_part {
                                 Some(host) => Ok(format!("{}@{}", local_part, host)),

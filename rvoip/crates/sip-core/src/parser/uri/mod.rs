@@ -24,9 +24,9 @@ pub use absolute::parse_absolute_uri;
 // Add imports for combinators and types
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::{tag, tag_no_case, take_while},
     character::complete::{char, digit1, one_of},
-    combinator::{map, map_res, opt, recognize, value, verify},
+    combinator::{map, map_res, opt, recognize, value, verify, all_consuming, eof},
     error::{Error as NomError, ErrorKind},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -44,95 +44,79 @@ use crate::error::Error;
 use authority::parse_authority;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
-pub fn parse_sip_uri(input: &[u8]) -> ParseResult<Uri> {
-    map_res(
-        recognize(
-            tuple((
-                tag(b"sip:"),
-                opt(pair(userinfo, tag(b"@"))),
-                hostport,
-                opt(uri_parameters),
-                opt(uri_headers),
-            ))
-        ),
-        |bytes_slice| {
-            let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
-                tag(b"sip:"),
-                opt(pair(userinfo, tag(b"@"))),
-                hostport,
-                opt(uri_parameters),
-                opt(uri_headers),
-            ))(bytes_slice).map_err(|e| Error::Parser(format!("Failed to parse URI: {:?}", e)))?;
+pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
+    let bytes_slice = bytes;
+    let res = all_consuming(delimited(
+        tag_no_case(b"sip:"),
+        tuple((
+            opt(userinfo),
+            hostport,
+            opt(uri_parameters),
+            opt(uri_headers),
+        )),
+        eof,
+    ))(bytes_slice);
 
-            if !rem.is_empty() {
-                 return Err(NomError::new(rem, ErrorKind::Verify));
-            }
+    match res {
+        Ok((remaining, (user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
+            // user_info is already (String, Option<String>)
+            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
             
-            let (user, password) = user_opt
-                .map(|(user_info, _)| (Some(user_info.0), user_info.1))
-                .unwrap_or((None, None));
-
-            // No need to convert byte slices since userinfo already returns strings
-            let user_str = user;
-            let password_str = password;
-
-            Ok(Uri {
+            let uri = Uri {
                 scheme: Scheme::Sip,
-                user: user_str,
-                password: password_str,
+                user: if user.is_empty() { None } else { Some(user) },
+                password,
                 host,
-                port,
+                port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
-            })
+            };
+            
+            Ok((remaining, uri))
         }
-    )(input)
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+            Err(nom::Err::Error(e))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
-pub fn parse_sips_uri(input: &[u8]) -> ParseResult<Uri> {
-     map_res(
-        recognize(
-            tuple((
-                tag(b"sips:"),
-                opt(pair(userinfo, tag(b"@"))),
-                hostport,
-                opt(uri_parameters),
-                opt(uri_headers),
-            ))
-        ),
-        |bytes_slice| {
-             let (rem, (_, user_opt, (host, port), params_opt, headers_opt)) = tuple((
-                tag(b"sips:"),
-                opt(pair(userinfo, tag(b"@"))),
-                hostport,
-                opt(uri_parameters),
-                opt(uri_headers),
-            ))(bytes_slice).map_err(|e| Error::Parser(format!("Failed to parse URI: {:?}", e)))?;
+pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
+    let bytes_slice = bytes;
+    let res = all_consuming(delimited(
+        tag_no_case(b"sips:"),
+        tuple((
+            opt(userinfo),
+            hostport,
+            opt(uri_parameters),
+            opt(uri_headers),
+        )),
+        eof,
+    ))(bytes_slice);
 
-            if !rem.is_empty() {
-                 return Err(NomError::new(rem, ErrorKind::Verify));
-            }
-
-            let (user, password) = user_opt
-                .map(|(user_info, _)| (Some(user_info.0), user_info.1))
-                .unwrap_or((None, None));
-                
-            // No need to convert byte slices since userinfo already returns strings
-            let user_str = user;
-            let password_str = password;
-
-            Ok(Uri {
+    match res {
+        Ok((remaining, (user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
+            // user_info is already (String, Option<String>)
+            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
+            
+            let uri = Uri {
                 scheme: Scheme::Sips,
-                user: user_str,
-                password: password_str,
+                user: if user.is_empty() { None } else { Some(user) },
+                password,
                 host,
-                port,
+                port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
-            })
+            };
+            
+            Ok((remaining, uri))
         }
-    )(input)
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+            Err(nom::Err::Error(e))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Public entry point for parsing a SIP or SIPS URI

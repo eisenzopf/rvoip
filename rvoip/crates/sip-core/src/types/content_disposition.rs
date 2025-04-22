@@ -29,6 +29,20 @@ impl fmt::Display for DispositionType {
     }
 }
 
+impl FromStr for DispositionType {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "session" => Ok(DispositionType::Session),
+            "render" => Ok(DispositionType::Render),
+            "icon" => Ok(DispositionType::Icon),
+            "alert" => Ok(DispositionType::Alert),
+            _ => Ok(DispositionType::Other(s.to_string())),
+        }
+    }
+}
+
 /// Typed Content-Disposition header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentDisposition {
@@ -61,7 +75,7 @@ impl FromStr for ContentDisposition {
         all_consuming(parse_content_disposition)(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
-                let disp_type_str = String::from_utf8(dtype_bytes.to_vec())?;
+                let disp_type_str = String::from_utf8(dtype_bytes.to_owned())?;
                 let disp_type = match disp_type_str.to_lowercase().as_str() {
                     "session" => DispositionType::Session,
                     "render" => DispositionType::Render,

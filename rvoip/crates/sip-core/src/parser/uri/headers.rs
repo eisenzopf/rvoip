@@ -55,12 +55,14 @@ pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
             tag(b"?"),
             separated_list1(tag(b"&"), header)
         ),
-        |pairs| -> Result<HashMap<String, String>, Error> {
+        |pairs| -> Result<HashMap<String, String>, NomError<&[u8]>> {
             let mut map = HashMap::new();
             for (name_bytes, value_bytes) in pairs {
                 // *** Unescape name and value ***
-                let name = unescape_uri_component(name_bytes)?;
-                let value = unescape_uri_component(value_bytes)?;
+                let name = unescape_uri_component(name_bytes)
+                    .map_err(|_| NomError::new(input, ErrorKind::MapRes))?;
+                let value = unescape_uri_component(value_bytes)
+                    .map_err(|_| NomError::new(input, ErrorKind::MapRes))?;
                 map.insert(name, value);
             }
             Ok(map)
