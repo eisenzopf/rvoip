@@ -19,6 +19,7 @@ use super::quoted::{quoted_string, quoted_pair};
 use super::values::{qvalue, delta_seconds};
 use super::uri::host::host;
 use super::ParseResult;
+use super::utils::unescape_uri_component;
 use crate::types::param::{Param, GenericValue};
 use crate::types::uri::Host;
 use crate::error::Error;
@@ -28,7 +29,8 @@ use ordered_float::NotNan;
 /// Helper to unquote a quoted string (represented as bytes).
 /// Returns Ok(String) if successful, Err(Error) otherwise.
 pub(crate) fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
-    unquote_bytes(input).map_err(|_| Error::ParseError("Invalid quoted string escape sequence".to_string()))
+    unescape_uri_component(input)
+        .map_err(|e| Error::ParseError(format!("Invalid escaped sequence in parameter: {}", e)))
 }
 
 // gen-value = token / host / quoted-string
@@ -41,7 +43,7 @@ fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
         map_res(token, |bytes| {
             str::from_utf8(bytes)
                 .map(|s| GenericValue::Token(s.to_string()))
-                .map_err(|_| nom::Err::Failure(nom::error::make_error(input, nom::error::ErrorKind::Char)))
+                .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
         }),
     ))(input)
 }
@@ -53,7 +55,7 @@ pub(crate) fn generic_param(input: &[u8]) -> ParseResult<Param> {
         pair(token, opt(preceded(equal, gen_value))),
         |(name_b, val_opt)| {
             let name = str::from_utf8(name_b)?.to_string();
-            Ok(Param::Other(name, val_opt))
+            Ok::<Param, nom::Err<nom::error::Error<&[u8]>>>(Param::Other(name, val_opt))
         }
     )(input)
 }
@@ -166,6 +168,30 @@ pub(crate) fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
         map(cp_expires, Param::Expires),
         generic_param // Fallback to generic
     ))(input)
+}
+
+// Function to parse a semicolon-separated list of key-value parameters into a HashMap<String, Option<String>>
+pub(crate) fn hashmap_param_list<'a>(
+    param_parser: impl Fn(&'a [u8]) -> ParseResult<'a, (String, Option<GenericValue>)>,
+) -> impl FnMut(&'a [u8]) -> ParseResult<'a, HashMap<String, Option<String>>> {
+    map(
+        many0(preceded(semi, param_parser)),
+        |params| {
+            params.into_iter().map(|(name, value)| {
+                // Convert Option<GenericValue> to Option<String>
+                let string_value = value.map(|v| v.to_string());
+                (name, string_value)
+            }).collect()
+        }
+    )
+}
+
+// Function to parse a semicolon-separated list of Params using a specific Param parser
+// Updated to use the specific param item parser directly
+pub(crate) fn semicolon_separated_params0<'a>(
+    param_item_parser: impl Fn(&'a [u8]) -> ParseResult<'a, Param>,
+) -> impl FnMut(&'a [u8]) -> ParseResult<'a, Vec<Param>> {
+    many0(preceded(semi, param_item_parser))
 }
 
 #[cfg(test)]

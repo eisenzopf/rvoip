@@ -20,9 +20,11 @@ use std::str;
 use std::collections::HashMap;
 use crate::types::accept::Accept as AcceptHeader; // Specific header type
 use crate::types::param::Param;
+use ordered_float::NotNan;
+use serde::{Deserialize, Serialize};
 
 // Define structure for Accept header value
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct AcceptValue { // Make struct pub
     pub m_type: String,
     pub m_subtype: String,

@@ -19,9 +19,13 @@ pub(crate) type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // delta-seconds = 1*DIGIT
 pub(crate) fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
-    map_res(digit1, |s: &[u8]| {
-        str::from_utf8(s).ok().and_then(|s_str| s_str.parse::<u32>().ok())
-    })(input)
+    map_res(
+        digit1,
+        |s: &[u8]| {
+            // Wrap the Option in Ok to match the Result expected by map_res
+            Ok(str::from_utf8(s).ok().and_then(|s_str| s_str.parse::<u32>().ok()))
+        }
+    )(input)
 }
 
 // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
@@ -71,6 +75,18 @@ pub(crate) fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
         text_utf8_char,
         many0(preceded(lws, text_utf8_char)),
     ))(input)
+}
+
+// ttl = 1*3DIGIT ; 0-255
+pub(crate) fn ttl_value(input: &[u8]) -> ParseResult<u8> {
+    map_res(
+        map_res(digit1, |s: &[u8]| 
+            // Convert bytes to str, then parse u8
+            str::from_utf8(s).map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
+                .and_then(|s_str| s_str.parse::<u8>().map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::ParseTo))))
+        ),
+        |val| Ok::<u8, nom::Err<nom::error::Error<&[u8]>>>(val) // Ensure Ok type matches expected Result
+    )(input)
 }
 
 #[cfg(test)]

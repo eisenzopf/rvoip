@@ -265,7 +265,7 @@ impl FromStr for HeaderName {
 }
 
 /// Value of a SIP header, parsed into its specific structure.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HeaderValue {
     // === Address Headers ===
     Contact(TypesContactValue), // Use imported type
@@ -318,7 +318,7 @@ pub enum HeaderValue {
     Subject(Option<Vec<u8>>),
     Server(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
     UserAgent(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
-    InReplyTo(Vec<(Vec<u8>, Option<Vec<u8>>)>), // Vec<callid>
+    InReplyTo(Vec<String>),
 
     // === Authentication (Placeholders) ===
     Authorization(Vec<u8>), // Placeholder
@@ -612,7 +612,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::ReplyTo => all_consuming(parser::headers::parse_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::ReplyTo(v)),
 
             // Routing Headers
-            HeaderName::Via => all_consuming(parser::headers::parse_via)(&value_bytes).map(|(_, v)| TypedHeader::Via(v)), // Assuming Via type wraps Vec<ViaHeader>
+            HeaderName::Via => all_consuming(parser::headers::parse_via)(&value_bytes).map(|(_, v)| TypedHeader::Via(types::via::Via(v))), // Assuming Via type wraps Vec<ViaHeader>
             HeaderName::Route => all_consuming(parser::headers::parse_route)(&value_bytes).map(|(_, v)| TypedHeader::Route(v)),
             HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(&value_bytes).map(|(_, v)| TypedHeader::RecordRoute(v)),
 
@@ -622,8 +622,8 @@ impl TryFrom<Header> for TypedHeader {
             
             // Content Negotiation Headers
             HeaderName::Accept => all_consuming(parser::headers::parse_accept)(&value_bytes).map(|(_, v)| TypedHeader::Accept(v)),
-            HeaderName::ContentType => all_consuming(parser::headers::parse_content_type)(&value_bytes).map(|(_, v)| TypedHeader::ContentType(v)),
-            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes).map(|(_, v)| TypedHeader::ContentLength(types::ContentLength(v))),
+            HeaderName::ContentType => all_consuming(parser::headers::parse_content_type_value)(&value_bytes).map(|(_, v)| TypedHeader::ContentType(types::ContentType(v))),
+            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(&value_bytes).map(|(_, v)| TypedHeader::ContentLength(types::ContentLength(v.try_into().unwrap()))),
             HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(&value_bytes).map(|(_, v)| TypedHeader::ContentDisposition(v)),
             HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(&value_bytes).map(|(_, v)| TypedHeader::ContentEncoding(v)), // Placeholder type
             HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(&value_bytes).map(|(_, v)| TypedHeader::ContentLanguage(v)), // Placeholder type
@@ -631,10 +631,10 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(&value_bytes).map(|(_, v)| TypedHeader::AcceptLanguage(v)), // Placeholder type
 
             // Simple Value Headers
-            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes).map(|(_, v)| TypedHeader::MaxForwards(types::MaxForwards(v))),
+            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(&value_bytes).map(|(_, v)| TypedHeader::MaxForwards(types::MaxForwards(v.try_into().unwrap()))),
             HeaderName::Expires => all_consuming(parser::headers::parse_expires)(&value_bytes).map(|(_, v)| TypedHeader::Expires(types::Expires(v))),
             HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(&value_bytes).map(|(_, v)| TypedHeader::MinExpires(v)), // Placeholder type
-            HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(&value_bytes).map(|(_, v)| TypedHeader::MimeVersion(v)), // Placeholder type
+            HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(&value_bytes).map(|(_, v)| TypedHeader::MimeVersion((v.major, v.minor))), // Use fields from Version
 
             // Auth Headers
             HeaderName::WwwAuthenticate => all_consuming(parser::headers::parse_www_authenticate)(&value_bytes).map(|(_, v)| TypedHeader::WwwAuthenticate(v)),
@@ -644,7 +644,7 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AuthenticationInfo => all_consuming(parser::headers::parse_authentication_info)(&value_bytes).map(|(_, v)| TypedHeader::AuthenticationInfo(v)),
 
             // Token List Headers
-            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes).map(|(_, v)| TypedHeader::Allow(types::Allow(v))),
+            HeaderName::Allow => all_consuming(parser::headers::parse_allow)(&value_bytes).map(|(_, v)| TypedHeader::Allow(types::allow::Allow(v))),
             HeaderName::Require => all_consuming(parser::headers::parse_require)(&value_bytes).map(|(_, v)| TypedHeader::Require(v)), // Placeholder type
             HeaderName::Supported => all_consuming(parser::headers::parse_supported)(&value_bytes).map(|(_, v)| TypedHeader::Supported(v)), // Placeholder type
             HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(&value_bytes).map(|(_, v)| TypedHeader::Unsupported(v)), // Placeholder type
@@ -658,16 +658,36 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(&value_bytes).map(|(_, v)| TypedHeader::Subject(v)), // Placeholder type
             HeaderName::Server => all_consuming(parser::headers::parse_server)(&value_bytes).map(|(_, v)| TypedHeader::Server(v)), // Placeholder type
             HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(&value_bytes).map(|(_, v)| TypedHeader::UserAgent(v)), // Placeholder type
-            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes).map(|(_, v)| TypedHeader::InReplyTo(v)), // Assuming InReplyTo type holds Vec<String>
-            HeaderName::Warning => all_consuming(parser::headers::parse_warning)(&value_bytes).map(|(_, v)| {
-                // Assuming parse_warning returns Ok((rest, (code, agent_uri_bytes, text_bytes)))
-                // Need to parse agent_uri_bytes to Uri and text_bytes to String
-                // THIS IS LIKELY INCORRECT AND NEEDS REFINEMENT.
-                let (code, agent_uri_bytes, text_bytes) = v; // Placeholder destructuring
-                let agent = Uri::from_str(std::str::from_utf8(agent_uri_bytes)?).map_err(|e| Error::ParseError(format!("Invalid agent URI in Warning: {}", e)))?;
-                let text = String::from_utf8(text_bytes.to_vec())?;
-                TypedHeader::Warning(types::Warning { code, agent, text })
-            }),
+            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(&value_bytes)
+                .map_err(Error::from)
+                .and_then(|(_, v)| { // v is Vec<(&[u8], Option<&[u8]>)> 
+                    let strings = v.into_iter()
+                        .map(|(local_bytes, host_bytes_opt)| {
+                            let local_part = String::from_utf8(local_bytes.to_vec())?;
+                            let host_part = host_bytes_opt
+                                .map(|h_bytes| String::from_utf8(h_bytes.to_vec()))
+                                .transpose()?; // Option<Result<String>> -> Result<Option<String>>
+                            match host_part {
+                                Some(host) => Ok(format!("{}@{}", local_part, host)),
+                                None => Ok(local_part),
+                            }
+                        })
+                        .collect::<Result<Vec<String>, Error>>()?; // Collect results into Vec<String>
+                    Ok(TypedHeader::InReplyTo(strings))
+                }),
+            HeaderName::Warning => {
+                all_consuming(parser::headers::parse_warning)(&value_bytes)
+                    .map_err(Error::from) // Convert Nom error first
+                    .and_then(|(_, v)| { // v = (code, agent_bytes, text_bytes)
+                        let (code, agent_bytes, text_bytes) = v;
+                        // Parse agent URI using the dedicated parser
+                        let (_, agent_uri) = all_consuming(parser::uri::parse_uri)(agent_bytes)
+                            .map_err(|e| Error::ParseError(format!("Failed to parse agent URI in Warning: {:?}", e)))?;
+                        // Convert text bytes to String
+                        let text = String::from_utf8(text_bytes.to_vec())?; // Implicit FromUtf8Error -> Error::from
+                        Ok(TypedHeader::Warning(types::Warning { code, agent: agent_uri, text }))
+                    })
+            },
             HeaderName::RetryAfter => all_consuming(parser::headers::parse_retry_after)(&value_bytes).map(|(_, v)| TypedHeader::RetryAfter(v)), // Placeholder type
             HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(&value_bytes).map(|(_, v)| TypedHeader::ErrorInfo(v)), // Placeholder type
             HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(&value_bytes).map(|(_, v)| TypedHeader::AlertInfo(v)), // Placeholder type

@@ -76,7 +76,7 @@ fn media_type(input: &[u8]) -> ParseResult<MediaType> {
 }
 
 // Define structure for Content-Type value
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct ContentTypeValue {
     pub m_type: String,
     pub m_subtype: String,

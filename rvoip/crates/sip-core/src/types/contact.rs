@@ -70,19 +70,19 @@ impl Contact {
     /// Gets all addresses from the Params variant.
     /// Returns None for wildcard contacts.
     pub fn addresses(&self) -> Option<impl Iterator<Item = &Address>> {
-        self.0.iter().flat_map(|value| match value {
+        Some(self.0.iter().flat_map(|value| match value {
             ContactValue::Params(params) => Some(params.iter().map(|cp| &cp.address)),
             ContactValue::Star => None,
-        })
+        }))
     }
     
      /// Gets mutable references to all addresses from the Params variant.
     /// Returns None for wildcard contacts.
     pub fn addresses_mut(&mut self) -> Option<impl Iterator<Item = &mut Address>> {
-        self.0.iter_mut().flat_map(|value| match value {
+        Some(self.0.iter_mut().flat_map(|value| match value {
             ContactValue::Params(params) => Some(params.iter_mut().map(|cp| &mut cp.address)),
             ContactValue::Star => None,
-        })
+        }))
     }
 
     /// Gets the expires parameter value from the *first* contact, if present.

@@ -9,7 +9,6 @@ use ordered_float::NotNan;
 use crate::parser::headers::accept::AcceptValue;
 use serde::{Deserialize, Serialize};
 use crate::types::param::Param;
-use crate::types::content_type::ContentTypeValue;
 
 /// Represents the Accept header field (RFC 3261 Section 20.1).
 /// Indicates the media types acceptable for the response.
@@ -44,10 +43,10 @@ impl Accept {
     /// TODO: Implement proper matching based on type/subtype/* and parameters (q values).
     pub fn accepts(&self, media_type: &AcceptValue) -> bool {
         self.0.iter().any(|accepted_type| {
-            // Simple type/subtype match for now
-            (accepted_type.type_ == "*" || accepted_type.type_ == media_type.type_) &&
-            (accepted_type.subtype == "*" || accepted_type.subtype == media_type.subtype)
-            // Parameter matching (like q values) is more complex and omitted here
+            // Simple type/subtype match
+            (accepted_type.m_type == "*" || accepted_type.m_type == media_type.m_type) &&
+            (accepted_type.m_subtype == "*" || accepted_type.m_subtype == media_type.m_subtype)
+            // TODO: Parameter matching (like q values)
         })
     }
 }
@@ -67,11 +66,24 @@ impl FromStr for Accept {
 
         // Convert &str to &[u8] and use all_consuming
         match all_consuming(parse_accept)(s.as_bytes()) {
-            Ok((_, values)) => Ok(Accept(values)),
+            Ok((_, accept_header)) => Ok(accept_header),
             Err(e) => Err(Error::ParseError(
                 format!("Failed to parse Accept header: {:?}", e)
             ))
         }
+    }
+}
+
+impl fmt::Display for AcceptValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = format!("{}/{}", self.m_type, self.m_subtype);
+        if let Some(q) = self.q {
+            s.push_str(&format!(";q={}", q));
+        }
+        for (k, v) in &self.params {
+            s.push_str(&format!(";{}={}", k, v));
+        }
+        write!(f, "{}", s)
     }
 }
 

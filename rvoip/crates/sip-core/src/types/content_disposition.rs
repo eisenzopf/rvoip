@@ -8,7 +8,7 @@ use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 
 /// Content Disposition Type (session, render, icon, alert, etc.)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DispositionType {
     Session,
     Render,

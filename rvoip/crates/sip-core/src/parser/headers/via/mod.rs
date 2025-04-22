@@ -13,6 +13,8 @@ use nom::{
     error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
+use std::fmt; // Import fmt
+use serde::{Serialize, Deserialize};
 
 // Import from new modules
 use crate::parser::separators::{hcolon, comma, slash};
@@ -34,12 +36,32 @@ use crate::types::param::Param; // Use the main Param enum
 
 /// Represents a single Via header entry.
 /// Making this struct public for use in types/header.rs
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViaHeader {
     pub sent_protocol: SentProtocol,
     pub sent_by_host: Host,
     pub sent_by_port: Option<u16>,
     pub params: Vec<Param>,
+}
+
+// Implementation of Display trait for ViaHeader
+impl fmt::Display for ViaHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.sent_protocol)?;
+        
+        // Format sent-by (host:port or host)
+        write!(f, "{}", self.sent_by_host)?;
+        if let Some(port) = self.sent_by_port {
+            write!(f, ":{}", port)?;
+        }
+        
+        // Format parameters
+        for param in &self.params {
+            write!(f, "{}", param)?; // Assuming Param implements Display correctly (e.g., ";key=value")
+        }
+        
+        Ok(())
+    }
 }
 
 // sent-protocol = protocol-name SLASH protocol-version SLASH transport
@@ -57,7 +79,7 @@ fn sent_protocol(input: &[u8]) -> ParseResult<SentProtocol> {
             let name = str::from_utf8(name_b)?.to_string();
             let version = str::from_utf8(ver_b)?.to_string();
             let transport = str::from_utf8(tran_b)?.to_string();
-            Ok(SentProtocol { name, version, transport })
+            Ok::<_, std::str::Utf8Error>(SentProtocol { name, version, transport })
         }
     )(input)
 }

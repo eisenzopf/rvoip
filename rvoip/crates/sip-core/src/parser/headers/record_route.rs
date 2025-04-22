@@ -39,13 +39,14 @@ fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
             semicolon_separated_params0(generic_param) // rr-params are generic params
         ),
         |((dn_bytes_opt, uri), params)| {
-            // Convert display name bytes
+            // Convert display name bytes, mapping Utf8Error to nom::Err::Failure
              let display_name = dn_bytes_opt
                 .map(|b| std::str::from_utf8(b).map(|s| s.to_string()))
-                .transpose()?;
+                .transpose()
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; // Added error mapping
 
-            // Return Address directly
-            Ok(Address { display_name, uri, params })
+            // Return Address directly (Result type is now compatible)
+            Ok::<_, nom::Err<NomError<&[u8]>>>(Address { display_name, uri, params })
         }
     )(input)
 }
