@@ -76,7 +76,7 @@ impl FromStr for ContentDisposition {
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
                 // Convert Vec<u8> to String properly
-                let disp_type_str = String::from_utf8(dtype_bytes.to_owned())?;
+                let disp_type_str = String::from_utf8(dtype_bytes.to_vec())?;
                 let disp_type = match disp_type_str.to_lowercase().as_str() {
                     "session" => DispositionType::Session,
                     "render" => DispositionType::Render,
@@ -87,7 +87,7 @@ impl FromStr for ContentDisposition {
                 
                 let params = params_vec.into_iter()
                     .filter_map(|p| {
-                        if let Param::Other(k, v_opt) = p {
+                        if let crate::parser::headers::content_disposition::DispositionParam::Generic(Param::Other(k, v_opt)) = p {
                             let value_str = v_opt.map(|gv| gv.to_string()).unwrap_or_default();
                             Some((k.to_lowercase(), value_str))
                         } else {

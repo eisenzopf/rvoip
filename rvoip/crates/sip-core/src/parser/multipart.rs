@@ -173,7 +173,7 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
                 }
             }
         } else if ct.trim().starts_with("text/") {
-            match String::from_utf8(raw_content.to_owned()) {
+            match String::from_utf8(raw_content.to_vec()) {
                 Ok(text) => Some(ParsedBody::Text(text)),
                 Err(_) => Some(ParsedBody::Other(raw_content.clone())),
             }
@@ -279,7 +279,10 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
     let end_boundary = format!("--{}--", boundary);
     
     // Call the internal nom parser, passing owned Strings to the closure
-    match all_consuming(|i| multipart_parser(i, full_boundary.clone(), end_boundary.clone()))(content) {
+    let parser = |i| multipart_parser(i, full_boundary.clone(), end_boundary.clone());
+    let result = all_consuming(parser)(content);
+    
+    match result {
         Ok((_, body)) => Ok(body),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = content.len() - e.input.len(); // Calculate offset

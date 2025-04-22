@@ -28,9 +28,10 @@ impl MimePart {
     }
 
     pub fn content_type(&self) -> Option<String> {
-         self.headers.iter()
+        self.headers.iter()
             .find(|h| h.name == HeaderName::ContentType)
             .and_then(|h| h.value.as_text())
+            .map(|s| s.to_string())
     }
 }
 
