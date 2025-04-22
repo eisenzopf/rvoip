@@ -83,6 +83,6 @@ mod tests {
         let (rem, infos) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(infos.len(), 2);
-         assert!(infos[1].params.len(), 1);
+         assert_eq!(infos[1].params.len(), 1);
     }
 } 
