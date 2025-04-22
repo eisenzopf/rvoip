@@ -36,16 +36,7 @@ impl FromStr for CallId {
 
         // Match on the Result
         match parse_result {
-            Ok((_, (local, host_opt))) => {
-                let local_part = String::from_utf8(local.to_vec())?;
-                let host_part = host_opt.map(|h| String::from_utf8(h.to_vec())).transpose()?;
-                // Construct the single String for CallId(String)
-                let call_id_string = match host_part {
-                    Some(host) => format!("{}@{}", local_part, host),
-                    None => local_part,
-                };
-                Ok(CallId(call_id_string))
-            },
+            Ok((_, call_id)) => Ok(call_id),
             Err(e) => Err(Error::from(e)), 
         }
     }

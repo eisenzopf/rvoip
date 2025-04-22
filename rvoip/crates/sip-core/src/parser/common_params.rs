@@ -124,7 +124,9 @@ where
 pub fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> {
     params.into_iter().fold(HashMap::new(), |mut acc, param| {
         if let Param::Other(name, value) = param {
-            acc.insert(name, value);
+            // Convert Option<GenericValue> to Option<String>
+            let string_value = value.map(|v| v.to_string());
+            acc.insert(name, string_value);
         }
         // TODO: Handle other Param variants like Q if needed in the HashMap?
         acc

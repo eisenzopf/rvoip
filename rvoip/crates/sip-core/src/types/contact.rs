@@ -198,10 +198,10 @@ impl FromStr for Contact {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
         use nom::combinator::all_consuming;
-        // The parser `parse_contact` correctly returns Vec<ContactValue>
+        // The parser `parse_contact` returns a ContactValue, we need to wrap it in a Vec
         match all_consuming(crate::parser::headers::contact::parse_contact)(s.as_bytes()) {
-             // Ensure the parsed value is wrapped correctly based on Contact definition
-            Ok((_, value)) => Ok(Contact(value)), // Assuming parse_contact returns Vec<ContactValue>
+            // Wrap the ContactValue in a Vec for the Contact constructor
+            Ok((_, value)) => Ok(Contact(vec![value])),
             Err(e) => Err(crate::error::Error::from(e)), // Use From trait
         }
     }

@@ -57,10 +57,7 @@ impl FromStr for Allow {
         use crate::parser::headers::allow::parse_allow;
 
         let (_, methods_bytes) = all_consuming(parse_allow)(s.as_bytes()).map_err(Error::from)?;
-        let methods = methods_bytes.0.iter()
-            .map(|m_bytes| Method::from_str(std::str::from_utf8(m_bytes)?))
-            .collect::<Result<Vec<Method>>>()?;
-        Ok(Allow(methods))
+        Ok(methods_bytes)
     }
 }
 
