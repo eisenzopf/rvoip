@@ -17,7 +17,6 @@ use nom::{
 use crate::types::Version;
 use nom::character::complete::char;
 use nom::sequence::{delimited, separated_pair};
-use crate::parser::common_chars::is_alphanum;
 use crate::parser::token::token;
 use crate::parser::quoted::quoted_string;
 use crate::types::param::{Param, GenericValue};
