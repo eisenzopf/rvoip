@@ -6,7 +6,7 @@ use nom::{
     character::complete::{alphanumeric1, char},
     combinator::{map, map_res, opt, recognize, value},
     multi::{many0, separated_list0},
-    sequence::{delimited, preceded, terminated, pair, tuple},
+    sequence::{delimited, preceded, terminated, pair, tuple, separated_pair},
     IResult,
 };
 use std::str;

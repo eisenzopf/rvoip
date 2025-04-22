@@ -1,4 +1,4 @@
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, ParseTypedHeader};
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
 use crate::types::address::Address;
 use std::fmt;
 use std::str::FromStr;

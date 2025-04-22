@@ -9,6 +9,7 @@ use nom::{
     multi::{many0},
     sequence::{pair, preceded, tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -20,13 +21,13 @@ use crate::parser::quoted::comment;
 use crate::parser::whitespace::lws;
 
 use crate::types::param::Param;
-use crate::types::retry_after::{RetryAfter as RetryAfterHeader, RetryAfterValue, RetryParam}; // Specific types
+// use crate::types::retry_after::{RetryAfter as RetryAfterHeader, RetryAfterValue, RetryParam}; // Removed unused import
 use crate::parser::common::*;
 use crate::parser::common_params::parse_generic_param;
 use crate::parser::quoted::parse_quoted_string;
 use crate::parser::values::parse_u32;
 use crate::parser::whitespace::ows;
-use crate::types::{HeaderError, RetryParam};
+// use crate::types::{HeaderError, RetryParam}; // Removed unused import
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::{map, map_res, opt};
@@ -34,8 +35,15 @@ use nom::multi::separated_list0;
 use nom::sequence::{delimited, pair, preceded, tuple};
 use crate::parser::ParseResult;
 
+// Define local RetryParam enum
+#[derive(Debug, PartialEq, Clone)]
+pub enum RetryParam {
+    Duration(u32),
+    Generic(Param), // Wraps the generic Param type
+}
+
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
-fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
+fn retry_param(input: &[u8]) -> ParseResult<RetryParam> { // Returns local RetryParam
     alt((
         map(
             preceded(pair(tag_no_case(b"duration"), equal), delta_seconds),
@@ -51,23 +59,28 @@ fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
 pub struct RetryAfterValue {
     pub delay: u32, // delta-seconds
     pub comment: Option<String>,
-    pub params: Vec<RetryParam>, // Only duration or generic params expected
+    pub params: Vec<RetryParam>, // Use local RetryParam
 }
 
 /// Parses a Retry-After header value.
-pub fn parse_retry_after(input: &[u8]) -> ParseResult<(u32, Option<&[u8]>, Vec<Param>)> {
+// pub fn parse_retry_after(input: &[u8]) -> ParseResult<(u32, Option<&[u8]>, Vec<Param>)> { // Old signature
+pub fn parse_retry_after(input: &[u8]) -> ParseResult<RetryAfterValue> { // New signature
     map_res(
         tuple((
             delta_seconds,
             opt(preceded(lws, comment)),
-            opt(preceded(lws, many0(preceded(semi, retry_param))))
+            // This correctly parses Vec<RetryParam> because it uses retry_param
+            opt(many0(preceded(semi, retry_param))) 
         )),
         |(delta, comment_bytes_opt, params_opt)| {
             let comment_opt = comment_bytes_opt
                 .map(|b| str::from_utf8(b).map(String::from))
-                .transpose()?;
+                .transpose() // Using transpose simplifies Option<Result<T>> to Result<Option<T>>
+                .map_err(|_e| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; // Handle potential UTF-8 error
+
             let params_vec = params_opt.unwrap_or_default();
-            Ok((delta, comment_opt, params_vec))
+            // Construct the RetryAfterValue struct
+            Ok::<RetryAfterValue, nom::error::Error<&[u8]>>(RetryAfterValue { delay: delta, comment: comment_opt, params: params_vec })
         }
     )(input)
 }
@@ -95,11 +108,11 @@ mod tests {
         let input = b"120";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, (delta, comment, params)) = result.unwrap();
+        let (rem, value) = result.unwrap(); // Now returns RetryAfterValue
         assert!(rem.is_empty());
-        assert_eq!(delta, 120);
-        assert!(comment.is_none());
-        assert!(params.is_empty());
+        assert_eq!(value.delay, 120);
+        assert!(value.comment.is_none());
+        assert!(value.params.is_empty());
     }
     
     #[test]
@@ -107,11 +120,11 @@ mod tests {
         let input = b"180 (Call Server Migration)";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, (delta, comment, params)) = result.unwrap();
+        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
         assert!(rem.is_empty());
-        assert_eq!(delta, 180);
-        assert_eq!(comment, Some("Call Server Migration".to_string()));
-        assert!(params.is_empty());
+        assert_eq!(value.delay, 180);
+        assert_eq!(value.comment, Some("Call Server Migration".to_string()));
+        assert!(value.params.is_empty());
     }
 
     #[test]
@@ -119,13 +132,14 @@ mod tests {
         let input = b"5;duration=10;reason=congestion";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, (delta, comment, params)) = result.unwrap();
+        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
         assert!(rem.is_empty());
-        assert_eq!(delta, 5);
-        assert!(comment.is_none());
-        assert_eq!(params.len(), 2);
-        assert!(params.contains(&RetryParam::Duration(10)));
-        assert!(params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "reason" && v == "congestion")));
+        assert_eq!(value.delay, 5);
+        assert!(value.comment.is_none());
+        assert_eq!(value.params.len(), 2);
+        assert!(value.params.contains(&RetryParam::Duration(10)));
+        // Adjust test to check the Generic variant correctly
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "reason" && v == "congestion")));
     }
 
      #[test]
@@ -133,12 +147,12 @@ mod tests {
         let input = b"60 (Please wait) ;duration=90";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, (delta, comment, params)) = result.unwrap();
+        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
         assert!(rem.is_empty());
-        assert_eq!(delta, 60);
-        assert_eq!(comment, Some("Please wait".to_string()));
-        assert_eq!(params.len(), 1);
-        assert!(params.contains(&RetryParam::Duration(90)));
+        assert_eq!(value.delay, 60);
+        assert_eq!(value.comment, Some("Please wait".to_string()));
+        assert_eq!(value.params.len(), 1);
+        assert!(value.params.contains(&RetryParam::Duration(90)));
     }
 
     #[test]
@@ -146,10 +160,10 @@ mod tests {
         let input = b"120 (Nested (comment) here)";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, (delta, comment, params)) = result.unwrap();
+        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
         assert!(rem.is_empty());
-        assert_eq!(delta, 120);
-        assert_eq!(comment, Some("Nested (comment) here".to_string()));
-        assert!(params.is_empty());
+        assert_eq!(value.delay, 120);
+        assert_eq!(value.comment, Some("Nested (comment) here".to_string()));
+        assert!(value.params.is_empty());
     }
 }

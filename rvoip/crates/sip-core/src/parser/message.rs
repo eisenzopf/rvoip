@@ -11,7 +11,7 @@ use nom::{
     Err, IResult, Needed,
 };
 
-use nom::error::{Error as NomError, ErrorKind, make_error};
+use nom::error::{Error as NomError, ErrorKind, make_error, ParseError};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
@@ -173,18 +173,12 @@ fn message_header(input: &[u8]) -> ParseResult<Header> {
             crlf
         )),
         |(name_bytes, _, raw_value_bytes, _)| {
-            let name_str = str::from_utf8(name_bytes)?;
+            let name_str = str::from_utf8(name_bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(name_bytes, nom::error::ErrorKind::Char)))?;
             let header_name = HeaderName::from_str(name_str)
-                .map_err(|_| format!("Invalid HeaderName: {}", name_str))?;
-
-            // Unfold LWS from the raw value bytes
-            let unfolded_value_bytes = unfold_lws(raw_value_bytes);
-            
-            // Store the unfolded bytes directly in HeaderValue::Raw
-            // Further parsing/typing happens later via TypedHeader::try_from
-            let header_value = HeaderValue::Raw(unfolded_value_bytes); 
-            
-            Ok(Header::new(header_name, header_value))
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(name_bytes, nom::error::ErrorKind::MapRes)))?;
+            let header_value = HeaderValue(raw_value_bytes.to_vec());
+            Ok::<Header, nom::error::Error<&[u8]>>(Header::new(header_name, header_value))
         }
     )(input)
 }

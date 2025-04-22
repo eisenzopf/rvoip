@@ -10,6 +10,7 @@ use nom::{
     multi::{many0, separated_list1},
     sequence::{pair, preceded, delimited, tuple},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -23,7 +24,7 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::uri::Uri;
-use crate::types::call_info::{CallInfo as CallInfoHeader, CallInfoValue, InfoPurpose}; // Use specific header type and related types
+// use crate::types::call_info::{CallInfo as CallInfoHeader, CallInfoValue, InfoPurpose}; // Removed unused import
 use serde::{Serialize, Deserialize};
 
 // Make these types public
@@ -52,10 +53,14 @@ fn info_param(input: &[u8]) -> ParseResult<InfoParam> {
             preceded(
                 pair(tag_no_case(b"purpose"), equal),
                 alt((
-                    map_res(tag_no_case("icon"), |_| Ok::<_, ()>(InfoPurpose::Icon)),
-                    map_res(tag_no_case("info"), |_| Ok(InfoPurpose::Info)),
-                    map_res(tag_no_case("card"), |_| Ok(InfoPurpose::Card)),
-                    map_res(token, |b| str::from_utf8(b).map(|s| InfoPurpose::Other(s.to_string())))
+                    map_res(tag_no_case("icon"), |_| Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Icon)),
+                    map_res(tag_no_case("info"), |_| Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Info)),
+                    map_res(tag_no_case("card"), |_| Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Card)),
+                    map_res(token, |bytes| {
+                        let purpose_str = str::from_utf8(bytes)
+                            .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
+                        Ok(InfoPurpose::Other(purpose_str.to_string()))
+                    })
                 ))
             ),
             InfoParam::Purpose

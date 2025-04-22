@@ -17,7 +17,6 @@ use crate::parser::common::comma_separated_list1; // Requires at least one
 use crate::parser::ParseResult;
 use std::str;
 use nom::combinator::map_res;
-use crate::types::{ContentEncoding, HeaderError};
 
 // Parse the comma-separated list of content-codings (tokens)
 fn content_coding_list(input: &[u8]) -> ParseResult<Vec<&[u8]>> {

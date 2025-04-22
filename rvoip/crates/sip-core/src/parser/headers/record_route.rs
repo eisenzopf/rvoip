@@ -41,16 +41,17 @@ fn record_route_entry(input: &[u8]) -> ParseResult<Address> {
             name_addr, // name_addr returns (Option<display_name_bytes>, Uri)
             semicolon_separated_params0(generic_param) // rr-params are generic params
         ),
-        |((dn_bytes_opt, uri), params)| {
+        |pair_result| -> Result<Address, nom::Err<NomError<&[u8]>>> { 
+            // Destructure here
+            let ((dn_bytes_opt, uri), params) = pair_result;
             // Convert display name bytes, mapping Utf8Error to nom::Err::Failure
              let display_name = dn_bytes_opt
                 .map(|b| std::str::from_utf8(b).map(|s| s.to_string()))
                 .transpose()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; // Correct error mapping
+                // Map the Utf8Error to a nom Failure
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?; 
 
-            // Return Address directly, ensuring the Ok variant matches the map_res expectation
-            // The error type E in Result<O, E> for map_res needs to be convertible From<Utf8Error>
-            // We handle Utf8Error above, so we just need to return Ok(Address)
+            // Construct and return the Address struct wrapped in Ok
             Ok(Address { display_name, uri, params })
         }
     )(input)

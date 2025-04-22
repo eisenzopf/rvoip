@@ -18,15 +18,16 @@ use crate::parser::common_params::contact_param_item;
 use crate::parser::ParseResult;
 
 // Import local submodules
-mod params;
-use params::parse_contact_params; // *(SEMI contact-params)
+// mod params; // Removed
+// use params::parse_contact_params; // Removed
 
 // Import types
-use crate::types::contact::{ContactHeader, ContactValue, ContactParams};
+// use crate::types::contact::{ContactHeader, ContactValue, ContactParams}; // Old import
+use crate::types::contact::{ContactValue, ContactParamInfo}; // Corrected import
 use crate::types::uri::Uri;
 use crate::types::address::Address;
 use crate::types::param::Param;
-use crate::types::contact::ContactParamInfo;
+// use crate::types::contact::ContactParamInfo; // Already included above
 
 // contact-param = (name-addr / addr-spec) *(SEMI contact-params)
 // contact-params = c-p-q / c-p-expires / contact-extension

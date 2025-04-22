@@ -17,19 +17,45 @@ use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
+use crate::parser::uri::parse_uri; // Import the actual URI parser
+use nom::combinator::all_consuming; // Import all_consuming
 
 use crate::types::uri::Uri;
 use crate::types::error_info::ErrorInfo as ErrorInfoHeader; // Use specific header type
 use serde::{Serialize, Deserialize}; // Added serde
+use std::str::FromStr; // Import FromStr
+use crate::error::Error as CrateError; // Import crate error
 
 // Import shared parsers
 use super::uri_with_params::uri_with_generic_params;
 use crate::types::param::Param;
 
-// error-uri = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
-fn error_uri(input: &[u8]) -> ParseResult<ErrorInfoValue> {
-    let (remaining, (uri, params)) = uri_with_generic_params(input)?;
-    Ok((remaining, ErrorInfoValue { uri, params }))
+// error-uri = LAQUOT absoluteURI RAQUOT
+// Returns Uri directly
+fn error_uri(input: &[u8]) -> ParseResult<Uri> {
+    map_res(
+        delimited(laquot, absolute_uri, raquot), // absolute_uri likely returns &[u8]
+        |uri_bytes| -> Result<Uri, CrateError> { 
+            // Parse the bytes using the dedicated parser
+            let (_, uri) = all_consuming(parse_uri)(uri_bytes)
+                .map_err(|e: nom::Err<nom::error::Error<&[u8]>>| CrateError::ParseError(format!("URI parse error: {}", e)))?;
+            Ok(uri)
+        }
+    )(input)
+}
+
+// error-info-value = error-uri *( SEMI generic-param )
+// Assume uri_with_generic_params returns (String, Vec<Param>) erroneously
+fn error_info_value(input: &[u8]) -> ParseResult<ErrorInfoValue> {
+     map_res(
+        uri_with_generic_params, // Assume this returns Result<(String, Vec<Param>), _>
+        |(uri_str, params)| -> Result<ErrorInfoValue, CrateError> { 
+             // Parse the URI string using the dedicated parser
+            let (_, uri) = all_consuming(parse_uri)(uri_str.as_bytes())
+                .map_err(|e: nom::Err<nom::error::Error<&[u8]>>| CrateError::ParseError(format!("URI parse error: {}", e)))?;
+            Ok(ErrorInfoValue { uri, params })
+        }
+    )(input)
 }
 
 // Define structure for Error-Info value
@@ -42,7 +68,7 @@ pub struct ErrorInfoValue {
 // Error-Info = "Error-Info" HCOLON error-uri *(COMMA error-uri)
 /// Parses an Error-Info header value.
 pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
-    comma_separated_list1(error_uri)(input)
+    comma_separated_list1(error_info_value)(input)
 }
 
 #[cfg(test)]

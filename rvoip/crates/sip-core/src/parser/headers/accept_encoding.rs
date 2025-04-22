@@ -26,7 +26,7 @@ use crate::parser::common::comma_separated_list0;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::accept_encoding::AcceptEncoding as AcceptEncodingHeader; // Specific type
+// use crate::types::accept_encoding::AcceptEncoding as AcceptEncodingHeader; // Removed unused import
 
 // Define EncodingInfo locally and make it public
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,8 +70,14 @@ pub struct AcceptEncodingValue {
 
 // Accept-Encoding = "Accept-Encoding" HCOLON [ encoding *(COMMA encoding) ]
 /// Parses an Accept-Encoding header value.
+// pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> { // Uncommented function
+//     separated_list1(comma, encoding)(input)
+// }
+// Let's adjust the parser to handle the optional nature: [ encoding *(COMMA encoding) ]
+// It should return ParseResult<Vec<EncodingInfo>> , empty Vec if header value is empty
 pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> {
-    separated_list1(comma, encoding)(input)
+    // Use separated_list0 to allow an empty list if the input is empty or just whitespace
+    separated_list0(comma, encoding)(input) 
 }
 
 #[cfg(test)]
@@ -120,7 +126,7 @@ mod tests {
         let result = parse_accept_encoding(input);
         assert!(result.is_ok());
         let (rem, encodings) = result.unwrap();
-        assert!(rem.is_empty());
-        assert!(encodings.is_empty());
+        assert!(rem.is_empty()); // Should consume empty input
+        assert!(encodings.is_empty()); // Should result in an empty Vec
     }
 } 

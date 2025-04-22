@@ -19,7 +19,6 @@ use crate::parser::ParseResult;
 
 use crate::types::param::Param;
 use crate::types::uri::Uri;
-use crate::types::address::NameAddr;
 use crate::types::address::Address;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;
 use crate::parser::address::parse_name_addr;
@@ -51,7 +50,7 @@ fn rplyto_spec(input: &[u8]) -> ParseResult<Address> {
 
 // Reply-To = "Reply-To" HCOLON rplyto-spec
 // Note: HCOLON handled elsewhere
-pub fn parse_reply_to(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_reply_to(input: &[u8]) -> ParseResult<ReplyToHeader> {
     map(rplyto_spec, ReplyToHeader)(input)
 }
 

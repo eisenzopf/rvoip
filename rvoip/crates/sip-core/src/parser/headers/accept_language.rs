@@ -27,7 +27,7 @@ use crate::parser::common::comma_separated_list0;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::accept_language::AcceptLanguage as AcceptLanguageHeader; // Specific type
+// use crate::types::accept_language::AcceptLanguage as AcceptLanguageHeader; // Removed - Unused import, type not found
 
 // Define LanguageInfo locally and make it public
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +68,24 @@ fn language(input: &[u8]) -> ParseResult<LanguageInfo> {
             language_range,
             many0(preceded(semi, accept_param))
         ),
-        |(range_str, params_vec)| LanguageInfo { range: range_str, params: params_vec }
+        |(range_str, raw_params)| { 
+            let mut q_value = None;
+            let mut generic_params = Vec::new();
+
+            for param in raw_params {
+                match param {
+                    Param::Q(q) => q_value = Some(q), // Found q-value
+                    other => generic_params.push(other), // Keep other params
+                }
+            }
+
+            // Initialize with extracted q and filtered params
+            LanguageInfo { 
+                range: range_str, 
+                q: q_value, 
+                params: generic_params 
+            }
+        }
     )(input)
 }
 

@@ -4,11 +4,15 @@ use super::auth::challenge::challenge; // Use the challenge parser
 use crate::parser::ParseResult;
 use crate::types::auth::{Challenge, AuthParam}; // Add AuthParam for test
 use nom::IResult;
+use nom::sequence::{pair, preceded};
+use nom::bytes::complete::take_while;
+use nom::character::complete::{space, lws};
+use nom::combinator::map;
 
 // WWW-Authenticate = "WWW-Authenticate" HCOLON challenge
-// Note: HCOLON is handled by the top-level message_header parser.
-// This parser receives the value *after* HCOLON.
-pub(crate) fn parse_www_authenticate(input: &[u8]) -> ParseResult<Challenge> {
+// challenge = auth-scheme 1*SP 1*auth-param
+// Make this function public
+pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Challenge> {
     // The input here is the value part after "WWW-Authenticate: "
     challenge(input)
 }

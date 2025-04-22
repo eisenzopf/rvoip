@@ -19,6 +19,7 @@ use nom::{
     combinator::{map, map_res},
     sequence::{pair, preceded, separated_pair},
     IResult,
+    error::ParseError,
 };
 use std::str;
 use std::collections::HashMap;
@@ -55,12 +56,12 @@ fn m_value(input: &[u8]) -> ParseResult<&[u8]> {
 
 // m-parameter = m-attribute EQUAL m-value
 // Returns (attribute_bytes, value_bytes)
-fn m_parameter(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
-    separated_pair(token, equal, m_value)(input)
-}
+// fn m_parameter(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
+//     separated_pair(token, equal, m_value)(input)
+// }
 
-// media-type = m-type SLASH m-subtype *(SEMI m-parameter)
-// Returns (type, subtype, Vec<(attr, val)>)
+// Comment out unused media_type function
+/*
 fn media_type(input: &[u8]) -> ParseResult<MediaType> {
     map_res(
         pair(
@@ -74,6 +75,7 @@ fn media_type(input: &[u8]) -> ParseResult<MediaType> {
         }
     )(input)
 }
+*/
 
 // Define structure for Content-Type value
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -104,7 +106,8 @@ impl fmt::Display for ContentTypeValue {
 // Content-Type = "Content-Type" HCOLON media-type
 // Note: HCOLON and compact form handled elsewhere.
 // This parser needs to return ContentTypeValue, not ContentTypeHeader
-pub(crate) fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
+// Make this function public
+pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
     // We need a parser that directly returns ContentTypeValue based on media_type logic
     // Let's reuse the media_type parser logic from parser/headers/media_type.rs here
     // Reimplementing m_type, m_subtype, m_parameter, m_value for simplicity here
@@ -138,9 +141,14 @@ pub(crate) fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeV
             pair(m_token, preceded(slash, m_token)), // Use m_token for type/subtype
             semicolon_separated_params0(m_parameter_str) // Use param parser returning String, String
         ),
-        |(((type_bytes, subtype_bytes), params_vec))| {
-            let m_type = str::from_utf8(type_bytes)?.to_lowercase();
-            let m_subtype = str::from_utf8(subtype_bytes)?.to_lowercase();
+        |(((type_bytes, subtype_bytes), params_vec))| -> Result<ContentTypeValue, nom::error::Error<&[u8]>> {
+            // Explicitly map Utf8Error to nom::Err::Failure
+            let m_type = str::from_utf8(type_bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(type_bytes, nom::error::ErrorKind::Char)))?
+                .to_lowercase();
+            let m_subtype = str::from_utf8(subtype_bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(subtype_bytes, nom::error::ErrorKind::Char)))?
+                .to_lowercase();
             let parameters = params_vec.into_iter().collect::<HashMap<_,_>>();
             Ok(ContentTypeValue { m_type, m_subtype, parameters })
         }

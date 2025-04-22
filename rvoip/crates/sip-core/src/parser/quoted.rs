@@ -2,7 +2,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take, take_while1},
     combinator::{map_res, recognize},
-    error::{error_position, ErrorKind},
+    error::{ErrorKind},
     multi::many0,
     sequence::{delimited, pair, preceded},
     IResult,
@@ -23,7 +23,7 @@ pub(crate) fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
         map_res(take(1usize), |c: &[u8]| {
             // Check if byte is empty or CR/LF (invalid escapes in SIP)
             if c.is_empty() || c[0] == b'\r' || c[0] == b'\n' {
-                Err(nom::Err::Failure(error_position!(input, ErrorKind::Verify)))
+                Err(nom::Err::Failure(nom::error::Error::new(input, ErrorKind::Verify)))
             } else {
                 Ok(c)
             }

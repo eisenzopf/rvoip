@@ -37,7 +37,6 @@ use crate::types::auth::{Authorization, WwwAuthenticate, ProxyAuthenticate, Prox
 use crate::types::reply_to::ReplyTo;
 use crate::parser::headers::reply_to::ReplyToValue; // Import from parser
 use crate::types::warning::Warning;
-use crate::parser::headers::warning::WarningValue; // Import from parser
 use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
 use crate::parser::headers::content_type::parse_content_type_value;
@@ -314,7 +313,7 @@ pub enum HeaderValue {
     Expires(Expires),
     MinExpires(u32),
     RetryAfter(RetryAfterValue),
-    Warning(Vec<WarningValue>),
+    Warning(Vec<Warning>),
     Timestamp((Vec<u8>, Option<Vec<u8>>), Option<(Vec<u8>, Option<Vec<u8>>)>), // (ts, delay_opt)
     Date(Vec<u8>),
 
@@ -479,7 +478,7 @@ pub enum TypedHeader {
     Accept(Accept), // Use types::Accept
     Allow(Allow), // Use types::Allow
     ReplyTo(ReplyTo), // Use types::ReplyTo
-    Warning(Warning), // Use types::Warning
+    Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
 
     // Placeholder Types (replace with actual types from types/* where available)
@@ -591,7 +590,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::Accept(v) => write!(f, "{}: {}", HeaderName::Accept, v),
             TypedHeader::Allow(v) => write!(f, "{}: {}", HeaderName::Allow, v),
             TypedHeader::ReplyTo(v) => write!(f, "{}: {}", HeaderName::ReplyTo, v),
-            TypedHeader::Warning(v) => write!(f, "{}: {}", HeaderName::Warning, v),
+            TypedHeader::Warning(v) => write!(f, "{}: {:?}", HeaderName::Warning, v),
             TypedHeader::ContentDisposition(v) => write!(f, "{}: {}", HeaderName::ContentDisposition, v),
 
             // Handle placeholder types (Vec<String>, tuples, etc.) - Requires Display impl for them
@@ -648,9 +647,12 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Contact => all_consuming(parser::headers::parse_contact)(value_bytes)
                 .map(|(_, v)| TypedHeader::Contact(Contact(v)))
                 .map_err(Error::from),
-            HeaderName::ReplyTo => all_consuming(parser::headers::parse_reply_to)(value_bytes)
-                .map(|(_, v)| TypedHeader::ReplyTo(ReplyTo(v)))
-                .map_err(Error::from),
+            HeaderName::ReplyTo => {
+                match all_consuming(parser::headers::reply_to::parse_reply_to)(value_bytes) {
+                    Ok((_, addr)) => Ok(TypedHeader::ReplyTo(ReplyTo(addr))),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            }
 
             // Routing Headers
             HeaderName::Via => all_consuming(parser::headers::parse_via)(value_bytes)
@@ -698,9 +700,17 @@ impl TryFrom<Header> for TypedHeader {
                     let length = v_u64.try_into().map_err(|_| Error::ParseError("Invalid Content-Length value (overflow)".into()))?;
                     Ok(TypedHeader::ContentLength(ContentLength(length)))
                 }),
-            HeaderName::ContentDisposition => all_consuming(parser::headers::parse_content_disposition)(value_bytes)
-                .map(|(_, v)| TypedHeader::ContentDisposition(v))
-                .map_err(Error::from),
+            HeaderName::ContentDisposition => {
+                match all_consuming(parser::headers::content_disposition::parse_content_disposition)(value_bytes) {
+                    Ok((_, (disp_type_bytes, params_vec))) => {
+                        let disp_type_str = String::from_utf8(disp_type_bytes.to_vec())?;
+                        let disposition_type = DispositionType::from_str(&disp_type_str)?;
+                        let typed_params = params_vec;
+                        Ok(TypedHeader::ContentDisposition(ContentDisposition { disposition_type, params: typed_params }))
+                    },
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            }
             HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(value_bytes)
                 .map_err(Error::from)
                 .and_then(|(_, v_bytes_list)| {
@@ -862,17 +872,35 @@ impl TryFrom<Header> for TypedHeader {
                     Ok(TypedHeader::InReplyTo(strings))
                 }),
              HeaderName::Warning => {
-                 all_consuming(parser::headers::parse_warning)(value_bytes)
-                     .map_err(Error::from)
-                     .and_then(|(_, v)| {
-                         let warnings = v.into_iter().map(|(code, agent_bytes, text_bytes)| {
-                             let (_, agent_uri) = all_consuming(parser::uri::parse_uri)(agent_bytes)
-                                 .map_err(|e| Error::ParseError(format!("Failed to parse agent URI in Warning: {:?}", e)))?;
-                             let text = String::from_utf8(text_bytes.to_vec())?;
-                             Ok(Warning { code, agent: agent_uri, text })
-                         }).collect::<Result<Vec<Warning>>>()?;
-                         Ok(TypedHeader::Warning(warnings))
-                     })
+                 let parse_result = all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);
+                 match parse_result {
+                     Ok((_, parsed_values)) => {
+                         let mut typed_warnings = Vec::new();
+                         for parsed_value in parsed_values {
+                             let agent_uri = match parsed_value.agent {
+                                 parser::headers::warning::WarnAgent::HostPort(host, port_opt) => {
+                                     Uri::new(None, host, port_opt, Vec::new(), Vec::new())
+                                 },
+                                 parser::headers::warning::WarnAgent::Pseudonym(bytes) => {
+                                     let host_str = String::from_utf8_lossy(&bytes);
+                                     match types::uri::Host::from_str(&host_str) {
+                                          Ok(host) => Uri::new(None, host, None, Vec::new(), Vec::new()),
+                                          Err(_) => {
+                                              return Err(Error::ParseError(format!("Cannot represent warning agent pseudonym '{}' as a valid host for Uri", host_str)));
+                                          }
+                                     }
+                                 }
+                             };
+
+                             let text_string = String::from_utf8(parsed_value.text)
+                                 .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in warning text: {}", e)))?;
+
+                             typed_warnings.push(Warning::new(parsed_value.code, agent_uri, text_string));
+                         }
+                         Ok(TypedHeader::Warning(typed_warnings))
+                     },
+                     Err(e) => Err(Error::from(e.to_owned())),
+                 }
              },
             HeaderName::RetryAfter => {
                 all_consuming(parser::headers::parse_retry_after)(value_bytes)

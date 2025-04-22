@@ -4,7 +4,7 @@
 use crate::parser::common_chars::{lhex, token, digit};
 use crate::parser::quoted::quoted_string;
 use crate::parser::separators::{comma, equal, ldquot, rdquot};
-use crate::parser::uri::parse_uri;
+use crate::parser::complete::parse_uri;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Keep types used internally or returned by base parsers
@@ -175,7 +175,7 @@ pub(crate) fn digest_uri(input: &[u8]) -> ParseResult<Uri> {
      // Now parse the URI from the content bytes
      // We use complete::parse_uri which returns Result<Uri, Error> not ParseResult
      // Need to handle the remainder and error conversion manually if parse_uri fails
-     match crate::parser::uri::complete::parse_uri(uri_bytes) { 
+     match parse_uri(uri_bytes) { 
         Ok(uri) => Ok((rem, uri)),
         Err(_) => Err(nom::Err::Failure(NomError::from_error_kind(uri_bytes, ErrorKind::Verify))), // Indicate URI parse failure
      }

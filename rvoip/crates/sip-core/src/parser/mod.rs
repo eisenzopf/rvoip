@@ -20,7 +20,7 @@ mod common_params;
 mod utf8;
 
 // Re-export top-level parsers and types, consolidate duplicates
-pub use message::{parse_message, IncrementalParser, ParseState};
+pub use message::{parse_message /*, IncrementalParser, ParseState*/ }; // Removed unresolved imports
 // pub use request::request_parser; // Removed
 // pub use response::response_parser; // Removed
 // Commenting out potentially unresolved imports
@@ -45,10 +45,10 @@ pub use headers::{
     parse_call_id,
     parse_reply_to,
     parse_allow,
-    parse_content_type,
+    parse_content_type_value,
     parse_content_disposition,
     parse_accept,
-    parse_warning,
+    parse_warning_value_list,
     parse_accept_encoding,
     parse_accept_language,
     parse_content_encoding,
@@ -63,6 +63,10 @@ pub use headers::{
     parse_proxy_authorization,
     parse_authentication_info,
 };
+
+// Comment out missing exports
+// pub use message::{parse_message, IncrementalParser, ParseState };
+pub use message::{parse_message};
 
 // Maybe re-export specific header parsers if needed directly?
 // pub use headers::{parse_via, parse_cseq, ...}; 

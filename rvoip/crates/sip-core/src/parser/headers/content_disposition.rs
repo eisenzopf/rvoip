@@ -11,6 +11,7 @@ use nom::{
     multi::many0,
     sequence::{pair, preceded},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -21,7 +22,7 @@ use crate::parser::common_params::generic_param;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
-use crate::types::content_disposition::{DispositionType, DispositionParam, Handling, ContentDisposition as ContentDispositionHeader};
+use crate::types::content_disposition::{ContentDisposition, DispositionType};
 use crate::parser::common_params::parse_generic_param;
 use crate::parser::token::parse_token;
 
@@ -35,8 +36,9 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
             token // Fallback for extension token
         )),
         |bytes| {
-            let s = str::from_utf8(bytes)?;
-            Ok::<DispositionType, _>(match s.to_ascii_lowercase().as_str() {
+            let s = str::from_utf8(bytes)
+                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
+            Ok::<DispositionType, nom::error::Error<&[u8]>>(match s.to_ascii_lowercase().as_str() {
                 "render" => DispositionType::Render,
                 "session" => DispositionType::Session,
                 "icon" => DispositionType::Icon,
@@ -49,29 +51,18 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
 
 // handling-param = "handling" EQUAL ( "optional" / "required" / other-handling )
 // other-handling = token
-fn handling_param(input: &[u8]) -> ParseResult<Handling> {
-    map_res(
-        preceded(
-            pair(tag_no_case(b"handling"), equal),
-            alt((tag_no_case("optional"), tag_no_case("required"), token))
-        ),
-        |bytes| {
-             let s = str::from_utf8(bytes)?;
-            Ok(match s.to_ascii_lowercase().as_str() {
-                "optional" => Handling::Optional,
-                "required" => Handling::Required,
-                other => Handling::Other(other.to_string()),
-            })
-        }
-    )(input)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Handling {
+    Optional,
+    Required,
+    Other(String),
 }
 
 // disp-param = handling-param / generic-param
-fn disp_param(input: &[u8]) -> ParseResult<DispositionParam> {
-    alt((
-        map(handling_param, DispositionParam::Handling),
-        map(generic_param, DispositionParam::Generic) // Map Param::Other
-    ))(input)
+#[derive(Debug, Clone, PartialEq)]
+enum DispositionParam {
+    Handling(Handling),
+    Generic(Param),
 }
 
 // Define structure for Content-Disposition value
@@ -82,23 +73,50 @@ pub struct ContentDispositionValue {
 }
 
 /// Parses the Content-Disposition header value.
-pub fn parse_content_disposition(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
+pub fn parse_content_disposition(input: &[u8]) -> ParseResult<(String, Vec<DispositionParam>)> {
     map(
         pair(
             disp_type,
             many0(preceded(semi, disp_param))
         ),
-        |(dtype, params)| {
-            let disp_type = match dtype {
-                DispositionType::Render => "render",
-                DispositionType::Session => "session",
-                DispositionType::Icon => "icon",
-                DispositionType::Alert => "alert",
+        |(dtype, params_vec)| {
+            let disp_type_str = match dtype {
+                DispositionType::Render => "render".to_string(),
+                DispositionType::Session => "session".to_string(),
+                DispositionType::Icon => "icon".to_string(),
+                DispositionType::Alert => "alert".to_string(),
                 DispositionType::Other(s) => s,
             };
-            Ok((disp_type.to_string(), params))
+            (disp_type_str, params_vec)
         }
     )(input)
+}
+
+// handling-param parser
+fn handling_param(input: &[u8]) -> ParseResult<Handling> {
+    preceded(
+        pair(tag_no_case("handling"), equal),
+        map_res(
+            alt((tag_no_case("optional"), tag_no_case("required"), token)),
+            |bytes| {
+                let s = str::from_utf8(bytes)
+                    .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(bytes, nom::error::ErrorKind::Char)))?;
+                Ok::<Handling, nom::error::Error<&[u8]>>(match s {
+                    "optional" => Handling::Optional,
+                    "required" => Handling::Required,
+                    other => Handling::Other(other.to_string()),
+                })
+            }
+        )
+    )(input)
+}
+
+// Define the disp_param parser function
+fn disp_param(input: &[u8]) -> ParseResult<DispositionParam> {
+    alt((
+        map(handling_param, DispositionParam::Handling),
+        map(parse_generic_param, DispositionParam::Generic), // Use existing generic_param parser
+    ))(input)
 }
 
 #[cfg(test)]

@@ -5,13 +5,16 @@ use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 use crate::types::auth::AuthenticationInfoParam;
 use nom::IResult;
+use crate::parser::headers::auth::common::parse_auth_param;
+use nom::multi::separated_list1;
+use nom::sequence::tuple;
+use nom::bytes::complete::tag;
+use crate::parser::whitespace::lws as LWS;
 
-// Authentication-Info = "Authentication-Info" HCOLON ainfo *(COMMA ainfo)
-// Note: HCOLON is handled by the top-level message_header parser.
-// This parser receives the value *after* HCOLON.
-pub(crate) fn parse_authentication_info(input: &[u8]) -> ParseResult<Vec<AuthenticationInfoParam>> {
-    // The input is the value part, parse comma-separated list of ainfo
-    comma_separated_list1(ainfo)(input)
+// Authentication-Info = "Authentication-Info" HCOLON auth-param *(COMMA auth-param)
+pub fn parse_authentication_info(input: &[u8]) -> ParseResult<Vec<AuthenticationInfoParam>> {
+    let separator = tuple((LWS, tag(b","), LWS));
+    separated_list1(separator, parse_auth_param)(input)
 }
 
 #[cfg(test)]

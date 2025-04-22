@@ -62,7 +62,7 @@ pub(crate) fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> 
                 let value = unescape_uri_component(value_bytes)?;
                 map.insert(name, value);
             }
-            Ok(map)
+            Ok::<HashMap<String, String>, nom::error::Error<&[u8]>>(map)
         }
     )(input)
 }

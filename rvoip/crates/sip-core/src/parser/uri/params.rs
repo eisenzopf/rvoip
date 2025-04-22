@@ -57,7 +57,7 @@ fn other_param(input: &[u8]) -> ParseResult<Param> {
             // Construct Param::Other, but now the value is just Option<String>
             // This loses the Host/Token/Quoted distinction from generic_param
             // TODO: Revisit if URI params need GenericValue like header params
-            Ok(Param::Other(name, value_opt.map(|v| GenericValue::Token(v)))) // Temp: Stuff into Token
+            Ok::<Param, nom::error::Error<&[u8]>>(Param::Other(name, value_opt.map(|v| GenericValue::Token(v)))) // Temp: Stuff into Token
         }
     )(input)
 }

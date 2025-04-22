@@ -83,7 +83,8 @@ pub(crate) fn ttl_value(input: &[u8]) -> ParseResult<u8> {
         map_res(digit1, |s: &[u8]| 
             // Convert bytes to str, then parse u8
             str::from_utf8(s).map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
-                .and_then(|s_str| s_str.parse::<u8>().map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::ParseTo))))
+                // Use ErrorKind::Digit for parse errors
+                .and_then(|s_str| s_str.parse::<u8>().map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)))) 
         ),
         |val| Ok::<u8, nom::Err<nom::error::Error<&[u8]>>>(val) // Ensure Ok type matches expected Result
     )(input)

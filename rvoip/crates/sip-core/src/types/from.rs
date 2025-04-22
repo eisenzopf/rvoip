@@ -1,4 +1,4 @@
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, ParseTypedHeader};
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
 use crate::types::address::Address;
 use serde::{Deserialize, Serialize};
 use std::fmt;

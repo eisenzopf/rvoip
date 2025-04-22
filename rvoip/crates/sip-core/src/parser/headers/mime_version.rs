@@ -36,11 +36,15 @@ fn mime_version_val(input: &[u8]) -> ParseResult<MimeVersion> {
 pub(crate) fn parse_mime_version(input: &[u8]) -> ParseResult<MimeVersion> {
     map_res(
         separated_pair(digit1, bytes::tag(b"."), digit1),
-        |(major_bytes, minor_bytes)| -> Result<MimeVersion, Error> {
-            let major_str = str::from_utf8(major_bytes)?;
-            let minor_str = str::from_utf8(minor_bytes)?;
-            let major = major_str.parse::<u8>()?;
-            let minor = minor_str.parse::<u8>()?;
+        |(major_bytes, minor_bytes)| -> Result<MimeVersion> {
+            let major_str = str::from_utf8(major_bytes)
+                .map_err(|e| Error::ParseError(format!("Invalid major version UTF-8: {}", e)))?;
+            let major = major_str.parse::<u8>()
+                .map_err(|e| Error::ParseError(format!("Invalid major version u8: {}", e)))?;
+            let minor_str = str::from_utf8(minor_bytes)
+                .map_err(|e| Error::ParseError(format!("Invalid minor version UTF-8: {}", e)))?;
+            let minor = minor_str.parse::<u8>()
+                .map_err(|e| Error::ParseError(format!("Invalid minor version u8: {}", e)))?;
             Ok(MimeVersion::new(major, minor))
         }
     )(input)

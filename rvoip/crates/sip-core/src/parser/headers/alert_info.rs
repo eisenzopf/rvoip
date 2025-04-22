@@ -17,9 +17,13 @@ use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::uri::absolute_uri; // Assuming an absolute_uri parser exists
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
+use crate::parser::uri::parse_uri; // Import the actual URI parser
+use nom::combinator::all_consuming; // Import all_consuming
 
 use crate::types::uri::Uri;
-use crate::types::alert_info::AlertInfo as AlertInfoHeader; // Use specific header type
+use std::str::FromStr; // Keep FromStr? Might not be needed
+use crate::error::Error as CrateError; // Import crate error
+// use crate::types::alert_info::AlertInfo as AlertInfoHeader; // Removed unused import
 
 use crate::types::param::Param;
 
@@ -37,8 +41,16 @@ pub struct AlertInfoValue {
 
 // alert-param = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 fn alert_param(input: &[u8]) -> ParseResult<AlertInfoValue> {
-    let (remaining, (uri, params)) = uri_with_generic_params(input)?;
-    Ok((remaining, AlertInfoValue { uri, params }))
+    map_res(
+        uri_with_generic_params, // Assume this still returns Result<(String, Vec<Param>), _>
+        |(uri_str, params)| -> Result<AlertInfoValue, CrateError> { 
+            // Parse the URI string using the dedicated parser
+            // Map nom::Err to CrateError
+            let (_, uri) = all_consuming(parse_uri)(uri_str.as_bytes())
+                .map_err(|e: nom::Err<nom::error::Error<&[u8]>>| CrateError::ParseError(format!("URI parse error: {}", e)))?;
+            Ok(AlertInfoValue { uri, params })
+        }
+    )(input)
 }
 
 /// Parses an Alert-Info header value.

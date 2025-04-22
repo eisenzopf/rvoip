@@ -9,6 +9,7 @@ use nom::{
     combinator::{map_res, recognize},
     sequence::{tuple, preceded, delimited},
     IResult,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -81,11 +82,14 @@ pub(crate) fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
                 tag("GMT") // Assumes GMT/UTC timezone
             ))
         ),
-        |bytes| {
+        |bytes| -> Result<DateTime<FixedOffset>, nom::Err<NomError<&[u8]>>> { 
             // Use chrono to parse the recognized RFC 1123 string
-            let date_str = str::from_utf8(bytes)?;
+            let date_str = str::from_utf8(bytes)
+                 // Map Utf8Error to nom::Err::Failure
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))?; 
             DateTime::parse_from_rfc2822(date_str) // RFC 2822 is compatible with RFC 1123 format
-                .map_err(|e| format!("Chrono parsing failed: {}", e))
+                 // Map chrono::ParseError to nom::Err::Failure
+                .map_err(|_e| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Verify))) 
         }
     )(input)
 }

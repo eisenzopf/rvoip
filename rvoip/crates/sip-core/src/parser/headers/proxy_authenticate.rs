@@ -4,13 +4,13 @@ use super::auth::challenge::challenge; // Use the challenge parser
 use crate::parser::ParseResult;
 use crate::types::auth::Challenge;
 use nom::IResult;
+use crate::parser::headers::auth::challenge::parse_challenge;
 
 // Proxy-Authenticate = "Proxy-Authenticate" HCOLON challenge
 // Note: HCOLON is handled by the top-level message_header parser.
 // This parser receives the value *after* HCOLON.
-pub(crate) fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<Challenge> {
-    // The input here is the value part after "Proxy-Authenticate: "
-    challenge(input)
+pub fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<Challenge> {
+    parse_challenge(input)
 }
 
 #[cfg(test)]
