@@ -65,3 +65,33 @@ impl FromStr for Allow {
 }
 
 // TODO: Implement methods (e.g., allows(Method)) 
+
+// Implement IntoIterator for Allow
+impl IntoIterator for Allow {
+    type Item = Method;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+// Implement IntoIterator for &Allow
+impl<'a> IntoIterator for &'a Allow {
+    type Item = &'a Method;
+    type IntoIter = std::slice::Iter<'a, Method>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+// Implement IntoIterator for &mut Allow
+impl<'a> IntoIterator for &'a mut Allow {
+    type Item = &'a mut Method;
+    type IntoIter = std::slice::IterMut<'a, Method>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+} 

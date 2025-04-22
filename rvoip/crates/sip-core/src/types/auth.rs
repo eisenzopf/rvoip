@@ -400,7 +400,7 @@ impl FromStr for Authorization {
     fn from_str(s: &str) -> Result<Self> {
         // Call the actual parser and map nom::Err to crate::error::Error
         crate::parser::headers::parse_authorization(s.as_bytes())
-            .map(|(_, creds)| Authorization(creds))
+            .map(|(_, auth_header)| auth_header) // parser returns AuthorizationHeader directly
             .map_err(Error::from)
     }
 }

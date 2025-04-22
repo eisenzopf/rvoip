@@ -774,14 +774,14 @@ impl TryFrom<Header> for TypedHeader {
         let parse_result = match &header.name {
             // Address Headers
             HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
-                .map(|(_, v)| TypedHeader::From(FromHeaderValue(v)))
-                .map_err(Error::from),
+                .map_err(Error::from)
+                .map(|(_, addr)| TypedHeader::From(FromHeaderValue(addr))),
             HeaderName::To => all_consuming(parser::headers::parse_to)(value_bytes)
-                .map(|(_, v)| TypedHeader::To(ToHeaderValue(v)))
-                .map_err(Error::from),
+                .map_err(Error::from)
+                .map(|(_, addr)| TypedHeader::To(ToHeaderValue(addr))),
             HeaderName::Contact => all_consuming(parser::headers::parse_contact)(value_bytes)
-                .map(|(_, v)| TypedHeader::Contact(Contact(v)))
-                .map_err(Error::from),
+                .map_err(Error::from)
+                .map(|(_, v)| TypedHeader::Contact(Contact(v))),
             HeaderName::ReplyTo => {
                 match all_consuming(parser::headers::reply_to::parse_reply_to)(value_bytes) {
                     Ok((_, addr)) => Ok(TypedHeader::ReplyTo(ReplyTo(addr))),
@@ -958,13 +958,16 @@ impl TryFrom<Header> for TypedHeader {
                 .map_err(Error::from),
             HeaderName::Organization => all_consuming(parser::headers::parse_organization)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_owned())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Organization(String::from_utf8(v_bytes.to_owned().into())?))),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Priority(String::from_utf8(v_bytes.to_owned())?))),
+                 .and_then(|(_, v_bytes)| {
+                    let priority_str = String::from_utf8(v_bytes.to_owned().into())?;
+                    Ok(TypedHeader::Priority(priority_str))
+                 }),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
                  .map_err(Error::from)
-                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_owned())?))),
+                 .and_then(|(_, v_bytes)| Ok(TypedHeader::Subject(String::from_utf8(v_bytes.to_owned().into())?))),
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_list)| {

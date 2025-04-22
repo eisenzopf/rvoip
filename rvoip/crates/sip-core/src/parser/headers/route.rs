@@ -31,6 +31,12 @@ use crate::parser::address::name_addr_or_addr_spec;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct RouteEntry(pub Address);
 
+impl std::fmt::Display for RouteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // route-param = name-addr *( SEMI rr-param )
 // rr-param = generic-param
 fn route_param(input: &[u8]) -> ParseResult<Address> {

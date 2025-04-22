@@ -33,6 +33,12 @@ use crate::parser::parse_address;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct RecordRouteEntry(pub Address);
 
+impl std::fmt::Display for RecordRouteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // Define a simple function that just calls parse_address, so it implements Copy
 fn parse_record_route_address(input: &[u8]) -> ParseResult<Address> {
     parse_address(input)
