@@ -26,6 +26,22 @@ pub enum ServerProduct {
     Comment(String),
 }
 
+/// Represents a product token with optional version used in Server/User-Agent headers
+/// Used by the parser module
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Product {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// Represents a single component of Server/User-Agent header
+/// Used by the parser module
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerVal {
+    Product(Product),
+    Comment(String),
+}
+
 impl ServerInfo {
     /// Create a new empty ServerInfo
     pub fn new() -> Self {
@@ -94,6 +110,24 @@ impl Default for ServerInfo {
     }
 }
 
+// Conversion from parser representation to header representation
+impl From<Vec<ServerVal>> for ServerInfo {
+    fn from(vals: Vec<ServerVal>) -> Self {
+        let mut info = ServerInfo::new();
+        for val in vals {
+            match val {
+                ServerVal::Product(p) => {
+                    info.add_product(&p.name, p.version.as_deref());
+                },
+                ServerVal::Comment(c) => {
+                    info.add_comment(&c);
+                }
+            }
+        }
+        info
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +162,20 @@ mod tests {
     fn test_server_info_empty() {
         let server = ServerInfo::new();
         assert_eq!(server.to_string(), "");
+    }
+    
+    #[test]
+    fn test_from_server_val() {
+        let vals = vec![
+            ServerVal::Product(Product {
+                name: "MyProduct".to_string(),
+                version: Some("1.0".to_string())
+            }),
+            ServerVal::Comment("Test Build".to_string())
+        ];
+        
+        let info = ServerInfo::from(vals);
+        assert_eq!(info.products.len(), 2);
+        assert_eq!(info.to_string(), "MyProduct/1.0 (Test Build)");
     }
 } 

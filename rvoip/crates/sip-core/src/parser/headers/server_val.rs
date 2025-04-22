@@ -15,8 +15,11 @@ use crate::parser::quoted::comment;
 use crate::parser::separators::slash;
 use crate::parser::ParseResult;
 
-// Import types (assuming)
-use crate::types::server::{ServerVal, Product}; // Assuming ServerVal::Product(Product), ServerVal::Comment(String)
+// Import the types from the types module
+use crate::types::server::{ServerVal, Product};
+
+// Create an alias for compatibility with existing code
+pub type ServerValComponent = ServerVal;
 
 // product-version = token
 fn product_version(input: &[u8]) -> ParseResult<String> {
@@ -41,6 +44,11 @@ pub fn server_val(input: &[u8]) -> ParseResult<ServerVal> {
         // Assuming comment parser returns the content as String
         map_res(comment, |bytes| str::from_utf8(bytes).map(|s| ServerVal::Comment(s.to_string())))
     ))(input)
+}
+
+// Alias for function to help with migration
+pub fn server_val_parser(input: &[u8]) -> ParseResult<ServerVal> {
+    server_val(input)
 }
 
 #[cfg(test)]

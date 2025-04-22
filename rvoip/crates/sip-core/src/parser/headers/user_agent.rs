@@ -15,11 +15,10 @@ use crate::parser::whitespace::lws;
 use super::server_val::server_val; // Use the shared server_val parser
 use crate::parser::ParseResult;
 
-// Import the return type from server_val
+// Import the types from the types module
+use crate::types::server::{ServerVal, Product};
+// Import the alias for backward compatibility
 use super::server_val::ServerValComponent;
-
-// Import types (assuming)
-use crate::types::server::ServerVal;
 
 // server-val *(LWS server-val)
 fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
@@ -34,7 +33,6 @@ pub fn parse_user_agent(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::server::{Product};
 
     #[test]
     fn test_parse_user_agent_single_product() {

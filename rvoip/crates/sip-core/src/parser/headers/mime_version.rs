@@ -7,7 +7,7 @@ use nom::{
     combinator::{map_res},
     sequence::{separated_pair, pair},
     IResult,
-    error::{ErrorKind, NomError},
+    error::{ErrorKind, Error as NomError},
 };
 use std::str;
 

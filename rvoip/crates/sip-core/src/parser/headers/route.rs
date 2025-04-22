@@ -23,7 +23,7 @@ use crate::types::address::Address;
 use crate::types::route::Route as RouteHeader; // Use the specific header type
 use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::types::uri_with_params::UriWithParams;
-use crate::parser::address::parse_address;
+use crate::parser::parse_address;
 use serde::{Serialize, Deserialize}; // Added serde
 use crate::parser::address::name_addr_or_addr_spec;
 
