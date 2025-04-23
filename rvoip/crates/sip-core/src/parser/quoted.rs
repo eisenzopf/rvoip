@@ -47,7 +47,7 @@ pub fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // quoted-string = SWS DQUOTE *(qdtext / quoted-pair ) DQUOTE
-// Returns the raw content within the quotes, including escape sequences.
+// Returns the raw content within the quotes, including escape sequences but without the surrounding quotes.
 pub fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
     preceded(
         sws,

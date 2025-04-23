@@ -21,16 +21,63 @@ use crate::error::{Error, Result};
 // Does not enforce toplabel/domainlabel specific content rules, relies on higher-level validation if needed.
 
 // domainlabel or toplabel part
-// Matches sequences like "example" or "co-uk"
+// According to RFC 3261, a hostname should consist of domain labels separated by dots
+// This ensures a hostname has at least one dot to distinguish it from a token
 fn domain_part(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(pair(
-        many0(pair(take_while1(|c:u8| c.is_ascii_alphanumeric() || c == b'-'), tag(b".".as_slice()))),
-        take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-')
+        pair(
+            take_while1(|c:u8| c.is_ascii_alphanumeric() || c == b'-'), // domainlabel
+            tag(b".".as_slice()) // require at least one dot
+        ),
+        alt((
+            recognize(pair(
+                many0(pair(
+                    take_while1(|c:u8| c.is_ascii_alphanumeric() || c == b'-'),
+                    tag(b".".as_slice())
+                )),
+                take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-') // toplabel
+            )),
+            tag(b"") // allow trailing dot at the end (FQDN)
+        ))
     ))(input)
+}
+
+// Helper to identify if a string might be an IPv4 address
+// This is a basic check - we assume 1-3 digits followed by a dot, repeated 4 times
+fn is_likely_ipv4(input: &[u8]) -> bool {
+    if input.len() < 7 || input.len() > 15 { // Min valid IPv4: 1.1.1.1, Max: 255.255.255.255
+        return false;
+    }
+    
+    let mut dots = 0;
+    let mut digits_since_last_dot = 0;
+    
+    for &c in input {
+        if c == b'.' {
+            if digits_since_last_dot == 0 || digits_since_last_dot > 3 {
+                return false;
+            }
+            dots += 1;
+            digits_since_last_dot = 0;
+        } else if c.is_ascii_digit() {
+            digits_since_last_dot += 1;
+        } else {
+            return false; // Non-digit, non-dot character
+        }
+    }
+    
+    // Valid IPv4 has exactly 3 dots (4 number segments)
+    dots == 3 && digits_since_last_dot > 0 && digits_since_last_dot <= 3
 }
 
 // hostname parser
 pub fn hostname(input: &[u8]) -> ParseResult<Host> {
+    // First, check if input looks like an IPv4 address
+    // If so, fail early to let the IPv4 parser handle it
+    if is_likely_ipv4(input) {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+
     map_res(
         domain_part,
         |bytes: &[u8]| -> Result<Host> {
