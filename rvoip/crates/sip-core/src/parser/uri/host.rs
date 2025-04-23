@@ -25,11 +25,40 @@ pub fn host(input: &[u8]) -> ParseResult<Host> {
 
 // port = 1*DIGIT
 pub fn port(input: &[u8]) -> ParseResult<u16> {
-    map_res(digit1, |bytes| { // Use digit1 directly
-        str::from_utf8(bytes)
-            .map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Char)))
-            .and_then(|s| s.parse::<u16>().map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Verify))))
-    })(input)
+    // Manual implementation that ensures strict numeric validation
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
+    }
+    
+    // Find the position of the first non-digit character
+    let mut pos = 0;
+    while pos < input.len() && input[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    
+    // Ensure we found at least one digit
+    if pos == 0 {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
+    }
+    
+    // Extract the digit sequence
+    let digits = &input[..pos];
+    let remaining = &input[pos..];
+    
+    // Parse the port number
+    let port_str = std::str::from_utf8(digits)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
+    
+    // Convert to u32 first to check for overflow
+    let port_num = port_str.parse::<u32>()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
+    
+    // Verify port is within valid range (0-65535)
+    if port_num > 65535 {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+    }
+    
+    Ok((remaining, port_num as u16))
 }
 
 // hostport = host [ ":" port ]

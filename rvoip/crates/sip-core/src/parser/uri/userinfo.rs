@@ -76,6 +76,31 @@ pub fn password(input: &[u8]) -> ParseResult<&[u8]> {
 // Corrected structure: Parses user and optional password, terminated by '@'
 // Extended to support IPv6 references in userinfo (RFC 5118)
 pub fn userinfo(input: &[u8]) -> ParseResult<(String, Option<String>)> {
+    // First, validate the input to ensure there's no more than one colon
+    // before the '@' symbol (excluding IPv6 references which are handled separately)
+    let at_pos = match input.iter().position(|&c| c == b'@') {
+        Some(pos) => pos,
+        None => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+    };
+    
+    // Check if we have an IPv6 reference in userinfo
+    let has_ipv6 = input.contains(&b'[') && input.contains(&b']');
+    
+    // If not an IPv6 reference, check for multiple colons
+    if !has_ipv6 {
+        let mut colon_count = 0;
+        for &c in &input[..at_pos] {
+            if c == b':' {
+                colon_count += 1;
+                if colon_count > 1 {
+                    // More than one colon found in userinfo - RFC 3261 only allows user:password
+                    return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
+                }
+            }
+        }
+    }
+    
+    // Now proceed with parsing
     map_res(
         terminated(
             pair(user, opt(preceded(tag(b":"), password))),

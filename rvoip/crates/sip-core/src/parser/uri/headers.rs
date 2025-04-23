@@ -117,12 +117,34 @@ fn hvalue(input: &[u8]) -> ParseResult<&[u8]> {
 // header = hname "=" hvalue
 // Returns (name_bytes, value_bytes)
 fn header(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
-    separated_pair(hname, tag(b"="), hvalue)(input)
+    // Check for headers with no name (starting with "=")
+    if !input.is_empty() && input[0] == b'=' {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    let result = separated_pair(hname, tag(b"="), hvalue)(input);
+    
+    // Additional validation - ensure header name is not empty
+    match result {
+        Ok((rem, (name, value))) => {
+            if name.is_empty() {
+                Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+            } else {
+                Ok((rem, (name, value)))
+            }
+        },
+        Err(e) => Err(e)
+    }
 }
 
 // headers = "?" header *( "&" header )
 // Returns HashMap<String, String>, handling unescaping.
 pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+    // Direct check for "?=" which would be a header with no name
+    if input.len() >= 2 && input[0] == b'?' && input[1] == b'=' {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
     map_res(
         preceded(
             tag(b"?"),

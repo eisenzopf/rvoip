@@ -47,6 +47,12 @@ pub fn pvalue(input: &[u8]) -> ParseResult<&[u8]> {
 // other-param = pname [ "=" pvalue ]
 // Updated to unescape name and value
 fn other_param(input: &[u8]) -> ParseResult<Param> {
+    // If the input starts with an equals sign, this is a parameter with no name
+    // which should be rejected according to RFC 3261
+    if !input.is_empty() && input[0] == b'=' {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Tag)));
+    }
+    
     // If the input ends with an equals sign and nothing after it, this should fail per RFC 3261
     if input.len() > 1 && input[input.len() - 1] == b'=' {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::Tag)));
@@ -55,6 +61,11 @@ fn other_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         pair(pname, opt(preceded(equal, pvalue))),
         |(name_bytes, value_opt_bytes)| -> Result<Param, Error> {
+            // Ensure the parameter name is not empty
+            if name_bytes.is_empty() {
+                return Err(Error::ParseError("Empty parameter name".to_string()));
+            }
+            
             let name = unescape_uri_component(name_bytes)?;
             let value_opt = value_opt_bytes
                 .map(|v_bytes| unescape_uri_component(v_bytes))

@@ -153,53 +153,106 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
         input
     };
     
+    // Special check for non-numeric port values
+    // If there's a colon not followed by digits, treat it as an error
+    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+        if colon_pos + 1 < input.len() {
+            let port_start = &input[colon_pos + 1..];
+            if port_start.is_empty() || !port_start[0].is_ascii_digit() {
+                // Port starts with non-digit
+                let error = nom::error::Error::new(input, nom::error::ErrorKind::Digit);
+                return Err(nom::Err::Error(error));
+            }
+            
+            // Find the end of the port number
+            let mut i = 0;
+            while i < port_start.len() && port_start[i].is_ascii_digit() {
+                i += 1;
+            }
+            
+            // If port contains non-digit characters before parameter or header delimiter
+            if i > 0 && i < port_start.len() && port_start[i] != b';' && port_start[i] != b'?' {
+                let error = nom::error::Error::new(input, nom::error::ErrorKind::Digit);
+                return Err(nom::Err::Error(error));
+            }
+            
+            // Now check if the port value exceeds u16 range (0-65535)
+            if i > 0 {
+                let port_digits = &port_start[0..i];
+                if port_digits.len() > 5 {  // More than 5 digits definitely exceeds 65535
+                    let error = nom::error::Error::new(input, nom::error::ErrorKind::Verify);
+                    return Err(nom::Err::Error(error));
+                } else if port_digits.len() == 5 {
+                    // Check if the value is > 65535
+                    if let Ok(port_str) = std::str::from_utf8(port_digits) {
+                        if let Ok(port_value) = port_str.parse::<u32>() {
+                            if port_value > 65535 {
+                                let error = nom::error::Error::new(input, nom::error::ErrorKind::Verify);
+                                return Err(nom::Err::Error(error));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // Parse hostport
-    let (mut remaining, (host, port)) = hostport(input)?;
-    
-    // Parse parameters if present (starting with ;)
-    let mut params = Vec::new();
-    if !remaining.is_empty() && remaining[0] == b';' {
-        match uri_parameters(remaining) {
-            Ok((new_remaining, parsed_params)) => {
-                remaining = new_remaining;
-                params = parsed_params;
-            },
-            Err(e) => {
-                // For debugging, print the error
-                eprintln!("Parameter parsing failed: {:?}", e);
-                eprintln!("Input: {:?}", remaining);
-                // If parameter parsing fails, keep the original remaining and empty params
+    match hostport(input) {
+        Ok((remaining, (host, port))) => {
+            // Parse parameters if present (starting with ;)
+            let mut params = Vec::new();
+            let mut current_remaining = remaining;
+            
+            if !current_remaining.is_empty() && current_remaining[0] == b';' {
+                match uri_parameters(current_remaining) {
+                    Ok((new_remaining, parsed_params)) => {
+                        current_remaining = new_remaining;
+                        params = parsed_params;
+                    },
+                    Err(e) => {
+                        eprintln!("Parameter parsing failed: {:?}", e);
+                        // Return the error instead of silently continuing
+                        return Err(e);
+                    }
+                }
             }
+            
+            // Parse headers if present (starting with ?)
+            let mut headers = HashMap::new();
+            if !current_remaining.is_empty() && current_remaining[0] == b'?' {
+                match uri_headers(current_remaining) {
+                    Ok((new_remaining, parsed_headers)) => {
+                        current_remaining = new_remaining;
+                        headers = parsed_headers;
+                    },
+                    Err(e) => {
+                        // Return the error instead of silently continuing
+                        return Err(e);
+                    }
+                }
+            }
+            
+            // Create URI
+            let (user, password) = user_info.unwrap_or((String::new(), None));
+            let uri = Uri {
+                scheme: Scheme::Sip,
+                user: if user.is_empty() { None } else { Some(user) },
+                password,
+                host,
+                port,
+                parameters: params,
+                headers,
+            };
+            
+            Ok((current_remaining, uri))
+        },
+        Err(e) => {
+            eprintln!("Hostport parsing failed: {:?}", e);
+            // Just propagate the error
+            Err(e)
         }
     }
-    
-    // Parse headers if present (starting with ?)
-    let mut headers = HashMap::new();
-    if !remaining.is_empty() && remaining[0] == b'?' {
-        match uri_headers(remaining) {
-            Ok((new_remaining, parsed_headers)) => {
-                remaining = new_remaining;
-                headers = parsed_headers;
-            },
-            Err(_) => {
-                // If header parsing fails, keep the original remaining and empty headers
-            }
-        }
-    }
-    
-    // Create URI
-    let (user, password) = user_info.unwrap_or((String::new(), None));
-    let uri = Uri {
-        scheme: Scheme::Sip,
-        user: if user.is_empty() { None } else { Some(user) },
-        password,
-        host,
-        port,
-        parameters: params,
-        headers,
-    };
-    
-    Ok((remaining, uri))
 }
 
 // Fixed implementation of SIPS URI parser that correctly handles params and headers
@@ -235,50 +288,105 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
         input
     };
     
+    // Special check for non-numeric port values
+    // If there's a colon not followed by digits, treat it as an error
+    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+        if colon_pos + 1 < input.len() {
+            let port_start = &input[colon_pos + 1..];
+            if port_start.is_empty() || !port_start[0].is_ascii_digit() {
+                // Port starts with non-digit
+                let error = nom::error::Error::new(input, nom::error::ErrorKind::Digit);
+                return Err(nom::Err::Error(error));
+            }
+            
+            // Find the end of the port number
+            let mut i = 0;
+            while i < port_start.len() && port_start[i].is_ascii_digit() {
+                i += 1;
+            }
+            
+            // If port contains non-digit characters before parameter or header delimiter
+            if i > 0 && i < port_start.len() && port_start[i] != b';' && port_start[i] != b'?' {
+                let error = nom::error::Error::new(input, nom::error::ErrorKind::Digit);
+                return Err(nom::Err::Error(error));
+            }
+            
+            // Now check if the port value exceeds u16 range (0-65535)
+            if i > 0 {
+                let port_digits = &port_start[0..i];
+                if port_digits.len() > 5 {  // More than 5 digits definitely exceeds 65535
+                    let error = nom::error::Error::new(input, nom::error::ErrorKind::Verify);
+                    return Err(nom::Err::Error(error));
+                } else if port_digits.len() == 5 {
+                    // Check if the value is > 65535
+                    if let Ok(port_str) = std::str::from_utf8(port_digits) {
+                        if let Ok(port_value) = port_str.parse::<u32>() {
+                            if port_value > 65535 {
+                                let error = nom::error::Error::new(input, nom::error::ErrorKind::Verify);
+                                return Err(nom::Err::Error(error));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // Parse hostport
-    let (mut remaining, (host, port)) = hostport(input)?;
-    
-    // Parse parameters if present (starting with ;)
-    let mut params = Vec::new();
-    if !remaining.is_empty() && remaining[0] == b';' {
-        match uri_parameters(remaining) {
-            Ok((new_remaining, parsed_params)) => {
-                remaining = new_remaining;
-                params = parsed_params;
-            },
-            Err(_) => {
-                // If parameter parsing fails, keep the original remaining and empty params
+    match hostport(input) {
+        Ok((remaining, (host, port))) => {
+            // Parse parameters if present (starting with ;)
+            let mut params = Vec::new();
+            let mut current_remaining = remaining;
+            
+            if !current_remaining.is_empty() && current_remaining[0] == b';' {
+                match uri_parameters(current_remaining) {
+                    Ok((new_remaining, parsed_params)) => {
+                        current_remaining = new_remaining;
+                        params = parsed_params;
+                    },
+                    Err(e) => {
+                        // Return the error instead of silently continuing
+                        return Err(e);
+                    }
+                }
             }
+            
+            // Parse headers if present (starting with ?)
+            let mut headers = HashMap::new();
+            if !current_remaining.is_empty() && current_remaining[0] == b'?' {
+                match uri_headers(current_remaining) {
+                    Ok((new_remaining, parsed_headers)) => {
+                        current_remaining = new_remaining;
+                        headers = parsed_headers;
+                    },
+                    Err(e) => {
+                        // Return the error instead of silently continuing
+                        return Err(e);
+                    }
+                }
+            }
+            
+            // Create URI
+            let (user, password) = user_info.unwrap_or((String::new(), None));
+            let uri = Uri {
+                scheme: Scheme::Sips,
+                user: if user.is_empty() { None } else { Some(user) },
+                password,
+                host,
+                port,
+                parameters: params,
+                headers,
+            };
+            
+            Ok((current_remaining, uri))
+        },
+        Err(e) => {
+            eprintln!("Hostport parsing failed: {:?}", e);
+            // Just propagate the error
+            Err(e)
         }
     }
-    
-    // Parse headers if present (starting with ?)
-    let mut headers = HashMap::new();
-    if !remaining.is_empty() && remaining[0] == b'?' {
-        match uri_headers(remaining) {
-            Ok((new_remaining, parsed_headers)) => {
-                remaining = new_remaining;
-                headers = parsed_headers;
-            },
-            Err(_) => {
-                // If header parsing fails, keep the original remaining and empty headers
-            }
-        }
-    }
-    
-    // Create URI
-    let (user, password) = user_info.unwrap_or((String::new(), None));
-    let uri = Uri {
-        scheme: Scheme::Sips,
-        user: if user.is_empty() { None } else { Some(user) },
-        password,
-        host,
-        port,
-        parameters: params,
-        headers,
-    };
-    
-    Ok((remaining, uri))
 }
 
 
@@ -792,6 +900,58 @@ mod tests {
         
         // The current implementation handles these cases differently, which may
         // be acceptable for real-world use to increase interoperability.
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_port_non_numeric() {
+        // 1. Non-numeric port (should be rejected)
+        let result = parse_uri(b"sip:alice@example.com:abc");
+        assert!(result.is_err(), "Parser should reject non-numeric port values");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_port_overflow() {
+        // 2. Port exceeds u16 range (should be rejected)
+        let result = parse_uri(b"sip:alice@example.com:65536");
+        assert!(result.is_err(), "Parser should reject port values > 65535");
+        
+        let result = parse_uri(b"sip:alice@example.com:999999");
+        assert!(result.is_err(), "Parser should reject large port values");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_param_no_name() {
+        // 3. Parameter with no name (should be rejected)
+        let result = parse_uri(b"sip:alice@example.com;=value");
+        assert!(result.is_err(), "Parser should reject parameters with no name");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_header_no_name() {
+        // 4. Header with no name (should be rejected)
+        let result = parse_uri(b"sip:alice@example.com?=value");
+        assert!(result.is_err(), "Parser should reject headers with no name");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_userinfo_multiple_colons() {
+        // 5. Multiple colons in userinfo part (only one allowed for user:password)
+        let result = parse_uri(b"sip:alice:pass:word@example.com");
+        assert!(result.is_err(), "Parser should reject multiple colons in userinfo");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_host_invalid_chars() {
+        // 6. Invalid characters in host
+        let result = parse_uri(b"sip:alice@example_com");
+        assert!(result.is_err(), "Parser should reject underscores in host");
+    }
+    
+    #[test]
+    fn test_strict_rfc_compliance_edge_cases_host_leading_period() {
+        // 7. Leading period in domain
+        let result = parse_uri(b"sip:alice@.example.com");
+        assert!(result.is_err(), "Parser should reject leading periods in domain");
     }
     
     #[test]
