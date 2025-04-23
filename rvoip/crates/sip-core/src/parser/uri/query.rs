@@ -38,7 +38,7 @@ fn query_param(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
 
 // query = *uric
 // Returns raw query string as bytes
-fn query_raw(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn query_raw(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many0(uric))(input)
 }
 
