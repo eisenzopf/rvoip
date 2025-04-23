@@ -46,19 +46,16 @@ use authority::parse_authority;
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
     let bytes_slice = bytes;
-    let res = all_consuming(delimited(
+    let res = tuple((
         tag_no_case(b"sip:"),
-        tuple((
-            opt(userinfo),
-            hostport,
-            opt(uri_parameters),
-            opt(uri_headers),
-        )),
-        eof,
+        opt(userinfo),
+        hostport,
+        opt(uri_parameters),
+        opt(uri_headers),
     ))(bytes_slice);
 
     match res {
-        Ok((remaining, (user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
+        Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
             // user_info is already (String, Option<String>)
             let (user, password) = user_info_opt.unwrap_or((String::new(), None));
             
@@ -84,19 +81,16 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
     let bytes_slice = bytes;
-    let res = all_consuming(delimited(
+    let res = tuple((
         tag_no_case(b"sips:"),
-        tuple((
-            opt(userinfo),
-            hostport,
-            opt(uri_parameters),
-            opt(uri_headers),
-        )),
-        eof,
+        opt(userinfo),
+        hostport,
+        opt(uri_parameters),
+        opt(uri_headers),
     ))(bytes_slice);
 
     match res {
-        Ok((remaining, (user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
+        Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
             // user_info is already (String, Option<String>)
             let (user, password) = user_info_opt.unwrap_or((String::new(), None));
             

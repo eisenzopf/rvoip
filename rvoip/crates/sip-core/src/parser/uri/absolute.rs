@@ -2,10 +2,10 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while1},
-    combinator::{map, opt, recognize, verify},
+    bytes::complete::{tag, take_until, take_while1},
+    combinator::{map, map_res, opt, recognize, verify},
     multi::many0,
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, terminated},
     IResult,
 };
 use std::str;
@@ -19,6 +19,7 @@ use crate::parser::uri::scheme::parse_scheme_raw;
 use crate::parser::uri::authority::parse_authority;
 use crate::parser::uri::path::{abs_path, param};
 use crate::parser::uri::query::{query_raw, parse_query};
+use crate::parser::uri::ipv6::ipv6_reference;
 
 // --- URI Character Sets (RFC 2396 / 3261) ---
 
@@ -68,8 +69,84 @@ fn opaque_part(input: &[u8]) -> ParseResult<&[u8]> {
     )(input)
 }
 
+// Check for empty authority after //
+fn is_valid_authority_context(scheme: &[u8], rest: &[u8]) -> bool {
+    // Special case for http/https - they must have a non-empty authority
+    if (scheme == b"http" || scheme == b"https") && 
+       rest.len() >= 2 && 
+       &rest[0..2] == b"//" && 
+       (rest.len() == 2 || rest[2] == b'/') {
+        return false;
+    }
+    true
+}
+
+// Check if scheme can have non-hierarchical form
+fn is_valid_scheme_form(scheme: &[u8], rest: &[u8]) -> bool {
+    let is_hierarchical = rest.starts_with(b"/");
+    
+    // HTTP/HTTPS must have a hierarchical form and must use //
+    if scheme == b"http" || scheme == b"https" {
+        if !is_hierarchical {
+            return false;
+        }
+        if is_hierarchical && rest.starts_with(b"/") && 
+           !(rest.len() > 1 && rest[1] == b'/') {
+            return false;
+        }
+    }
+    true
+}
+
+// Validate IPv6 address syntax
+fn validate_ipv6(input: &[u8]) -> bool {
+    // Find the IPv6 address if any
+    if let Some(start) = input.iter().position(|&c| c == b'[') {
+        if let Some(end) = input.iter().skip(start + 1).position(|&c| c == b']') {
+            let end = start + 1 + end;
+            
+            // Check if brackets are empty or content is too short
+            if end - start <= 2 {
+                return false;
+            }
+            
+            // Extract the IPv6 content
+            let ipv6_content = &input[start + 1..end];
+            
+            // Basic validation: must contain valid characters and at least one colon
+            let valid_chars = ipv6_content.iter().all(|&c| 
+                c.is_ascii_hexdigit() || c == b':' || c == b'.'
+            );
+            
+            if !valid_chars || !ipv6_content.contains(&b':') {
+                return false;
+            }
+            
+            // Check for IPv6 syntax errors like :::1 (too many colons together)
+            if ipv6_content.windows(3).any(|w| w == b":::") {
+                return false;
+            }
+            
+            // Check if IPv6 address is too short (like [1])
+            if ipv6_content.len() < 3 && !(ipv6_content == b"::") {
+                return false;
+            }
+        }
+    }
+    
+    true
+}
+
+// Find the end marker (fragment, or end of input)
+fn find_uri_end(input: &[u8]) -> usize {
+    if let Some(pos) = input.iter().position(|&c| c == b'#') {
+        pos
+    } else {
+        input.len()
+    }
+}
+
 // absoluteURI = scheme ":" ( hier-part / opaque-part )
-// Complete rewrite to avoid subtraction overflow
 pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
     if input.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -78,144 +155,52 @@ pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
         )));
     }
 
-    // Find the position of the colon that separates scheme from the rest
-    let colon_pos = match input.iter().position(|&c| c == b':') {
-        Some(pos) => pos,
-        None => {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-    };
-
-    // Validate the scheme (must start with alpha and contain only allowed chars)
-    if colon_pos == 0 || !input[0].is_ascii_alphabetic() {
+    // First parse the scheme
+    let scheme_result = parse_scheme_raw(input);
+    if scheme_result.is_err() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
-            nom::error::ErrorKind::Alpha,
+            nom::error::ErrorKind::Tag,
         )));
     }
-
-    for &c in &input[1..colon_pos] {
-        if !(c.is_ascii_alphabetic() || c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.') {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::AlphaNumeric,
-            )));
-        }
-    }
-
-    // Extract the scheme and the rest
-    let scheme = &input[0..colon_pos];
     
-    // We need at least one character after the colon
-    if colon_pos + 1 >= input.len() {
+    let (after_scheme, scheme) = scheme_result.unwrap();
+    
+    // Handle empty rest case
+    if after_scheme.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::TakeWhile1,
         )));
     }
     
-    let rest = &input[colon_pos + 1..];
+    // Additional validation for specific scheme requirements
+    if !is_valid_scheme_form(scheme, after_scheme) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     
-    // Special case for http:// with empty authority
-    if (scheme == b"http" || scheme == b"https") && 
-       rest.len() >= 2 && 
-       &rest[0..2] == b"//" && 
-       (rest.len() == 2 || rest[2] == b'/') {
+    if !is_valid_authority_context(scheme, after_scheme) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Complete,
         )));
     }
     
-    // Check if we have hierarchical URI (starts with / or //)
-    let is_hierarchical = rest.starts_with(b"/");
-    
-    // For hierarchical URI, we validate it meets the format
-    if is_hierarchical {
-        // Check for '//' prefix (net-path)
-        if rest.len() >= 2 && &rest[0..2] == b"//" {
-            // Must have non-empty authority after //
-            if rest.len() == 2 || rest[2] == b'/' {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Complete,
-                )));
-            }
-        } else if scheme == b"http" && &rest[0..1] == b"/" && !(rest.len() > 1 && rest[1] == b'/') {
-            // http:/something is invalid - http must use //
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-    } else {
-        // For opaque URIs, first character must not be '/'
-        if rest.starts_with(b"/") {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-        
-        // Validate that the scheme is not "http" or "https" and trying to use a non-hierarchical URI
-        if scheme == b"http" || scheme == b"https" {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
+    // Validate IPv6 address if present
+    if !validate_ipv6(input) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
     }
     
-    // Special validation for IPv6 addresses in the authority component
-    if rest.contains(&b'[') {
-        // Basic check for properly formed IPv6 address
-        let open_bracket = rest.iter().position(|&c| c == b'[');
-        let close_bracket = rest.iter().position(|&c| c == b']');
-        
-        if open_bracket.is_none() || close_bracket.is_none() || 
-           open_bracket.unwrap() >= close_bracket.unwrap() || 
-           close_bracket.unwrap() - open_bracket.unwrap() <= 2 {
-            // Malformed IPv6 address
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-        
-        // Basic validation of IPv6 address content
-        let ipv6_content = &rest[open_bracket.unwrap()+1..close_bracket.unwrap()];
-        
-        // Simple IPv6 validation: must contain at least one valid hex character or colon
-        let valid_chars = ipv6_content.iter().all(|&c| 
-            c.is_ascii_hexdigit() || c == b':' || c == b'.'
-        );
-        
-        if !valid_chars || !ipv6_content.contains(&b':') {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-
-        // Check for IPv6 syntax errors like :::1 (too many colons together)
-        if ipv6_content.windows(3).any(|w| w == b":::") {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-    }
+    // Find where the URI ends (at fragment or end of input)
+    let uri_end = find_uri_end(input);
     
-    // Find the end of the URI - typically at a fragment marker (#)
-    // or the end of the input
-    let uri_end = match input.iter().position(|&c| c == b'#') {
-        Some(pos) => pos,
-        None => input.len(),
-    };
-    
+    // Return the URI without the fragment
     Ok((&input[uri_end..], &input[0..uri_end]))
 }
 
