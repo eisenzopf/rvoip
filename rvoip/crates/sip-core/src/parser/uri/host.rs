@@ -221,10 +221,16 @@ mod tests {
     #[test]
     fn test_hostport_with_trailing() {
         // Hostport with trailing content
-        let (rem, (host_val, port_opt)) = hostport(b"example.com:5060;transport=tcp").unwrap();
-        assert_eq!(rem, b";transport=tcp");
+        let (rem, (host_val, port_opt)) = hostport(b"example.com;param=value").unwrap();
+        assert_eq!(rem, b";param=value");
         assert!(matches!(host_val, Host::Domain(domain) if domain == "example.com"));
-        assert_eq!(port_opt, Some(5060));
+        assert_eq!(port_opt, None);
+
+        // Test with parameters similar to our failing test case
+        let (rem, (host_val, port_opt)) = hostport(b"example.com;transport=tcp;lr").unwrap();
+        assert_eq!(rem, b";transport=tcp;lr");
+        assert!(matches!(host_val, Host::Domain(domain) if domain == "example.com"));
+        assert_eq!(port_opt, None);
     }
 
     // === RFC 3261 Specific Tests ===

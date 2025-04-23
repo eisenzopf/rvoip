@@ -41,11 +41,25 @@ fn domain_label(input: &[u8]) -> ParseResult<&[u8]> {
 
 // Parse a hostname including handling of trailing dot for FQDN
 fn parse_hostname(input: &[u8]) -> ParseResult<&[u8]> {
-    // Find the position of a colon if it exists (for port)
+    // Find the position of a colon, semicolon, or question mark if it exists (for port, params, or headers)
     let port_position = input.iter().position(|&c| c == b':');
+    let param_position = input.iter().position(|&c| c == b';');
+    let header_position = input.iter().position(|&c| c == b'?');
     
-    // If a port exists, only parse up to that point
-    let parse_input = match port_position {
+    // Determine the end position - use the earliest of port, param, or header if multiple exist
+    let end_position = match (port_position, param_position, header_position) {
+        (Some(port_pos), Some(param_pos), Some(header_pos)) => Some(port_pos.min(param_pos).min(header_pos)),
+        (Some(port_pos), Some(param_pos), None) => Some(port_pos.min(param_pos)),
+        (Some(port_pos), None, Some(header_pos)) => Some(port_pos.min(header_pos)),
+        (None, Some(param_pos), Some(header_pos)) => Some(param_pos.min(header_pos)),
+        (Some(pos), None, None) => Some(pos),
+        (None, Some(pos), None) => Some(pos),
+        (None, None, Some(pos)) => Some(pos),
+        (None, None, None) => None
+    };
+    
+    // If a terminator exists, only parse up to that point
+    let parse_input = match end_position {
         Some(pos) => &input[..pos],
         None => input,
     };
@@ -69,8 +83,8 @@ fn parse_hostname(input: &[u8]) -> ParseResult<&[u8]> {
     if !parse_input.contains(&b'.') {
         return match domain_label(parse_input) {
             Ok(_) => {
-                // Return remaining input (which might include the port part)
-                if let Some(pos) = port_position {
+                // Return remaining input (which might include port or params)
+                if let Some(pos) = end_position {
                     Ok((&input[pos..], parse_input))
                 } else {
                     Ok((&[][..], parse_input))
@@ -114,15 +128,15 @@ fn parse_hostname(input: &[u8]) -> ParseResult<&[u8]> {
         return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
     }
     
-    // Calculate remaining input based on what we parsed and where the port is
-    if let Some(pos) = port_position {
-        // Return the port part as remaining input
+    // Calculate remaining input based on what we parsed and where the terminator is
+    if let Some(pos) = end_position {
+        // Return the port or param part as remaining input
         Ok((&input[pos..], hostname_input))
     } else if has_trailing_dot {
         // Return the trailing dot as remaining
         Ok((&parse_input[parse_input.len() - 1..], hostname_input))
     } else {
-        // No port or trailing dot
+        // No port, params, or trailing dot
         Ok((&[][..], hostname_input))
     }
 }
@@ -300,5 +314,33 @@ mod tests {
         // Test fully qualified domain names with trailing dots
         assert_eq!(hostname(b"example.com."), Ok((&b"."[..], Host::Domain("example.com".to_string()))));
         assert_eq!(hostname(b"a.b.c.d.e.f."), Ok((&b"."[..], Host::Domain("a.b.c.d.e.f".to_string()))));
+    }
+
+    #[test]
+    fn test_hostname_with_semicolon() {
+        // Test that semicolons are properly recognized as terminators
+        let (rem, host) = hostname(b"example.com;transport=tcp").unwrap();
+        assert_eq!(rem, b";transport=tcp");
+        assert_eq!(host, Host::Domain("example.com".to_string()));
+
+        // Test with both port and params
+        let (rem, host) = hostname(b"example.com:5060;transport=tcp").unwrap();
+        assert_eq!(rem, b":5060;transport=tcp");
+        assert_eq!(host, Host::Domain("example.com".to_string()));
+
+        // Test with multiple params
+        let (rem, host) = hostname(b"example.com;transport=tcp;lr").unwrap();
+        assert_eq!(rem, b";transport=tcp;lr");
+        assert_eq!(host, Host::Domain("example.com".to_string()));
+        
+        // Test with question marks for headers
+        let (rem, host) = hostname(b"example.com?Subject=Hello").unwrap();
+        assert_eq!(rem, b"?Subject=Hello");
+        assert_eq!(host, Host::Domain("example.com".to_string()));
+        
+        // Test with both param and headers
+        let (rem, host) = hostname(b"example.com;transport=tcp?Subject=Hello").unwrap();
+        assert_eq!(rem, b";transport=tcp?Subject=Hello");
+        assert_eq!(host, Host::Domain("example.com".to_string()));
     }
 } 

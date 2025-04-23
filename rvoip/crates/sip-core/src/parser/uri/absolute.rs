@@ -155,52 +155,144 @@ pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
         )));
     }
 
-    // First parse the scheme
-    let scheme_result = parse_scheme_raw(input);
-    if scheme_result.is_err() {
+    // Find the position of the colon that separates scheme from the rest
+    let colon_pos = match input.iter().position(|&c| c == b':') {
+        Some(pos) => pos,
+        None => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    };
+
+    // Validate the scheme (must start with alpha and contain only allowed chars)
+    if colon_pos == 0 || !input[0].is_ascii_alphabetic() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
-            nom::error::ErrorKind::Tag,
+            nom::error::ErrorKind::Alpha,
         )));
     }
+
+    for &c in &input[1..colon_pos] {
+        if !(c.is_ascii_alphabetic() || c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.') {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::AlphaNumeric,
+            )));
+        }
+    }
+
+    // Extract the scheme and the rest
+    let scheme = &input[0..colon_pos];
     
-    let (after_scheme, scheme) = scheme_result.unwrap();
-    
-    // Handle empty rest case
-    if after_scheme.is_empty() {
+    // We need at least one character after the colon
+    if colon_pos + 1 >= input.len() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::TakeWhile1,
         )));
     }
     
-    // Additional validation for specific scheme requirements
-    if !is_valid_scheme_form(scheme, after_scheme) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
+    let rest = &input[colon_pos + 1..];
     
-    if !is_valid_authority_context(scheme, after_scheme) {
+    // Special case for http:// with empty authority
+    if (scheme == b"http" || scheme == b"https") && 
+       rest.len() >= 2 && 
+       &rest[0..2] == b"//" && 
+       (rest.len() == 2 || rest[2] == b'/') {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Complete,
         )));
     }
     
-    // Validate IPv6 address if present
-    if !validate_ipv6(input) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
+    // Check if we have hierarchical URI (starts with / or //)
+    let is_hierarchical = rest.starts_with(b"/");
+    
+    // For hierarchical URI, we validate it meets the format
+    if is_hierarchical {
+        // Check for '//' prefix (net-path)
+        if rest.len() >= 2 && &rest[0..2] == b"//" {
+            // Must have non-empty authority after //
+            if rest.len() == 2 || rest[2] == b'/' {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Complete,
+                )));
+            }
+        } else if scheme == b"http" && &rest[0..1] == b"/" && !(rest.len() > 1 && rest[1] == b'/') {
+            // http:/something is invalid - http must use //
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    } else {
+        // For opaque URIs, first character must not be '/'
+        if rest.starts_with(b"/") {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+        
+        // Validate that the scheme is not "http" or "https" and trying to use a non-hierarchical URI
+        if scheme == b"http" || scheme == b"https" {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
     }
     
-    // Find where the URI ends (at fragment or end of input)
-    let uri_end = find_uri_end(input);
+    // Special validation for IPv6 addresses in the authority component
+    if rest.contains(&b'[') {
+        // Basic check for properly formed IPv6 address
+        let open_bracket = rest.iter().position(|&c| c == b'[');
+        let close_bracket = rest.iter().position(|&c| c == b']');
+        
+        if open_bracket.is_none() || close_bracket.is_none() || 
+           open_bracket.unwrap() >= close_bracket.unwrap() || 
+           close_bracket.unwrap() - open_bracket.unwrap() <= 2 {
+            // Malformed IPv6 address
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+        
+        // Basic validation of IPv6 address content
+        let ipv6_content = &rest[open_bracket.unwrap()+1..close_bracket.unwrap()];
+        
+        // Simple IPv6 validation: must contain at least one valid hex character or colon
+        let valid_chars = ipv6_content.iter().all(|&c| 
+            c.is_ascii_hexdigit() || c == b':' || c == b'.'
+        );
+        
+        if !valid_chars || !ipv6_content.contains(&b':') {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+
+        // Check for IPv6 syntax errors like :::1 (too many colons together)
+        if ipv6_content.windows(3).any(|w| w == b":::") {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    }
     
-    // Return the URI without the fragment
+    // Find the end of the URI - typically at a fragment marker (#)
+    // or the end of the input
+    let uri_end = match input.iter().position(|&c| c == b'#') {
+        Some(pos) => pos,
+        None => input.len(),
+    };
+    
     Ok((&input[uri_end..], &input[0..uri_end]))
 }
 

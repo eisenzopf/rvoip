@@ -479,4 +479,17 @@ mod tests {
             panic!("Param structure mismatch");
         }
     }
+
+    // Add a new test for debugging our issue
+    #[test]
+    fn test_uri_parameters_standalone() {
+        let input = b";transport=tcp;lr";
+        let (rem, params) = uri_parameters(input).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(params.len(), 2);
+        assert!(params.contains(&Param::Transport("tcp".to_string())));
+        assert!(params.contains(&Param::Lr));
+        
+        println!("Parsed params: {:?}", params);
+    }
 } 
