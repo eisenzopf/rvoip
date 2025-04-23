@@ -26,7 +26,7 @@ fn is_scheme_char(c: u8) -> bool {
 
 // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
 // Return the raw bytes of the scheme
-fn scheme_raw(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn scheme_raw(input: &[u8]) -> ParseResult<&[u8]> {
     let (rem, scheme) = recognize(pair(
         alpha1,
         take_while(is_scheme_char)
