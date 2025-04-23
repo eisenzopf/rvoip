@@ -2,9 +2,9 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{alpha1, alphanumeric1},
-    combinator::{map_res, recognize},
-    multi::many0,
-    sequence::pair,
+    combinator::{map_res, recognize, verify},
+    multi::{many0, many1},
+    sequence::{pair, preceded, tuple},
     IResult,
     error::{Error as NomError, ErrorKind, ParseError},
 };
@@ -14,82 +14,177 @@ use crate::types::uri::Host;
 use crate::parser::ParseResult;
 use crate::error::{Error, Result};
 
+// RFC 1034/1035 compliant hostname parser
 // hostname = *( domainlabel "." ) toplabel [ "." ]
 // domainlabel = alphanum / alphanum *( alphanum / "-" ) alphanum
 // toplabel = ALPHA / ALPHA *( alphanum / "-" ) alphanum
-// Simplified: Recognizes sequences of alphanumeric/hyphen labels separated by dots.
-// Does not enforce toplabel/domainlabel specific content rules, relies on higher-level validation if needed.
 
-// domainlabel or toplabel part
-// According to RFC 3261, a hostname should consist of domain labels separated by dots
-// This ensures a hostname has at least one dot to distinguish it from a token
-fn domain_part(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(pair(
-        pair(
-            take_while1(|c:u8| c.is_ascii_alphanumeric() || c == b'-'), // domainlabel
-            tag(b".".as_slice()) // require at least one dot
-        ),
-        alt((
-            recognize(pair(
-                many0(pair(
-                    take_while1(|c:u8| c.is_ascii_alphanumeric() || c == b'-'),
-                    tag(b".".as_slice())
-                )),
-                take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-') // toplabel
-            )),
-            tag(b"") // allow trailing dot at the end (FQDN)
-        ))
-    ))(input)
+// Valid character for a hostname label (alphanumeric or hyphen only)
+fn is_label_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'-'
 }
 
-// Helper to identify if a string might be an IPv4 address
-// This is a basic check - we assume 1-3 digits followed by a dot, repeated 4 times
-fn is_likely_ipv4(input: &[u8]) -> bool {
-    if input.len() < 7 || input.len() > 15 { // Min valid IPv4: 1.1.1.1, Max: 255.255.255.255
+// Parse a single valid domain label (without dots)
+// Cannot start or end with a hyphen per RFC 1034
+fn domain_label(input: &[u8]) -> ParseResult<&[u8]> {
+    // Verify the label doesn't start or end with hyphen
+    verify(
+        // Must have at least one character, all of which are valid label chars
+        take_while1(is_label_char),
+        |label: &[u8]| {
+            !label.is_empty() && 
+            label[0] != b'-' && 
+            label[label.len() - 1] != b'-'
+        }
+    )(input)
+}
+
+// Parse a hostname including handling of trailing dot for FQDN
+fn parse_hostname(input: &[u8]) -> ParseResult<&[u8]> {
+    // Find the position of a colon if it exists (for port)
+    let port_position = input.iter().position(|&c| c == b':');
+    
+    // If a port exists, only parse up to that point
+    let parse_input = match port_position {
+        Some(pos) => &input[..pos],
+        None => input,
+    };
+    
+    // Reject consecutive dots (empty labels)
+    if parse_input.windows(2).any(|window| window == b"..") {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    // Reject underscores in hostnames
+    if parse_input.iter().any(|&c| c == b'_') {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    // Empty input is not a valid hostname
+    if parse_input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    // Handle single labels (like "localhost") - valid hostname
+    if !parse_input.contains(&b'.') {
+        return match domain_label(parse_input) {
+            Ok(_) => {
+                // Return remaining input (which might include the port part)
+                if let Some(pos) = port_position {
+                    Ok((&input[pos..], parse_input))
+                } else {
+                    Ok((&[][..], parse_input))
+                }
+            },
+            Err(e) => Err(e)
+        };
+    }
+    
+    // Handle trailing dot in FQDN format (e.g., "example.com.")
+    let has_trailing_dot = parse_input.len() > 1 && parse_input[parse_input.len() - 1] == b'.';
+    
+    // Parse main part of the hostname (without the trailing dot)
+    let hostname_input = if has_trailing_dot {
+        &parse_input[..parse_input.len() - 1]
+    } else {
+        parse_input
+    };
+    
+    // Leading dot is invalid (empty first label)
+    if hostname_input.starts_with(b".") {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    // Split the hostname by dots and verify each label
+    let labels: Vec<&[u8]> = hostname_input.split(|&c| c == b'.').collect();
+    
+    // Check each label for validity
+    for label in &labels {
+        if label.is_empty() || label[0] == b'-' || label[label.len() - 1] == b'-' || 
+           !label.iter().all(|&c| is_label_char(c)) {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+        }
+    }
+    
+    // Don't apply IPv4 detection to hostnames with no chance of being IPv4
+    let could_be_ipv4 = hostname_input.iter().all(|&c| c == b'.' || c.is_ascii_digit());
+    
+    // Only reject hostnames that are definitely meant to be IPv4 addresses
+    if could_be_ipv4 && is_likely_actual_ipv4(hostname_input) {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    // Calculate remaining input based on what we parsed and where the port is
+    if let Some(pos) = port_position {
+        // Return the port part as remaining input
+        Ok((&input[pos..], hostname_input))
+    } else if has_trailing_dot {
+        // Return the trailing dot as remaining
+        Ok((&parse_input[parse_input.len() - 1..], hostname_input))
+    } else {
+        // No port or trailing dot
+        Ok((&[][..], hostname_input))
+    }
+}
+
+// More precise IPv4 address detection to avoid false positives
+// Only marks definite IPv4 addresses, not just numeric domains that look like IPv4
+fn is_likely_actual_ipv4(input: &[u8]) -> bool {
+    // Must be a specific format: 4 numeric segments separated by dots
+    let segments: Vec<&[u8]> = input.split(|&c| c == b'.').collect();
+    
+    if segments.len() != 4 {
         return false;
     }
     
-    let mut dots = 0;
-    let mut digits_since_last_dot = 0;
-    
-    for &c in input {
-        if c == b'.' {
-            if digits_since_last_dot == 0 || digits_since_last_dot > 3 {
-                return false;
-            }
-            dots += 1;
-            digits_since_last_dot = 0;
-        } else if c.is_ascii_digit() {
-            digits_since_last_dot += 1;
-        } else {
-            return false; // Non-digit, non-dot character
+    // Check that each segment is a valid IPv4 octet
+    for segment in segments {
+        // Empty segment
+        if segment.is_empty() {
+            return false;
+        }
+        
+        // Leading zeros (except single 0) not allowed in real IPv4
+        if segment.len() > 1 && segment[0] == b'0' {
+            return false;
+        }
+        
+        // All characters must be digits
+        if !segment.iter().all(|&c| c.is_ascii_digit()) {
+            return false;
+        }
+        
+        // Convert to a number and check range (0-255)
+        match std::str::from_utf8(segment) {
+            Ok(s) => match s.parse::<u8>() {
+                Ok(_) => {}, // Valid octet in 0-255 range
+                Err(_) => return false, // Outside 0-255 range
+            },
+            Err(_) => return false, // Not valid UTF-8 (shouldn't happen with ASCII digits)
         }
     }
     
-    // Valid IPv4 has exactly 3 dots (4 number segments)
-    dots == 3 && digits_since_last_dot > 0 && digits_since_last_dot <= 3
+    // Only categorize as IPv4 if it strictly follows IPv4 format
+    true
 }
 
-// hostname parser
+// Public hostname parser function
 pub fn hostname(input: &[u8]) -> ParseResult<Host> {
-    // First, check if input looks like an IPv4 address
-    // If so, fail early to let the IPv4 parser handle it
-    if is_likely_ipv4(input) {
+    // Handle the case where the input is a single dot
+    if input == b"." {
         return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
     }
-
-    map_res(
-        domain_part,
-        |bytes: &[u8]| -> Result<Host> {
-            // Basic validation: Ensure not empty and doesn't start/end with hyphen (common basic check)
-            if bytes.is_empty() || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
-                Err(Error::ParseError(format!("Invalid hostname format: {:?}", bytes)))
-            } else {
-                let s = str::from_utf8(bytes)?;
-                Ok(Host::Domain(s.to_string()))
-            }
-        }
-    )(input)
+    
+    // Use the internal parser to handle the parsing
+    let (remaining, host_bytes) = parse_hostname(input)?;
+    
+    // Convert the parsed bytes to a domain name
+    let domain = match str::from_utf8(host_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char))),
+    };
+    
+    Ok((remaining, Host::Domain(domain)))
 }
 
 #[cfg(test)]
@@ -97,19 +192,113 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hostname() {
+    fn test_hostname_basic() {
+        // Basic valid hostnames
         assert_eq!(hostname(b"example.com"), Ok((&[][..], Host::Domain("example.com".to_string()))));
         assert_eq!(hostname(b"host1.subdomain.example.co.uk"), Ok((&[][..], Host::Domain("host1.subdomain.example.co.uk".to_string()))));
         assert_eq!(hostname(b"a-valid-host.net"), Ok((&[][..], Host::Domain("a-valid-host.net".to_string()))));
         assert_eq!(hostname(b"xn--ls8h.example"), Ok((&[][..], Host::Domain("xn--ls8h.example".to_string())))); // IDN
         
-        // Allow trailing dot (RFC 1035, less common in SIP?)
-        assert_eq!(hostname(b"example.com."), Ok((&b"."[..], Host::Domain("example.com".to_string())))); // Should consume up to trailing dot? TBC
-
+        // Trailing dot (RFC 1035, FQDN format)
+        assert_eq!(hostname(b"example.com."), Ok((&b"."[..], Host::Domain("example.com".to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_invalid_basic() {
         // Invalid cases
         assert!(hostname(b"-invalid.start").is_err());
         assert!(hostname(b"invalid.end-").is_err());
-        assert!(hostname(b"invalid..dot").is_err()); // Fails domain_part recognition
-        assert!(hostname(b".").is_err()); // Fails domain_part recognition
+        assert!(hostname(b"invalid..dot").is_err()); // Consecutive dots (empty label)
+        assert!(hostname(b".").is_err()); // Just a dot
+        assert!(hostname(b".invalid.start").is_err()); // Leading dot
+    }
+    
+    #[test]
+    fn test_hostname_rfc3261_compliance() {
+        // RFC 3261 Section 25.1 (Core Syntax)
+        // The hostname syntax follows RFC 1034/1035 with modifications for SIP
+        
+        // Valid examples from RFC 3261
+        assert_eq!(hostname(b"atlanta.com"), Ok((&[][..], Host::Domain("atlanta.com".to_string()))));
+        assert_eq!(hostname(b"biloxi.com"), Ok((&[][..], Host::Domain("biloxi.com".to_string()))));
+        
+        // Single-label hostnames are valid in RFC 3261
+        assert_eq!(hostname(b"localhost"), Ok((&[][..], Host::Domain("localhost".to_string()))));
+        
+        // Domain labels can be up to 63 characters per RFC 1034
+        let long_label = b"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijk.com"; // 63 chars + .com
+        assert_eq!(hostname(long_label), Ok((&[][..], Host::Domain(String::from_utf8_lossy(long_label).to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_edge_cases() {
+        // RFC 1034/1035 edge cases
+        
+        // Labels should only contain alphanumeric characters and hyphens
+        assert!(hostname(b"invalid_underscore.com").is_err()); 
+        
+        // Modern DNS implementations sometimes allow underscores in certain contexts
+        // SIP hostnames are more strict and don't allow this
+        assert!(hostname(b"_sip._tcp.example.com").is_err());
+        
+        // Double dots (empty labels) are invalid
+        assert!(hostname(b"example..com").is_err());
+        assert!(hostname(b".example.com").is_err()); // Leading dot (empty first label)
+    }
+    
+    #[test]
+    fn test_hostname_domain_labels() {
+        // RFC 1034/1035 domain label tests
+        
+        // Domain labels can't start or end with hyphens
+        assert!(hostname(b"-invalid.com").is_err());
+        assert!(hostname(b"invalid-.com").is_err());
+        assert!(hostname(b"valid.com-").is_err());
+        
+        // Valid domain label with hyphens in the middle
+        assert_eq!(hostname(b"this-is-valid.com"), Ok((&[][..], Host::Domain("this-is-valid.com".to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_rfc5890_idn() {
+        // RFC 5890-5894 Internationalized Domain Names
+        // IDNs in ASCII-compatible encoding (Punycode with xn-- prefix)
+        
+        // Valid IDNs in Punycode
+        assert_eq!(hostname(b"xn--bcher-kva.example"), Ok((&[][..], Host::Domain("xn--bcher-kva.example".to_string())))); // bücher.example
+        assert_eq!(hostname(b"xn--caf-dma.example"), Ok((&[][..], Host::Domain("xn--caf-dma.example".to_string())))); // café.example
+    }
+    
+    #[test]
+    fn test_hostname_not_ipv4() {
+        // Test cases that look like IPv4 addresses but should be parsed as hostnames
+        
+        // Numeric domains that don't follow IPv4 format should be valid hostnames
+        assert_eq!(hostname(b"999.888.777.666"), Ok((&[][..], Host::Domain("999.888.777.666".to_string()))));
+        assert_eq!(hostname(b"192.168.1"), Ok((&[][..], Host::Domain("192.168.1".to_string()))));
+        assert_eq!(hostname(b"192.168.1."), Ok((&b"."[..], Host::Domain("192.168.1".to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_rfc4475_torture_cases() {
+        // RFC 4475 SIP Torture test cases
+        
+        // Valid hostnames with numeric labels from RFC 4475
+        assert_eq!(hostname(b"987.13.55.44"), Ok((&[][..], Host::Domain("987.13.55.44".to_string()))));
+        assert_eq!(hostname(b"555.example.com"), Ok((&[][..], Host::Domain("555.example.com".to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_with_port_suffix() {
+        // Test hostnames with port suffix to ensure proper parsing
+        assert_eq!(hostname(b"example.com:5060"), Ok((&b":5060"[..], Host::Domain("example.com".to_string()))));
+        assert_eq!(hostname(b"localhost:5060"), Ok((&b":5060"[..], Host::Domain("localhost".to_string()))));
+    }
+    
+    #[test]
+    fn test_hostname_fqdn_format() {
+        // Test fully qualified domain names with trailing dots
+        assert_eq!(hostname(b"example.com."), Ok((&b"."[..], Host::Domain("example.com".to_string()))));
+        assert_eq!(hostname(b"a.b.c.d.e.f."), Ok((&b"."[..], Host::Domain("a.b.c.d.e.f".to_string()))));
     }
 } 
