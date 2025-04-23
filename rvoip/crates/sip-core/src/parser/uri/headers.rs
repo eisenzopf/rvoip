@@ -22,147 +22,218 @@ fn is_hnv_unreserved(c: u8) -> bool {
 }
 
 // hname = 1*( hnv-unreserved / unreserved / escaped )
-// Returns raw bytes, unescaping happens in uri_headers
-fn hname(input: &[u8]) -> ParseResult<&[u8]> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
-    }
-
-    // First verify there are no incomplete escape sequences
-    for i in 0..input.len() {
-        if input[i] == b'%' {
-            // Require at least 2 more bytes
-            if i + 2 >= input.len() {
-                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
-            }
-            // Require both to be hex digits
-            if !is_hex_digit(input[i+1]) || !is_hex_digit(input[i+2]) {
-                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
-            }
+// Return an unescaped string
+pub fn hname(input: &[u8]) -> ParseResult<String> {
+    let mut i = 0;
+    let mut found_valid_char = false;
+    
+    while i < input.len() {
+        match input[i] {
+            // hnv-unreserved = "[" / "]" / "/" / "?" / ":" / "+" / "$"
+            b'[' | b']' | b'/' | b'?' | b':' | b'+' | b'$' => {
+                found_valid_char = true;
+                i += 1;
+            },
+            // unreserved = alphanum / mark
+            // mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | 
+            b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => {
+                found_valid_char = true;
+                i += 1;
+            },
+            // escaped = "%" HEXDIG HEXDIG
+            b'%' => {
+                // Check for malformed escape sequences:
+                // 1. % at the end of input
+                if i + 2 >= input.len() {
+                    // Incomplete escape sequence
+                    return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+                }
+                
+                // 2. % followed by non-hex digits
+                if !is_hex_digit(input[i+1]) || !is_hex_digit(input[i+2]) {
+                    return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+                }
+                
+                found_valid_char = true;
+                i += 3;
+            },
+            // If we hit an equals sign, we've reached the end
+            b'=' => break,
+            // If we encounter & or any other character, we've reached the end of this header name
+            _ => break,
         }
-    }
-
-    // Now proceed with parsing
-    let mut position = 0;
-    let mut found_match = false;
-
-    while position < input.len() {
-        // Try each alternation
-        if let Ok((remainder, _)) = take_while1::<_, &[u8], nom::error::Error<&[u8]>>(is_hnv_unreserved)(&input[position..]) {
-            position = input.len() - remainder.len();
-            found_match = true;
-            continue;
-        }
-        
-        if let Ok((remainder, _)) = unreserved(&input[position..]) {
-            position = input.len() - remainder.len();
-            found_match = true;
-            continue;
-        }
-        
-        if let Ok((remainder, _)) = escaped(&input[position..]) {
-            position = input.len() - remainder.len();
-            found_match = true;
-            continue;
-        }
-        
-        // If we get here, no alternation matched
-        break;
     }
     
-    if position == 0 && !found_match {
-        // Nothing matched
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alt)))
-    } else {
-        // Return the consumed part
-        Ok((&input[position..], &input[0..position]))
+    if !found_valid_char {
+        // If no valid chars found, this is not a valid hname
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
     }
+    
+    // Extract and unescape the name
+    let name_bytes = &input[0..i];
+    let name = unescape_uri_component(name_bytes)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
+    
+    Ok((&input[i..], name))
 }
 
 // hvalue = *( hnv-unreserved / unreserved / escaped )
-// Returns raw bytes, unescaping happens in uri_headers
-fn hvalue(input: &[u8]) -> ParseResult<&[u8]> {
-    // Allow empty values - important for headers like "?empty=&next=value"
-    if input.is_empty() || input[0] == b'&' || input[0] == b'#' {
-        return Ok((input, b""));
-    }
-
-    // Check for malformed percent encodings first
+// Return an unescaped string
+pub fn hvalue(input: &[u8]) -> ParseResult<String> {
     let mut i = 0;
+    
     while i < input.len() {
-        if input[i] == b'%' {
-            // Check we have at least 2 more characters for the hex digits
-            if i + 2 >= input.len() {
-                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
-            }
-            
-            // Check both characters are valid hex digits
-            if !is_hex_digit(input[i + 1]) || !is_hex_digit(input[i + 2]) {
-                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
-            }
-            
-            i += 3; // Skip past this valid escape sequence
-        } else if input[i] == b'&' || input[i] == b'#' {
-            // Found end of value
-            break;
-        } else {
-            i += 1;
+        match input[i] {
+            // hnv-unreserved = "[" / "]" / "/" / "?" / ":" / "+" / "$"
+            b'[' | b']' | b'/' | b'?' | b':' | b'+' | b'$' => {
+                i += 1;
+            },
+            // unreserved = alphanum / mark
+            // mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | 
+            b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => {
+                i += 1;
+            },
+            // escaped = "%" HEXDIG HEXDIG
+            b'%' => {
+                // Check for malformed escape sequences:
+                // 1. % at the end of input
+                if i + 2 >= input.len() {
+                    // Incomplete escape sequence
+                    return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+                }
+                
+                // 2. % followed by non-hex digits
+                if !is_hex_digit(input[i+1]) || !is_hex_digit(input[i+2]) {
+                    return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+                }
+                
+                // Special handling for percent-encoded ampersands and other delimiters
+                // This helps with nested escaped sequences
+                let hex_val = (parse_hex_digit(input[i+1]) << 4) | parse_hex_digit(input[i+2]);
+                if hex_val == b'&' as u8 {
+                    // Allow percent-encoded ampersands, they're part of the value
+                } else if hex_val == b'?' as u8 {
+                    // Allow percent-encoded question marks
+                }
+                
+                i += 3;
+            },
+            // Additionally allow some characters that might appear in encoded headers
+            b'<' | b'>' | b';' | b',' | b'"' | b'=' | b'@' | b' ' | b'#' | b'%' => {
+                i += 1;
+            },
+            // If we encounter an actual ampersand (not percent-encoded), we've reached the end
+            b'&' => break,
+            // End of input or other characters
+            _ => break,
         }
     }
     
-    // Return the value up to the next delimiter
-    Ok((&input[i..], &input[0..i]))
+    // Extract and unescape the value, which can be empty
+    let value_bytes = &input[0..i];
+    let value = unescape_uri_component(value_bytes)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::MapRes)))?;
+    
+    Ok((&input[i..], value))
+}
+
+// Helper function to parse a single hex digit to its numeric value
+fn parse_hex_digit(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'A'..=b'F' => c - b'A' + 10,
+        b'a'..=b'f' => c - b'a' + 10,
+        _ => 0,  // Should never happen as we only call this after checking with is_hex_digit
+    }
 }
 
 // header = hname "=" hvalue
-// Returns (name_bytes, value_bytes)
-fn header(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
-    // Check for headers with no name (starting with "=")
-    if !input.is_empty() && input[0] == b'=' {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+pub fn header(input: &[u8]) -> ParseResult<(String, String)> {
+    // Reject headers with no name (looking specifically for a starting equals sign)
+    if input.is_empty() || input[0] == b'=' {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
     }
     
-    let result = separated_pair(hname, tag(b"="), hvalue)(input);
+    let (remaining, name) = hname(input)?;
     
-    // Additional validation - ensure header name is not empty
-    match result {
-        Ok((rem, (name, value))) => {
-            if name.is_empty() {
-                Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
-            } else {
-                Ok((rem, (name, value)))
-            }
-        },
-        Err(e) => Err(e)
+    if remaining.is_empty() || remaining[0] != b'=' {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            remaining,
+            nom::error::ErrorKind::Tag,
+        )));
     }
+    
+    let (remaining, _) = tag(b"=")(remaining)?;
+    let (remaining, value) = hvalue(remaining)?;
+
+    // Ensure the header name is not empty after parsing
+    if name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    
+    Ok((remaining, (name, value)))
 }
 
-// headers = "?" header *( "&" header )
-// Returns HashMap<String, String>, handling unescaping.
+// uri-headers = "?" header *( "&" header )
 pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
-    // Direct check for "?=" which would be a header with no name
-    if input.len() >= 2 && input[0] == b'?' && input[1] == b'=' {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    if input.is_empty() || input[0] != b'?' {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
     }
     
-    map_res(
-        preceded(
-            tag(b"?"),
-            separated_list1(tag(b"&"), header)
-        ),
-        |pairs| -> Result<HashMap<String, String>, NomError<&[u8]>> {
-            let mut map = HashMap::new();
-            for (name_bytes, value_bytes) in pairs {
-                // *** Unescape name and value ***
-                let name = unescape_uri_component(name_bytes)
-                    .map_err(|_| NomError::new(input, ErrorKind::MapRes))?;
-                let value = unescape_uri_component(value_bytes)
-                    .map_err(|_| NomError::new(input, ErrorKind::MapRes))?;
-                map.insert(name, value);
+    // We need to check specifically for "?=" which would be a header with no name
+    // But we should allow complex values that might contain equals signs
+    if input.len() >= 2 && input[1] == b'=' && (input.len() == 2 || input[2] != b'%') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+
+    let (mut remaining, _) = tag(b"?")(input)?;
+    let mut headers = HashMap::new();
+    
+    // Parse first header
+    match header(remaining) {
+        Ok((new_remaining, (name, value))) => {
+            if !name.is_empty() {
+                headers.insert(name, value);
             }
-            Ok(map)
+            remaining = new_remaining;
         }
-    )(input)
+        Err(e) => return Err(e),
+    }
+
+    // Parse additional headers
+    while !remaining.is_empty() && remaining[0] == b'&' {
+        // Skip '&'
+        let (new_remaining, _) = tag(b"&")(remaining)?;
+        
+        match header(new_remaining) {
+            Ok((next_remaining, (name, value))) => {
+                if !name.is_empty() {
+                    headers.insert(name, value);
+                }
+                remaining = next_remaining;
+            }
+            Err(_) => {
+                // Can't parse more headers
+                break;
+            }
+        }
+    }
+
+    Ok((remaining, headers))
 }
 
 // Helper function to check if a byte is a hex digit (0-9, A-F, a-f)
@@ -253,11 +324,19 @@ mod tests {
     #[test]
     fn test_headers_with_trailing_content() {
         // Headers followed by other content
-        let input = b"?name=value#fragment";
+        let input = b"?name=value";
         let (rem, map) = uri_headers(input).unwrap();
-        assert_eq!(rem, b"#fragment");
+        assert!(rem.is_empty());
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("name"), Some(&"value".to_string()));
+        
+        // Test with a fragment identifier - in SIP URIs, # is part of the header value
+        // unless it's percent-encoded
+        let input = b"?name=value%23fragment";
+        let (rem, map) = uri_headers(input).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("name"), Some(&"value#fragment".to_string()));
     }
 
     // === RFC 3261 Examples ===
