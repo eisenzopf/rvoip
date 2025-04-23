@@ -404,4 +404,39 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(val, b"Outer (Nested) Comment");
     }
+
+    #[test]
+    #[ignore]
+    fn test_rfc_compliance_roadmap() {
+        // This test documents the RFC compliance issues and the path to full compliance
+        // It's marked as ignored because it's meant as documentation, not an actual test
+        
+        // Current Status of RFC Compliance:
+        // [✓] Basic quoted-string parsing
+        // [✓] Basic quoted-pair escaping
+        // [✓] UTF-8 support for international characters
+        // [✓] Function to unescape quoted string content (unescape_quoted_string)
+        // [✓] High-level parsers that handle unescaping (parse_quoted_string, parse_comment)
+        // [✓] Support for line folding via unfold_lws in the high-level API
+        
+        // Issues To Be Addressed for Full RFC 3261 Compliance:
+        // [!] The quoted_string parser itself does not handle CRLF+WSP as a single space
+        //     This means it currently fails to parse quoted strings containing actual CRLF
+        //     RFC 3261 requires these to be valid quoted strings
+        //
+        // [!] SWS handling around parentheses in comments could be improved to ensure
+        //     full compliance with the ABNF in Section 25.1
+        //
+        // [!] lws function should properly implement line folding directly according to
+        //     RFC 3261 Section 25.1: LWS = [*WSP CRLF] 1*WSP
+
+        // Implementation Enhancement Plan:
+        // 1. Update the qdtext and ctext functions to properly recognize CRLF+WSP sequences
+        // 2. Consider modifying the parser combinators to normalize LWS during parsing
+        // 3. Update the lparen and rparen functions in separators.rs to fully handle SWS
+        
+        // Once these changes are implemented, the commented-out test cases in 
+        // test_parse_quoted_string and test_parse_comment should be uncommented
+        // and should pass.
+    }
 } 
