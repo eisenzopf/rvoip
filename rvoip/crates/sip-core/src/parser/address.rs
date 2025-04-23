@@ -121,7 +121,7 @@ mod tests {
     fn test_display_name_quoted_escaped() {
         let (rem, name) = display_name(b"\"\\\"Agent\\\" Smith\"").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(name, "\\\"Agent\\\" Smith"); // This is what unquote_string produces
+        assert_eq!(name, "\"Agent\" Smith");
     }
 
     #[test]

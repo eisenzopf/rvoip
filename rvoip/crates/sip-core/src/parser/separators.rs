@@ -47,11 +47,15 @@ pub fn equal(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 pub fn lparen(input: &[u8]) -> ParseResult<&[u8]> {
-    delimited(sws, tag(b"("), sws)(input)
+    // LPAREN = SWS "("
+    // RFC 3261 defines LPAREN as optional whitespace followed by open paren
+    preceded(sws, tag(b"("))(input)
 }
 
 pub fn rparen(input: &[u8]) -> ParseResult<&[u8]> {
-    delimited(sws, tag(b")"), sws)(input)
+    // RPAREN = ")" SWS
+    // RFC 3261 defines RPAREN as close paren followed by optional whitespace
+    terminated(tag(b")"), sws)(input)
 }
 
 pub fn raquot(input: &[u8]) -> ParseResult<&[u8]> {
