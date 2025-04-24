@@ -27,9 +27,12 @@ fn via_ttl(input: &[u8]) -> ParseResult<Param> {
         |b| {
             let s = str::from_utf8(b)
                 .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
-            s.parse::<u8>()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))
-                .map(Param::Ttl)
+            let parsed = s.parse::<u16>()
+                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))?;
+            
+            // Cap the TTL value at 255 as per the SIP specification
+            let capped_ttl = if parsed > 255 { 255 } else { parsed as u8 };
+            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Ttl(capped_ttl))
         }
     )(input)
 }

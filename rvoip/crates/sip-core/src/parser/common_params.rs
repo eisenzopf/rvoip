@@ -52,14 +52,14 @@ pub fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
 // gen-value = token / host / quoted-string
 fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
     alt((
-        map(host, GenericValue::Host),
-        map_res(quoted_string, |bytes| {
-            unquote_string(bytes).map(GenericValue::Quoted)
-        }),
         map_res(token, |bytes| {
             str::from_utf8(bytes)
                 .map(|s| GenericValue::Token(s.to_string()))
                 .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
+        }),
+        map(host, GenericValue::Host),
+        map_res(quoted_string, |bytes| {
+            unquote_string(bytes).map(GenericValue::Quoted)
         }),
     ))(input)
 }
