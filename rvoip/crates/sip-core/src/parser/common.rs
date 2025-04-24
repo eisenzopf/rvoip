@@ -301,4 +301,20 @@ impl HeaderValue {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// Verify that there are no empty elements in a list of strings
+/// 
+/// This is useful for validating comma-separated lists where empty elements
+/// like "foo,,bar" should be rejected.
+/// 
+/// # Arguments
+/// 
+/// * `items` - A slice of strings to check
+/// 
+/// # Returns
+/// 
+/// `true` if there are no empty elements, `false` otherwise
+pub fn verify_no_empty_elements(items: &[String]) -> bool {
+    !items.iter().any(|item| item.is_empty())
 } 

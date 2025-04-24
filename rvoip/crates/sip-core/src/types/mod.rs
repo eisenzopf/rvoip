@@ -68,6 +68,7 @@ pub mod server;
 pub mod retry_after;
 pub mod error_info;
 pub mod supported;
+pub mod unsupported;
 
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
@@ -99,3 +100,4 @@ pub use server::*;
 pub use retry_after::*;
 pub use error_info::*;
 pub use supported::Supported;
+pub use unsupported::Unsupported;

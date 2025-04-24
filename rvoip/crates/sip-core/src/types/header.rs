@@ -55,6 +55,7 @@ use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if n
 use crate::types::refer_to::ReferTo; // Add ReferTo import
 use crate::types::call_info::{CallInfo, CallInfoValue};
 use crate::types::supported::Supported; // Import Supported type
+use crate::types::unsupported::Unsupported; // Import Unsupported type
 
 // Helper From implementation for Error
 impl From<FromUtf8Error> for Error {
@@ -514,7 +515,7 @@ pub enum TypedHeader {
     MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
     Supported(Supported), // Use types::Supported instead of Vec<String>
-    Unsupported(Vec<String>),
+    Unsupported(Unsupported), // Use types::Unsupported instead of Vec<String>
     ProxyRequire(Vec<String>),
     Date(DateTime<FixedOffset>), // Use imported chrono types
     Timestamp((NotNan<f32>, Option<NotNan<f32>>)), // Use imported NotNan
@@ -664,14 +665,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::Supported, supported)
             },
             TypedHeader::Unsupported(unsupported) => {
-                write!(f, "{}: ", HeaderName::Unsupported)?;
-                for (i, feature) in unsupported.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", feature)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::Unsupported, unsupported)
             },
             TypedHeader::ProxyRequire(proxy_require) => {
                 write!(f, "{}: ", HeaderName::ProxyRequire)?;
@@ -869,8 +863,8 @@ impl TryFrom<Header> for TypedHeader {
                 // Use our new Supported type
                 Ok(TypedHeader::Supported(Supported::from_header(&header)?))
             },
-            HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(value_bytes)
-                .map(|(_, strings)| TypedHeader::Unsupported(strings))
+            HeaderName::Unsupported => all_consuming(parser::headers::unsupported::parse_unsupported)(value_bytes)
+                .map(|(_, strings)| TypedHeader::Unsupported(Unsupported::with_tags(strings)))
                 .map_err(Error::from),
             HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(value_bytes)
                 .map(|(_, strings)| TypedHeader::ProxyRequire(strings))
