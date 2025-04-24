@@ -42,6 +42,7 @@ use crate::types::warning::Warning;
 use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
 use crate::types::priority::Priority; // Import Priority type
+use crate::types::require::Require; // Import Require type
 use crate::parser::headers::content_type::parse_content_type_value;
 use crate::types::retry_after::RetryAfter;
 // CSeqValue doesn't seem to exist, CSeq struct is used directly
@@ -497,6 +498,7 @@ pub enum TypedHeader {
     Allow(Allow), // Use types::Allow
     ReplyTo(ReplyTo), // Use types::ReplyTo
     ReferTo(ReferTo), // Add ReferTo variant
+    Require(Require), // Use types::Require
     Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
 
@@ -508,7 +510,6 @@ pub enum TypedHeader {
     AcceptLanguage(AcceptLanguage), // Use our new AcceptLanguage type instead of Vec<AcceptLanguageValue>
     MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
-    Require(Vec<String>),
     Supported(Vec<String>),
     Unsupported(Vec<String>),
     ProxyRequire(Vec<String>),
@@ -655,14 +656,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::MinExpires(min_expires) => write!(f, "{}: {}", HeaderName::MinExpires, min_expires),
             TypedHeader::MimeVersion(mime_version) => write!(f, "{}: {:?}", HeaderName::MimeVersion, mime_version),
             TypedHeader::Require(require) => {
-                write!(f, "{}: ", HeaderName::Require)?;
-                for (i, requirement) in require.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", requirement)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::Require, require)
             },
             TypedHeader::Supported(supported) => {
                 write!(f, "{}: ", HeaderName::Supported)?;
@@ -872,9 +866,10 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Allow => all_consuming(parser::headers::allow::parse_allow)(value_bytes)
                 .map(|(_, allow)| TypedHeader::Allow(allow))
                 .map_err(Error::from),
-            HeaderName::Require => all_consuming(parser::headers::parse_require)(value_bytes)
-                .map(|(_, strings)| TypedHeader::Require(strings))
-                .map_err(Error::from),
+            HeaderName::Require => {
+                // Use our new Require type
+                Ok(TypedHeader::Require(Require::from_header(&header)?))
+            },
             HeaderName::Supported => all_consuming(parser::headers::parse_supported)(value_bytes)
                 .map(|(_, strings)| TypedHeader::Supported(strings))
                 .map_err(Error::from),
