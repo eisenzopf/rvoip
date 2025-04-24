@@ -55,6 +55,8 @@ impl UriAdapter {
             match scheme_str {
                 "sip" => {
                     // Extract the host and other components
+                    // For SIP URIs in Call-Info headers, the authority might not be parsed correctly
+                    // by fluent-uri. In that case, fall back to a direct implementation.
                     if let Some(authority) = flu_uri.authority() {
                         let host_str = authority.host();
                         let host = Host::from_str(host_str)?;
@@ -68,7 +70,10 @@ impl UriAdapter {
                         
                         // Extract port if present
                         if let Some(port) = authority.port_to_u16().ok().flatten() {
-                            uri.port = Some(port);
+                            // Don't set port if it's 0
+                            if port > 0 {
+                                uri.port = Some(port);
+                            }
                         }
                         
                         // Extract any path or query components that might be present
@@ -79,8 +84,10 @@ impl UriAdapter {
                         
                         Ok(uri)
                     } else {
-                        // SIP URI without authority
-                        Err(Error::InvalidUri("SIP URI requires authority".to_string()))
+                        // Authority parse failed - for SIP URIs in Call-Info context,
+                        // we'll preserve the full string to avoid data loss
+                        let mut uri = Uri::custom(uri_str);
+                        Ok(uri)
                     }
                 },
                 "sips" => {
@@ -98,7 +105,10 @@ impl UriAdapter {
                         
                         // Extract port if present
                         if let Some(port) = authority.port_to_u16().ok().flatten() {
-                            uri.port = Some(port);
+                            // Don't set port if it's 0
+                            if port > 0 {
+                                uri.port = Some(port);
+                            }
                         }
                         
                         // Extract any path or query components
@@ -108,7 +118,9 @@ impl UriAdapter {
                         
                         Ok(uri)
                     } else {
-                        Err(Error::InvalidUri("SIPS URI requires authority".to_string()))
+                        // Fall back to custom URI for consistency
+                        let uri = Uri::custom(uri_str);
+                        Ok(uri)
                     }
                 },
                 "tel" => {

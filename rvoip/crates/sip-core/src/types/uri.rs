@@ -328,9 +328,12 @@ impl fmt::Display for Uri {
             Host::Address(IpAddr::V6(addr)) => write!(f, "[{}]", addr)?,
         }
         
-        // Optional port
+        // Optional port (only if not 0)
         if let Some(port) = self.port {
-            write!(f, ":{}", port)?;
+            // Don't show port 0
+            if port > 0 {
+                write!(f, ":{}", port)?;
+            }
         }
         
         // Parameters (;key=value or ;key)
