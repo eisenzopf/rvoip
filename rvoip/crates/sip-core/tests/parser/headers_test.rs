@@ -1,6 +1,7 @@
 // Tests for header parsing logic in parser/headers.rs
 
-use crate::common::{assert_parses_ok, assert_parse_fails, uri, addr, param_tag, param_lr, param_expires, param_transport, param_other, param_received, param_ttl, param_q, param_method, param_user};
+use crate::common::{assert_parses_ok, assert_parse_fails, DOMAIN, uri, assert_display_parses_back};
+use crate::common::param_tag, param_lr, param_expires, param_transport, param_other, param_received, param_ttl, param_q, param_method, param_user;
 use crate::common::param_branch;
 use rvoip_sip_core::error::{Result, Error};
 use rvoip_sip_core::types::{self, CSeq, Method, Address, Param, MediaType, Via, Allow, Accept, ContentDisposition, DispositionType, Warning, ContentLength, Expires, MaxForwards, CallId};
@@ -54,6 +55,35 @@ use rvoip_sip_core::types::{
     record_route::{RecordRoute, RecordRouteEntry},
     route::{Route, RouteEntry as ParserRouteValue},
     reply_to::ReplyTo,
+};
+use ordered_float::NotNan;
+use chrono::DateTime;
+use rvoip_sip_core::{
+    parser::headers::{
+        parse_cseq, 
+        parse_from, 
+        parse_to, 
+        parse_contact, 
+        parse_content_type, 
+        parse_via,
+        parse_allow,
+    },
+    types::{
+        Uri, Host, Transport, CallId, ContentType, ContentDisposition, MediaType, Warning,
+        Allow, Accept, Method, DispositionType, CSeq, 
+        uri::Scheme, via::Via,
+        auth::{
+            Challenge, Credentials, DigestParam, Algorithm, 
+            Qop, WwwAuthenticate, Authorization, ProxyAuthenticate, 
+            ProxyAuthorization, AuthenticationInfo, AuthenticationInfoParam,
+        },
+        address::DisplayName,
+        from::From,
+        to::To,
+        contact::Contact,
+        reply_to::ReplyTo,
+    },
+    parser::headers::accept::AcceptValue,
 };
 
 #[test]
@@ -219,20 +249,63 @@ fn test_accept_parser_typed() {
     /// RFC 3261 Section 20.1 Accept
     let mut params = HashMap::new();
     params.insert("level".to_string(), "1".to_string());
+    
+    // Create test input with application/json;level=1 having higher q-value to test sorting
+    let input = "application/json;level=1, application/sdp;q=0.8";
+    
+    // Our parser now sorts the values by q-value (highest first)
     let expected = Accept(vec![
-        MediaType { type_: "application".to_string(), subtype: "sdp".to_string(), params: HashMap::new() },
-        MediaType { type_: "application".to_string(), subtype: "json".to_string(), params: params.clone() }
+        AcceptValue {
+            m_type: "application".to_string(),
+            m_subtype: "json".to_string(),
+            q: None, // Implicit q=1.0
+            params: params.clone()
+        },
+        AcceptValue {
+            m_type: "application".to_string(),
+            m_subtype: "sdp".to_string(),
+            q: Some(NotNan::new(0.8).unwrap()),
+            params: HashMap::new()
+        }
     ]);
-    assert_parses_ok("application/sdp, application/json;level=1", expected);
+    
+    assert_parses_ok(input, expected);
 
-     let expected_single = Accept(vec![
-         MediaType { type_: "text".to_string(), subtype: "html".to_string(), params: HashMap::new() }
-     ]);
-     assert_parses_ok("text/html", expected_single);
-
+    // Test a single media type
+    let expected_single = Accept(vec![
+        AcceptValue {
+            m_type: "text".to_string(),
+            m_subtype: "html".to_string(),
+            q: None,
+            params: HashMap::new()
+        }
+    ]);
+    assert_parses_ok("text/html", expected_single);
+    
+    // Test wildcard values
+    let wildcard_input = "*/*;q=0.1, application/*;q=0.5";
+    let expected_wildcard = Accept(vec![
+        AcceptValue {
+            m_type: "application".to_string(),
+            m_subtype: "*".to_string(),
+            q: Some(NotNan::new(0.5).unwrap()),
+            params: HashMap::new()
+        },
+        AcceptValue {
+            m_type: "*".to_string(),
+            m_subtype: "*".to_string(),
+            q: Some(NotNan::new(0.1).unwrap()),
+            params: HashMap::new()
+        }
+    ]);
+    assert_parses_ok(wildcard_input, expected_wildcard);
+    
+    // Test with empty values and errors
     assert_parse_fails::<Accept>("");
     assert_parse_fails::<Accept>("application/sdp,"); // Trailing comma
     assert_parse_fails::<Accept>("badtype");
+    assert_parse_fails::<Accept>("text/html;q=1.1"); // q > 1.0
+    assert_parse_fails::<Accept>("text/html;q=-0.1"); // q < 0.0
 }
 
 #[test]
