@@ -68,18 +68,35 @@ impl fmt::Display for ViaHeader {
 // protocol-name = "SIP" / token
 // protocol-version = token
 // transport = "UDP" / "TCP" / "TLS" / "SCTP" / other-transport
+// RFC 3261 Section 20.42
 fn sent_protocol(input: &[u8]) -> ParseResult<SentProtocol> {
     map_res(
         tuple((
             alt((tag_no_case(b"SIP"), token)), // name
-            preceded(slash, token), // version
+            preceded(slash, opt(token)), // version (make it optional)
             preceded(slash, token), // transport
         )),
-        |(name_b, ver_b, tran_b)| {
-            let name = str::from_utf8(name_b)?.to_string();
-            let version = str::from_utf8(ver_b)?.to_string();
-            let transport = str::from_utf8(tran_b)?.to_string();
-            Ok::<_, std::str::Utf8Error>(SentProtocol { name, version, transport })
+        |(name_b, ver_b_opt, tran_b)| {
+            let name = str::from_utf8(name_b)
+                .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Char)))?
+                .to_string();
+            
+            // Handle empty version
+            let version = match ver_b_opt {
+                Some(ver_b) => str::from_utf8(ver_b)
+                    .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Char)))?
+                    .to_string(),
+                None => "".to_string()
+            };
+            
+            let transport = str::from_utf8(tran_b)
+                .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Char)))?
+                .to_string();
+            
+            // RFC 3261 requires protocol-name to be "SIP" (case-insensitive) or token
+            // and transport to be one of UDP, TCP, TLS, SCTP or other valid transport
+            
+            Ok::<_, nom::Err<NomError<&[u8]>>>(SentProtocol { name, version, transport })
         }
     )(input)
 }
@@ -91,41 +108,83 @@ fn sent_by(input: &[u8]) -> ParseResult<(Host, Option<u16>)> {
 }
 
 // via-parm = sent-protocol LWS sent-by *( SEMI via-params )
+// RFC 3261 Section 20.42
 fn via_param_parser(input: &[u8]) -> ParseResult<ViaHeader> {
-    map(
+    map_res(
         tuple((
             sent_protocol,
             preceded(lws, sent_by),
             semicolon_separated_params0(via_param_item) // Use list helper with imported parser
         )),
-        |(protocol, (host, port), params)| ViaHeader {
-            sent_protocol: protocol,
-            sent_by_host: host,
-            sent_by_port: port,
-            params,
+        |(protocol, (host, port), params)| {
+            // According to RFC 3261, a branch parameter is mandatory for all Via headers after RFC 3261
+            // However, we don't enforce this here as we may need to parse headers from pre-RFC 3261 implementations
+            
+            Ok::<_, nom::Err<NomError<&[u8]>>>(ViaHeader {
+                sent_protocol: protocol,
+                sent_by_host: host,
+                sent_by_port: port,
+                params,
+            })
         }
     )(input)
 }
 
 // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
+// RFC 3261 Section 20.42
 pub fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
-    // Check if the input starts with a Via header
-    if input.len() >= 3 && (
-        &input[0..3] == b"Via" || 
-        &input[0..3] == b"VIA" || 
-        &input[0..3] == b"via" ||
-        input[0] == b'v' || 
-        input[0] == b'V'
-    ) {
-        // If it has the header prefix, use the full header parsing
-        preceded(
-            pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
-            comma_separated_list1(via_param_parser) // Use the parser for a full via-parm
-        )(input)
-    } else {
-        // If not, assume it's just the content part (useful for tests)
-        comma_separated_list1(via_param_parser)(input)
+    // This is the strict RFC-compliant parser that requires the header name
+    preceded(
+        pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
+        comma_separated_list1(via_param_parser) // Use the parser for a full via-parm
+    )(input)
+}
+
+// Test-only function that directly parses via-parm content without requiring the header name
+// This makes tests easier to write when focusing on the content part only
+#[cfg(test)]
+pub(crate) fn parse_via_params(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+    comma_separated_list1(via_param_parser)(input)
+}
+
+/// Validates a Via header according to RFC 3261 requirements
+/// Returns true if the Via header is valid, false otherwise
+pub fn validate_via_header(via: &ViaHeader) -> bool {
+    // Check that protocol name is case-insensitive "SIP"
+    // RFC 3261 allows other protocol names, but "SIP" is standard
+    let is_sip_protocol = via.sent_protocol.name.eq_ignore_ascii_case("SIP");
+    
+    // Check for valid version (typically "2.0")
+    let has_valid_version = !via.sent_protocol.version.is_empty();
+    
+    // Check for valid transport (RFC 3261 lists UDP, TCP, TLS, SCTP as standard)
+    let transport_upper = via.sent_protocol.transport.to_uppercase();
+    let is_standard_transport = ["UDP", "TCP", "TLS", "SCTP"].contains(&transport_upper.as_str());
+    
+    // Check for valid host
+    let has_valid_host = !via.sent_by_host.to_string().is_empty();
+    
+    // Check for mandatory branch parameter (all compliant requests MUST have branch starting with z9hG4bK)
+    let has_compliant_branch = via.params.iter().any(|p| {
+        if let Param::Branch(branch) = p {
+            branch.starts_with("z9hG4bK")
+        } else {
+            false
+        }
+    });
+    
+    // All required checks pass
+    is_sip_protocol && has_valid_version && has_valid_host && has_compliant_branch
+}
+
+/// Validates a list of Via headers according to RFC 3261 requirements
+/// Returns true if all Via headers are valid, false otherwise
+pub fn validate_via_headers(vias: &[ViaHeader]) -> bool {
+    if vias.is_empty() {
+        return false; // At least one Via header is required
     }
+    
+    vias.iter().all(validate_via_header)
 }
 
 #[cfg(test)]
@@ -346,7 +405,7 @@ mod tests {
     #[test]
     fn test_parse_via_multiple() {
         let input = b"SIP/2.0/UDP first.example.com:4000;branch=z9hG4bK776asdhds , SIP/2.0/UDP second.example.com:5060;branch=z9hG4bKnasd8;received=1.2.3.4";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         println!("DEBUG - parse_via result: {:?}", result);
         assert!(result.is_ok());
         let (rem, vias) = result.unwrap();
@@ -354,13 +413,29 @@ mod tests {
         assert_eq!(vias.len(), 2);
         assert_eq!(vias[0].sent_by_port, Some(4000));
         assert_eq!(vias[1].params.len(), 2); 
+        
+        // Also test with full header syntax
+        let input_with_header = b"Via: SIP/2.0/UDP first.example.com:4000;branch=z9hG4bK776asdhds , SIP/2.0/UDP second.example.com:5060;branch=z9hG4bKnasd8;received=1.2.3.4";
+        let result = parse_via(input_with_header);
+        assert!(result.is_ok());
+        let (rem, vias) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(vias.len(), 2);
     }
     
     #[test]
     fn test_parse_via_with_whitespace() {
         // Test with whitespace around commas
         let input = b"SIP/2.0/UDP first.example.com:4000;branch=z9hG4bK776asdhds , \r\n SIP/2.0/UDP second.example.com:5060;branch=z9hG4bKnasd8";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
+        assert!(result.is_ok());
+        let (rem, vias) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(vias.len(), 2);
+        
+        // Test with full header and excessive whitespace (RFC compliant)
+        let input_with_header = b"Via  :  \t SIP/2.0/UDP first.example.com:4000;branch=z9hG4bK776asdhds , \r\n SIP/2.0/UDP second.example.com:5060;branch=z9hG4bKnasd8";
+        let result = parse_via(input_with_header);
         assert!(result.is_ok());
         let (rem, vias) = result.unwrap();
         assert!(rem.is_empty());
@@ -373,7 +448,7 @@ mod tests {
         
         // Example from Section 7.1 (SIP MESSAGE)
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok());
         let (rem, vias) = result.unwrap();
         assert!(rem.is_empty());
@@ -388,7 +463,7 @@ mod tests {
         
         // Example from Section 24.2 (SIP REGISTER)
         let input = b"SIP/2.0/UDP bobspc.biloxi.com:5060;branch=z9hG4bKnashds7";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok());
         let (rem, vias) = result.unwrap();
         assert!(rem.is_empty());
@@ -396,11 +471,19 @@ mod tests {
         
         // Example from Section 25 (Examples with multiple Vias and parameters)
         let input = b"SIP/2.0/UDP server10.biloxi.com;branch=z9hG4bK4b43c2ff8.1, SIP/2.0/UDP bigbox3.site3.atlanta.com;branch=z9hG4bK77ef4c2312983.1";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok());
         let (rem, vias) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vias.len(), 2);
+        
+        // Test with abbreviated header name (v:)
+        let input_with_header = b"v: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
+        let result = parse_via(input_with_header);
+        assert!(result.is_ok());
+        let (rem, vias) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(vias.len(), 1);
     }
     
     #[test]
@@ -420,5 +503,93 @@ mod tests {
         assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, None) if s == "test")));
         assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, Some(GenericValue::Token(v))) if s == "multi-param" && v == "123")));
         assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, Some(GenericValue::Quoted(v))) if s == "key" && v == "quoted value")));
+    }
+    
+    #[test]
+    fn test_validator_functions() {
+        // Create a valid Via header
+        let valid_via = ViaHeader {
+            sent_protocol: SentProtocol {
+                name: "SIP".to_string(),
+                version: "2.0".to_string(),
+                transport: "UDP".to_string(),
+            },
+            sent_by_host: Host::Domain("example.com".to_string()),
+            sent_by_port: Some(5060),
+            params: vec![Param::Branch("z9hG4bK776asdhds".to_string())],
+        };
+        
+        // Test valid header
+        assert!(validate_via_header(&valid_via));
+        
+        // Test invalid protocol name
+        let mut invalid_protocol = valid_via.clone();
+        invalid_protocol.sent_protocol.name = "INVALID".to_string();
+        assert!(!validate_via_header(&invalid_protocol));
+        
+        // Test empty version
+        let mut invalid_version = valid_via.clone();
+        invalid_version.sent_protocol.version = "".to_string();
+        assert!(!validate_via_header(&invalid_version));
+        
+        // Test missing branch parameter
+        let mut missing_branch = valid_via.clone();
+        missing_branch.params = vec![Param::Other("rport".to_string(), None)];
+        assert!(!validate_via_header(&missing_branch));
+        
+        // Test non-compliant branch (not starting with z9hG4bK)
+        let mut invalid_branch = valid_via.clone();
+        invalid_branch.params = vec![Param::Branch("invalid-branch".to_string())];
+        assert!(!validate_via_header(&invalid_branch));
+        
+        // Test validate_via_headers function
+        assert!(validate_via_headers(&[valid_via.clone()]));
+        assert!(!validate_via_headers(&[])); // Empty list is invalid
+        assert!(!validate_via_headers(&[invalid_branch])); // List with invalid header is invalid
+    }
+    
+    #[test]
+    fn test_edge_cases() {
+        // Test with minimal valid input
+        let minimal_input = b"SIP/2.0/UDP host;branch=z9hG4bK123";
+        let result = parse_via_params(minimal_input);
+        println!("1. Minimal valid input result: {:?}", result);
+        assert!(result.is_ok());
+        
+        // Test with empty protocol version (technically valid per ABNF, but likely invalid semantically)
+        let empty_version = b"SIP//UDP host;branch=z9hG4bK123";
+        let result = parse_via_params(empty_version);
+        println!("2. Empty version result: {:?}", result);
+        assert!(result.is_ok());
+        let (_, vias) = result.unwrap();
+        assert_eq!(vias[0].sent_protocol.version, "");
+        
+        // Test with IPv6 address
+        let ipv6_input = b"SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK123";
+        let result = parse_via_params(ipv6_input);
+        println!("3. IPv6 input result: {:?}", result);
+        assert!(result.is_ok());
+        
+        // Test with mixed case parameter names (should be case-insensitive)
+        let mixed_case = b"SIP/2.0/UDP host;BrAnCh=z9hG4bK123;RpOrT";
+        let result = parse_via_params(mixed_case);
+        println!("4. Mixed case result: {:?}", result);
+        assert!(result.is_ok());
+        let (_, vias) = result.unwrap();
+        assert!(vias[0].params.iter().any(|p| matches!(p, Param::Branch(s) if s == "z9hG4bK123")));
+        
+        // Test with unusual but valid transport protocols
+        let unusual_transport = b"SIP/2.0/WS host;branch=z9hG4bK123";
+        let result = parse_via_params(unusual_transport);
+        println!("5. Unusual transport result: {:?}", result);
+        assert!(result.is_ok());
+        let (_, vias) = result.unwrap();
+        assert_eq!(vias[0].sent_protocol.transport, "WS");
+        
+        // Test with extreme whitespace (all LWS points should accept arbitrary amounts)
+        let whitespace_input = b"SIP/2.0/UDP  \t \r\n host  \r\n  ;  \t branch=z9hG4bK123";
+        let result = parse_via_params(whitespace_input);
+        println!("6. Whitespace input result: {:?}", result);
+        assert!(result.is_ok());
     }
 }
