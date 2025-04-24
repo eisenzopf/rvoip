@@ -6,7 +6,7 @@ use nom::{
 // Type alias for parser result
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
-fn is_token_char(c: u8) -> bool {
+pub fn is_token_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || 
     c == b'-' || c == b'.' || c == b'!' || c == b'%' || c == b'*' || 
     c == b'_' || c == b'+' || c == b'`' || c == b'\'' || c == b'~'

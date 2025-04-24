@@ -16,7 +16,7 @@ pub fn wsp(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 /// Parses optional whitespace (0 or more SP or HTAB)
-fn owsp(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn owsp(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(many0(wsp))(input)
 }
 
