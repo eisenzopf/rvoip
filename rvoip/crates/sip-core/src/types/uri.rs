@@ -29,6 +29,10 @@ pub enum Scheme {
     Sips,
     /// TEL URI (telephone number)
     Tel,
+    /// HTTP URI
+    Http,
+    /// HTTPS URI
+    Https,
 }
 
 impl Scheme {
@@ -38,6 +42,8 @@ impl Scheme {
             Scheme::Sip => "sip",
             Scheme::Sips => "sips",
             Scheme::Tel => "tel",
+            Scheme::Http => "http",
+            Scheme::Https => "https",
         }
     }
 }
@@ -59,6 +65,8 @@ impl FromStr for Scheme {
             "sip" => Ok(Scheme::Sip),
             "sips" => Ok(Scheme::Sips),
             "tel" => Ok(Scheme::Tel),
+            "http" => Ok(Scheme::Http),
+            "https" => Ok(Scheme::Https),
             _ => Err(Error::InvalidUri(format!("Invalid scheme token: {}", s))),
         }
     }

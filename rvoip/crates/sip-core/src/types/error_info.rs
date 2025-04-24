@@ -4,6 +4,12 @@
 use std::fmt;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use crate::types::uri::Uri;
+use crate::parser::headers::error_info::{ErrorInfoValue, parse_error_info, full_parse_error_info};
+use crate::error::{Result, Error};
+use std::str::FromStr;
+use nom::combinator::all_consuming;
+use crate::types::param::Param;
 
 /// ErrorInfo represents an Error-Info header value
 /// Used to provide additional information about errors in responses
@@ -117,50 +123,177 @@ impl fmt::Display for ErrorInfoList {
     }
 }
 
+/// Represents a structured error-info header that can be used with the parser system 
+/// Provides conversion between the structured ErrorInfoList and the parser's internal types.
+pub struct ErrorInfoHeader {
+    pub error_info_list: ErrorInfoList,
+}
+
+impl ErrorInfoHeader {
+    /// Create a new empty ErrorInfoHeader
+    pub fn new() -> Self {
+        ErrorInfoHeader {
+            error_info_list: ErrorInfoList::new(),
+        }
+    }
+    
+    /// Convert from parser's ErrorInfoValue to the structured ErrorInfo type
+    pub fn from_error_info_value(value: &ErrorInfoValue) -> ErrorInfo {
+        let mut info = ErrorInfo::new(&value.uri_str);
+        
+        // Convert params to parameters HashMap
+        for param in &value.params {
+            if let Param::Other(name, value_opt) = param {
+                if let Some(value) = value_opt {
+                    match value {
+                        crate::types::param::GenericValue::Token(val) => {
+                            info = info.with_param(name, val);
+                        },
+                        crate::types::param::GenericValue::Quoted(val) => {
+                            info = info.with_param(name, val);
+                        },
+                        crate::types::param::GenericValue::Host(host) => {
+                            // Convert host to string
+                            info = info.with_param(name, &host.to_string());
+                        },
+                    }
+                }
+            }
+        }
+        
+        info
+    }
+}
+
+impl FromStr for ErrorInfoHeader {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let trimmed_s = s.trim();
+        
+        // Try parsing as a full header first (with "Error-Info:" prefix)
+        let full_result = all_consuming(full_parse_error_info)(trimmed_s.as_bytes());
+        if let Ok((_, values)) = full_result {
+            let mut header = ErrorInfoHeader::new();
+            for value in values {
+                header.error_info_list.add(ErrorInfoHeader::from_error_info_value(&value));
+            }
+            return Ok(header);
+        }
+        
+        // If that fails, try parsing just the value part
+        let result = all_consuming(parse_error_info)(trimmed_s.as_bytes());
+        match result {
+            Ok((_, values)) => {
+                let mut header = ErrorInfoHeader::new();
+                for value in values {
+                    header.error_info_list.add(ErrorInfoHeader::from_error_info_value(&value));
+                }
+                Ok(header)
+            },
+            Err(err) => Err(Error::from(err)),
+        }
+    }
+}
+
+impl fmt::Display for ErrorInfoHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.error_info_list)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::uri::Uri;
     
     #[test]
-    fn test_error_info_display_simple() {
-        let error_info = ErrorInfo::new("https://example.com/errors/23");
-        assert_eq!(error_info.to_string(), "https://example.com/errors/23");
+    fn test_from_str_basic() {
+        // Test parsing with just value
+        let s = "<sip:busy@example.com>;reason=busy";
+        let header: ErrorInfoHeader = s.parse().unwrap();
+        
+        assert_eq!(header.error_info_list.len(), 1);
+        assert_eq!(header.error_info_list.items[0].uri, "sip:busy@example.com");
+        assert_eq!(header.error_info_list.items[0].parameters.get("reason").unwrap(), "busy");
+        assert!(header.error_info_list.items[0].comment.is_none());
     }
     
     #[test]
-    fn test_error_info_with_comment() {
-        let error_info = ErrorInfo::new("https://example.com/errors/access-denied")
-            .with_comment("User lacks permissions");
-        assert_eq!(error_info.to_string(), "https://example.com/errors/access-denied (User lacks permissions)");
+    fn test_from_str_with_header() {
+        // Test parsing with header name
+        let s = "Error-Info: <http://example.com/error.html>";
+        let header: ErrorInfoHeader = s.parse().unwrap();
+        
+        assert_eq!(header.error_info_list.len(), 1);
+        assert_eq!(header.error_info_list.items[0].uri, "http://example.com/error.html");
     }
     
     #[test]
-    fn test_error_info_with_params() {
-        let error_info = ErrorInfo::new("https://example.com/errors/404")
-            .with_param("language", "en");
-        assert_eq!(error_info.to_string(), "https://example.com/errors/404;language=en");
+    fn test_from_str_multiple() {
+        // Test parsing multiple URIs
+        let s = "<sip:busy@example.com>;reason=busy, <https://example.com/error.html>";
+        let header: ErrorInfoHeader = s.parse().unwrap();
+        
+        assert_eq!(header.error_info_list.len(), 2);
+        assert_eq!(header.error_info_list.items[0].uri, "sip:busy@example.com");
+        assert_eq!(header.error_info_list.items[1].uri, "https://example.com/error.html");
     }
     
     #[test]
-    fn test_error_info_with_spaces() {
-        let error_info = ErrorInfo::new("https://example.com/error description");
-        assert_eq!(error_info.to_string(), "<https://example.com/error description>");
+    fn test_display() {
+        // Test formatting a single entry
+        let mut list = ErrorInfoList::new();
+        list.add(ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy"));
+        
+        let header = ErrorInfoHeader { error_info_list: list };
+        assert_eq!(header.to_string(), "sip:busy@example.com;reason=busy");
+        
+        // Test formatting multiple entries
+        let mut list = ErrorInfoList::new();
+        list.add(ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy"));
+        list.add(ErrorInfo::new("https://example.com/error.html"));
+        
+        let header = ErrorInfoHeader { error_info_list: list };
+        assert_eq!(header.to_string(), "sip:busy@example.com;reason=busy, https://example.com/error.html");
     }
     
     #[test]
-    fn test_error_info_list() {
-        let list = ErrorInfoList::new()
-            .with(ErrorInfo::new("https://example.com/errors/1"))
-            .with(ErrorInfo::new("https://example.com/errors/2").with_comment("More info"));
+    fn test_empty() {
+        // Test empty list
+        let header = ErrorInfoHeader::new();
+        assert_eq!(header.to_string(), "");
+        assert!(header.error_info_list.is_empty());
+    }
+    
+    #[test]
+    fn test_add_methods() {
+        // Test adding ErrorInfo objects
+        let mut list = ErrorInfoList::new();
+        list.add(ErrorInfo::new("sip:busy@example.com"));
+        list.add(ErrorInfo::new("https://example.com/error.html"));
         
         assert_eq!(list.len(), 2);
-        assert_eq!(list.to_string(), "https://example.com/errors/1, https://example.com/errors/2 (More info)");
+        
+        // Test using builder pattern
+        let list = ErrorInfoList::new()
+            .with(ErrorInfo::new("sip:busy@example.com"))
+            .with(ErrorInfo::new("https://example.com/error.html"));
+            
+        assert_eq!(list.len(), 2);
     }
     
     #[test]
-    fn test_error_info_list_empty() {
-        let list = ErrorInfoList::new();
-        assert!(list.is_empty());
-        assert_eq!(list.to_string(), "");
+    fn test_comment_handling() {
+        // Test comment handling
+        let info = ErrorInfo::new("sip:busy@example.com").with_comment("User is busy");
+        assert_eq!(info.to_string(), "sip:busy@example.com (User is busy)");
+    }
+    
+    #[test]
+    fn test_uri_with_spaces() {
+        // Test URI with spaces (should be enclosed in angle brackets)
+        let info = ErrorInfo::new("http://example.com/error message.html");
+        assert_eq!(info.to_string(), "<http://example.com/error message.html>");
     }
 } 

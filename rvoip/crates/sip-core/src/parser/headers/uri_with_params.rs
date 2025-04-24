@@ -19,6 +19,22 @@ use crate::types::param::Param;
 // Returns (URI String, Vec<Param>)
 
 pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
+    println!("uri_with_generic_params input: {:?}", std::str::from_utf8(input));
+    
+    // Try to find laquot
+    if let Some(i) = input.iter().position(|&b| b == b'<') {
+        println!("Found laquot at position {}", i);
+    } else {
+        println!("No laquot found in input");
+    }
+    
+    // Try to find raquot
+    if let Some(i) = input.iter().position(|&b| b == b'>') {
+        println!("Found raquot at position {}", i);
+    } else {
+        println!("No raquot found in input");
+    }
+    
     map(
         pair(
             // LAQUOT absoluteURI RAQUOT
@@ -28,12 +44,22 @@ pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)
                     parse_absolute_uri, 
                     raquot
                 ),
-                 |bytes| str::from_utf8(bytes).map(String::from)
+                 |bytes| {
+                     println!("absoluteURI bytes: {:?}", bytes);
+                     let res = str::from_utf8(bytes);
+                     if let Err(ref e) = res {
+                         println!("UTF-8 conversion error: {:?}", e);
+                     }
+                     res.map(String::from)
+                 }
             ),
             // *( SEMI generic-param )
-            many0(preceded(semi, generic_param)) 
+            many0(preceded(semi, generic_param))
         ),
-        |(uri_str, params_vec)| (uri_str, params_vec)
+        |(uri_str, params_vec)| {
+            println!("Successful parse: uri_str={}, params={:?}", uri_str, params_vec);
+            (uri_str, params_vec)
+        }
     )(input)
 }
 
