@@ -196,30 +196,29 @@ fn language_range(input: &[u8]) -> ParseResult<String> {
                 )
             ),
             |bytes: &[u8]| {
-                // Check if the primary tag (before any hyphen) is too long
-                // Should not reach here since primary_tag_part validates length,
-                // but we keep it as a safeguard
-                let primary_end = bytes.iter().position(|&c| c == b'-').unwrap_or(bytes.len());
-                if primary_end > 8 && input[0] != b'*' && !input.starts_with(b"i-") && !input.starts_with(b"x-") {
+                // Validate the full tag as per RFC 5646
+                let parts: Vec<&[u8]> = bytes.split(|&c| c == b'-').collect();
+                
+                // Primary tag should be 1-8 alphabetic characters
+                let primary = parts[0];
+                if primary.len() < 1 || primary.len() > 8 || !primary.iter().all(|&c| c.is_ascii_alphabetic()) {
                     return Err(nom::Err::Error(nom::error::Error::new(
                         bytes,
-                        nom::error::ErrorKind::TooLarge
+                        nom::error::ErrorKind::Alpha
                     )));
                 }
                 
-                // Check if any subtag is too long
-                if bytes.contains(&b'-') {
-                    let parts: Vec<&[u8]> = bytes.split(|&c| c == b'-').collect();
-                    for part in parts.iter().skip(1) { // Skip primary tag, already checked
-                        if part.len() > 8 {
-                            return Err(nom::Err::Error(nom::error::Error::new(
-                                bytes,
-                                nom::error::ErrorKind::TooLarge
-                            )));
-                        }
+                // Validate subtags (if any)
+                for part in parts.iter().skip(1) {
+                    if part.len() < 1 || part.len() > 8 || !part.iter().all(|&c| c.is_ascii_alphanumeric()) {
+                        return Err(nom::Err::Error(nom::error::Error::new(
+                            bytes,
+                            nom::error::ErrorKind::Alpha
+                        )));
                     }
                 }
                 
+                // If we get here, the tag is valid
                 Ok(String::from_utf8_lossy(bytes).to_string().to_lowercase())
             }
         ),
