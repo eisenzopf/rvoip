@@ -16,12 +16,15 @@ use crate::parser::ParseResult;
 /// 
 /// Note: This parser handles only the value part (1*DIGIT).
 /// The "Max-Forwards" token and HCOLON are parsed separately.
-pub fn parse_max_forwards(input: &[u8]) -> ParseResult<u32> {
+/// 
+/// Returns a u8 for consistency with the MaxForwards type. Values exceeding u8::MAX
+/// will be rejected with an error as per SIP RFC 3261 implementation guidelines.
+pub fn parse_max_forwards(input: &[u8]) -> ParseResult<u8> {
     map_res(
         digit1, 
         |bytes| {
             let s = str::from_utf8(bytes).map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;
-            s.parse::<u32>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
+            s.parse::<u8>().map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
         }
     )(input)
 }
@@ -42,10 +45,14 @@ mod tests {
         assert!(rem_zero.is_empty());
         assert_eq!(val_zero, 0);
         
-        // Large values (RFC doesn't specify an upper limit)
-        let (rem_large, val_large) = parse_max_forwards(b"4294967295").unwrap(); // max u32
-        assert!(rem_large.is_empty());
-        assert_eq!(val_large, 4294967295);
+        // Maximum valid value for u8
+        let (rem_max, val_max) = parse_max_forwards(b"255").unwrap();
+        assert!(rem_max.is_empty());
+        assert_eq!(val_max, 255);
+        
+        // Values exceeding u8::MAX should fail
+        assert!(parse_max_forwards(b"256").is_err());
+        assert!(parse_max_forwards(b"300").is_err());
     }
 
     #[test]

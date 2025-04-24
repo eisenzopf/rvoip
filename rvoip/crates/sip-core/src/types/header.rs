@@ -514,8 +514,8 @@ pub enum TypedHeader {
     ProxyRequire(Vec<String>),
     Date(DateTime<FixedOffset>), // Use imported chrono types
     Timestamp((NotNan<f32>, Option<NotNan<f32>>)), // Use imported NotNan
-    Organization(String),
-    Priority(String), // Replace with types::priority::PriorityValue when defined
+    Organization(crate::types::Organization), // Use our new Organization type
+    Priority(Priority), // Use types::Priority
     Subject(String),
     Server(Vec<String>), // Replace with types::server::ServerVal when defined
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
@@ -891,10 +891,10 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::Timestamp(v))
                 .map_err(Error::from),
             HeaderName::Organization => all_consuming(parser::headers::parse_organization)(value_bytes)
-                .map(|(_, string)| TypedHeader::Organization(string))
+                .map(|(_, org)| TypedHeader::Organization(org))
                 .map_err(Error::from),
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
-                .map(|(_, priority)| TypedHeader::Priority(priority.to_string()))
+                .map(|(_, priority)| TypedHeader::Priority(types::priority::Priority::from_str(&priority.to_string()).unwrap_or(types::priority::Priority::Normal)))
                 .map_err(Error::from),
             HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
                 .map(|(_, string)| TypedHeader::Subject(string))
@@ -924,7 +924,7 @@ impl TryFrom<Header> for TypedHeader {
                      .collect::<Vec<String>>()))
                  .map_err(Error::from),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
-                .map(|(_, strings)| TypedHeader::InReplyTo(crate::types::in_reply_to::InReplyTo(strings.into_iter().map(crate::types::CallId).collect())))
+                .map(|(_, strings)| TypedHeader::InReplyTo(crate::types::in_reply_to::InReplyTo::with_multiple_strings(strings)))
                 .map_err(Error::from),
              HeaderName::Warning => {
                  let parse_result = all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);

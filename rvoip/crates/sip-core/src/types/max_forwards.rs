@@ -46,6 +46,4 @@ impl FromStr for MaxForwards {
                 format!("Invalid Max-Forwards value: {}", e)
             ))
     }
-}
-
-// TODO: Implement methods (e.g., decrement, is_zero) 
+} 
