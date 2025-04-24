@@ -51,7 +51,6 @@ use crate::types::accept_language::AcceptLanguage; // Use our new AcceptLanguage
 use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
 use crate::types::refer_to::ReferTo; // Add ReferTo import
-use crate::parser::headers::refer_to::ReferToValue; // Import from parser
 use crate::types::call_info::{CallInfo, CallInfoValue};
 
 // Helper From implementation for Error
@@ -309,7 +308,7 @@ pub enum HeaderValue {
     Route(Vec<RouteEntry>),
     RecordRoute(Vec<RecordRouteEntry>),
     ReplyTo(ReplyToValue),
-    ReferTo(ReferToValue), // Add ReferTo variant
+    ReferTo(ReferTo), // Add ReferTo variant
 
     // === Request/Response Info ===
     Via(Vec<ViaEntry>), // ViaEntry would contain the parsed tuple
@@ -997,18 +996,21 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
             HeaderName::ReferTo => {
-                match header.value {
-                    HeaderValue::ReferTo(value) => {
-                        // Extract parts needed to create the ReferTo type
-                        let display_name = value.display_name;
-                        let uri = value.uri;
-                        let params = value.params;
-                        
-                        // Build Address and ReferTo
-                        let address = crate::types::address::Address::new(display_name, uri);
-                        Ok(TypedHeader::ReferTo(ReferTo(address)))
-                    }
-                    _ => Err(Error::ParseError(format!("Invalid header value for Refer-To header")))
+                if let HeaderValue::ReferTo(value) = header.value {
+                    // Access fields through methods instead of direct access
+                    let display_name = value.address().display_name.clone();
+                    let uri = value.uri().clone();
+                    let params = value.params().to_vec();
+                    
+                    Ok(TypedHeader::ReferTo(ReferTo::new(Address {
+                        display_name,
+                        uri,
+                        params,
+                    })))
+                } else {
+                    Err(Error::ParseError(format!(
+                        "Expected ReferTo header value, got {:?}", header.value
+                    )))
                 }
             }
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
