@@ -190,6 +190,7 @@ pub fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
     alt((
         map(cp_q, Param::Q),
         map(cp_expires, Param::Expires),
+        tag_param, // Add tag_param parsing for Contact headers
         generic_param // Fallback to generic
     ))(input)
 }
