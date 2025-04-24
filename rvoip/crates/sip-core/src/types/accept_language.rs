@@ -66,8 +66,12 @@ impl AcceptLanguage {
 
         let available: Vec<&str> = available_languages.into_iter().collect();
         
+        // Make sure languages are sorted by q-value (highest first)
+        let mut sorted_languages = self.0.clone();
+        sorted_languages.sort();
+        
         // First check exact matches in q-value order (highest first)
-        for lang_info in &self.0 {
+        for lang_info in &sorted_languages {
             // Skip wildcards in this pass
             if lang_info.range == "*" {
                 continue;
@@ -81,7 +85,7 @@ impl AcceptLanguage {
         }
         
         // Then check for wildcard match
-        if let Some(wildcard) = self.0.iter().find(|lang| lang.range == "*") {
+        if let Some(wildcard) = sorted_languages.iter().find(|lang| lang.range == "*") {
             // If there's a wildcard and it has a non-zero q-value, accept the first available language
             if wildcard.q_value() > 0.0 {
                 return available.first().copied();
@@ -94,7 +98,11 @@ impl AcceptLanguage {
 
 impl fmt::Display for AcceptLanguage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let language_strings: Vec<String> = self.0.iter().map(|lang| lang.to_string()).collect();
+        // Create a sorted copy of the languages
+        let mut sorted_languages = self.0.clone();
+        sorted_languages.sort();
+        
+        let language_strings: Vec<String> = sorted_languages.iter().map(|lang| lang.to_string()).collect();
         write!(f, "{}", language_strings.join(", "))
     }
 }
@@ -292,7 +300,7 @@ mod tests {
         
         let accept_lang = AcceptLanguage(languages);
         
-        // Test the display implementation
+        // Test the display implementation - should be in order of q-value (highest first)
         assert_eq!(accept_lang.to_string(), "fr, en;q=0.800");
         
         // Test the accepts method
