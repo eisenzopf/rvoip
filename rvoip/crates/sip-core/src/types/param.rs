@@ -100,7 +100,7 @@ impl fmt::Display for Param {
             Param::Maddr(val) => write!(f, ";maddr={}", val),
             Param::Ttl(val) => write!(f, ";ttl={}", val),
             Param::Lr => write!(f, ";lr"),
-            Param::Q(val) => write!(f, ";q={:.1}", val.into_inner()),
+            Param::Q(val) => write!(f, ";q={:.3}", val.into_inner()),
             Param::Transport(val) => write!(f, ";transport={}", val),
             Param::User(val) => write!(f, ";user={}", val),
             Param::Method(val) => write!(f, ";method={}", val),

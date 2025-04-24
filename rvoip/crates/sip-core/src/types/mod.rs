@@ -26,6 +26,7 @@ pub use version::Version;
 // SIP Core Types
 
 pub mod accept;
+pub mod accept_language;
 pub mod address;
 pub mod allow;
 pub mod auth;
@@ -59,6 +60,7 @@ pub mod retry_after;
 pub mod error_info;
 
 pub use accept::Accept;
+pub use accept_language::AcceptLanguage;
 pub use address::Address;
 pub use allow::Allow;
 pub use auth::*;

@@ -1,14 +1,20 @@
-// Parser for the Accept-Language header (RFC 3261 Section 20.3)
+// Parser for the Accept-Language header (RFC 3261 Section 20.3, RFC 3066/5646)
 // Accept-Language = "Accept-Language" HCOLON [ language *(COMMA language) ]
 // language = language-range *(SEMI accept-param)
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
 // accept-param = ("q" EQUAL qvalue) / generic-param
+//
+// This is based on RFC 3066 (Language Tags) which specifies:
+// - Primary subtag: 1-8 ASCII alphabetic characters
+// - Subsequent subtags: 1-8 ASCII alphanumeric characters
+// - Subtags separated by hyphens
+// - Language tags are case-insensitive (though lowercase is preferred)
 
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
     character::complete::alpha1,
-    combinator::{map, opt, recognize, value},
+    combinator::{map, opt, recognize, value, map_res},
     multi::{many0, separated_list0, separated_list1},
     sequence::{pair, preceded},
     IResult,
@@ -17,6 +23,8 @@ use std::str;
 use std::collections::HashMap;
 use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
+use std::cmp::Ordering;
+use std::fmt;
 
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma, equal};
@@ -37,63 +45,126 @@ pub struct LanguageInfo {
     pub params: Vec<Param>,
 }
 
-// primary-tag = 1*8ALPHA
-// subtag = 1*8ALPHA
-fn language_tag_part(input: &[u8]) -> ParseResult<&[u8]> {
-    // Strict check: must be 1-8 ASCII alphabetic characters
-    let mut end = 0;
-    for (i, &c) in input.iter().enumerate() {
-        if i >= 8 || !c.is_ascii_alphabetic() {
-            break;
+impl LanguageInfo {
+    // Get effective q-value (defaults to 1.0 if not specified)
+    pub fn q_value(&self) -> f32 {
+        self.q.map_or(1.0, |q| q.into_inner())
+    }
+    
+    // Compare language tags in a case-insensitive manner per RFC 3066
+    pub fn language_equals(&self, other: &str) -> bool {
+        self.range.eq_ignore_ascii_case(other)
+    }
+}
+
+// Implementation to enable sorting languages by q-value (highest first)
+impl PartialOrd for LanguageInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        other.q_value().partial_cmp(&self.q_value())
+    }
+}
+
+impl Ord for LanguageInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Sort by q-value (highest first), then by range string for stable ordering
+        other.q_value().partial_cmp(&self.q_value())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.range.cmp(&other.range))
+    }
+}
+
+// Display implementation for language info
+impl fmt::Display for LanguageInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.range)?;
+        
+        // Add q-value if present
+        if let Some(q) = self.q {
+            write!(f, ";q={:.3}", q)?;
         }
-        end = i + 1;
+        
+        // Add other parameters - Param already includes semicolons, so we don't add them here
+        for param in &self.params {
+            write!(f, "{}", param)?;
+        }
+        
+        Ok(())
     }
-    
-    // Require at least one character
-    if end == 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TakeWhileMN
-        )));
-    }
-    
-    Ok((&input[end..], &input[0..end]))
+}
+
+// primary-tag = 1*8ALPHA
+// Per RFC 3066, the primary tag must be alphabetic
+fn primary_tag_part(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while_m_n(1, 8, |c: u8| c.is_ascii_alphabetic())(input)
+}
+
+// subtag = 1*8ALPHANUM
+// Per RFC 3066, subtags can be alphanumeric
+fn subtag_part(input: &[u8]) -> ParseResult<&[u8]> {
+    take_while_m_n(1, 8, |c: u8| c.is_ascii_alphanumeric())(input)
 }
 
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
-// Returns range as String
+// Returns range as String (converted to lowercase as per RFC 3066)
 fn language_range(input: &[u8]) -> ParseResult<String> {
-    // Check if this is just a wildcard "*"
-    if input.len() == 1 && input[0] == b'*' {
-        return Ok((&input[1..], "*".to_string()));
+    alt((
+        // Regular language tag
+        map_res(
+            recognize(
+                pair(
+                    primary_tag_part, 
+                    many0(preceded(tag(b"-"), subtag_part))
+                )
+            ),
+            |bytes: &[u8]| {
+                // Check if the primary tag (before any hyphen) is too long
+                let primary_end = bytes.iter().position(|&c| c == b'-').unwrap_or(bytes.len());
+                if primary_end > 8 {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        bytes,
+                        nom::error::ErrorKind::TooLarge
+                    )));
+                }
+                
+                // Check if any subtag is too long
+                if bytes.contains(&b'-') {
+                    let parts: Vec<&[u8]> = bytes.split(|&c| c == b'-').collect();
+                    for part in parts.iter().skip(1) { // Skip primary tag, already checked
+                        if part.len() > 8 {
+                            return Err(nom::Err::Error(nom::error::Error::new(
+                                bytes,
+                                nom::error::ErrorKind::TooLarge
+                            )));
+                        }
+                    }
+                }
+                
+                Ok(String::from_utf8_lossy(bytes).to_string().to_lowercase())
+            }
+        ),
+        // Wildcard
+        map(
+            tag(b"*"),
+            |_| "*".to_string()
+        )
+    ))(input)
+}
+
+// Validate q-value according to RFC specifications:
+// - Must be between 0.0 and 1.0 inclusive
+// - Should have at most 3 decimal places
+// This function normalizes and validates the q-value
+fn validate_qvalue(q: NotNan<f32>) -> Option<NotNan<f32>> {
+    let q_val = q.into_inner();
+    
+    // Check range
+    if q_val < 0.0 || q_val > 1.0 {
+        return None;
     }
     
-    // Otherwise, try parsing primary-tag followed by optional subtags
-    // Following strict RFC format: 1*8ALPHA *( "-" 1*8ALPHA )
-    let (remaining, primary) = language_tag_part(input)?;
-    
-    // Initial part is recognized
-    let mut result = vec![primary];
-    let mut current = remaining;
-    
-    // Process any subtags
-    while !current.is_empty() && current.len() >= 2 && current[0] == b'-' {
-        // Try to parse "-" followed by 1*8ALPHA
-        let (after_dash, _) = tag(b"-")(current)?;
-        let (next, subtag) = language_tag_part(after_dash)?;
-        
-        // Add the dash and subtag to our result
-        result.push(b"-");
-        result.push(subtag);
-        
-        // Move to the next segment
-        current = next;
-    }
-    
-    // Convert the accumulated result to a String
-    let lang_range = String::from_utf8_lossy(&result.concat()).to_string();
-    
-    Ok((current, lang_range))
+    // Round to 3 decimal places to enforce the RFC limit
+    let rounded = (q_val * 1000.0).round() / 1000.0;
+    NotNan::new(rounded).ok()
 }
 
 // language = language-range *(SEMI accept-param)
@@ -111,8 +182,11 @@ fn language(input: &[u8]) -> ParseResult<LanguageInfo> {
 
             for param in raw_params {
                 match param {
-                    Param::Q(q) => q_value = Some(q), // Extract q-value
-                    other => other_params.push(other), // Keep other params
+                    Param::Q(q) => {
+                        // Validate and normalize q-value
+                        q_value = validate_qvalue(q).map(Some).unwrap_or(None);
+                    }
+                    other => other_params.push(other),
                 }
             }
 
@@ -141,13 +215,23 @@ pub fn parse_accept_language(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
         // Then parse the optional list of languages
         opt(comma_separated_list0(language))
     )(input)
-    .map(|(rem, langs_opt)| (rem, langs_opt.unwrap_or_else(Vec::new)))
+    .map(|(rem, langs_opt)| {
+        let mut langs = langs_opt.unwrap_or_else(Vec::new);
+        // Sort languages by q-value (highest first) per RFC 2616
+        langs.sort();
+        (rem, langs)
+    })
 }
 
 // Test-only function that directly parses language list content without header name
 #[cfg(test)]
 pub(crate) fn parse_languages(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
     comma_separated_list0(language)(input)
+    .map(|(rem, mut langs)| {
+        // Sort languages by q-value (highest first) per RFC 2616
+        langs.sort();
+        (rem, langs)
+    })
 }
 
 #[cfg(test)]
@@ -161,33 +245,79 @@ mod tests {
         // Basic language ranges
         let (rem, range) = language_range(b"en-us").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(range, "en-us");
+        assert_eq!(range, "en-us"); // Should be lowercase
 
+        // Case insensitivity test - output should be lowercase
+        let (_, range_upper) = language_range(b"EN-US").unwrap();
+        assert_eq!(range_upper, "en-us");
+
+        // Single language tag
         let (rem_single, range_single) = language_range(b"fr").unwrap();
         assert!(rem_single.is_empty());
         assert_eq!(range_single, "fr");
 
+        // Wildcard
         let (rem_wild, range_wild) = language_range(b"*").unwrap();
         assert!(rem_wild.is_empty());
         assert_eq!(range_wild, "*");
         
-        // Invalid cases per RFC - but might be accepted by our implementation
-        assert!(language_range(b"1234").is_err() || language_range(b"1234").unwrap().1.len() > 0,
-               "Should reject non-alphabetic tags or parse something");
+        // Alphanumeric subtags (RFC 3066 compliant)
+        let (_, range_alphanum) = language_range(b"en-gb2").unwrap();
+        assert_eq!(range_alphanum, "en-gb2", "Should accept alphanumeric subtags");
         
-        // Underscore is not a valid separator in RFC but our implementation may handle it
+        // Invalid cases
+        assert!(language_range(b"1234").is_err(), "Should reject non-alphabetic primary tags");
+        
+        // Underscore handling check (RFC only allows hyphens, but implementation might accept underscores)
         let underscore_result = language_range(b"en_us");
         if underscore_result.is_ok() {
-            println!("Note: parser accepts underscore in language tags");
+            println!("Note: Current implementation accepts underscores which is not RFC compliant");
+        } else {
+            assert!(underscore_result.is_err(), "Should ideally reject underscores per RFC");
         }
         
-        // Long primary tag gets truncated to 8 chars in our implementation
-        let (rem_long, range_long) = language_range(b"toolongprimarytag").unwrap();
-        assert_eq!(range_long.len(), 8, "Should truncate long tags at 8 chars");
+        // Tag length validation - the parser should take only the first 8 characters and leave the rest
+        let long_tag_result = language_range(b"abcdefghi");
+        println!("Long primary tag result: {:?}", long_tag_result);
         
-        // Long language tag with subtags - our parser handles this differently
-        let (rem_long_subtag, range_long_subtag) = language_range(b"en-us-looooong").unwrap();
-        assert!(range_long_subtag.starts_with("en-"), "Should start with primary tag");
+        // The parser should succeed but only consume the first 8 characters
+        assert!(long_tag_result.is_ok(), "Parser should succeed with a valid prefix");
+        let (remainder, value) = long_tag_result.unwrap();
+        assert_eq!(value, "abcdefgh", "Should only take the first 8 characters");
+        assert_eq!(remainder, &b"i"[..], "Should leave the 9th character as remainder");
+        
+        // Similarly for subtags
+        let long_subtag_result = language_range(b"en-abcdefghi");
+        println!("Long subtag result: {:?}", long_subtag_result);
+        
+        // The parser should succeed but only consume characters up to the valid part
+        assert!(long_subtag_result.is_ok(), "Parser should succeed with a valid prefix");
+        let (remainder, value) = long_subtag_result.unwrap();
+        assert_eq!(value, "en-abcdefgh", "Should only take a valid subtag length");
+        assert_eq!(remainder, &b"i"[..], "Should leave the extra character as remainder");
+        
+        // Correct subtag parsing
+        let (_, range_multi) = language_range(b"zh-hans-cn").unwrap();
+        assert_eq!(range_multi, "zh-hans-cn", "Should handle multiple subtags");
+    }
+    
+    #[test]
+    fn test_qvalue_validation() {
+        // Valid q-values
+        assert_eq!(validate_qvalue(NotNan::new(0.0).unwrap()), Some(NotNan::new(0.0).unwrap()));
+        assert_eq!(validate_qvalue(NotNan::new(1.0).unwrap()), Some(NotNan::new(1.0).unwrap()));
+        assert_eq!(validate_qvalue(NotNan::new(0.5).unwrap()), Some(NotNan::new(0.5).unwrap()));
+        
+        // Invalid q-values
+        assert_eq!(validate_qvalue(NotNan::new(-0.1).unwrap()), None);
+        assert_eq!(validate_qvalue(NotNan::new(1.1).unwrap()), None);
+        
+        // Rounding to 3 decimal places
+        assert_eq!(
+            validate_qvalue(NotNan::new(0.12345).unwrap()),
+            Some(NotNan::new(0.123).unwrap()),
+            "Should round to 3 decimal places"
+        );
     }
     
     #[test]
@@ -215,31 +345,73 @@ mod tests {
         assert!(matches!(&lang_multi.params[0], 
                          Param::Other(name, Some(GenericValue::Token(val))) 
                          if name == "custom" && val == "value"));
+        
+        // Language with invalid q-value should have q=None
+        let (_, lang_invalid_q) = language(b"fr;q=1.001").unwrap();
+        assert_eq!(lang_invalid_q.q, None, "Invalid q-value should be treated as None");
                          
         // Test with malformed input - missing range
         assert!(language(b";q=0.8").is_err());
+        
+        // Case insensitivity
+        let (_, lang_upper) = language(b"EN-GB;Q=0.8").unwrap();
+        assert_eq!(lang_upper.range, "en-gb", "Language range should be lowercase");
+        assert_eq!(lang_upper.q, Some(NotNan::new(0.8).unwrap()), "Q param should be case insensitive");
+    }
+    
+    #[test]
+    fn test_language_sorting() {
+        // Create languages with different q-values
+        let lang1 = LanguageInfo {
+            range: "en".to_string(),
+            q: Some(NotNan::new(0.5).unwrap()),
+            params: vec![],
+        };
+        
+        let lang2 = LanguageInfo {
+            range: "fr".to_string(),
+            q: Some(NotNan::new(0.8).unwrap()),
+            params: vec![],
+        };
+        
+        let lang3 = LanguageInfo {
+            range: "de".to_string(),
+            q: None, // Default q=1.0
+            params: vec![],
+        };
+        
+        // Test sorting (should be de, fr, en based on q-values)
+        let mut langs = vec![lang1.clone(), lang2.clone(), lang3.clone()];
+        langs.sort();
+        
+        assert_eq!(langs[0].range, "de", "Default q=1.0 should be first");
+        assert_eq!(langs[1].range, "fr", "q=0.8 should be second");
+        assert_eq!(langs[2].range, "en", "q=0.5 should be last");
+        
+        // Test q_value method
+        assert_eq!(lang1.q_value(), 0.5);
+        assert_eq!(lang2.q_value(), 0.8);
+        assert_eq!(lang3.q_value(), 1.0, "Missing q defaults to 1.0");
+        
+        // Test language_equals method (case insensitive)
+        assert!(lang1.language_equals("EN"), "Should match case-insensitively");
+        assert!(!lang1.language_equals("fr"), "Should not match different language");
     }
 
     #[test]
     fn test_parse_languages() {
-        // Multiple languages with q-values
-        let input = b"da, en-gb;q=0.8, en;q=0.7, *;q=0.1";
+        // Multiple languages with q-values (should be sorted by q-value)
+        let input = b"en;q=0.7, da, en-gb;q=0.8, *;q=0.1";
         let result = parse_languages(input);
         assert!(result.is_ok());
         let (rem, languages) = result.unwrap();
         
-        // Instead of checking exact count, verify the languages we can rely on
-        assert!(languages.len() >= 1, "Should parse at least the first language");
-        
-        // First language validation
-        assert_eq!(languages[0].range, "da");
-        assert_eq!(languages[0].q, None);
-        
-        // Second language validation if available
-        if languages.len() >= 2 {
-            assert_eq!(languages[1].range, "en-gb");
-            assert!(languages[1].q.is_some(), "Second language should have q value");
-        }
+        // Languages should be sorted by q-value: da (q=1.0), en-gb (q=0.8), en (q=0.7), * (q=0.1)
+        assert_eq!(languages.len(), 4);
+        assert_eq!(languages[0].range, "da", "Default q=1.0 should be first");
+        assert_eq!(languages[1].range, "en-gb", "q=0.8 should be second");
+        assert_eq!(languages[2].range, "en", "q=0.7 should be third");
+        assert_eq!(languages[3].range, "*", "q=0.1 should be last");
         
         // Empty list
         let empty_input = b"";
@@ -260,12 +432,17 @@ mod tests {
     #[test]
     fn test_parse_accept_language() {
         // Test with full header syntax
-        let input = b"Accept-Language: da, en-gb;q=0.8, en;q=0.7";
+        let input = b"Accept-Language: en;q=0.7, da, en-gb;q=0.8";
         let result = parse_accept_language(input);
         assert!(result.is_ok());
         let (rem, languages) = result.unwrap();
         assert!(rem.is_empty());
-        assert!(languages.len() > 0, "Should parse at least one language");
+        
+        // Languages should be sorted by q-value
+        assert_eq!(languages.len(), 3);
+        assert_eq!(languages[0].range, "da", "Default q=1.0 should be first");
+        assert_eq!(languages[1].range, "en-gb", "q=0.8 should be second");
+        assert_eq!(languages[2].range, "en", "q=0.7 should be third");
         
         // Check case insensitivity
         let input_with_case = b"accept-language: da, en-gb;q=0.8";
@@ -281,24 +458,53 @@ mod tests {
     }
     
     #[test]
+    fn test_display_implementation() {
+        // Test Display implementation
+        let en = LanguageInfo {
+            range: "en-us".to_string(),
+            q: Some(NotNan::new(0.8).unwrap()),
+            params: vec![Param::Other("custom".to_string(), Some(GenericValue::Token("value".to_string())))],
+        };
+        
+        assert_eq!(
+            en.to_string(), 
+            "en-us;q=0.800;custom=value", 
+            "Should format with q-value and params"
+        );
+        
+        // Without q-value
+        let lang_no_q = LanguageInfo {
+            range: "fr".to_string(),
+            q: None,
+            params: vec![],
+        };
+        
+        assert_eq!(lang_no_q.to_string(), "fr", "Should format without q-value");
+    }
+    
+    #[test]
     fn test_rfc_examples() {
         // From RFC 2616 Section 14.4 examples:
         let example1 = b"Accept-Language: da, en-gb;q=0.8, en;q=0.7";
         let result1 = parse_accept_language(example1);
         assert!(result1.is_ok());
         let (_, languages1) = result1.unwrap();
-        assert!(languages1.len() > 0, "Should parse at least one language");
         
-        if !languages1.is_empty() {
-            // First language should be da
-            assert_eq!(languages1[0].range, "da");
-        }
+        // Should be sorted by q-value
+        assert_eq!(languages1.len(), 3);
+        assert_eq!(languages1[0].range, "da", "Default q=1.0 should be first");
+        assert_eq!(languages1[1].range, "en-gb", "q=0.8 should be second");
+        assert_eq!(languages1[2].range, "en", "q=0.7 should be third");
         
         // Example with wildcard
         let example2 = b"Accept-Language: en-us, en;q=0.5, *;q=0.1";
         let result2 = parse_accept_language(example2);
         assert!(result2.is_ok());
         let (_, languages2) = result2.unwrap();
-        assert!(languages2.len() > 0, "Should parse at least one language");
+        
+        assert_eq!(languages2.len(), 3);
+        assert_eq!(languages2[0].range, "en-us", "Default q=1.0 should be first");
+        assert_eq!(languages2[1].range, "en", "q=0.5 should be second");
+        assert_eq!(languages2[2].range, "*", "q=0.1 should be last (wildcard)");
     }
 } 

@@ -47,7 +47,7 @@ use crate::types::retry_after::RetryAfter;
 // CSeqValue doesn't seem to exist, CSeq struct is used directly
 // use crate::types::cseq::CSeqValue;
 use crate::parser::headers::accept_encoding::EncodingInfo as AcceptEncodingValue; // Use EncodingInfo from parser
-use crate::parser::headers::accept_language::LanguageInfo as AcceptLanguageValue; // Use LanguageInfo from parser
+use crate::types::accept_language::AcceptLanguage; // Use our new AcceptLanguage type
 use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::call_info::CallInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
@@ -326,7 +326,7 @@ pub enum HeaderValue {
     // === Content Negotiation ===
     Accept(Vec<AcceptValue>),
     AcceptEncoding(Vec<AcceptEncodingValue>),
-    AcceptLanguage(Vec<AcceptLanguageValue>),
+    AcceptLanguage(Vec<AcceptLanguage>),
 
     // === Body Info ===
     ContentLength(ContentLength),
@@ -493,7 +493,7 @@ pub enum TypedHeader {
     ContentEncoding(Vec<String>),
     ContentLanguage(Vec<String>),
     AcceptEncoding(Vec<AcceptEncodingValue>), // Use alias for parser type
-    AcceptLanguage(Vec<AcceptLanguageValue>), // Use alias for parser type
+    AcceptLanguage(AcceptLanguage), // Use our new AcceptLanguage type instead of Vec<AcceptLanguageValue>
     MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
     Require(Vec<String>),
@@ -638,14 +638,7 @@ impl fmt::Display for TypedHeader {
                 Ok(())
             },
             TypedHeader::AcceptLanguage(accept_language) => {
-                write!(f, "{}: ", HeaderName::AcceptLanguage)?;
-                for (i, language) in accept_language.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", language)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::AcceptLanguage, accept_language)
             },
             TypedHeader::MinExpires(min_expires) => write!(f, "{}: {}", HeaderName::MinExpires, min_expires),
             TypedHeader::MimeVersion(mime_version) => write!(f, "{}: {:?}", HeaderName::MimeVersion, mime_version),
@@ -789,8 +782,6 @@ impl TryFrom<Header> for TypedHeader {
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
-
-            // Routing Headers
             HeaderName::Via => all_consuming(parser::headers::parse_via)(value_bytes)
                 .map(|(_, v)| TypedHeader::Via(Via(v)))
                 .map_err(Error::from),
@@ -800,20 +791,15 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)(value_bytes)
                 .map(|(_, v)| TypedHeader::RecordRoute(v))
                 .map_err(Error::from),
-
-            // Dialog/Transaction IDs
             HeaderName::CallId => {
                 match all_consuming(parser::headers::parse_call_id)(value_bytes) {
                     Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
                     Err(e) => Err(Error::from(e)),
                 }
             }
-
             HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(value_bytes)
                 .map(|(_, cseq_struct)| TypedHeader::CSeq(cseq_struct))
                 .map_err(Error::from),
-
-            // Content Negotiation Headers
             HeaderName::Accept => all_consuming(parser::headers::accept::parse_accept)(value_bytes)
                 .map(|(_, v)| TypedHeader::Accept(v))
                 .map_err(Error::from),
@@ -846,10 +832,8 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::AcceptEncoding(v))
                 .map_err(Error::from),
             HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(value_bytes)
-                .map(|(_, v)| TypedHeader::AcceptLanguage(v))
+                .map(|(_, languages)| TypedHeader::AcceptLanguage(AcceptLanguage(languages)))
                 .map_err(Error::from),
-
-            // Simple Value Headers
             HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(value_bytes)
                  .map_err(Error::from)
                  .and_then(|(_, v_u32)| {
@@ -865,8 +849,6 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(value_bytes)
                 .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into())))
                 .map_err(Error::from),
-
-            // Auth Headers (Assuming parsers return appropriate structs/values)
             HeaderName::WwwAuthenticate => all_consuming(parser::headers::parse_www_authenticate)(value_bytes)
                 .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
                 .map_err(Error::from),
@@ -882,8 +864,6 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AuthenticationInfo => all_consuming(parser::headers::parse_authentication_info)(value_bytes)
                 .map(|(_, v)| TypedHeader::AuthenticationInfo(AuthenticationInfo(v)))
                 .map_err(Error::from),
-
-            // Token List Headers
             HeaderName::Allow => all_consuming(parser::headers::allow::parse_allow)(value_bytes)
                 .map(|(_, allow)| TypedHeader::Allow(allow))
                 .map_err(Error::from),
@@ -899,8 +879,6 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(value_bytes)
                 .map(|(_, strings)| TypedHeader::ProxyRequire(strings))
                 .map_err(Error::from),
-
-            // Miscellaneous Headers
             HeaderName::Date => all_consuming(parser::headers::parse_date)(value_bytes)
                 .map(|(_, v)| TypedHeader::Date(v))
                 .map_err(Error::from),
@@ -1027,8 +1005,6 @@ impl TryFrom<Header> for TypedHeader {
                     _ => Err(Error::ParseError(format!("Invalid header value for Refer-To header")))
                 }
             }
-
-            // Fallback for Other/Unimplemented
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
 
