@@ -2,6 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 use fluent_uri::Uri as FluentUri;
 use serde::{Serialize, Deserialize};
+use std::net::{IpAddr, Ipv6Addr};
 
 use crate::error::{Error, Result};
 use crate::types::param::Param;
@@ -36,8 +37,89 @@ impl UriAdapter {
         }
     }
     
+    /// Special handling for SIP URIs with IPv6 addresses
+    /// This addresses a limitation in some URI parsers with IPv6 literals
+    fn handle_sip_ipv6_uri(uri_str: &str) -> Option<Uri> {
+        let sip_prefix = if uri_str.starts_with("sip:") {
+            "sip:"
+        } else if uri_str.starts_with("sips:") {
+            "sips:"
+        } else {
+            return None;
+        };
+        
+        // Check if we have an IPv6 address in the URI
+        let ipv6_start = uri_str.find('[');
+        let ipv6_end = uri_str.find(']');
+        
+        if ipv6_start.is_none() || ipv6_end.is_none() || ipv6_start.unwrap() >= ipv6_end.unwrap() {
+            return None;
+        }
+        
+        // Extract the IPv6 address
+        let ipv6_start = ipv6_start.unwrap();
+        let ipv6_end = ipv6_end.unwrap();
+        let ipv6_addr_str = &uri_str[ipv6_start+1..ipv6_end];
+        
+        // Parse the IPv6 address
+        let ipv6_addr = match Ipv6Addr::from_str(ipv6_addr_str) {
+            Ok(addr) => addr,
+            Err(_) => return None,
+        };
+        
+        // Determine if this is a user@host format
+        let has_userinfo = uri_str[sip_prefix.len()..ipv6_start].contains('@');
+        let mut user = None;
+        
+        if has_userinfo {
+            let user_part = &uri_str[sip_prefix.len()..ipv6_start];
+            let at_pos = user_part.find('@').unwrap();
+            user = Some(user_part[0..at_pos].to_string());
+        }
+        
+        // Create the URI with the IPv6 host
+        let mut uri = Uri::new(
+            if sip_prefix == "sip:" { Scheme::Sip } else { Scheme::Sips },
+            Host::Address(IpAddr::V6(ipv6_addr))
+        );
+        
+        // Set the user if we have one
+        if let Some(u) = user {
+            uri.user = Some(u);
+        }
+        
+        // Check for port
+        if ipv6_end + 1 < uri_str.len() && uri_str.chars().nth(ipv6_end + 1) == Some(':') {
+            let rest = &uri_str[ipv6_end+2..];
+            let port_end = rest.find(|c| c == ';' || c == '?' || c == ' ').unwrap_or(rest.len());
+            let port_str = &rest[0..port_end];
+            
+            if let Ok(port) = port_str.parse::<u16>() {
+                if port > 0 {
+                    uri.port = Some(port);
+                }
+            }
+            
+            // Check for parameters or headers
+            if port_end < rest.len() {
+                // For complex cases, store the original URI
+                uri.raw_uri = Some(uri_str.to_string());
+            }
+        } else if ipv6_end + 1 < uri_str.len() {
+            // For parameters, headers, etc., store the original URI
+            uri.raw_uri = Some(uri_str.to_string());
+        }
+        
+        Some(uri)
+    }
+    
     /// Parse standard SIP URI schemes
     fn parse_standard_uri(uri_str: &str) -> Result<Uri> {
+        // Special handling for SIP URIs with IPv6 addresses
+        if let Some(uri) = Self::handle_sip_ipv6_uri(uri_str) {
+            return Ok(uri);
+        }
+        
         // Parse with fluent-uri first to validate and extract components
         let flu_uri = FluentUri::parse(uri_str)
             .map_err(|e| Error::InvalidUri(format!("Invalid URI: {}", e)))?;
@@ -226,6 +308,46 @@ mod tests {
         for uri_str in uris.iter() {
             let parsed = UriAdapter::parse_uri(uri_str).unwrap();
             assert_eq!(parsed.to_string(), *uri_str, "URI was not preserved in round-trip: {}", uri_str);
+        }
+    }
+    
+    #[test]
+    fn test_ipv6_uri_handling() {
+        // Test IPv6 address in SIP URIs
+        let ipv6_uris = [
+            "sip:[2001:db8::1]",
+            "sips:[2001:db8::1]",
+            "sip:user@[2001:db8::1]",
+            "sips:user@[2001:db8::1]",
+            "sip:[2001:db8::1]:5060",
+            "sips:[2001:db8::1]:5061",
+            "sip:user@[2001:db8::1]:5060",
+            "sips:user@[2001:db8::1]:5061",
+            "sip:[2001:db8::1];transport=tcp",
+            "sip:user@[2001:db8::1];transport=tcp",
+            "sip:[2001:db8::1]:5060;transport=tcp",
+            "sip:user@[2001:db8::1]:5060;transport=tcp",
+            "sip:[2001:db8::1]?subject=call",
+            "sip:user@[2001:db8::1]?subject=call",
+            "sip:[2001:db8::1]:5060?subject=call",
+            "sip:user@[2001:db8::1]:5060?subject=call"
+        ];
+        
+        for uri_str in ipv6_uris.iter() {
+            let result = UriAdapter::parse_uri(uri_str);
+            assert!(result.is_ok(), "Failed to parse IPv6 URI: {}", uri_str);
+            
+            let parsed = result.unwrap();
+            let parsed_str = parsed.to_string();
+            
+            // For simple cases without params/headers, verify exact match
+            if !uri_str.contains(";") && !uri_str.contains("?") {
+                assert_eq!(parsed_str, *uri_str, "IPv6 URI not preserved: {}", uri_str);
+            } else {
+                // For complex cases, verify the scheme and IPv6 address are preserved
+                assert!(parsed_str.starts_with(&uri_str[0..4]), "Scheme not preserved: {}", uri_str);
+                assert!(parsed_str.contains("[2001:db8::1]"), "IPv6 address not preserved: {}", uri_str);
+            }
         }
     }
 } 
