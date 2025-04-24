@@ -54,6 +54,7 @@ use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if n
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
 use crate::types::refer_to::ReferTo; // Add ReferTo import
 use crate::types::call_info::{CallInfo, CallInfoValue};
+use crate::types::supported::Supported; // Import Supported type
 
 // Helper From implementation for Error
 impl From<FromUtf8Error> for Error {
@@ -512,7 +513,7 @@ pub enum TypedHeader {
     AcceptLanguage(AcceptLanguage), // Use our new AcceptLanguage type instead of Vec<AcceptLanguageValue>
     MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
-    Supported(Vec<String>),
+    Supported(Supported), // Use types::Supported instead of Vec<String>
     Unsupported(Vec<String>),
     ProxyRequire(Vec<String>),
     Date(DateTime<FixedOffset>), // Use imported chrono types
@@ -660,14 +661,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::Require, require)
             },
             TypedHeader::Supported(supported) => {
-                write!(f, "{}: ", HeaderName::Supported)?;
-                for (i, feature) in supported.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", feature)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::Supported, supported)
             },
             TypedHeader::Unsupported(unsupported) => {
                 write!(f, "{}: ", HeaderName::Unsupported)?;
@@ -871,9 +865,10 @@ impl TryFrom<Header> for TypedHeader {
                 // Use our new Require type
                 Ok(TypedHeader::Require(Require::from_header(&header)?))
             },
-            HeaderName::Supported => all_consuming(parser::headers::parse_supported)(value_bytes)
-                .map(|(_, strings)| TypedHeader::Supported(strings))
-                .map_err(Error::from),
+            HeaderName::Supported => {
+                // Use our new Supported type
+                Ok(TypedHeader::Supported(Supported::from_header(&header)?))
+            },
             HeaderName::Unsupported => all_consuming(parser::headers::parse_unsupported)(value_bytes)
                 .map(|(_, strings)| TypedHeader::Unsupported(strings))
                 .map_err(Error::from),
