@@ -23,6 +23,12 @@ use crate::types::method::Method;
 
 /// Parses 1*DIGIT LWS Method
 /// Returns a tuple of (sequence number, Method)
+/// 
+/// # Error Handling
+/// - Returns an error if the sequence number exceeds u32::MAX
+/// - Returns an error if the method is not a valid token
+/// - Standard method names are recognized in uppercase form (INVITE, BYE, etc.)
+/// - Lowercase or non-standard method names are parsed as Method::Extension
 fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
     map_res(
         pair(
@@ -33,14 +39,22 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
             // Parse sequence number
             let seq_str = str::from_utf8(seq_bytes)
                 .map_err(|_| NomError::from_error_kind(seq_bytes, ErrorKind::Char))?;
-            let seq_num = seq_str.parse::<u32>()
-                .map_err(|_| NomError::from_error_kind(seq_bytes, ErrorKind::Digit))?;
             
-            // Parse method
+            // Handle potential overflow for sequence number
+            let seq_num = seq_str.parse::<u32>()
+                .map_err(|e| {
+                    if e.to_string().contains("overflow") {
+                        NomError::from_error_kind(seq_bytes, ErrorKind::TooLarge)
+                    } else {
+                        NomError::from_error_kind(seq_bytes, ErrorKind::Digit)
+                    }
+                })?;
+            
+            // Parse method (case-sensitive as per RFC 3261)
             let method_str = str::from_utf8(method_bytes)
                  .map_err(|_| NomError::from_error_kind(method_bytes, ErrorKind::Char))?; 
             let method = Method::from_str(method_str)
-                 .map_err(|_| NomError::from_error_kind(method_bytes, ErrorKind::Verify))?; // Use Verify for Method parse error
+                 .map_err(|_| NomError::from_error_kind(method_bytes, ErrorKind::Verify))?;
                  
             Ok((seq_num, method))
         }
@@ -50,6 +64,16 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
 /// Parses the CSeq value part (without header name and colon)
 /// Expected format: 1*DIGIT LWS Method
 /// Returns a CSeq struct
+/// 
+/// # Examples
+/// ```
+/// use crate::parser::headers::cseq::parse_cseq;
+/// 
+/// let result = parse_cseq(b"101 INVITE");
+/// assert!(result.is_ok());
+/// let (_, cseq) = result.unwrap();
+/// assert_eq!(cseq.seq, 101);
+/// ```
 pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
     map(
         cseq_value_method,
@@ -60,6 +84,19 @@ pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
 /// Full parser that handles the complete header including name and colon
 /// Expected format: "CSeq" HCOLON 1*DIGIT LWS Method
 /// Returns a CSeq struct
+/// 
+/// The header name "CSeq" is case-insensitive, but the Method is case-sensitive
+/// as per RFC 3261.
+/// 
+/// # Examples
+/// ```
+/// use crate::parser::headers::cseq::full_parse_cseq;
+/// 
+/// let result = full_parse_cseq(b"CSeq: 101 INVITE");
+/// assert!(result.is_ok());
+/// let (_, cseq) = result.unwrap();
+/// assert_eq!(cseq.seq, 101);
+/// ```
 pub fn full_parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
     preceded(
         pair(tag_no_case(b"CSeq"), hcolon),
@@ -168,12 +205,17 @@ mod tests {
         let (_, cseq_large) = result_large.unwrap();
         assert_eq!(cseq_large.seq, u32::MAX);
         
-        // Test overflow (should fail or handle gracefully)
+        // Test overflow (should fail)
         let input_overflow = b"CSeq: 4294967296 BYE"; // u32::MAX + 1
         let result_overflow = full_parse_cseq(input_overflow);
-        // This depends on how the implementation handles overflow
-        // Either it should fail or truncate to fit u32
-        println!("Overflow result: {:?}", result_overflow);
+        assert!(result_overflow.is_err(), "Should reject sequence number overflow");
+        
+        // Our implementation returns a MapRes error for overflow
+        if let Err(e) = result_overflow {
+            println!("Overflow error: {:?}", e);
+            // Just verify we get some kind of error, rather than assuming specific type
+            assert!(true, "Got expected error for overflow");
+        }
     }
     
     #[test]
