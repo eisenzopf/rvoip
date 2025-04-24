@@ -119,7 +119,7 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
 /// Can be re-exported by the main parser mod.rs
 pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
     // Use alt to try each parser
-    alt((parse_sip_uri_fixed, parse_sips_uri_fixed))(input)
+    alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
 }
 
 // Fixed implementation of SIP URI parser that correctly handles params and headers
@@ -437,6 +437,56 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
     }
 }
 
+// Parse tel URI (RFC 3966)
+// tel:telephone-subscriber
+// telephone-subscriber = global-number / local-number
+fn parse_tel_uri(input: &[u8]) -> ParseResult<Uri> {
+    // Tag for "tel:"
+    let (input, _) = tag_no_case(b"tel:")(input)?;
+    
+    // In our implementation, we store the telephone number as the host part of the URI
+    // while marking the URI scheme as Tel
+    // Per RFC 3966, the telephone-subscriber part can include various characters
+    // Capture everything until a parameter or end of input
+    let (input, number) = recognize(
+        take_while(|c| {
+            c != b';' && c != b'?' // Stop at parameter or header delimiter
+        })
+    )(input)?;
+    
+    // Convert number to string
+    let number_str = std::str::from_utf8(number)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
+        .to_string();
+    
+    // Parse parameters if present
+    let mut params = Vec::new();
+    let mut current_input = input;
+    
+    if !current_input.is_empty() && current_input[0] == b';' {
+        match uri_parameters(current_input) {
+            Ok((remaining, parsed_params)) => {
+                current_input = remaining;
+                params = parsed_params;
+            },
+            Err(e) => return Err(e),
+        }
+    }
+    
+    // Create TEL URI
+    let uri = Uri {
+        scheme: Scheme::Tel,
+        user: None, // TEL URI doesn't have a user component in our model
+        password: None,
+        host: Host::Domain(number_str), // Store the phone number as domain
+        port: None, // TEL URI doesn't have a port
+        parameters: params,
+        headers: HashMap::new(), // TEL URI typically doesn't use headers
+        raw_uri: None,
+    };
+    
+    Ok((current_input, uri))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1022,5 +1072,47 @@ mod tests {
         let uri_bytes = b"sip:alice@atlanta.com;param=abc%3bdef";
         let (_, uri) = parse_uri(uri_bytes).expect("Failed to parse RFC 4475 escaped semicolons");
         assert!(uri.parameters.iter().any(|p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) if n == "param" && v == "abc;def")));
+    }
+
+    #[test]
+    fn test_parse_tel_uri() {
+        // Test parsing a simple TEL URI
+        let uri_bytes = b"tel:+1-212-555-1234";
+        match parse_tel_uri(uri_bytes) {
+            Ok((rem, uri)) => {
+                assert!(rem.is_empty());
+                assert_eq!(uri.scheme, Scheme::Tel);
+                assert_eq!(uri.user, None);
+                assert!(matches!(uri.host, Host::Domain(d) if d == "+1-212-555-1234"));
+                assert!(uri.parameters.is_empty());
+            },
+            Err(e) => {
+                panic!("Failed to parse TEL URI: {:?}", e);
+            }
+        }
+
+        // Test with parameters
+        let uri_bytes = b"tel:+1-212-555-1234;phone-context=nyc.example.com";
+        match parse_tel_uri(uri_bytes) {
+            Ok((rem, uri)) => {
+                assert!(rem.is_empty());
+                assert_eq!(uri.scheme, Scheme::Tel);
+                assert!(matches!(uri.host, Host::Domain(d) if d == "+1-212-555-1234"));
+                assert_eq!(uri.parameters.len(), 1);
+                assert!(uri.parameters.iter().any(|p| 
+                    matches!(p, Param::Other(k, Some(GenericValue::Token(v))) 
+                        if k == "phone-context" && v == "nyc.example.com")
+                ));
+            },
+            Err(e) => {
+                panic!("Failed to parse TEL URI with parameters: {:?}", e);
+            }
+        }
+
+        // Test via the public parse_uri function
+        let uri_bytes = b"tel:+1-212-555-1234";
+        let (_, uri) = parse_uri(uri_bytes).expect("Failed to parse TEL URI");
+        assert_eq!(uri.scheme, Scheme::Tel);
+        assert!(matches!(uri.host, Host::Domain(d) if d == "+1-212-555-1234"));
     }
 } 
