@@ -186,7 +186,7 @@ fn language_range(input: &[u8]) -> ParseResult<String> {
         )));
     }
 
-    alt((
+        alt((
         // Regular language tag
         map_res(
             recognize(
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(private_value, "x-private", "Should handle private use tags");
     }
     
-    #[test]
+     #[test]
     fn test_language() {
         // Language with q-value
         let (rem, lang) = language(b"da;q=1.0").unwrap();
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(lang.range, "da");
         assert_eq!(lang.q, Some(NotNan::new(1.0).unwrap()));
         assert_eq!(lang.params.len(), 0); // q should be extracted to the q field
-        
+
         // Language with no parameters
         let (rem_no_param, lang_no_param) = language(b"en-gb").unwrap();
         assert!(rem_no_param.is_empty());
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(lang_upper.range, "en-gb", "Language range should be lowercase");
         assert_eq!(lang_upper.q, Some(NotNan::new(0.8).unwrap()), "Q param should be case insensitive");
     }
-    
+
     #[test]
     fn test_language_sorting() {
         // Create languages with different q-values
@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(single_languages[0].range, "en");
     }
     
-    #[test]
+     #[test]
     fn test_parse_accept_language() {
         // Test with full header syntax
         let input = b"Accept-Language: en;q=0.7, da, en-gb;q=0.8";
