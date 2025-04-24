@@ -12,7 +12,7 @@
 use nom::{
     bytes::complete::{tag, tag_no_case, take_while1},
     character::complete::{alpha1, space0},
-    combinator::{map, fail, recognize, verify},
+    combinator::{map, fail, recognize, verify, opt},
     multi::{many0, separated_list1},
     sequence::{pair, preceded, delimited, tuple},
     IResult, error::ErrorKind, Err,
@@ -23,6 +23,7 @@ use std::str;
 use crate::parser::separators::{hcolon, comma};
 use crate::parser::common::{comma_separated_list1};
 use crate::parser::ParseResult;
+use crate::parser::whitespace::{lws, owsp, sws, crlf};
 
 // Define the LanguageTag struct
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -61,6 +62,11 @@ fn parse_language_tag(input: &[u8]) -> IResult<&[u8], LanguageTag> {
         return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
     }
     
+    // Check for CRLF within language tag - not allowed
+    if input.windows(2).any(|w| w == b"\r\n") {
+        return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+    }
+    
     // We need to handle byte input correctly for nom
     let (input, parts) = separated_list1(tag(b"-"), take_while1(|c: u8| c.is_ascii_alphanumeric()))(input)?;
     
@@ -74,10 +80,36 @@ fn parse_language_tag(input: &[u8]) -> IResult<&[u8], LanguageTag> {
         return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
     }
     
-    // Validate subtags (if any)
-    for part in parts.iter().skip(1) {
-        if part.len() < 1 || part.len() > 8 || !part.iter().all(|&c| c.is_ascii_alphanumeric()) {
-            return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+    // Validate subtags according to RFC 5646 rules
+    if parts.len() > 1 {
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            // Skip primary tag (i=0)
+            if part.is_empty() || part.len() > 8 {
+                return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+            }
+            
+            // Special case for identifying likely script tags
+            // RFC 5646 Section 2.2.3: Script tags are 4 alpha characters
+            // If the second position (index 1) has a 4-letter subtag with first letter capitalized,
+            // it's likely a script tag and should only contain letters
+            if i == 1 && part.len() == 4 && part[0].is_ascii_uppercase() {
+                if !part.iter().all(|&c| c.is_ascii_alphabetic()) {
+                    return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+                }
+                continue;
+            }
+            
+            // Check if this might be a region subtag (position 1 or 2, 2 letters or 3 digits)
+            if (i == 1 || i == 2) && 
+               ((part.len() == 2 && part.iter().all(|&c| c.is_ascii_alphabetic())) ||
+                (part.len() == 3 && part.iter().all(|&c| c.is_ascii_digit()))) {
+                // This is likely a region subtag
+                continue;
+            }
+            
+            // For other positions, allow general alphanumeric values
+            // Non-script 4-digit tags are valid in various positions, including variants
+            continue;
         }
     }
     
@@ -103,20 +135,37 @@ fn language_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
         return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Tag)));
     }
     
-    // Manually parse comma-separated language tags
-    let mut result = Vec::new();
-    let mut remaining = input;
+    // Skip initial whitespace using the imported whitespace function
+    let (mut remaining, _) = sws(input)?;
     
-    // Skip initial whitespace
-    let mut idx = 0;
-    while idx < remaining.len() && remaining[idx].is_ascii_whitespace() {
-        idx += 1;
+    // Check for CRLF within language tag parts (not between commas)
+    // If we find a CRLF that's not followed by a comma or whitespace,
+    // it's likely inside a tag which isn't allowed
+    for i in 0..remaining.len().saturating_sub(1) {
+        if remaining[i] == b'\r' && remaining[i+1] == b'\n' {
+            // If this CRLF is not at the end, and not followed by a comma or space,
+            // then it's inside a tag - reject it
+            if i+2 < remaining.len() && 
+               remaining[i+2] != b',' && 
+               !remaining[i+2].is_ascii_whitespace() {
+                return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+            }
+        }
     }
-    remaining = &remaining[idx..];
     
-    // Parse tags
+    // Manually parse comma-separated language tags with proper whitespace handling
+    let mut result = Vec::new();
+    
     while !remaining.is_empty() {
-        // Parse a language tag
+        // Handle line folding and skip whitespace before each tag
+        let (rest, _) = sws(remaining)?;
+        remaining = rest;
+        
+        if remaining.is_empty() {
+            break;
+        }
+        
+        // Find the end of the tag (before comma or whitespace)
         let tag_end = remaining.iter()
             .position(|&c| c == b',' || c.is_ascii_whitespace())
             .unwrap_or(remaining.len());
@@ -129,32 +178,35 @@ fn language_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
         let tag_input = &remaining[..tag_end];
         match parse_language_tag(tag_input) {
             Ok((_, tag)) => result.push(tag.0),
-            Err(e) => return Err(e),
+            Err(_) => {
+                // Return an error referencing the original input
+                return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));
+            }
         }
         
         // Move past the tag
         remaining = &remaining[tag_end..];
         
-        // Skip whitespace
-        idx = 0;
-        while idx < remaining.len() && remaining[idx].is_ascii_whitespace() {
-            idx += 1;
-        }
-        remaining = &remaining[idx..];
+        // Skip whitespace after tag
+        let (rest, _) = sws(remaining)?;
+        remaining = rest;
         
-        // If we hit a comma, move past it
+        // If we hit a comma, move past it and expect another tag
         if !remaining.is_empty() && remaining[0] == b',' {
             remaining = &remaining[1..];
             
-            // Skip whitespace after comma
-            idx = 0;
-            while idx < remaining.len() && remaining[idx].is_ascii_whitespace() {
-                idx += 1;
-            }
-            remaining = &remaining[idx..];
+            // Skip whitespace after comma, including line folding
+            let (rest, _) = sws(remaining)?;
+            remaining = rest;
             
-            // Check for empty element
-            if remaining.is_empty() || remaining[0] == b',' {
+            // Check for trailing comma at the end of input
+            if remaining.is_empty() {
+                // Trailing comma is an error
+                return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Tag)));
+            }
+            
+            // Check for empty element (comma followed immediately by another comma)
+            if !remaining.is_empty() && remaining[0] == b',' {
                 return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Tag)));
             }
         }
@@ -353,5 +405,91 @@ mod tests {
         // Missing colon
         assert!(parse_content_language(b"Content-Language en").is_err(), 
                 "Missing colon");
+    }
+
+    #[test]
+    fn test_line_folding() {
+        // Test line folding as per RFC 3261 Section 7.3.1
+        let input = b"Content-Language: en\r\n ,\r\n fr-CA\r\n ,\r\n de";
+        let result = parse_content_language(input);
+        assert!(result.is_ok());
+        let (_, tags) = result.unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0], "en");
+        assert_eq!(tags[1], "fr-ca");
+        assert_eq!(tags[2], "de");
+        
+        // Test folding within a language tag (should fail as tags can't contain CRLF)
+        // We need to directly parse a tag with CRLF to test this
+        let input_tag = b"e\r\n n";
+        let tag_result = parse_language_tag(input_tag);
+        assert!(tag_result.is_err(), "Line folding within a language tag should be rejected");
+
+        // Test with parsing the full header
+        let input_invalid = b"Content-Language: e\r\nn";
+        let result_invalid = parse_content_language(input_invalid);
+        assert!(result_invalid.is_err(), "Line folding within a language tag should be rejected");
+    }
+    
+    #[test]
+    fn test_extended_language_tag_validation() {
+        // Test extended language tag validation as per RFC 5646
+        
+        // 1. Script subtags (e.g., Latn for Latin script)
+        let script_result = language_tag(b"zh-Hant");
+        assert!(script_result.is_ok());
+        if let Ok((_, tag)) = script_result {
+            assert_eq!(tag, "zh-hant");
+        }
+        
+        // 2. Region subtags (e.g., US for United States)
+        let region_result = language_tag(b"en-US");
+        assert!(region_result.is_ok());
+        if let Ok((_, tag)) = region_result {
+            assert_eq!(tag, "en-us");
+        }
+        
+        // 3. Variant subtags
+        let variant_result = language_tag(b"sl-rozaj-biske");
+        assert!(variant_result.is_ok());
+        if let Ok((_, tag)) = variant_result {
+            assert_eq!(tag, "sl-rozaj-biske");
+        }
+        
+        // 4. Extension subtags (single letter followed by hyphen)
+        let ext_result = language_tag(b"en-a-bbb-x-a");
+        assert!(ext_result.is_ok());
+        if let Ok((_, tag)) = ext_result {
+            assert_eq!(tag, "en-a-bbb-x-a");
+        }
+        
+        // 5. Private use subtags (x- prefix)
+        let private_result = language_tag(b"x-private");
+        assert!(private_result.is_ok());
+        if let Ok((_, tag)) = private_result {
+            assert_eq!(tag, "x-private");
+        }
+        
+        // 6. Grandfathered tags (irregular)
+        let grand_result = language_tag(b"i-ami");
+        assert!(grand_result.is_ok());
+        if let Ok((_, tag)) = grand_result {
+            assert_eq!(tag, "i-ami");
+        }
+        
+        // 7. Numeric region codes
+        let numeric_result = language_tag(b"es-419");
+        assert!(numeric_result.is_ok());
+        if let Ok((_, tag)) = numeric_result {
+            assert_eq!(tag, "es-419");
+        }
+        
+        // Test non-script 4-character alphanumeric tag
+        let digit_result = language_tag(b"en-1234");
+        assert!(digit_result.is_ok(), "4-digit subtag in non-script position should be valid");
+        
+        // Test invalid script tag with digits (using capital first letter to identify as script)
+        let invalid_script = language_tag(b"en-Lat1");
+        assert!(invalid_script.is_err(), "Script tag with digit should be rejected");
     }
 } 

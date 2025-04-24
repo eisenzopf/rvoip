@@ -15,11 +15,12 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case},
-    combinator::{map, map_res},
-    sequence::{pair, preceded, separated_pair},
+    bytes::complete::{tag, tag_no_case},
+    combinator::{map, map_res, opt, verify},
+    sequence::{pair, preceded, separated_pair, terminated, tuple},
+    multi::many0,
     IResult,
-    error::ParseError,
+    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 use std::collections::HashMap;
@@ -27,11 +28,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // Import from base parser modules
-use crate::parser::separators::{hcolon, equal, slash};
+use crate::parser::separators::{hcolon, equal, slash, semi};
 use crate::parser::ParseResult;
 use crate::parser::token::token;
 use crate::parser::quoted::quoted_string;
 use crate::parser::common_params::{semicolon_separated_params0, generic_param};
+use crate::parser::whitespace::{lws, owsp, sws};
 
 // Import from sibling header modules
 // use super::media_type::{parse_media_type, media_params_to_hashmap}; // Use the specific media_type parser - REMOVED
@@ -53,29 +55,6 @@ use crate::types::param::Param;
 fn m_value(input: &[u8]) -> ParseResult<&[u8]> {
     alt((token, quoted_string))(input)
 }
-
-// m-parameter = m-attribute EQUAL m-value
-// Returns (attribute_bytes, value_bytes)
-// fn m_parameter(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
-//     separated_pair(token, equal, m_value)(input)
-// }
-
-// Comment out unused media_type function
-/*
-fn media_type(input: &[u8]) -> ParseResult<MediaType> {
-    map_res(
-        pair(
-            pair(m_type, preceded(slash, m_subtype)),
-            semicolon_separated_params0(generic_param)
-        ),
-        |(((type_bytes, subtype_bytes), params_vec))| {
-            let media_type = str::from_utf8(type_bytes)?.to_string();
-            let sub_type = str::from_utf8(subtype_bytes)?.to_string();
-            Ok(MediaType::new(media_type, sub_type, params_vec))
-        }
-    )(input)
-}
-*/
 
 // Define structure for Content-Type value
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -108,62 +87,100 @@ impl fmt::Display for ContentTypeValue {
 // This parser needs to return ContentTypeValue, not ContentTypeHeader
 // Make this function public
 pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
-    // We need a parser that directly returns ContentTypeValue based on media_type logic
-    // Let's reuse the media_type parser logic from parser/headers/media_type.rs here
-    // Reimplementing m_type, m_subtype, m_parameter, m_value for simplicity here
-    // m-type, m-subtype are just tokens
-    fn m_token(input: &[u8]) -> ParseResult<&[u8]> {
-        token(input)
+    // First check for empty input
+    if input.is_empty() {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-
-    // m-value = token / quoted-string (returning owned String)
-    fn m_value_str(input: &[u8]) -> ParseResult<String> {
-        alt((
-            map_res(quoted_string, |bytes| crate::parser::common_params::unquote_string(bytes)),
-            map_res(token, |bytes| str::from_utf8(bytes).map(String::from)),
-        ))(input)
+    
+    // Handle leading whitespace, including line folding
+    let (input, _) = opt(lws)(input)?;
+    
+    // Parse the media type and subtype with proper whitespace handling
+    let (input, (m_type, m_subtype)) = parse_media_type_with_whitespace(input)?;
+    
+    // Parse the parameters with proper whitespace handling
+    let (input, params) = parse_media_parameters(input)?;
+    
+    // Handle any trailing whitespace
+    let (input, _) = sws(input)?;
+    
+    // Check that there's nothing left to parse
+    if !input.is_empty() {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
     }
-
-    // m-parameter = m-attribute EQUAL m-value (returning String, String)
-    fn m_parameter_str(input: &[u8]) -> ParseResult<(String, String)> {
-        map_res(
-            separated_pair(m_token, equal, m_value_str),
-            |(attr_bytes, value_string)| {
-                str::from_utf8(attr_bytes)
-                    .map(|attr_str| (attr_str.to_lowercase(), value_string))
-            },
-        )(input)
-    }
-
-    // media-type parser logic adapted to return ContentTypeValue
-    map_res(
-        pair(
-            pair(m_token, preceded(slash, m_token)), // Use m_token for type/subtype
-            semicolon_separated_params0(m_parameter_str) // Use param parser returning String, String
-        ),
-        |(((type_bytes, subtype_bytes), params_vec))| { 
-            str::from_utf8(type_bytes)
-                .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(type_bytes, nom::error::ErrorKind::Char)))
-                .and_then(|m_type_str| {
-                    str::from_utf8(subtype_bytes)
-                        .map_err(|_| nom::Err::Failure(nom::error::Error::from_error_kind(subtype_bytes, nom::error::ErrorKind::Char)))
-                        .map(|m_subtype_str| {
-                             let parameters = params_vec.into_iter().collect::<HashMap<_,_>>();
-                             ContentTypeValue {
-                                m_type: m_type_str.to_lowercase(),
-                                m_subtype: m_subtype_str.to_lowercase(),
-                                parameters
-                            }
-                        })
-                })
-        }
-    )(input)
+    
+    // Create ContentTypeValue with normalized type/subtype (lowercase)
+    let content_type = ContentTypeValue {
+        m_type: m_type.to_lowercase(),
+        m_subtype: m_subtype.to_lowercase(),
+        parameters: params,
+    };
+    
+    Ok((input, content_type))
 }
 
-// Old parser function - keep for reference or remove later
-// pub fn parse_content_type(input: &[u8]) -> ParseResult<ContentTypeHeader> {
-//     map(media_type, ContentTypeHeader)(input)
-// }
+// Parse the media type and subtype part (m-type SLASH m-subtype) with proper whitespace handling
+fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<(String, String)> {
+    // Parse type, slash, and subtype with proper whitespace handling
+    let (input, (m_type_bytes, _, m_subtype_bytes)) = tuple((
+        terminated(token, opt(lws)),                    // type token followed by optional whitespace
+        terminated(slash, opt(lws)),                    // slash followed by optional whitespace
+        token                                           // subtype token
+    ))(input)?;
+    
+    // Convert to strings
+    let m_type = str::from_utf8(m_type_bytes)
+        .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::AlphaNumeric)))?
+        .to_string();
+        
+    let m_subtype = str::from_utf8(m_subtype_bytes)
+        .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::AlphaNumeric)))?
+        .to_string();
+    
+    Ok((input, (m_type, m_subtype)))
+}
+
+// Parse the media parameters (*(SEMI m-parameter)) with proper whitespace handling
+fn parse_media_parameters(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+    let (input, params) = many0(parse_media_parameter)(input)?;
+    
+    // Create a HashMap from the parameter pairs
+    let parameters = params.into_iter().collect::<HashMap<_, _>>();
+    
+    Ok((input, parameters))
+}
+
+// Parse a single media parameter (SEMI m-parameter) with proper whitespace handling
+fn parse_media_parameter(input: &[u8]) -> ParseResult<(String, String)> {
+    // Parse a semicolon followed by a parameter
+    let (input, _) = terminated(semi, opt(lws))(input)?;
+    
+    // Parse the parameter name and value
+    let (input, (name_bytes, value)) = separated_pair(
+        token,                                          // Parameter name is a token
+        terminated(equal, opt(lws)),                    // Equals sign followed by optional whitespace
+        alt((
+            // Parse quoted string value
+            map_res(quoted_string, |bytes| {
+                crate::parser::common_params::unquote_string(bytes)
+                    .map_err(|_| nom::Err::Error(NomError::new(bytes, ErrorKind::AlphaNumeric)))
+            }),
+            
+            // Parse token value
+            map_res(token, |bytes| {
+                str::from_utf8(bytes).map(String::from)
+                    .map_err(|_| nom::Err::Error(NomError::new(bytes, ErrorKind::AlphaNumeric)))
+            })
+        ))
+    )(input)?;
+    
+    // Convert parameter name to lowercase string (parameters are case-insensitive)
+    let name = str::from_utf8(name_bytes)
+        .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::AlphaNumeric)))?
+        .to_lowercase();
+    
+    Ok((input, (name, value)))
+}
 
 #[cfg(test)]
 mod tests {
@@ -212,5 +229,231 @@ mod tests {
             parameters: HashMap::from([("charset".to_string(), "us-ascii (quoted)".to_string())]),
         };
         assert_eq!(ctv_quoted.to_string(), "text/plain;charset=\"us-ascii (quoted)\"");
+    }
+    
+    #[test]
+    fn test_parse_content_type_with_whitespace() {
+        // Test with various whitespace patterns
+        let input = b"  application/json  ;  charset=utf-8  ;  boundary=1234  ";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "application");
+        assert_eq!(ctv.m_subtype, "json");
+        assert_eq!(ctv.parameters.len(), 2);
+        assert_eq!(ctv.parameters.get("charset"), Some(&"utf-8".to_string()));
+        assert_eq!(ctv.parameters.get("boundary"), Some(&"1234".to_string()));
+        
+        // Test with tabs
+        let input = b"text/plain	;	charset=iso-8859-1";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "text");
+        assert_eq!(ctv.m_subtype, "plain");
+        assert_eq!(ctv.parameters.len(), 1);
+    }
+    
+    #[test]
+    fn test_parse_content_type_with_line_folding() {
+        // Test with line folding after type
+        let input = b"application\r\n /json";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        // Test with line folding after slash
+        let input = b"application/\r\n json";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        // Test with line folding in parameters
+        let input = b"application/json;\r\n charset=utf-8;\r\n boundary=1234";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "application");
+        assert_eq!(ctv.m_subtype, "json");
+        assert_eq!(ctv.parameters.len(), 2);
+        
+        // Test with complex line folding
+        let input = b"application\r\n /\r\n json\r\n ;\r\n charset\r\n =\r\n utf-8";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "application");
+        assert_eq!(ctv.m_subtype, "json");
+        assert_eq!(ctv.parameters.len(), 1);
+    }
+    
+    #[test]
+    fn test_parse_content_type_case_sensitivity() {
+        // Test case insensitivity for type and subtype
+        let input = b"APPLICATION/JSON";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "application");
+        assert_eq!(ctv.m_subtype, "json");
+        
+        // Test case insensitivity for parameter names
+        let input = b"text/plain; CHARSET=utf-8";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.parameters.get("charset"), Some(&"utf-8".to_string()));
+        
+        // Test mixed case
+        let input = b"Text/Plain; Charset=UTF-8";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "text");
+        assert_eq!(ctv.m_subtype, "plain");
+        assert_eq!(ctv.parameters.get("charset"), Some(&"UTF-8".to_string())); // Parameter values should preserve case
+    }
+    
+    #[test]
+    fn test_parse_content_type_error_handling() {
+        // Test empty input
+        let input = b"";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test invalid format (missing slash)
+        let input = b"application";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test missing subtype
+        let input = b"application/";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test invalid parameter format (missing value)
+        let input = b"text/plain; charset=";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test invalid parameter format (missing equals)
+        let input = b"text/plain; charset";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test invalid characters in type
+        let input = b"text@/plain";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test invalid characters in subtype
+        let input = b"text/plain@";
+        assert!(parse_content_type_value(input).is_err());
+        
+        // Test unclosed quoted string
+        let input = b"text/plain; charset=\"unclosed";
+        assert!(parse_content_type_value(input).is_err());
+    }
+    
+    #[test]
+    fn test_parse_content_type_rfc_examples() {
+        // Examples from RFC 3261
+        let input = b"application/sdp";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        let input = b"application/sdp;version=2";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        // Common examples from HTTP
+        let input = b"text/plain";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        let input = b"text/html; charset=utf-8";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        // Multipart example
+        let input = b"multipart/mixed; boundary=gc0p4Jq0M2Yt08jU534c0p";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "multipart");
+        assert_eq!(ctv.m_subtype, "mixed");
+        assert_eq!(ctv.parameters.get("boundary"), Some(&"gc0p4Jq0M2Yt08jU534c0p".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_content_type_multiple_parameters() {
+        // Test with multiple parameters
+        let input = b"application/json; charset=utf-8; boundary=1234; modified=true";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "application");
+        assert_eq!(ctv.m_subtype, "json");
+        assert_eq!(ctv.parameters.len(), 3);
+        assert_eq!(ctv.parameters.get("charset"), Some(&"utf-8".to_string()));
+        assert_eq!(ctv.parameters.get("boundary"), Some(&"1234".to_string()));
+        assert_eq!(ctv.parameters.get("modified"), Some(&"true".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_content_type_quoted_string_parameters() {
+        // Test with quoted string parameters
+        let input = b"text/plain; charset=\"utf-8\"; description=\"Some text with spaces\"";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.m_type, "text");
+        assert_eq!(ctv.m_subtype, "plain");
+        assert_eq!(ctv.parameters.len(), 2);
+        assert_eq!(ctv.parameters.get("charset"), Some(&"utf-8".to_string()));
+        assert_eq!(ctv.parameters.get("description"), Some(&"Some text with spaces".to_string()));
+        
+        // Test with escaped quotes in quoted string
+        let input = b"text/plain; desc=\"This is a \\\"quoted\\\" word\"";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        let (rem, ctv) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ctv.parameters.get("desc"), Some(&"This is a \"quoted\" word".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_content_type_abnf_compliance() {
+        // Test compliance with RFC 3261 ABNF grammar
+        
+        // Media type
+        for m_type in &["text", "image", "audio", "video", "application", "message", "multipart", "custom-type", "x-custom"] {
+            for m_subtype in &["plain", "html", "json", "custom-subtype", "x-custom"] {
+                let input = format!("{}/{}", m_type, m_subtype).into_bytes();
+                let result = parse_content_type_value(&input);
+                assert!(result.is_ok(), "Failed to parse valid media type: {}/{}", m_type, m_subtype);
+            }
+        }
+        
+        // Parameters
+        let valid_params = [
+            "charset=utf-8",
+            "boundary=\"simple boundary\"",
+            "custom-param=value",
+            "q=0.7",
+            "level=1"
+        ];
+        
+        let input = b"text/plain";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+        
+        for param in valid_params.iter() {
+            let full_input = format!("text/plain; {}", param).into_bytes();
+            let result = parse_content_type_value(&full_input);
+            assert!(result.is_ok(), "Failed to parse valid parameter: {}", param);
+        }
     }
 } 
