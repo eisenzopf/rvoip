@@ -45,6 +45,7 @@ use crate::types::priority::Priority; // Import Priority type
 use crate::types::require::Require; // Import Require type
 use crate::parser::headers::content_type::parse_content_type_value;
 use crate::types::retry_after::RetryAfter;
+use crate::types::subject::Subject; // Import Subject type
 // CSeqValue doesn't seem to exist, CSeq struct is used directly
 // use crate::types::cseq::CSeqValue;
 use crate::parser::headers::accept_encoding::EncodingInfo as AcceptEncodingValue; // Use EncodingInfo from parser
@@ -501,6 +502,7 @@ pub enum TypedHeader {
     Require(Require), // Use types::Require
     Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
+    Subject(Subject), // Use types::Subject instead of String
 
     // Placeholder Types (replace with actual types from types/* where available)
     // These might still need Serialize/Deserialize if not using a types::* struct
@@ -517,7 +519,6 @@ pub enum TypedHeader {
     Timestamp((NotNan<f32>, Option<NotNan<f32>>)), // Use imported NotNan
     Organization(crate::types::Organization), // Use our new Organization type
     Priority(Priority), // Use types::Priority
-    Subject(String),
     Server(Vec<String>), // Replace with types::server::ServerVal when defined
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
     InReplyTo(crate::types::in_reply_to::InReplyTo),
@@ -891,9 +892,12 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                 .map(|(_, priority)| TypedHeader::Priority(types::priority::Priority::from_str(&priority.to_string()).unwrap_or(types::priority::Priority::Normal)))
                 .map_err(Error::from),
-            HeaderName::Subject => all_consuming(parser::headers::parse_subject)(value_bytes)
-                .map(|(_, string)| TypedHeader::Subject(string))
-                .map_err(Error::from),
+            HeaderName::Subject => {
+                // Use our Subject type directly from the parser
+                all_consuming(parser::headers::subject::parse_subject)(value_bytes)
+                    .map(|(_, subject)| TypedHeader::Subject(subject))
+                    .map_err(Error::from)
+            },
             HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                  .map(|(_, server_vals)| TypedHeader::Server(server_vals.into_iter()
                      .map(|server_val| match server_val {
