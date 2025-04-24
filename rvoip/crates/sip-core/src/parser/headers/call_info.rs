@@ -97,7 +97,10 @@ fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
             // Use the UriAdapter to parse the URI properly
             let uri = match crate::types::UriAdapter::parse_uri(uri_str) {
                 Ok(uri) => uri,
-                Err(_) => return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify)),
+                Err(e) => {
+                    eprintln!("Error parsing URI '{}': {:?}", uri_str, e);
+                    return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify));
+                }
             };
             
             // Convert InfoParam to Param
@@ -116,12 +119,12 @@ fn trim_ws(input: &[u8]) -> &[u8] {
     let mut end = input.len();
 
     // Trim leading whitespace
-    while start < end && (input[start] == b' ' || input[start] == b'\t') {
+    while start < end && (input[start] == b' ' || input[start] == b'\t' || input[start] == b'\r' || input[start] == b'\n') {
         start += 1;
     }
 
     // Trim trailing whitespace
-    while end > start && (input[end - 1] == b' ' || input[end - 1] == b'\t') {
+    while end > start && (input[end - 1] == b' ' || input[end - 1] == b'\t' || input[end - 1] == b'\r' || input[end - 1] == b'\n') {
         end -= 1;
     }
 
@@ -137,8 +140,8 @@ pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
     // Helper function to trim whitespace around commas
     fn trim_comma_ws(input: &[u8]) -> ParseResult<&[u8]> {
         let (mut input, _) = comma(input)?;
-        // Trim whitespace after comma
-        while !input.is_empty() && (input[0] == b' ' || input[0] == b'\t') {
+        // Trim all whitespace after comma (space, tab, CR, LF)
+        while !input.is_empty() && (input[0] == b' ' || input[0] == b'\t' || input[0] == b'\r' || input[0] == b'\n') {
             input = &input[1..];
         }
         Ok((input, input))
@@ -317,9 +320,9 @@ mod tests {
         let inputs = [
             b"<http://www.example.com/alice/photo.jpg>;purpose=icon".as_slice(),
             b"<https://secure.example.com/alice/photo.jpg>;purpose=icon".as_slice(),
-            // Skip the SIP URI test for now until the URI parsing is fixed
-            // b"<sip:alice@example.com>;purpose=card".as_slice(),
-            // b"<sips:alice@secure.example.com>;purpose=card".as_slice(),
+            // Re-enable SIP URI tests
+            b"<sip:alice@example.com>;purpose=card".as_slice(),
+            b"<sips:alice@secure.example.com>;purpose=card".as_slice(),
             b"<tel:+1-212-555-1234>;purpose=info".as_slice()
         ];
         
@@ -330,22 +333,58 @@ mod tests {
             let (rem, infos) = result.unwrap();
             assert!(rem.is_empty(), "Remaining input for '{}': {:?}", input_str, rem);
             assert_eq!(infos.len(), 1, "Wrong number of infos for '{}'", input_str);
+            
+            // Verify the URI is preserved
+            let parsed_uri = &infos[0].uri;
+            let uri_string = parsed_uri.to_string();
+            // Extract the URI from the original input (between < and >)
+            let original_uri = input_str.split('<').nth(1).unwrap().split('>').next().unwrap();
+            assert_eq!(uri_string, original_uri, "URI not preserved correctly for {}", original_uri);
         }
     }
     
     #[test]
     fn test_parse_call_info_complex() {
-        // Simplify the test case to avoid complex whitespace and comma handling issues
-        let input = b"<http://www.example.com/alice/photo.jpg>;purpose=icon;size=large";
+        // Complex case with multiple info values and many parameters
+        let input = b"<http://www.example.com/alice/photo.jpg>;purpose=icon;size=large, \
+                     <http://www.example.com/alice/>;purpose=info;index=1;active, \
+                     <sip:alice@example.com>;purpose=card;priority=high";
         let result = parse_call_info(input);
-        assert!(result.is_ok(), "Failed to parse basic info");
+        assert!(result.is_ok(), "Failed to parse complex call info input");
         let (rem, infos) = result.unwrap();
-        assert!(rem.is_empty(), "Non-empty remainder after parse");
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].params.len(), 2);
         
-        // Verify the URI is preserved
+        // Check if the remainder is empty
+        assert!(rem.is_empty(), "Non-empty remainder after parse: '{}'", std::str::from_utf8(rem).unwrap_or(""));
+        
+        assert_eq!(infos.len(), 3, "Expected 3 info values, got {}", infos.len());
+        
+        // Check parameter counts for each info
+        assert_eq!(infos[0].params.len(), 2);
+        assert_eq!(infos[1].params.len(), 3);
+        assert_eq!(infos[2].params.len(), 2);
+        
+        // Verify the URIs are preserved
         assert_eq!(infos[0].uri.to_string(), "http://www.example.com/alice/photo.jpg");
+        assert_eq!(infos[1].uri.to_string(), "http://www.example.com/alice/");
+        assert_eq!(infos[2].uri.to_string(), "sip:alice@example.com");
+        
+        // Test with different whitespace variants
+        let whitespace_inputs = [
+            b"<http://example.com>;purpose=icon,<sip:user@example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon, <sip:user@example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon,  <sip:user@example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon,\t<sip:user@example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon,\r\n<sip:user@example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon,\n<sip:user@example.com>;purpose=card".as_slice(),
+        ];
+        
+        for input in whitespace_inputs.iter() {
+            let result = parse_call_info(input);
+            assert!(result.is_ok(), "Failed to parse with whitespace variation: {}", String::from_utf8_lossy(input));
+            let (rem, infos) = result.unwrap();
+            assert!(rem.is_empty(), "Non-empty remainder with whitespace variation");
+            assert_eq!(infos.len(), 2, "Expected 2 info values with whitespace variation");
+        }
     }
     
     #[test]

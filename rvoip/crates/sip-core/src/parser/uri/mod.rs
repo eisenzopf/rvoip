@@ -67,6 +67,7 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
+                raw_uri: None,
             };
             
             Ok((remaining, uri))
@@ -102,6 +103,7 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
                 headers: headers_opt.unwrap_or_default(),
+                raw_uri: None,
             };
             
             Ok((remaining, uri))
@@ -265,6 +267,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
                 port,
                 parameters: params,
                 headers,
+                raw_uri: None,
             };
             
             Ok((current_remaining, uri))
@@ -421,6 +424,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
                 port,
                 parameters: params,
                 headers,
+                raw_uri: None,
             };
             
             Ok((current_remaining, uri))

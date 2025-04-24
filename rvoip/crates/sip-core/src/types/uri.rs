@@ -170,6 +170,8 @@ pub struct Uri {
     pub parameters: Vec<Param>,
     /// URI headers (?key=value)
     pub headers: HashMap<String, String>,
+    /// Raw URI string for custom schemes
+    pub raw_uri: Option<String>,
 }
 
 impl Uri {
@@ -183,6 +185,7 @@ impl Uri {
             port: None,
             parameters: Vec::new(),
             headers: HashMap::new(),
+            raw_uri: None,
         }
     }
 
@@ -211,7 +214,7 @@ impl Uri {
         Self::new(Scheme::Tel, Host::domain(number))
     }
 
-    /// Create a new URI with a custom scheme by storing the entire URI string as the host
+    /// Create a new URI with a custom scheme by storing the entire URI string
     /// This is used for schemes that are not explicitly supported (like http, https)
     /// but need to be preserved in the Call-Info header
     pub fn custom(uri_string: impl Into<String>) -> Self {
@@ -221,16 +224,26 @@ impl Uri {
         if uri_string.starts_with("sip:") || uri_string.starts_with("sips:") || uri_string.starts_with("tel:") {
             return Self::from_str(&uri_string).unwrap_or_else(|_| {
                 // Fallback to custom storage if parsing fails
-                let mut uri = Self::new(Scheme::Sip, Host::domain("_custom_"));
-                uri.parameters.push(Param::Other("_custom_uri_".to_string(), Some(crate::types::param::GenericValue::Token(uri_string))));
+                let mut uri = Self::new(Scheme::Sip, Host::domain("unknown.host"));
+                uri.raw_uri = Some(uri_string);
                 uri
             });
         }
         
-        // For non-SIP URIs, store as custom
-        let mut uri = Self::new(Scheme::Sip, Host::domain("_custom_"));
-        uri.parameters.push(Param::Other("_custom_uri_".to_string(), Some(crate::types::param::GenericValue::Token(uri_string))));
+        // For non-SIP URIs, store the raw string
+        let mut uri = Self::new(Scheme::Sip, Host::domain("unknown.host"));
+        uri.raw_uri = Some(uri_string);
         uri
+    }
+
+    /// Check if this URI has a custom scheme (non-SIP)
+    pub fn is_custom(&self) -> bool {
+        self.raw_uri.is_some()
+    }
+
+    /// Get the raw URI string if this is a custom URI
+    pub fn as_raw_uri(&self) -> Option<&str> {
+        self.raw_uri.as_deref()
     }
 
     /// Get the username part of the URI, if present
@@ -287,13 +300,9 @@ impl Uri {
 
 impl fmt::Display for Uri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Check if this is a custom URI (with the _custom_uri_ parameter)
-        for param in &self.parameters {
-            if let Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) = param {
-                if name == "_custom_uri_" {
-                    return f.write_str(value);
-                }
-            }
+        // If this is a custom URI, just output the raw string
+        if let Some(raw_uri) = &self.raw_uri {
+            return f.write_str(raw_uri);
         }
 
         // Normal URI formatting
@@ -326,12 +335,6 @@ impl fmt::Display for Uri {
         
         // Parameters (;key=value or ;key)
         for param in &self.parameters {
-            // Skip internal parameters
-            if let Param::Other(name, _) = param {
-                if name == "_custom_uri_" {
-                    continue;
-                }
-            }
             write!(f, ";{}", param)?;
         }
         
@@ -347,8 +350,7 @@ impl fmt::Display for Uri {
                 }
                 
                 // URL-encode key and value
-                // TODO: Implement proper URL encoding
-                write!(f, "{}={}", key, value)?;
+                write!(f, "{}={}", escape_param(key), escape_param(value))?;
             }
         }
         
