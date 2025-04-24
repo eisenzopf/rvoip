@@ -62,9 +62,22 @@ fn tag_param(input: &[u8]) -> ParseResult<Param> {
     )(input)
 }
 
+// Special case for the "lr" flag parameter
+fn lr_param(input: &[u8]) -> ParseResult<Param> {
+    value(Param::Lr, tag_no_case(b"lr"))(input)
+}
+
+// transport-param = "transport=" token
+fn transport_param(input: &[u8]) -> ParseResult<Param> {
+    map_res(
+        preceded(tag_no_case(b"transport".as_slice()), preceded(equal, token)),
+        |transport_bytes| str::from_utf8(transport_bytes).map(|s| Param::Transport(s.to_string()))
+    )(input)
+}
+
 // from-param = tag-param / generic-param
 fn from_param_item(input: &[u8]) -> ParseResult<Param> {
-    alt((tag_param, generic_param))(input)
+    alt((tag_param, lr_param, transport_param, generic_param))(input)
 }
 
 // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
@@ -153,5 +166,108 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(addr.display_name, None);
         assert!(addr.params.is_empty());
+    }
+    
+    // Additional tests for RFC 3261 compliance
+    
+    #[test]
+    fn test_from_multiple_parameters() {
+        let input = b"<sip:alice@atlanta.com>;tag=1928301774;lr;transport=udp";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert_eq!(addr.params.len(), 3);
+        assert!(addr.params.contains(&Param::Tag("1928301774".to_string())));
+        assert!(addr.params.contains(&Param::Lr));
+        assert!(addr.params.contains(&Param::Transport("udp".to_string())));
+    }
+    
+    #[test]
+    fn test_from_ipv4_addr() {
+        let input = b"<sip:alice@192.168.1.1>;tag=123";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert_eq!(addr.display_name, None);
+        match &addr.uri.host {
+            Host::Address(ip) => assert!(ip.is_ipv4()),
+            _ => panic!("Expected IPv4 address"),
+        }
+    }
+    
+    #[test]
+    fn test_from_ipv6_addr() {
+        let input = b"<sip:alice@[2001:db8::1]>;tag=456";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        match &addr.uri.host {
+            Host::Address(ip) => assert!(ip.is_ipv6()),
+            _ => panic!("Expected IPv6 address"),
+        }
+    }
+    
+    #[test]
+    fn test_from_with_port() {
+        let input = b"<sip:alice@example.com:5060>;tag=789";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert_eq!(addr.uri.port, Some(5060));
+    }
+    
+    #[test]
+    fn test_from_with_quoted_display_name() {
+        let input = b"\"John Doe\" <sip:john@example.com>;tag=abc123";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert_eq!(addr.display_name, Some("John Doe".to_string()));
+    }
+    
+    #[test]
+    fn test_from_with_escaped_chars_in_display_name() {
+        let input = b"\"John \\\"Johnny\\\" Doe\" <sip:john@example.com>;tag=def456";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        // The display name should have the quotes properly unescaped
+        assert_eq!(addr.display_name, Some("John \"Johnny\" Doe".to_string()));
+    }
+    
+    #[test]
+    fn test_from_uri_with_parameters() {
+        let input = b"<sip:alice@example.com;transport=tcp>;tag=ghi789";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        // The transport parameter should be in the URI parameters, not the header parameters
+        assert!(addr.uri.parameters.contains(&Param::Transport("tcp".to_string())));
+        assert_eq!(addr.params.len(), 1); // Only the tag parameter should be in the header params
+    }
+    
+    #[test]
+    fn test_from_tag_parameter_case_insensitivity() {
+        let input = b"<sip:alice@example.com>;TAG=case-test";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert!(addr.params.contains(&Param::Tag("case-test".to_string())));
     }
 } 

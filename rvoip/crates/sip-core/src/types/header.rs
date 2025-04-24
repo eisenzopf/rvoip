@@ -353,7 +353,7 @@ pub enum HeaderValue {
     Subject(Option<Vec<u8>>),
     Server(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
     UserAgent(Vec<(Option<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)>), // Vec<(Product?, Comment?)>
-    InReplyTo(Vec<String>),
+    InReplyTo(crate::types::in_reply_to::InReplyTo),
 
     // === Authentication (Placeholders) ===
     Authorization(Vec<u8>), // Placeholder
@@ -519,7 +519,7 @@ pub enum TypedHeader {
     Subject(String),
     Server(Vec<String>), // Replace with types::server::ServerVal when defined
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
-    InReplyTo(Vec<String>),
+    InReplyTo(crate::types::in_reply_to::InReplyTo),
     RetryAfter(RetryAfter), // Now using types::retry_after::RetryAfter
     ErrorInfo(Vec<crate::parser::headers::error_info::ErrorInfoValue>), // Use imported parser type
     AlertInfo(Vec<crate::parser::headers::alert_info::AlertInfoValue>), // Use imported parser type
@@ -924,7 +924,7 @@ impl TryFrom<Header> for TypedHeader {
                      .collect::<Vec<String>>()))
                  .map_err(Error::from),
             HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
-                .map(|(_, strings)| TypedHeader::InReplyTo(strings))
+                .map(|(_, strings)| TypedHeader::InReplyTo(crate::types::in_reply_to::InReplyTo(strings.into_iter().map(crate::types::CallId).collect())))
                 .map_err(Error::from),
              HeaderName::Warning => {
                  let parse_result = all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);

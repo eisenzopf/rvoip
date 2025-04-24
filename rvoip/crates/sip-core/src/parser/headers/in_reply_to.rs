@@ -49,8 +49,95 @@ mod tests {
         assert_eq!(ids, vec!["local-id"]);
     }
 
-     #[test]
+    #[test]
     fn test_parse_in_reply_to_empty_fail() {
         assert!(parse_in_reply_to(b"").is_err());
+    }
+    
+    // Additional RFC compliance tests
+    
+    #[test]
+    fn test_parse_in_reply_to_case_insensitive() {
+        // Test for case insensitivity in header name (RFC 3261 Section 7.3.1)
+        let input = b"in-reply-to: abc123@example.com";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "abc123@example.com");
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_whitespace() {
+        // Test for whitespace handling around commas (RFC 3261 Section 7.3.1)
+        let input = b"In-Reply-To: id1@domain.com   ,    id2@domain.com,id3@domain.com";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], "id1@domain.com");
+        assert_eq!(ids[1], "id2@domain.com");
+        assert_eq!(ids[2], "id3@domain.com");
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_special_chars() {
+        // Test for Call-ID with special characters (RFC 3261 Section 25)
+        let input = b"In-Reply-To: abc123.!%*+-_`'~@example.com";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "abc123.!%*+-_`'~@example.com");
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_uuid_style() {
+        // Test with UUID-style Call-IDs commonly used in SIP
+        let input = b"In-Reply-To: f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_multiple_complex() {
+        // Test with multiple Call-IDs of varying complexity
+        let input = b"In-Reply-To: simple-id, complex.id-with_special!chars@domain.com, f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], "simple-id");
+        assert_eq!(ids[1], "complex.id-with_special!chars@domain.com");
+        assert_eq!(ids[2], "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_malformed() {
+        // Test with malformed input - should fail
+        assert!(parse_in_reply_to(b"In-Reply-To:").is_err()); // No Call-ID
+        assert!(parse_in_reply_to(b"In-Reply-To: ,").is_err()); // Empty Call-ID between commas
+        assert!(parse_in_reply_to(b"In-Reply-To").is_err()); // No colon
+        assert!(parse_in_reply_to(b"Wrong-Header: id@domain").is_err()); // Wrong header name
+    }
+    
+    #[test]
+    fn test_parse_in_reply_to_trailing_content() {
+        // Test with trailing content
+        let input = b"In-Reply-To: id@domain.com;param=value";
+        let result = parse_in_reply_to(input);
+        assert!(result.is_ok());
+        let (rem, ids) = result.unwrap();
+        assert_eq!(rem, b";param=value");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "id@domain.com");
     }
 } 
