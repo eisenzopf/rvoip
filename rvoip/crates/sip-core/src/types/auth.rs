@@ -228,6 +228,13 @@ pub enum Credentials {
     Other { scheme: String, params: Vec<AuthParam> },
 }
 
+impl Credentials {
+    /// Returns true if the credentials are of the Digest type
+    pub fn is_digest(&self) -> bool {
+        matches!(self, Credentials::Digest { .. })
+    }
+}
+
 impl fmt::Display for Credentials {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
