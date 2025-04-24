@@ -5,7 +5,7 @@
 use nom::{
     bytes::complete::{tag, tag_no_case, take_until, is_not},
     character::complete::space0,
-    combinator::{map, map_res, opt, verify, fail, recognize},
+    combinator::{map, map_res, opt, verify, fail, recognize, all_consuming},
     multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
     IResult, Err,
@@ -18,7 +18,6 @@ use crate::parser::common_params::{generic_param};
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 use crate::parser::whitespace::sws;
-use nom::combinator::all_consuming;
 
 use crate::types::uri::Uri;
 use crate::types::uri_adapter::UriAdapter;
@@ -57,7 +56,15 @@ fn enclosed_uri(input: &[u8]) -> ParseResult<String> {
             if uri_str.is_empty() {
                 return Err(CrateError::ParseError("Empty URI".to_string()));
             }
-            Ok(uri_str)
+            
+            // Trim any whitespace from the URI
+            // RFC 3261 allows linear whitespace within angle brackets
+            let trimmed = uri_str.trim();
+            if trimmed.is_empty() {
+                return Err(CrateError::ParseError("Empty URI after trimming".to_string()));
+            }
+            
+            Ok(trimmed.to_string())
         }
     )(input)
 }
@@ -65,7 +72,7 @@ fn enclosed_uri(input: &[u8]) -> ParseResult<String> {
 /// Parses a parameter (;name=value or ;name)
 fn param(input: &[u8]) -> ParseResult<Param> {
     preceded(
-        semi,
+        pair(semi, space0), // Allow whitespace after semicolon
         generic_param
     )(input)
 }
@@ -100,7 +107,7 @@ fn error_info_value(input: &[u8]) -> ParseResult<ErrorInfoValue> {
     // Parse the URI using the UriAdapter
     let uri = match UriAdapter::parse_uri(&uri_str) {
         Ok(u) => u,
-        Err(e) => return Err(Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+        Err(_) => return Err(Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
     };
     
     Ok((remaining, ErrorInfoValue { uri, uri_str, params }))
@@ -133,12 +140,18 @@ fn trailing_comma_check(input: &[u8]) -> ParseResult<&[u8]> {
 /// Example: `<sip:error@example.com>;reason=busy, <http://error.org>`
 pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
     let (input, items) = separated_list1(
-        comma,
+        tuple((space0, comma, space0)), // Allow whitespace around commas
         error_info_value
     )(input)?;
     
     // Check for trailing comma
     let (input, _) = trailing_comma_check(input)?;
+    
+    // Verify we've consumed all input
+    let (input, _) = space0(input)?;
+    if !input.is_empty() {
+        return Err(Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)));
+    }
     
     Ok((input, items))
 }
@@ -147,7 +160,7 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
 /// Example: `Error-Info: <sip:busy@example.com>;reason=busy`
 pub fn full_parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
     preceded(
-        pair(tag_no_case(b"Error-Info"), hcolon),
+        pair(tag_no_case(b"Error-Info"), tuple((hcolon, space0))), // Allow whitespace after colon
         parse_error_info
     )(input)
 }
@@ -234,6 +247,8 @@ mod tests {
             ("<http://example.com/errors/busy>", "http://example.com/errors/busy"),
             ("<https://example.com/errors/busy>", "https://example.com/errors/busy"),
             ("<tel:+1-212-555-1234>", "tel:+1-212-555-1234"),
+            ("<mailto:user@example.com>", "mailto:user@example.com"), // Additional scheme test
+            ("<ftp://ftp.example.com/error.txt>", "ftp://ftp.example.com/error.txt"), // Additional scheme test
         ];
         
         for (input_str, expected_uri_str) in test_cases {
@@ -263,7 +278,11 @@ mod tests {
                 s if s.starts_with("tel:") => {
                     assert_eq!(infos[0].uri.scheme.as_str(), "tel");
                 },
-                _ => panic!("Unexpected scheme in URI: {}", infos[0].uri_str),
+                _ => {
+                    // Custom URI schemes should be stored properly
+                    assert!(infos[0].uri.is_custom());
+                    assert_eq!(infos[0].uri.as_raw_uri().unwrap(), expected_uri_str);
+                },
             }
         }
     }
@@ -291,6 +310,13 @@ mod tests {
         let input_full = "Error-Info:  <sip:busy@example.com>";
         let result_full = full_parse_error_info(input_full.as_bytes());
         assert!(result_full.is_ok(), "Should handle whitespace after colon");
+        
+        // Test with whitespace inside URI angle brackets (allowed by RFC 3261)
+        let input_ws_uri = "<  sip:busy@example.com  >";
+        let result_ws_uri = parse_error_info(input_ws_uri.as_bytes());
+        assert!(result_ws_uri.is_ok(), "Should handle whitespace inside URI angle brackets");
+        let (_, infos_ws) = result_ws_uri.unwrap();
+        assert_eq!(infos_ws[0].uri_str, "sip:busy@example.com", "URI should be trimmed");
     }
     
     #[test]
@@ -320,6 +346,12 @@ mod tests {
         // Quoted string parameter
         assert!(matches!(&infos[0].params[3], Param::Other(n, Some(v)) 
             if n == "info" && v.to_string().contains("quoted value")));
+        
+        // Test parameter with URI as value
+        let input_uri_param = "<sip:busy@example.com>;href=<http://example.com/uri>";
+        let result_uri_param = parse_error_info(input_uri_param.as_bytes());
+        // This should fail - URIs as parameter values need special handling
+        assert!(result_uri_param.is_err(), "URI as parameter value needs special handling");
     }
     
     #[test]
@@ -348,6 +380,21 @@ mod tests {
         let input5 = "<sip:busy@example.com>, ";
         let result5 = parse_error_info(input5.as_bytes());
         assert!(result5.is_err(), "Missing URI in a list should fail");
+        
+        // Test with just whitespace
+        let input6 = "   ";
+        let result6 = parse_error_info(input6.as_bytes());
+        assert!(result6.is_err(), "Just whitespace should fail");
+        
+        // Test with invalid scheme
+        let input7 = "<invalid@example.com>";
+        let result7 = parse_error_info(input7.as_bytes());
+        assert!(result7.is_err(), "Invalid scheme should fail");
+        
+        // Test with parameter without semicolon
+        let input8 = "<sip:busy@example.com>reason=busy";
+        let result8 = parse_error_info(input8.as_bytes());
+        assert!(result8.is_err(), "Parameter without semicolon should fail");
     }
     
     #[test]
@@ -355,7 +402,7 @@ mod tests {
         // Example from RFC 3261 Section 24.2 (INVITE with Error-Info)
         let input = "Error-Info: <sip:not-in-service-recording@atlanta.com>";
         let result = full_parse_error_info(input.as_bytes());
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "RFC example should parse successfully");
         let (_, infos) = result.unwrap();
         
         // Verify URI
@@ -365,13 +412,20 @@ mod tests {
         // Example with a reason parameter (common in practice)
         let input2 = "Error-Info: <sip:busy-message@example.com>;reason=busy";
         let result2 = full_parse_error_info(input2.as_bytes());
-        assert!(result2.is_ok());
+        assert!(result2.is_ok(), "RFC example with parameter should parse successfully");
         let (_, infos2) = result2.unwrap();
         
         // Verify URI and parameter
         assert_eq!(infos2[0].uri_str, "sip:busy-message@example.com");
         assert_eq!(infos2[0].uri.scheme.as_str(), "sip");
         assert_eq!(infos2[0].params.len(), 1);
+        
+        // Example with multiple items (not from RFC but valid)
+        let input3 = "Error-Info: <sip:not-in-service@example.com>, <http://errors.example.com/busy.html>";
+        let result3 = full_parse_error_info(input3.as_bytes());
+        assert!(result3.is_ok(), "Multiple URIs should parse successfully");
+        let (_, infos3) = result3.unwrap();
+        assert_eq!(infos3.len(), 2);
     }
     
     #[test]
@@ -382,6 +436,8 @@ mod tests {
             "<sip:busy@example.com>;reason=busy",
             "<sip:a@b.c>, <http://d.e/f>",
             "<sip:a@b.c>;p=1, <sip:d@e.f>;q=2",
+            "< sip:busy@example.com >", // With whitespace inside brackets (allowed by RFC)
+            "<sip:busy@example.com>  ;  reason=busy", // With whitespace around semicolon
         ];
         
         for case in &valid_cases {
@@ -395,8 +451,10 @@ mod tests {
             "sip:busy@example.com", // Missing angle brackets
             "<>", // Empty URI
             "<sip:busy@example.com", // Unclosed bracket
-            "<sip:busy@example.com>reason=busy", // Missing semicolon (this should now be detected by verify_no_trailing_chars)
+            "<sip:busy@example.com>reason=busy", // Missing semicolon
             "<sip:busy@example.com>, ", // Trailing comma
+            "<sip:busy@example.com>,", // Trailing comma
+            "<:busy@example.com>", // Missing scheme
         ];
         
         for case in &invalid_cases {
