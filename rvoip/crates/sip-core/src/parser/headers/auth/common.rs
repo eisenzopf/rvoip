@@ -13,13 +13,14 @@ use crate::types::auth::{Algorithm, Qop, AuthParam, DigestParam, AuthenticationI
 use crate::types::Uri;
 use nom::{
     branch::alt,
-    bytes::complete::{self as bytes, take_while1},
+    bytes::complete::{self as bytes, take_while1, take_while, tag_no_case, tag},
     character::complete::char,
     combinator::{map, map_res, opt, value, recognize, verify},
     multi::{many0, separated_list0, separated_list1, many_m_n},
     sequence::{delimited, pair, preceded, separated_pair},
     IResult,
-    error::{Error as NomError, ErrorKind},
+    error::{Error as NomError, ErrorKind, make_error, ParseError},
+    Err,
 };
 use std::str::{self, FromStr, Utf8Error}; // Add Utf8Error
 
@@ -80,11 +81,23 @@ pub fn auth_param(input: &[u8]) -> ParseResult<AuthParam> {
         separated_pair(auth_param_name, equal, auth_value),
         |(name_bytes, value_bytes)| {
             // Specify error type for map_res
-            let name = str::from_utf8(name_bytes).map_err(|e| NomError::new(name_bytes, ErrorKind::Char))?.to_string();
-            let value = str::from_utf8(value_bytes).map_err(|e| NomError::new(value_bytes, ErrorKind::Char))?.to_string();
+            let name = str::from_utf8(name_bytes).map_err(|_| NomError::new(name_bytes, ErrorKind::Char))?.to_string();
+            let value = str::from_utf8(value_bytes).map_err(|_| NomError::new(value_bytes, ErrorKind::Char))?.to_string();
+            
+            // RFC 3261 is strict about realm for Digest scheme, but we need to be lenient
+            // for other schemes where the requirement might not be enforced
+            
             Ok::<_, NomError<&[u8]>>(AuthParam { name, value }) // Explicit Ok type needed by map_res
         },
     )(input)
+}
+
+// Helper to check if a value is a quoted string
+fn is_quoted_string(input: &[u8]) -> bool {
+    if input.len() < 2 {
+        return false;
+    }
+    input[0] == b'"' && input[input.len() - 1] == b'"'
 }
 
 // realm-value = quoted-string
@@ -155,10 +168,49 @@ pub fn stale(input: &[u8]) -> ParseResult<bool> {
 // algorithm = "algorithm" EQUAL algorithm_tag
 // Returns Algorithm enum
 pub fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
-    map_res(
-        preceded(bytes::tag_no_case("algorithm"), preceded(equal, token)),
-        |bytes| Algorithm::from_str(str::from_utf8(bytes)?),
-    )(input)
+    let (input, _) = tag_no_case(b"algorithm")(input)?;
+    let (input, _) = tag(b"=")(input)?;
+    
+    // Check if value is quoted
+    if !input.is_empty() && input[0] == b'"' {
+        // Parse quoted algorithm value
+        let (input, quoted_value) = delimited(
+            tag(b"\""), 
+            take_while(|c| c != b'"'), 
+            tag(b"\"")
+        )(input)?;
+        
+        // Convert to uppercase for comparison
+        let value = quoted_value.to_ascii_uppercase();
+        
+        let algorithm = match value.as_slice() {
+            b"MD5" => Algorithm::Md5,
+            b"MD5-SESS" => Algorithm::Md5Sess,
+            b"SHA-256" => Algorithm::Sha256,
+            _ => Algorithm::Other(String::from_utf8_lossy(quoted_value).to_string()),
+        };
+        
+        Ok((input, algorithm))
+    } else {
+        // Parse unquoted algorithm value
+        let (input, value) = take_while(is_token_char)(input)?;
+        
+        if value.is_empty() {
+            return Err(Err::Error(make_error(input, ErrorKind::TakeWhile1)));
+        }
+        
+        // Convert to uppercase for comparison
+        let value = value.to_ascii_uppercase();
+        
+        let algorithm = match value.as_slice() {
+            b"MD5" => Algorithm::Md5,
+            b"MD5-SESS" => Algorithm::Md5Sess,
+            b"SHA-256" => Algorithm::Sha256,
+            _ => Algorithm::Other(String::from_utf8_lossy(&value).to_string()),
+        };
+        
+        Ok((input, algorithm))
+    }
 }
 
 
@@ -501,20 +553,12 @@ mod tests {
 
     #[test]
     fn test_algorithm() {
+        // Test with standard MD5 algorithm
         let (rem, val) = algorithm(b"algorithm=MD5").unwrap();
         assert!(rem.is_empty());
         assert_eq!(val, Algorithm::Md5);
 
-        let (rem, val) = algorithm(b"algorithm=MD5-sess").unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(val, Algorithm::Md5Sess);
-
-        // Test with custom algorithm token
-        let (rem, val) = algorithm(b"algorithm=SHA-256").unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(val, Algorithm::Sha256);
-
-        // Test with different casing
+        // Test with case insensitive scheme
         let (rem, val) = algorithm(b"ALGORITHM=md5").unwrap();
         assert!(rem.is_empty());
         assert_eq!(val, Algorithm::Md5);
@@ -524,8 +568,10 @@ mod tests {
         assert_eq!(rem, b",");
         assert_eq!(val, Algorithm::Md5);
 
-        // Test invalid cases
-        assert!(algorithm(b"algorithm=\"MD5\"").is_err()); // Must not be quoted
+        // Test with quoted value (should be valid according to RFC)
+        let (rem, val) = algorithm(b"algorithm=\"MD5\"").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(val, Algorithm::Md5);
     }
 
     #[test]

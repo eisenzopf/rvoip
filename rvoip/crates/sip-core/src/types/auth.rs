@@ -257,66 +257,97 @@ impl fmt::Display for Credentials {
 
 /// Typed WWW-Authenticate header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WwwAuthenticate(pub Challenge); // Holds the Challenge enum directly
+pub struct WwwAuthenticate(pub Vec<Challenge>); // Holds multiple Challenge enums
 
 impl fmt::Display for WwwAuthenticate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to Challenge's Display
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        
+        let challenges_str = self.0.iter()
+            .map(|challenge| challenge.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        write!(f, "{}", challenges_str)
     }
 }
 
 impl WwwAuthenticate {
-    /// Creates a new WwwAuthenticate header with mandatory fields.
-    pub fn new(scheme: Scheme, realm: impl Into<String>, nonce: impl Into<String>) -> Self {
-        Self(Challenge::Digest { params: vec![
+    /// Creates a new WwwAuthenticate header with a single Digest challenge.
+    pub fn new(realm: impl Into<String>, nonce: impl Into<String>) -> Self {
+        Self(vec![Challenge::Digest { params: vec![
             DigestParam::Realm(realm.into()),
             DigestParam::Nonce(nonce.into()),
-        ] })
+        ] }])
     }
 
-    /// Sets the domain parameter.
+    /// Creates a new WwwAuthenticate header with a Basic challenge.
+    pub fn new_basic(realm: impl Into<String>) -> Self {
+        Self(vec![Challenge::Basic { params: vec![
+            AuthParam { name: "realm".to_string(), value: realm.into() }
+        ] }])
+    }
+
+    /// Adds an additional challenge to this header.
+    pub fn add_challenge(&mut self, challenge: Challenge) {
+        self.0.push(challenge);
+    }
+
+    /// Returns the first Digest challenge, if any.
+    pub fn first_digest(&self) -> Option<&Challenge> {
+        self.0.iter().find(|c| matches!(c, Challenge::Digest { .. }))
+    }
+
+    /// Returns the first Basic challenge, if any.
+    pub fn first_basic(&self) -> Option<&Challenge> {
+        self.0.iter().find(|c| matches!(c, Challenge::Basic { .. }))
+    }
+
+    /// Sets the domain parameter on the first Digest challenge.
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Domain(vec![domain.into()]));
         }
         self
     }
 
-    /// Sets the opaque parameter.
+    /// Sets the opaque parameter on the first Digest challenge.
     pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Opaque(opaque.into()));
         }
         self
     }
 
-    /// Sets the stale parameter.
+    /// Sets the stale parameter on the first Digest challenge.
     pub fn with_stale(mut self, stale: bool) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Stale(stale));
         }
         self
     }
 
-    /// Sets the algorithm parameter.
+    /// Sets the algorithm parameter on the first Digest challenge.
     pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Algorithm(algorithm));
         }
         self
     }
 
-    /// Adds a Qop value.
+    /// Adds a Qop value to the first Digest challenge.
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Qop(vec![qop]));
         }
         self
     }
 
-    /// Sets multiple Qop values.
+    /// Sets multiple Qop values on the first Digest challenge.
     pub fn with_qops(mut self, qops: Vec<Qop>) -> Self {
-        if let Challenge::Digest { ref mut params } = self.0 {
+        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Qop(qops));
         }
         self
@@ -328,7 +359,7 @@ impl FromStr for WwwAuthenticate {
     fn from_str(s: &str) -> Result<Self> {
         // Call the actual parser and map nom::Err to crate::error::Error
          crate::parser::headers::parse_www_authenticate(s.as_bytes())
-             .map(|(_, challenge)| WwwAuthenticate(challenge))
+             .map(|(_, challenges)| WwwAuthenticate(challenges))
              .map_err(Error::from) // Convert nom::Err to our Error type
     }
 }
