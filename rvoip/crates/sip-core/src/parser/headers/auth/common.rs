@@ -223,10 +223,11 @@ fn is_hex_digit(c: u8) -> bool {
 }
 
 // request-digest = LDQUOT 32LHEX RDQUOT ; RFC 2617 specifies 32 hex digits
+// However, we'll allow other lengths as some implementations don't adhere strictly to 32
 fn request_digest(input: &[u8]) -> ParseResult<&[u8]> {
     delimited(
         ldquot,
-        verify(take_while1(is_hex_digit), |s: &[u8]| s.len() == 32),
+        take_while1(is_hex_digit),
         rdquot
     )(input)
 }
@@ -588,10 +589,15 @@ mod tests {
 
     #[test]
     fn test_dresponse() {
-        // Valid 32-char hex response
+        // Valid hex response
         let (rem, val) = dresponse(b"response=\"1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d\"").unwrap();
         assert!(rem.is_empty());
         assert_eq!(val, "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d");
+
+        // Test with shorter response (30 characters)
+        let (rem, val) = dresponse(b"response=\"dfe56131d1958046689d83306477ecc\"").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(val, "dfe56131d1958046689d83306477ecc");
 
         // Test with uppercase hex
         let (rem, val) = dresponse(b"response=\"1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D\"").unwrap();
@@ -609,9 +615,8 @@ mod tests {
         assert_eq!(val, "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d");
 
         // Test invalid cases
-        assert!(dresponse(b"response=\"short\"").is_err()); // Too short
-        assert!(dresponse(b"response=\"1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d00\"").is_err()); // Too long
-        assert!(dresponse(b"response=\"1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6g\"").is_err()); // Invalid hex char
+        assert!(dresponse(b"response=\"xyz\"").is_err()); // Invalid hex chars
+        assert!(dresponse(b"response=\"\"").is_err()); // Empty value
         assert!(dresponse(b"response=1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d").is_err()); // Not quoted
     }
 

@@ -11,9 +11,10 @@ use crate::parser::ParseResult;
 use crate::types::auth::{AuthParam, Credentials, DigestParam, Scheme, Algorithm, Qop};
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case, take_till1}, // Need take_till1 for Basic token
-    combinator::{map, map_res, recognize},
-    sequence::{pair, preceded},
+    bytes::complete::{tag_no_case, take_till1},
+    character::complete::{char, digit1},
+    combinator::{map, map_res, opt, recognize},
+    sequence::{preceded, pair},
     IResult,
 };
 use std::str::FromStr;
@@ -35,17 +36,77 @@ fn basic_credentials_token(input: &[u8]) -> ParseResult<&[u8]> {
 // basic-credentials = base64-user-pass (token68)
 // other-response = auth-scheme LWS auth-param *(COMMA auth-param)
 pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
+    // First check if the input is empty
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+    }
+    
+    // Check if the input starts with "Digest " (Digest followed by a space)
+    if input.len() >= 7 && (&input[0..7] == b"Digest " || &input[0..7] == b"DIGEST " || &input[0..7] == b"digest ") {
+        let (rem, params) = preceded(
+            pair(
+                tag_no_case("Digest"),
+                lws
+            ),
+            digest_credential
+        )(input)?;
+        return Ok((rem, Credentials::Digest { params }));
+    }
+    
+    // Check if the input starts with "Basic " (Basic followed by a space)
+    if input.len() >= 6 && (&input[0..6] == b"Basic " || &input[0..6] == b"BASIC " || &input[0..6] == b"basic ") {
+        let (rem, token_bytes) = preceded(
+            pair(
+                tag_no_case("Basic"),
+                lws
+            ),
+            basic_credentials_token
+        )(input)?;
+        
+        let token = std::str::from_utf8(token_bytes)
+                        .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))? // Basic error conversion
+                        .to_string();
+        return Ok((rem, Credentials::Basic { token }));
+    }
+    
+    // Check if the input starts with "Bearer " (Bearer followed by a space)
+    if input.len() >= 7 && (&input[0..7] == b"Bearer " || &input[0..7] == b"BEARER " || &input[0..7] == b"bearer ") {
+        let (rem, token_bytes) = preceded(
+            pair(
+                tag_no_case("Bearer"),
+                lws
+            ),
+            basic_credentials_token // We can reuse this for Bearer tokens
+        )(input)?;
+        
+        let token = std::str::from_utf8(token_bytes)
+                        .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))? // Basic error conversion
+                        .to_string();
+        
+        // Create a parameter with token68 value
+        let param = AuthParam {
+            name: "token68".to_string(),
+            value: token,
+        };
+        
+        return Ok((rem, Credentials::Other { 
+            scheme: "Bearer".to_string(), 
+            params: vec![param] 
+        }));
+    }
+    
+    // If neither of the special cases, use the general approach
     let (rem, scheme_str) = auth_scheme(input)?;
     let (rem, _) = lws(rem)?;
 
     match Scheme::from_str(&scheme_str) {
         Ok(Scheme::Digest) => {
-            // Parse comma-separated list of digest params
+            // We shouldn't get here because we already handled Digest above
             let (rem, params) = digest_credential(rem)?;
             Ok((rem, Credentials::Digest { params }))
         }
         Ok(Scheme::Basic) => {
-            // Parse the Base64 token
+            // We shouldn't get here because we already handled Basic above
             let (rem, token_bytes) = basic_credentials_token(rem)?;
             let token = std::str::from_utf8(token_bytes)
                             .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))? // Basic error conversion
@@ -319,6 +380,12 @@ mod tests {
             Credentials::Digest { params } => {
                 assert_eq!(params.len(), 6);
                 
+                // Print all parameters for debugging
+                println!("All parameters in RFC example:");
+                for (i, param) in params.iter().enumerate() {
+                    println!("Param {}: {:?}", i, param);
+                }
+                
                 // Check specific parameters from the RFC example
                 assert!(params.iter().any(|p| match p {
                     DigestParam::Username(u) => u == "bob",
@@ -340,10 +407,22 @@ mod tests {
                     DigestParam::Uri(u) => u.to_string() == "sips:ss2.example.com",
                     _ => false
                 }));
-                assert!(params.iter().any(|p| match p {
-                    DigestParam::Response(r) => r == "dfe56131d1958046689d83306477ecc",
-                    _ => false
-                }));
+                
+                // The response value is now parsed and available through the test
+                let response_param = params.iter().find_map(|p| match p {
+                    DigestParam::Response(r) => {
+                        println!("Found response: {}", r);
+                        Some(r.as_str())
+                    },
+                    _ => None
+                });
+                
+                if response_param.is_none() {
+                    println!("Response parameter not found in params!");
+                }
+                
+                assert!(response_param.is_some());
+                assert_eq!(response_param.unwrap(), "dfe56131d1958046689d83306477ecc");
             },
             _ => panic!("Expected Digest credentials"),
         }
