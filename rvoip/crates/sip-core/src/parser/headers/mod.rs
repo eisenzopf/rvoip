@@ -57,7 +57,7 @@ mod media_type;
 pub use via::parse_via;
 pub use contact::parse_contact;
 pub use from::parse_from;
-pub use to::parse_to;
+pub use to::{parse_to, to_header};
 pub use route::parse_route;
 pub use record_route::parse_record_route;
 pub use cseq::parse_cseq;
