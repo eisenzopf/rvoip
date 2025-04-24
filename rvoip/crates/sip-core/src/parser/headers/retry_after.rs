@@ -4,7 +4,7 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case, tag},
+    bytes::complete::{tag_no_case, tag, take_while},
     combinator::{map, map_res, opt},
     multi::{many0, separated_list0},
     sequence::{pair, preceded, tuple, delimited},
@@ -25,7 +25,7 @@ use crate::types::param::Param;
 use crate::parser::common::*;
 use crate::parser::ParseResult;
 
-// Define local RetryParam enum
+// Define public RetryParam enum for use in types module
 #[derive(Debug, PartialEq, Clone)]
 pub enum RetryParam {
     Duration(u32),
@@ -33,13 +33,22 @@ pub enum RetryParam {
 }
 
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
-fn retry_param(input: &[u8]) -> ParseResult<RetryParam> { // Returns local RetryParam
+pub fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
     alt((
-        map(
-            preceded(pair(tag_no_case(b"duration"), equal), delta_seconds),
-            RetryParam::Duration
+        // Verify that duration has a valid delta-seconds value
+        map_res(
+            preceded(pair(tag_no_case(b"duration"), equal), take_while(|c| c != b';' && c != b' ')),
+            |duration_bytes: &[u8]| {
+                // Convert to string and then parse as a number
+                let duration_str = std::str::from_utf8(duration_bytes)
+                    .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Digit)))?;
+                
+                // Try to parse as a u32
+                duration_str.parse::<u32>()
+                    .map(RetryParam::Duration)
+                    .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Digit)))
+            }
         ),
-        // Ensure generic_param only returns Param::Other here if needed
         map(generic_param, RetryParam::Generic)
     ))(input)
 }
@@ -47,9 +56,9 @@ fn retry_param(input: &[u8]) -> ParseResult<RetryParam> { // Returns local Retry
 // Define struct for Retry-After value
 #[derive(Debug, PartialEq, Clone)]
 pub struct RetryAfterValue {
-    pub delay: u32, // delta-seconds
+    pub delay: u32,            // delta-seconds
     pub comment: Option<String>,
-    pub params: Vec<RetryParam>, // Use local RetryParam
+    pub params: Vec<RetryParam>,
 }
 
 /// Parses a Retry-After header value.
@@ -59,23 +68,24 @@ pub fn parse_retry_after(input: &[u8]) -> ParseResult<RetryAfterValue> { // New 
         tuple((
             delta_seconds,
             opt(preceded(lws, comment)),
-            // This correctly parses Vec<RetryParam> because it uses retry_param
-            opt(many0(preceded(semi, retry_param))) 
+            many0(preceded(semi, retry_param))
         )),
-        |(delta, comment_bytes_opt, params_opt)| {
-            // Refactor using and_then
+        |(delta, comment_bytes_opt, params)| {
+            // Convert comment bytes to String if present
             let comment_opt_result = comment_bytes_opt
                 .map(|b| {
                     str::from_utf8(b)
                         .map(|s| s.to_string())
-                        // Map Utf8Error to nom::Err::Failure
-                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(b, ErrorKind::Char))) 
+                        .map_err(|_| nom::Err::Failure(NomError::from_error_kind(b, ErrorKind::Char)))
                 })
-                .transpose(); // Option<Result<String, nom::Err>> -> Result<Option<String>, nom::Err>
+                .transpose();
 
-            comment_opt_result.map(|comment_opt| { // Only proceed if comment parsing succeeded
-                 let params_vec = params_opt.unwrap_or_default();
-                 RetryAfterValue { delay: delta, comment: comment_opt, params: params_vec }
+            comment_opt_result.map(|comment_opt| {
+                RetryAfterValue {
+                    delay: delta,
+                    comment: comment_opt,
+                    params,
+                }
             })
         }
     )(input)
@@ -92,10 +102,14 @@ mod tests {
         assert!(rem_dur.is_empty());
         assert!(matches!(param_dur, RetryParam::Duration(60)));
 
-        let (rem_gen, param_gen) = retry_param(b"reason=Temporarily Unavailable").unwrap();
+        let (rem_gen, param_gen) = retry_param(b"reason=Temporarily").unwrap();
         assert!(rem_gen.is_empty());
-        // Note: Generic param value might be Token or Quoted depending on input
         assert!(matches!(param_gen, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) 
+                         if n == "reason" && v == "Temporarily"));
+                         
+        let (rem_quoted, param_quoted) = retry_param(b"reason=\"Temporarily Unavailable\"").unwrap();
+        assert!(rem_quoted.is_empty());
+        assert!(matches!(param_quoted, RetryParam::Generic(Param::Other(n, Some(GenericValue::Quoted(v)))) 
                          if n == "reason" && v == "Temporarily Unavailable"));
     }
 
@@ -104,7 +118,7 @@ mod tests {
         let input = b"120";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, value) = result.unwrap(); // Now returns RetryAfterValue
+        let (rem, value) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(value.delay, 120);
         assert!(value.comment.is_none());
@@ -116,7 +130,7 @@ mod tests {
         let input = b"180 (Call Server Migration)";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
+        let (rem, value) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(value.delay, 180);
         assert_eq!(value.comment, Some("Call Server Migration".to_string()));
@@ -128,27 +142,27 @@ mod tests {
         let input = b"5;duration=10;reason=congestion";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
+        let (rem, value) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(value.delay, 5);
         assert!(value.comment.is_none());
         assert_eq!(value.params.len(), 2);
-        assert!(value.params.contains(&RetryParam::Duration(10)));
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Duration(10))));
         // Adjust test to check the Generic variant correctly
         assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "reason" && v == "congestion")));
     }
 
-     #[test]
+    #[test]
     fn test_parse_retry_after_full() {
         let input = b"60 (Please wait) ;duration=90";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
+        let (rem, value) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(value.delay, 60);
         assert_eq!(value.comment, Some("Please wait".to_string()));
         assert_eq!(value.params.len(), 1);
-        assert!(value.params.contains(&RetryParam::Duration(90)));
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Duration(90))));
     }
 
     #[test]
@@ -156,10 +170,61 @@ mod tests {
         let input = b"120 (Nested (comment) here)";
         let result = parse_retry_after(input);
         assert!(result.is_ok());
-        let (rem, value) = result.unwrap(); // Returns RetryAfterValue
+        let (rem, value) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(value.delay, 120);
         assert_eq!(value.comment, Some("Nested (comment) here".to_string()));
         assert!(value.params.is_empty());
+    }
+
+    #[test]
+    fn test_parse_retry_after_rfc_examples() {
+        // Test with examples similar to those in RFC 3261
+        let input = b"18000 (5 hours)";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 18000);
+        assert_eq!(value.comment, Some("5 hours".to_string()));
+        
+        let input = b"120";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 120);
+        
+        let input = b"3600;duration=1800";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 3600);
+        assert_eq!(value.params.len(), 1);
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Duration(1800))));
+    }
+    
+    #[test]
+    fn test_parse_retry_after_multiple_params() {
+        let input = b"300;duration=600;reason=maintenance;urgent;retry-id=123";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 300);
+        assert_eq!(value.params.len(), 4);
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Duration(600))));
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "reason" && v == "maintenance")));
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, None)) if n == "urgent")));
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "retry-id" && v == "123")));
+    }
+    
+    #[test]
+    fn test_parse_retry_after_parameter_only() {
+        // Test with parameter only, no comment
+        let input = b"60;duration=120";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 60);
+        assert!(value.comment.is_none());
+        assert_eq!(value.params.len(), 1);
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Duration(120))));
+    }
+    
+    #[test]
+    fn test_parse_retry_after_quoted_param() {
+        // Test with quoted parameter value
+        let input = b"60;reason=\"Server Maintenance\"";
+        let (_, value) = parse_retry_after(input).unwrap();
+        assert_eq!(value.delay, 60);
+        assert!(value.params.iter().any(|p| matches!(p, RetryParam::Generic(Param::Other(n, Some(GenericValue::Quoted(v)))) if n == "reason" && v == "Server Maintenance")));
     }
 }

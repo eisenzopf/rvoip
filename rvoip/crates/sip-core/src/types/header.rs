@@ -965,25 +965,27 @@ impl TryFrom<Header> for TypedHeader {
                         let delay = ra_value.delay;
                         let comment = ra_value.comment;
                         
-                        // Convert params from RetryParam to HashMap entries
-                        let mut parameters = HashMap::new();
+                        // Create a RetryAfter instance with the parsed values
+                        let mut retry_after = RetryAfter::new(delay);
+                        
+                        // Set comment if present
+                        if let Some(comment_text) = comment {
+                            retry_after.comment = Some(comment_text);
+                        }
+                        
+                        // Process parameters
                         for param in ra_value.params {
                             match param {
                                 crate::parser::headers::retry_after::RetryParam::Duration(d) => {
-                                    parameters.insert("duration".to_string(), d.to_string());
+                                    retry_after.duration = Some(d);
                                 },
-                                crate::parser::headers::retry_after::RetryParam::Generic(Param::Other(name, Some(value))) => {
-                                    parameters.insert(name, value.to_string());
-                                },
-                                _ => {} // Ignore other param types
+                                crate::parser::headers::retry_after::RetryParam::Generic(param) => {
+                                    retry_after.parameters.push(param);
+                                }
                             }
                         }
                         
-                        Ok(TypedHeader::RetryAfter(RetryAfter {
-                            delay,
-                            comment,
-                            parameters,
-                        }))
+                        Ok(TypedHeader::RetryAfter(retry_after))
                     })
             },
             HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(value_bytes)
