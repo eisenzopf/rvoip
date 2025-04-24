@@ -45,7 +45,7 @@ pub struct WarningValue {
 #[derive(Debug, PartialEq, Clone)]
 pub enum WarnAgent {
     HostPort(Host, Option<u16>),
-    Pseudonym(Vec<u8>),
+    Pseudonym(String),
 }
 
 // warn-code = 3DIGIT
@@ -61,11 +61,15 @@ fn warn_code(input: &[u8]) -> ParseResult<u16> { // Return u16 directly
 }
 
 // warn-agent = hostport / pseudonym (token)
-// Returns Result<(Host, Option<u16>), &[u8]> where Ok is HostPort, Err is Pseudonym bytes
-fn warn_agent(input: &[u8]) -> ParseResult<Result<(Host, Option<u16>), &[u8]>> {
+fn warn_agent(input: &[u8]) -> ParseResult<WarnAgent> {
     alt((
-        map(hostport, |hp| Ok(hp)), // hostport -> Ok variant
-        map(token, |t| Err(t)) // pseudonym (token) -> Err variant with bytes
+        // First try to parse as a hostport (which includes IP addresses)
+        map(hostport, |(host, port)| WarnAgent::HostPort(host, port)),
+        // Then try to parse as a pseudonym (token)
+        map_res(token, |t| {
+            str::from_utf8(t).map(|s| WarnAgent::Pseudonym(s.to_string()))
+                .map_err(|_| nom::Err::Error(NomError::from_error_kind(t, ErrorKind::AlphaNumeric)))
+        })
     ))(input)
 }
 
@@ -83,11 +87,7 @@ fn warning_value(input: &[u8]) -> ParseResult<WarningValue> {
             preceded(space1, warn_agent),
             preceded(space1, warn_text)
         )),
-        |(code, agent_res, text_b)| {
-            let agent = match agent_res {
-                Ok((host, port)) => WarnAgent::HostPort(host, port),
-                Err(pseudo_b) => WarnAgent::Pseudonym(pseudo_b.to_vec()), // Convert &[u8] to Vec<u8>
-            };
+        |(code, agent, text_b)| {
             WarningValue { code, agent, text: text_b.to_vec() } // Convert &[u8] to Vec<u8>
         }
     )(input)
@@ -97,7 +97,7 @@ fn warning_value(input: &[u8]) -> ParseResult<WarningValue> {
 // Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 // Note: HCOLON handled elsewhere if parsing just the value part
 pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
-    separated_list1(preceded(sws, tag(",")), warning_value)(input)
+    separated_list1(comma, warning_value)(input)
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 307);
-        assert!(matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "isi.edu"));
+        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "isi.edu"));
         assert_eq!(val.text, b"Session parameter 'foo' not understood".to_vec()); // Compare Vec<u8>
     }
 
@@ -125,8 +125,7 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 399);
-        // Assuming pseudonym token is parsed as hostport for now by warn_agent
-        assert!(matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "p1.example.net"));
+        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "p1.example.net"));
         assert_eq!(val.text, b"Response too large".to_vec()); // Compare Vec<u8>
     }
 

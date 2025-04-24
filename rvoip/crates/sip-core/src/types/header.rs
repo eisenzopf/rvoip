@@ -936,12 +936,11 @@ impl TryFrom<Header> for TypedHeader {
                                  parser::headers::warning::WarnAgent::HostPort(host, port_opt) => {
                                      Uri::new(Scheme::Sip, host)
                                  },
-                                 parser::headers::warning::WarnAgent::Pseudonym(bytes) => {
-                                     let host_str = String::from_utf8_lossy(&bytes);
-                                     match types::uri::Host::from_str(&host_str) {
+                                 parser::headers::warning::WarnAgent::Pseudonym(pseudonym_str) => {
+                                     match types::uri::Host::from_str(&pseudonym_str) {
                                           Ok(host) => Uri::new(Scheme::Sip, host),
                                           Err(_) => {
-                                              return Err(Error::ParseError(format!("Cannot represent warning agent pseudonym '{}' as a valid host for Uri", host_str)));
+                                              return Err(Error::ParseError(format!("Cannot represent warning agent pseudonym '{}' as a valid host for Uri", pseudonym_str)));
                                           }
                                      }
                                  }
