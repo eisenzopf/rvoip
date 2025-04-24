@@ -4,19 +4,27 @@
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
 // accept-param = ("q" EQUAL qvalue) / generic-param
 //
-// This is based on RFC 3066 (Language Tags) which specifies:
+// This uses RFC 5646 (formerly RFC 3066) language tag format which specifies:
 // - Primary subtag: 1-8 ASCII alphabetic characters
 // - Subsequent subtags: 1-8 ASCII alphanumeric characters
-// - Subtags separated by hyphens
+// - Subtags separated by hyphens only (no underscores)
 // - Language tags are case-insensitive (though lowercase is preferred)
+//
+// RFC 5646 Extended Structure:
+// - Extended language subtags: 3 alphabetic characters, up to 3 subtags
+// - Script subtags: 4 alphabetic characters 
+// - Region subtags: 2 alphabetic or 3 digit characters
+// - Variant subtags: 5-8 alphanumeric or 4 alphanumeric if starts with digit
+// - Extensions: single character followed by subtags
+// - Private use: 'x' followed by subtags
 
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
     character::complete::alpha1,
-    combinator::{map, opt, recognize, value, map_res},
+    combinator::{map, opt, recognize, value, map_res, verify},
     multi::{many0, separated_list0, separated_list1},
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, delimited},
     IResult,
 };
 use std::str;
@@ -51,7 +59,7 @@ impl LanguageInfo {
         self.q.map_or(1.0, |q| q.into_inner())
     }
     
-    // Compare language tags in a case-insensitive manner per RFC 3066
+    // Compare language tags in a case-insensitive manner per RFC 3066/5646
     pub fn language_equals(&self, other: &str) -> bool {
         self.range.eq_ignore_ascii_case(other)
     }
@@ -92,21 +100,81 @@ impl fmt::Display for LanguageInfo {
     }
 }
 
+// Ensures the input doesn't contain underscores (to be RFC compliant)
+fn no_underscore(input: &[u8]) -> bool {
+    !input.contains(&b'_')
+}
+
 // primary-tag = 1*8ALPHA
-// Per RFC 3066, the primary tag must be alphabetic
+// Per RFC 5646, the primary tag must be alphabetic
 fn primary_tag_part(input: &[u8]) -> ParseResult<&[u8]> {
-    take_while_m_n(1, 8, |c: u8| c.is_ascii_alphabetic())(input)
+    verify(
+        take_while_m_n(1, 8, |c: u8| c.is_ascii_alphabetic()),
+        no_underscore // Explicitly disallow underscores
+    )(input)
 }
 
 // subtag = 1*8ALPHANUM
-// Per RFC 3066, subtags can be alphanumeric
+// Per RFC 5646, subtags can be alphanumeric
 fn subtag_part(input: &[u8]) -> ParseResult<&[u8]> {
-    take_while_m_n(1, 8, |c: u8| c.is_ascii_alphanumeric())(input)
+    verify(
+        take_while_m_n(1, 8, |c: u8| c.is_ascii_alphanumeric()),
+        no_underscore // Explicitly disallow underscores
+    )(input)
+}
+
+// Extended language subtag: 3 ALPHA characters per RFC 5646
+fn ext_lang_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+    verify(
+        take_while_m_n(3, 3, |c: u8| c.is_ascii_alphabetic()),
+        no_underscore
+    )(input)
+}
+
+// Script subtag: 4 ALPHA characters per RFC 5646
+fn script_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+    verify(
+        take_while_m_n(4, 4, |c: u8| c.is_ascii_alphabetic()),
+        no_underscore
+    )(input)
+}
+
+// Region subtag: 2 ALPHA or 3 DIGIT per RFC 5646
+fn region_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+    verify(
+        alt((
+            take_while_m_n(2, 2, |c: u8| c.is_ascii_alphabetic()),
+            take_while_m_n(3, 3, |c: u8| c.is_ascii_digit())
+        )),
+        no_underscore
+    )(input)
+}
+
+// Variant subtag: 5-8 alphanum or 4 if starts with digit
+fn variant_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+    verify(
+        alt((
+            take_while_m_n(5, 8, |c: u8| c.is_ascii_alphanumeric()),
+            verify(
+                take_while_m_n(4, 4, |c: u8| c.is_ascii_alphanumeric()),
+                |s: &[u8]| s.len() > 0 && s[0].is_ascii_digit()
+            )
+        )),
+        no_underscore
+    )(input)
 }
 
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
-// Returns range as String (converted to lowercase as per RFC 3066)
+// Returns range as String (converted to lowercase as per RFC 5646)
 fn language_range(input: &[u8]) -> ParseResult<String> {
+    // Reject inputs containing underscores immediately
+    if input.contains(&b'_') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Alpha
+        )));
+    }
+
     alt((
         // Regular language tag
         map_res(
@@ -141,6 +209,28 @@ fn language_range(input: &[u8]) -> ParseResult<String> {
                 
                 Ok(String::from_utf8_lossy(bytes).to_string().to_lowercase())
             }
+        ),
+        // RFC 5646 grandfathered tags (rare, but preserved for compatibility)
+        map(
+            alt((
+                tag_no_case(b"i-ami"),
+                tag_no_case(b"i-bnn"),
+                tag_no_case(b"i-default"),
+                tag_no_case(b"i-enochian"),
+                tag_no_case(b"i-hak"),
+                tag_no_case(b"i-klingon"),
+                tag_no_case(b"i-lux"),
+                tag_no_case(b"i-mingo"),
+                tag_no_case(b"i-navajo"),
+                tag_no_case(b"i-pwn"),
+                tag_no_case(b"i-tao"),
+                tag_no_case(b"i-tay"),
+                tag_no_case(b"i-tsu"),
+                tag_no_case(b"sgn-be-fr"),
+                tag_no_case(b"sgn-be-nl"),
+                tag_no_case(b"sgn-ch-de")
+            )),
+            |bytes| String::from_utf8_lossy(bytes).to_string().to_lowercase()
         ),
         // Wildcard
         map(
@@ -261,20 +351,16 @@ mod tests {
         assert!(rem_wild.is_empty());
         assert_eq!(range_wild, "*");
         
-        // Alphanumeric subtags (RFC 3066 compliant)
+        // Alphanumeric subtags (RFC 5646 compliant)
         let (_, range_alphanum) = language_range(b"en-gb2").unwrap();
         assert_eq!(range_alphanum, "en-gb2", "Should accept alphanumeric subtags");
         
         // Invalid cases
         assert!(language_range(b"1234").is_err(), "Should reject non-alphabetic primary tags");
         
-        // Underscore handling check (RFC only allows hyphens, but implementation might accept underscores)
+        // Underscore handling check (RFC only allows hyphens)
         let underscore_result = language_range(b"en_us");
-        if underscore_result.is_ok() {
-            println!("Note: Current implementation accepts underscores which is not RFC compliant");
-        } else {
-            assert!(underscore_result.is_err(), "Should ideally reject underscores per RFC");
-        }
+        assert!(underscore_result.is_err(), "Should reject underscores as per RFC");
         
         // Tag length validation - the parser should take only the first 8 characters and leave the rest
         let long_tag_result = language_range(b"abcdefghi");
@@ -295,6 +381,15 @@ mod tests {
         let (remainder, value) = long_subtag_result.unwrap();
         assert_eq!(value, "en-abcdefgh", "Should only take a valid subtag length");
         assert_eq!(remainder, &b"i"[..], "Should leave the extra character as remainder");
+        
+        // RFC 5646 grandfathered tags
+        let (_, grand_tag) = language_range(b"i-navajo").unwrap();
+        assert_eq!(grand_tag, "i-navajo", "Should accept RFC 5646 grandfathered tags");
+        
+        // Test for extended language subtags (RFC 5646)
+        let complex_tag = b"zh-yue-HK"; // Cantonese as spoken in Hong Kong
+        let (_, complex_value) = language_range(complex_tag).unwrap();
+        assert_eq!(complex_value, "zh-yue-hk", "Should handle extended language subtags");
         
         // Correct subtag parsing
         let (_, range_multi) = language_range(b"zh-hans-cn").unwrap();
@@ -318,6 +413,29 @@ mod tests {
             Some(NotNan::new(0.123).unwrap()),
             "Should round to 3 decimal places"
         );
+    }
+    
+    #[test]
+    fn test_rfc5646_extensions() {
+        // Test script subtag (4 alphabetic chars)
+        let script_tag = b"zh-Hant"; // Chinese written in Traditional script
+        let (_, script_value) = language_range(script_tag).unwrap();
+        assert_eq!(script_value, "zh-hant", "Should handle script subtags");
+        
+        // Test region subtag (2 alpha or 3 digit)
+        let region_alpha_tag = b"en-US"; // English as used in the United States
+        let (_, region_alpha_value) = language_range(region_alpha_tag).unwrap();
+        assert_eq!(region_alpha_value, "en-us", "Should handle region subtags (alpha)");
+        
+        // Test variant subtag
+        let variant_tag = b"sl-rozaj-biske"; // Resian dialect of Slovene, Biscotarian variety
+        let (_, variant_value) = language_range(variant_tag).unwrap();
+        assert_eq!(variant_value, "sl-rozaj-biske", "Should handle variant subtags");
+        
+        // Test private use
+        let private_tag = b"x-private"; 
+        let (_, private_value) = language_range(private_tag).unwrap();
+        assert_eq!(private_value, "x-private", "Should handle private use tags");
     }
     
     #[test]
