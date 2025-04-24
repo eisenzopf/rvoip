@@ -22,6 +22,7 @@ bytes = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, version = "1.7", features = ["v4"] }
 # Parsing
 nom = "7.1.3"
+fluent-uri = "0.3.2"
 # Logging
 tracing = { workspace = true }
 ordered-float = { version = "5.0.0", features = ["serde"] }
