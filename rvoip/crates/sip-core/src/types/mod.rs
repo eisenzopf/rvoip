@@ -19,6 +19,10 @@ pub use param::Param;
 pub mod uri;
 pub use uri::{Uri, Host, Scheme};
 
+// Add URI adapter module
+pub mod uri_adapter;
+pub use uri_adapter::UriAdapter;
+
 // Add Version module
 pub mod version;
 pub use version::Version;
@@ -31,6 +35,7 @@ pub mod address;
 pub mod allow;
 pub mod auth;
 pub mod call_id;
+pub mod call_info;
 pub mod contact;
 pub mod content_disposition;
 pub mod content_length;
@@ -65,6 +70,7 @@ pub use address::Address;
 pub use allow::Allow;
 pub use auth::*;
 pub use call_id::CallId;
+pub use call_info::{CallInfo, CallInfoValue, InfoPurpose};
 pub use contact::Contact;
 pub use content_disposition::*;
 pub use content_length::ContentLength;

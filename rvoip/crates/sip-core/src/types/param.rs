@@ -93,21 +93,21 @@ pub enum Param {
 impl fmt::Display for Param {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Param::Branch(val) => write!(f, ";branch={}", val),
-            Param::Tag(val) => write!(f, ";tag={}", val),
-            Param::Expires(val) => write!(f, ";expires={}", val),
-            Param::Received(val) => write!(f, ";received={}", val),
-            Param::Maddr(val) => write!(f, ";maddr={}", val),
-            Param::Ttl(val) => write!(f, ";ttl={}", val),
-            Param::Lr => write!(f, ";lr"),
-            Param::Q(val) => write!(f, ";q={:.3}", val.into_inner()),
-            Param::Transport(val) => write!(f, ";transport={}", val),
-            Param::User(val) => write!(f, ";user={}", val),
-            Param::Method(val) => write!(f, ";method={}", val),
-            Param::Handling(val) => write!(f, ";handling={}", val),
-            Param::Duration(val) => write!(f, ";duration={}", val),
-            Param::Other(key, Some(val)) => write!(f, ";{}={}", key, val), // Use GenericValue::Display
-            Param::Other(key, None) => write!(f, ";{}", key),
+            Param::Branch(val) => write!(f, "branch={}", val),
+            Param::Tag(val) => write!(f, "tag={}", val),
+            Param::Expires(val) => write!(f, "expires={}", val),
+            Param::Received(val) => write!(f, "received={}", val),
+            Param::Maddr(val) => write!(f, "maddr={}", val),
+            Param::Ttl(val) => write!(f, "ttl={}", val),
+            Param::Lr => write!(f, "lr"),
+            Param::Q(val) => write!(f, "q={:.3}", val.into_inner()),
+            Param::Transport(val) => write!(f, "transport={}", val),
+            Param::User(val) => write!(f, "user={}", val),
+            Param::Method(val) => write!(f, "method={}", val),
+            Param::Handling(val) => write!(f, "handling={}", val),
+            Param::Duration(val) => write!(f, "duration={}", val),
+            Param::Other(key, Some(val)) => write!(f, "{}={}", key, val), // Use GenericValue::Display
+            Param::Other(key, None) => write!(f, "{}", key),
         }
     }
 }

@@ -49,10 +49,10 @@ use crate::types::retry_after::RetryAfter;
 use crate::parser::headers::accept_encoding::EncodingInfo as AcceptEncodingValue; // Use EncodingInfo from parser
 use crate::types::accept_language::AcceptLanguage; // Use our new AcceptLanguage type
 use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
-use crate::parser::headers::call_info::CallInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
 use crate::types::refer_to::ReferTo; // Add ReferTo import
 use crate::parser::headers::refer_to::ReferToValue; // Import from parser
+use crate::types::call_info::{CallInfo, CallInfoValue};
 
 // Helper From implementation for Error
 impl From<FromUtf8Error> for Error {
@@ -345,7 +345,7 @@ pub enum HeaderValue {
 
     // === Info Headers ===
     AlertInfo(Vec<AlertInfoValue>),
-    CallInfo(Vec<CallInfoValue>),
+    CallInfo(Vec<CallInfoValue>), // Keep as Vec<CallInfoValue> for backward compatibility
     ErrorInfo(Vec<ErrorInfoValue>),
 
     // === Misc ===
@@ -413,7 +413,20 @@ impl fmt::Display for HeaderValue {
                     write!(f, "{:?}", bytes)
                 }
             },
-            // Add handling for other variant types as needed
+            HeaderValue::CallInfo(ref values) => {
+                let mut first = true;
+                for value in values {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "<{}>", value.uri)?;
+                    for param in &value.params {
+                        write!(f, ";{}", param)?;
+                    }
+                    first = false;
+                }
+                Ok(())
+            },
             _ => write!(f, "[Complex Value]"),
         }
     }
@@ -511,7 +524,7 @@ pub enum TypedHeader {
     RetryAfter(RetryAfter), // Now using types::retry_after::RetryAfter
     ErrorInfo(Vec<crate::parser::headers::error_info::ErrorInfoValue>), // Use imported parser type
     AlertInfo(Vec<crate::parser::headers::alert_info::AlertInfoValue>), // Use imported parser type
-    CallInfo(Vec<crate::parser::headers::call_info::CallInfoValue>), // Use imported parser type
+    CallInfo(CallInfo), // Use our new CallInfo type
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -739,14 +752,7 @@ impl fmt::Display for TypedHeader {
                 Ok(())
             },
             TypedHeader::CallInfo(call_info) => {
-                write!(f, "{}: ", HeaderName::CallInfo)?;
-                for (i, info) in call_info.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", info)?;
-                }
-                Ok(())
+                write!(f, "{}", call_info)
             },
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
@@ -988,7 +994,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, alert_info_values)| TypedHeader::AlertInfo(alert_info_values))
                 .map_err(Error::from),
             HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(value_bytes)
-                .map(|(_, call_info_values)| TypedHeader::CallInfo(call_info_values))
+                .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
             HeaderName::ReferTo => {
                 match header.value {
@@ -1015,7 +1021,7 @@ impl TryFrom<Header> for TypedHeader {
 /// Trait for typed headers
 pub trait TypedHeaderTrait: Sized {
     /// Type of header name
-    type Name: Into<HeaderName> + Copy;
+    type Name: Into<HeaderName> + Clone;
     
     /// Header name
     fn header_name() -> Self::Name;

@@ -211,6 +211,28 @@ impl Uri {
         Self::new(Scheme::Tel, Host::domain(number))
     }
 
+    /// Create a new URI with a custom scheme by storing the entire URI string as the host
+    /// This is used for schemes that are not explicitly supported (like http, https)
+    /// but need to be preserved in the Call-Info header
+    pub fn custom(uri_string: impl Into<String>) -> Self {
+        let uri_string = uri_string.into();
+        
+        // If it's a SIP URI, parse it normally
+        if uri_string.starts_with("sip:") || uri_string.starts_with("sips:") || uri_string.starts_with("tel:") {
+            return Self::from_str(&uri_string).unwrap_or_else(|_| {
+                // Fallback to custom storage if parsing fails
+                let mut uri = Self::new(Scheme::Sip, Host::domain("_custom_"));
+                uri.parameters.push(Param::Other("_custom_uri_".to_string(), Some(crate::types::param::GenericValue::Token(uri_string))));
+                uri
+            });
+        }
+        
+        // For non-SIP URIs, store as custom
+        let mut uri = Self::new(Scheme::Sip, Host::domain("_custom_"));
+        uri.parameters.push(Param::Other("_custom_uri_".to_string(), Some(crate::types::param::GenericValue::Token(uri_string))));
+        uri
+    }
+
     /// Get the username part of the URI, if present
     pub fn username(&self) -> Option<&str> {
         self.user.as_deref()
@@ -265,42 +287,71 @@ impl Uri {
 
 impl fmt::Display for Uri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:", self.scheme)?;
-
-        if let Some(user) = &self.user {
-            write!(f, "{}", escape_user_info(user))?;
-
-            if let Some(password) = &self.password {
-                write!(f, ":{}", escape_user_info(password))?;
+        // Check if this is a custom URI (with the _custom_uri_ parameter)
+        for param in &self.parameters {
+            if let Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) = param {
+                if name == "_custom_uri_" {
+                    return f.write_str(value);
+                }
             }
-
-            write!(f, "@")?;
         }
 
-        write!(f, "{}", self.host)?;
-
+        // Normal URI formatting
+        write!(f, "{}:", self.scheme)?;
+        
+        // User info (username and optional password)
+        if let Some(ref user) = self.user {
+            let escaped_user = escape_user_info(user);
+            write!(f, "{}", escaped_user)?;
+            
+            if let Some(ref password) = self.password {
+                let escaped_password = escape_user_info(password);
+                write!(f, ":{}", escaped_password)?;
+            }
+            
+            write!(f, "@")?;
+        }
+        
+        // Host (domain or IP address)
+        match &self.host {
+            Host::Domain(domain) => write!(f, "{}", domain)?,
+            Host::Address(IpAddr::V4(addr)) => write!(f, "{}", addr)?,
+            Host::Address(IpAddr::V6(addr)) => write!(f, "[{}]", addr)?,
+        }
+        
+        // Optional port
         if let Some(port) = self.port {
             write!(f, ":{}", port)?;
         }
-
-        // Iterate over Vec<Param> for display
+        
+        // Parameters (;key=value or ;key)
         for param in &self.parameters {
-            write!(f, "{}", param)?;
+            // Skip internal parameters
+            if let Param::Other(name, _) = param {
+                if name == "_custom_uri_" {
+                    continue;
+                }
+            }
+            write!(f, ";{}", param)?;
         }
-
+        
+        // Headers (?key=value&key=value)
         if !self.headers.is_empty() {
-            write!(f, "?")?;
-
             let mut first = true;
             for (key, value) in &self.headers {
-                if !first {
+                if first {
+                    write!(f, "?")?;
+                    first = false;
+                } else {
                     write!(f, "&")?;
                 }
-                write!(f, "{}={}", escape_param(key), escape_param(value))?;
-                first = false;
+                
+                // URL-encode key and value
+                // TODO: Implement proper URL encoding
+                write!(f, "{}={}", key, value)?;
             }
         }
-
+        
         Ok(())
     }
 }
