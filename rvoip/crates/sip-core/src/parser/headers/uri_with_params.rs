@@ -19,48 +19,53 @@ use crate::types::param::Param;
 // Returns (URI String, Vec<Param>)
 
 pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
-    println!("uri_with_generic_params input: {:?}", std::str::from_utf8(input));
-    
-    // Try to find laquot
-    if let Some(i) = input.iter().position(|&b| b == b'<') {
-        println!("Found laquot at position {}", i);
-    } else {
-        println!("No laquot found in input");
-    }
-    
-    // Try to find raquot
-    if let Some(i) = input.iter().position(|&b| b == b'>') {
-        println!("Found raquot at position {}", i);
-    } else {
-        println!("No raquot found in input");
-    }
-    
     map(
         pair(
             // LAQUOT absoluteURI RAQUOT
             map_res( // Use map_res to handle potential UTF-8 error from absoluteURI bytes
                 delimited(
                     laquot,
-                    parse_absolute_uri, 
+                    take_until_raquot,
                     raquot
                 ),
-                 |bytes| {
-                     println!("absoluteURI bytes: {:?}", bytes);
-                     let res = str::from_utf8(bytes);
-                     if let Err(ref e) = res {
-                         println!("UTF-8 conversion error: {:?}", e);
-                     }
-                     res.map(String::from)
-                 }
+                |bytes| str::from_utf8(bytes).map(String::from)
             ),
             // *( SEMI generic-param )
             many0(preceded(semi, generic_param))
         ),
-        |(uri_str, params_vec)| {
-            println!("Successful parse: uri_str={}, params={:?}", uri_str, params_vec);
-            (uri_str, params_vec)
-        }
+        |(uri_str, params_vec)| (uri_str, params_vec)
     )(input)
+}
+
+// Helper function to extract the URI content between angle brackets
+fn take_until_raquot(input: &[u8]) -> ParseResult<&[u8]> {
+    if input.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeUntil
+        )));
+    }
+    
+    // Look for the closing angle bracket
+    let mut i = 0;
+    let mut found = false;
+    
+    while i < input.len() {
+        if input[i] == b'>' {
+            found = true;
+            break;
+        }
+        i += 1;
+    }
+    
+    if !found {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeUntil
+        )));
+    }
+    
+    Ok((&input[i..], &input[0..i]))
 }
 
 #[cfg(test)]

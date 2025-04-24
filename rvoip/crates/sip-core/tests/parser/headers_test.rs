@@ -16,6 +16,45 @@ use rvoip_sip_core::Uri;
 use std::str::FromStr;
 use std::net::IpAddr;
 use std::collections::HashMap;
+use rvoip_sip_core::types::{
+    Uri,
+    allow::Allow,
+    supported::Supported,
+    require::Require,
+    organization::Organization,
+    server::ServerInfo,
+    unsupported::Unsupported,
+    cseq::CSeq,
+    max_forwards::MaxForwards,
+    subject::Subject,
+    warning::Warning,
+    date::Date,
+    user_agent::UserAgent,
+    min_expires::MinExpires,
+    priority::Priority,
+    mime::MediaType,
+    retry_after::RetryAfter,
+    accept::Accept,
+    call_id::CallId,
+    expires::Expires,
+    content_length::ContentLength,
+    content_type::ContentType,
+    content_encoding::ContentEncoding,
+    content_disposition::ContentDisposition,
+    via::Via,
+    contact::Contact,
+    to::To,
+    from::From,
+    auth::{WwwAuthenticate, Authorization, ProxyAuthenticate, ProxyAuthorization, AuthenticationInfo, 
+          Challenge, Credentials, DigestParam, Qop, Algorithm, AuthenticationInfoParam, Scheme},
+    extensions::{AcceptLanguage, CallInfo, AlertInfo, ErrorInfo, InReplyTo, SuppressIfMatch},
+    event::Event,
+    subscription_state::SubscriptionState,
+    address::Address,
+    record_route::{RecordRoute, RecordRouteEntry},
+    route::{Route, RouteEntry as ParserRouteValue},
+    reply_to::ReplyTo,
+};
 
 #[test]
 fn test_cseq_parser_typed() {
@@ -260,26 +299,28 @@ fn test_www_authenticate_parser_typed() {
     /// RFC 3261 Section 20.44 WWW-Authenticate
     assert_parses_ok(
         "Digest realm=\"example.com\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", algorithm=MD5, qop=\"auth, auth-int\", stale=true",
-        WwwAuthenticate {
-            scheme: Scheme::Digest,
-            realm: "example.com".to_string(),
-            domain: None,
-            nonce: "dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string(),
-            opaque: None,
-            stale: Some(true),
-            algorithm: Some(Algorithm::Md5),
-            qop: vec![Qop::Auth, Qop::AuthInt],
-        }
+        WwwAuthenticate(
+            Challenge::Digest { 
+                params: vec![
+                    DigestParam::Realm("example.com".to_string()),
+                    DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string()),
+                    DigestParam::Algorithm(Algorithm::Md5),
+                    DigestParam::Qop(vec![Qop::Auth, Qop::AuthInt]),
+                    DigestParam::Stale(true),
+                ]
+            }
+        )
     );
     assert_parses_ok(
         "Digest realm=\"realm2\", nonce=\"nonce123\"",
-        WwwAuthenticate {
-            scheme: Scheme::Digest,
-            realm: "realm2".to_string(),
-            domain: None,
-            nonce: "nonce123".to_string(),
-            opaque: None, stale: None, algorithm: None, qop: vec![]
-        }
+        WwwAuthenticate(
+            Challenge::Digest { 
+                params: vec![
+                    DigestParam::Realm("realm2".to_string()),
+                    DigestParam::Nonce("nonce123".to_string()),
+                ]
+            }
+        )
     );
     
     assert_parse_fails::<WwwAuthenticate>("Digest nonce=\"abc\""); // Missing realm
@@ -290,19 +331,22 @@ fn test_authorization_parser_typed() {
     /// RFC 3261 Section 22.2 Authorization
     assert_parses_ok(
         "Digest username=\"bob\", realm=\"biloxi.example.com\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"sip:bob@biloxi.example.com\", response=\"245f2341c95403d85a1aeae87d33a3e4\", algorithm=MD5, cnonce=\"0a4f113b\", opaque=\"5ccc069c403ebaf9f0171e9517f40e41\", qop=auth, nc=00000001",
-        Authorization {
-            scheme: Scheme::Digest,
-            username: "bob".to_string(),
-            realm: "biloxi.example.com".to_string(),
-            nonce: "dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string(),
-            uri: uri("sip:bob@biloxi.example.com"),
-            response: "245f2341c95403d85a1aeae87d33a3e4".to_string(),
-            algorithm: Some(Algorithm::Md5),
-            cnonce: Some("0a4f113b".to_string()),
-            opaque: Some("5ccc069c403ebaf9f0171e9517f40e41".to_string()),
-            message_qop: Some(Qop::Auth),
-            nonce_count: Some(1),
-        }
+        Authorization(
+            Credentials::Digest { 
+                params: vec![
+                    DigestParam::Username("bob".to_string()),
+                    DigestParam::Realm("biloxi.example.com".to_string()),
+                    DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string()),
+                    DigestParam::Uri(uri("sip:bob@biloxi.example.com")),
+                    DigestParam::Response("245f2341c95403d85a1aeae87d33a3e4".to_string()),
+                    DigestParam::Algorithm(Algorithm::Md5),
+                    DigestParam::Cnonce("0a4f113b".to_string()),
+                    DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string()),
+                    DigestParam::MsgQop(Qop::Auth),
+                    DigestParam::NonceCount(1),
+                ]
+            }
+        )
     );
     assert_parse_fails::<Authorization>("Digest username=\"u\""); // Missing fields
 }
@@ -312,13 +356,15 @@ fn test_proxy_authenticate_parser_typed() {
     /// RFC 3261 Section 22.3 Proxy-Authenticate
      assert_parses_ok(
         "Digest realm=\"proxy.com\", nonce=\"pnonce\", algorithm=SHA-256", 
-        ProxyAuthenticate(WwwAuthenticate {
-            scheme: Scheme::Digest,
-            realm: "proxy.com".to_string(),
-            nonce: "pnonce".to_string(),
-            algorithm: Some(Algorithm::Sha256),
-            domain: None, opaque: None, stale: None, qop: vec![]
-        })
+        ProxyAuthenticate(
+            Challenge::Digest { 
+                params: vec![
+                    DigestParam::Realm("proxy.com".to_string()),
+                    DigestParam::Nonce("pnonce".to_string()),
+                    DigestParam::Algorithm(Algorithm::Sha256),
+                ]
+            }
+        )
     );
     assert_parse_fails::<ProxyAuthenticate>("Digest nonce=\"pnonce\""); // Missing realm
 }
@@ -328,11 +374,18 @@ fn test_proxy_authorization_parser_typed() {
     /// RFC 3261 Section 22.3 Proxy-Authorization
      assert_parses_ok(
         "Digest username=\"pu\", realm=\"pr\", nonce=\"pn\", uri=\"sip:a@b\", response=\"pr\", algorithm=MD5", 
-        ProxyAuthorization(Authorization {
-            scheme: Scheme::Digest, username: "pu".to_string(), realm: "pr".to_string(), 
-            nonce: "pn".to_string(), uri: uri("sip:a@b"), response: "pr".to_string(),
-            algorithm: Some(Algorithm::Md5), cnonce: None, opaque: None, message_qop: None, nonce_count: None
-        })
+        ProxyAuthorization(
+            Credentials::Digest { 
+                params: vec![
+                    DigestParam::Username("pu".to_string()),
+                    DigestParam::Realm("pr".to_string()),
+                    DigestParam::Nonce("pn".to_string()),
+                    DigestParam::Uri(uri("sip:a@b")),
+                    DigestParam::Response("pr".to_string()),
+                    DigestParam::Algorithm(Algorithm::Md5),
+                ]
+            }
+        )
     );
      assert_parse_fails::<ProxyAuthorization>("Digest username=\"pu\""); // Missing fields
 }
@@ -342,17 +395,19 @@ fn test_authentication_info_parser_typed() {
     /// RFC 7615 Section 3. Authentication-Info Header Field
     assert_parses_ok(
         "nextnonce=\"nonce123\", qop=auth, rspauth=\"rsp456\", cnonce=\"cnonce789\", nc=00000001",
-        AuthenticationInfo {
-            nextnonce: Some("nonce123".to_string()),
-            qop: Some(Qop::Auth),
-            rspauth: Some("rsp456".to_string()),
-            cnonce: Some("cnonce789".to_string()),
-            nc: Some(1), // Parsed as octal
-        }
+        AuthenticationInfo(vec![
+            AuthenticationInfoParam::NextNonce("nonce123".to_string()),
+            AuthenticationInfoParam::Qop(Qop::Auth),
+            AuthenticationInfoParam::ResponseAuth("rsp456".to_string()),
+            AuthenticationInfoParam::Cnonce("cnonce789".to_string()),
+            AuthenticationInfoParam::NonceCount(1),
+        ])
     );
     assert_parses_ok(
         "rspauth=\"abc\"",
-        AuthenticationInfo { nextnonce: None, qop: None, rspauth: Some("abc".to_string()), cnonce: None, nc: None }
+        AuthenticationInfo(vec![
+            AuthenticationInfoParam::ResponseAuth("abc".to_string()),
+        ])
     );
     assert_parse_fails::<AuthenticationInfo>("nc=bad"); // Invalid nc format
 }
@@ -363,29 +418,39 @@ fn test_parse_route() {
     let input1 = "<sip:server10.biloxi.com;lr>, <sip:bigbox3.site3.atlanta.com;lr>";
     let uri1_1_uri = uri("sip:server10.biloxi.com").with_parameter(param_lr()); 
     let uri1_2_uri = uri("sip:bigbox3.site3.atlanta.com").with_parameter(param_lr());
-    let uri1_1 = UriWithParams { uri: uri1_1_uri, params: vec![] }; 
-    let uri1_2 = UriWithParams { uri: uri1_2_uri, params: vec![] }; 
-    assert_parses_ok(input1, Route(UriWithParamsList { uris: vec![uri1_1, uri1_2] }));
+    let addr1_1 = Address::new(None::<String>, uri1_1_uri);
+    let addr1_2 = Address::new(None::<String>, uri1_2_uri);
+    assert_parses_ok(input1, Route(vec![
+        ParserRouteValue(addr1_1),
+        ParserRouteValue(addr1_2),
+    ]));
 
     /// No angle brackets, single entry
     let input2 = "sip:192.168.0.1;transport=udp";
     let uri2_1_uri = uri("sip:192.168.0.1").with_parameter(param_transport("udp"));
-    let uri2_1 = UriWithParams { uri: uri2_1_uri, params: vec![] };
-    assert_parses_ok(input2, Route(UriWithParamsList { uris: vec![uri2_1] }));
+    let addr2_1 = Address::new(None::<String>, uri2_1_uri);
+    assert_parses_ok(input2, Route(vec![
+        ParserRouteValue(addr2_1),
+    ]));
 
     /// Mixed formats and more params
     let input3 = "<sip:p1.example.com;lr;foo=bar>, sip:p2.example.com;transport=tcp";
      let uri3_1_uri = uri("sip:p1.example.com").with_parameter(param_lr()).with_parameter(param_other("foo", Some("bar")));
      let uri3_2_uri = uri("sip:p2.example.com").with_parameter(param_transport("tcp"));
-     let uri3_1 = UriWithParams { uri: uri3_1_uri, params: vec![] };
-     let uri3_2 = UriWithParams { uri: uri3_2_uri, params: vec![] };
-     assert_parses_ok(input3, Route(UriWithParamsList { uris: vec![uri3_1, uri3_2] }));
+     let addr3_1 = Address::new(None::<String>, uri3_1_uri);
+     let addr3_2 = Address::new(None::<String>, uri3_2_uri);
+     assert_parses_ok(input3, Route(vec![
+        ParserRouteValue(addr3_1),
+        ParserRouteValue(addr3_2),
+    ]));
 
     /// URI with userinfo
     let input4 = "<sip:user@[::1]:5090;transport=tls;lr>";
      let uri4_1_uri = uri("sip:user@[::1]:5090").with_parameter(param_transport("tls")).with_parameter(param_lr());
-     let uri4_1 = UriWithParams { uri: uri4_1_uri, params: vec![] };
-     assert_parses_ok(input4, Route(UriWithParamsList { uris: vec![uri4_1] }));
+     let addr4_1 = Address::new(None::<String>, uri4_1_uri);
+     assert_parses_ok(input4, Route(vec![
+        ParserRouteValue(addr4_1),
+    ]));
 
     // Failure cases
     assert_parse_fails::<Route>(""); // Empty
@@ -401,14 +466,19 @@ fn test_parse_record_route() {
     let input1 = "<sip:server10.biloxi.com;lr>, <sip:bigbox3.site3.atlanta.com;lr>";
     let uri1_1_uri = uri("sip:server10.biloxi.com").with_parameter(param_lr());
     let uri1_2_uri = uri("sip:bigbox3.site3.atlanta.com").with_parameter(param_lr());
-    let uri1_1 = UriWithParams { uri: uri1_1_uri, params: vec![] };
-    let uri1_2 = UriWithParams { uri: uri1_2_uri, params: vec![] };
-    assert_parses_ok(input1, RecordRoute(UriWithParamsList { uris: vec![uri1_1, uri1_2] }));
+    let addr1_1 = Address::new(None::<String>, uri1_1_uri);
+    let addr1_2 = Address::new(None::<String>, uri1_2_uri);
+    assert_parses_ok(input1, RecordRoute(vec![
+        RecordRouteEntry(addr1_1),
+        RecordRouteEntry(addr1_2),
+    ]));
 
     let input2 = "sip:192.168.0.1;transport=udp";
     let uri2_1_uri = uri("sip:192.168.0.1").with_parameter(param_transport("udp"));
-    let uri2_1 = UriWithParams { uri: uri2_1_uri, params: vec![] };
-    assert_parses_ok(input2, RecordRoute(UriWithParamsList { uris: vec![uri2_1] }));
+    let addr2_1 = Address::new(None::<String>, uri2_1_uri);
+    assert_parses_ok(input2, RecordRoute(vec![
+        RecordRouteEntry(addr2_1),
+    ]));
 
     // Failure cases
     assert_parse_fails::<RecordRoute>("");
