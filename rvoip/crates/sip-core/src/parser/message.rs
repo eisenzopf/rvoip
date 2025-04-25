@@ -59,7 +59,55 @@ fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
     Ok((remaining_input, headers))
 }
 
+/// Parse a header value with support for line folding according to RFC 3261 Section 7.3.1.
+/// 
+/// Line folding occurs when a line ending CRLF is followed by whitespace (SP or HTAB).
+/// According to the RFC:
+/// "A line break followed by folding whitespace is equivalent to a SP character."
+/// 
+/// This parser correctly handles these folded lines and returns a slice that includes
+/// the entire logical header value across multiple physical lines.
+pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
+    // Find the next non-continuation line ending (i.e., CRLF not followed by SP/HTAB)
+    let mut i = 0;
+    let len = input.len();
+    let start = input;
+    
+    while i + 1 < len {
+        // Look for CRLF
+        if input[i] == b'\r' && input[i + 1] == b'\n' {
+            // Check if followed by whitespace (folding)
+            if i + 2 < len && (input[i + 2] == b' ' || input[i + 2] == b'\t') {
+                // This is a folded line, continue scanning
+                i += 2; // Skip the CR LF
+                
+                // Skip all whitespace in this folded line
+                while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                    i += 1;
+                }
+            } else {
+                // This is a non-folded line ending, end of header value
+                break;
+            }
+        } else {
+            // Regular character
+            i += 1;
+        }
+    }
+    
+    // Return the span from start to the end of the value
+    Ok((&input[i..], &start[..i]))
+}
+
 /// Top-level nom parser for a full SIP message (using byte input)
+/// 
+/// This parser follows a resilient approach to header parsing:
+/// 1. It will parse the start line (request-line or status-line)
+/// 2. It will parse all headers and attempt to convert them to typed headers
+/// 3. If a header can't be parsed into its typed form, it will be retained as a raw header
+///    instead of failing the entire message parse
+/// 4. Content-Length is extracted to determine body size
+/// 5. The message body is parsed based on the Content-Length header (or 0 if absent)
 fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
     // 1. Parse Start Line
     let (rest, start_line_data) = alt((
@@ -153,40 +201,6 @@ fn header_name(input: &[u8]) -> ParseResult<&[u8]> {
 // Simplified: Takes bytes until CRLF. Actual unfolding/validation happens later.
 pub fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
-}
-
-// header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
-// This correctly handles line folding according to RFC 3261
-pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
-    // Find the next non-continuation line ending (i.e., CRLF not followed by SP/HTAB)
-    let mut i = 0;
-    let len = input.len();
-    let start = input;
-    
-    while i + 1 < len {
-        // Look for CRLF
-        if input[i] == b'\r' && input[i + 1] == b'\n' {
-            // Check if followed by whitespace (folding)
-            if i + 2 < len && (input[i + 2] == b' ' || input[i + 2] == b'\t') {
-                // This is a folded line, continue scanning
-                i += 2; // Skip the CR LF
-                
-                // Skip all whitespace in this folded line
-                while i < len && (input[i] == b' ' || input[i] == b'\t') {
-                    i += 1;
-                }
-            } else {
-                // This is a non-folded line ending, end of header value
-                break;
-            }
-        } else {
-            // Regular character
-            i += 1;
-        }
-    }
-    
-    // Return the span from start to the end of the value
-    Ok((&input[i..], &start[..i]))
 }
 
 // message-header = header-name HCOLON header-value CRLF
