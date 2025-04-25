@@ -4,6 +4,7 @@
 pub mod parser {
     pub mod header_parser_test;
     pub mod uri_parser_test;
+    pub mod message_parser_test;
 }
 
 // Import common test utilities
