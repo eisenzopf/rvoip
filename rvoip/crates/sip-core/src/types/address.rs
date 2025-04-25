@@ -195,6 +195,10 @@ impl Address {
                     Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => Some(v_opt.as_ref().and_then(|gv| gv.as_str())),
                     Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
                     Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                    Param::Rport(val) if key.eq_ignore_ascii_case("rport") => match val {
+                        Some(port) => Some(Some(Box::leak(port.to_string().into_boxed_str()))),
+                        None => Some(None) // Flag parameter
+                    },
                     _ => None,
                 })
                 .flatten() // Flatten the Option<Option<&str>> to Option<&str>
@@ -223,6 +227,7 @@ impl Address {
             Param::Other(k, _) => !k.eq_ignore_ascii_case(&key_string),
             Param::Handling(_) => !key_string.eq_ignore_ascii_case("handling"),
             Param::Duration(_) => !key_string.eq_ignore_ascii_case("duration"),
+            Param::Rport(_) => !key_string.eq_ignore_ascii_case("rport"),
         });
 
         // Add as Param::Other
