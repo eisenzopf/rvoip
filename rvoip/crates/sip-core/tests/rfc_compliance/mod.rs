@@ -1,7 +1,11 @@
 // RFC Compliance Test Modules
 
-// pub mod rfc3261_examples; // File not found
-// pub mod rfc4475_test; // File not found
-// pub mod rfc5118_test; // File not found
-pub mod torture_test; // Uncommented - File exists
-// Add mods for other RFC/Torture tests later 
+// This directory contains tests for validating the SIP parser against
+// SIP RFC test cases, including RFC 4475 (SIP Torture Tests).
+
+// Current active modules
+pub mod torture_test; // RFC 4475 torture tests
+
+// Future modules - uncomment when implemented
+// pub mod rfc3261_examples; // Examples from core SIP spec RFC 3261
+// pub mod rfc5118_test; // Tests for Internationalized domain names and URIs RFC 5118 

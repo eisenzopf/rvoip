@@ -13,7 +13,7 @@ use rvoip_sip_core::types::sip_message::{Message, Request, Response};
 use rvoip_sip_core::{
     Error as SipError,
     Result as SipResult,
-    parser::message::parse_message, 
+    parse_message, 
     types::header::{HeaderName, HeaderValue, TypedHeader}
 };
 
@@ -102,11 +102,11 @@ where
     }
 }
 
-// --- Message Test Helpers (Keep existing for now) ---
+// --- Message Test Helpers ---
 
 /// Helper to parse a SIP message using bytes
 pub fn parse_sip_message_bytes(data: &[u8]) -> SipResult<Message> {
-    parse_message(data) // Direct call to parser
+    parse_message(data)
 }
 
 /// Helper to parse a SIP message from a string
@@ -129,9 +129,48 @@ pub fn expect_parse_error(msg: &str, expected_substring: Option<&str>) -> bool {
     }
 }
 
-/// Validate that a message parses successfully and contains expected fields (basic)
-/// Note: This uses raw string comparisons for headers, needs update for typed headers.
-pub fn validate_message_basic(
+/// Create a SIP request for testing
+pub fn create_test_request(method: Method, uri_str: &str) -> Request {
+    let uri = Uri::from_str(uri_str).expect("Invalid URI for test");
+    Request::new(method, uri)
+}
+
+/// Create a SIP response for testing
+pub fn create_test_response(status: StatusCode) -> Response {
+    Response::new(status)
+}
+
+/// Create a basic SIP message for testing (common test case)
+pub fn create_basic_message(method: Method, uri_str: &str) -> Message {
+    // Clone method since it doesn't implement Copy trait
+    let mut request = create_test_request(method.clone(), uri_str);
+    
+    // Import the specific types needed for each header
+    use rvoip_sip_core::types::to::To;
+    use rvoip_sip_core::types::from::From;
+    use rvoip_sip_core::types::call_id::CallId;
+    use rvoip_sip_core::types::cseq::CSeq;
+    
+    // Create properly typed headers
+    let to_header = To(addr(Some("Bob"), "sip:bob@example.com", vec![]));
+    let from_header = From(addr(Some("Alice"), "sip:alice@example.com", vec![param_tag("1234")]));
+    let call_id = CallId("test-call-id".to_string());
+    let cseq = CSeq::new(1, method);
+    
+    request = request
+        .with_header(TypedHeader::To(to_header))
+        .with_header(TypedHeader::From(from_header))
+        .with_header(TypedHeader::CallId(call_id))
+        .with_header(TypedHeader::CSeq(cseq))
+        .with_header(TypedHeader::Via(Via::new(
+            "SIP", "2.0", "UDP", "example.com", None, vec![param_branch("z9hG4bK-test")]
+        ).expect("Failed to create Via header")));
+    
+    Message::Request(request)
+}
+
+/// Validate that a message parses successfully and contains expected headers
+pub fn validate_message(
     data: &str, 
     expected_method: Option<Method>,
     expected_uri: Option<&str>,
@@ -139,6 +178,7 @@ pub fn validate_message_basic(
 ) -> bool {
     match parse_sip_message(data) {
         Ok(message) => {
+            // Check method and URI for requests
             if let Some(method) = expected_method {
                 if let Message::Request(request) = &message {
                     if request.method != method {
@@ -163,6 +203,7 @@ pub fn validate_message_basic(
                 }
             }
             
+            // Check headers
             let headers = message.headers();
             for (name, value) in expected_headers {
                 let found = headers.iter().any(|h| {

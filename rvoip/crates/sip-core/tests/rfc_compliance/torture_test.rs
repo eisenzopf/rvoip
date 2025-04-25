@@ -2,86 +2,152 @@
 
 use std::fs;
 use std::path::Path;
-use rvoip_sip_core::parse_message; // Assuming parse_message is the main entry point
+use std::env;
+use rvoip_sip_core::parse_message;
+use rvoip_sip_core::error::Error as SipError;
 
-const WELLFORMED_DIR: &str = "tests/rfc_compliance/wellformed";
-const MALFORMED_DIR: &str = "tests/rfc_compliance/malformed";
-
-// Helper function to read SIP message files from a directory
-fn read_sip_files(dir: &str) -> Vec<(String, Vec<u8>)> {
-    let mut messages = Vec::new();
-    match fs::read_dir(dir) {
-        Ok(entries) => {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
-                        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                        match fs::read(&path) {
-                            Ok(content) => messages.push((filename, content)),
-                            Err(e) => eprintln!("Warning: Failed to read file {:?}: {}", path, e),
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => eprintln!("Warning: Failed to read directory '{}': {}", dir, e),
-    }
-    messages
+/// Structure for tracking test results
+struct TestResults {
+    successes: Vec<String>,
+    failures: Vec<(String, SipError, String)>,
 }
 
+impl TestResults {
+    fn new() -> Self {
+        Self {
+            successes: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    fn add_success(&mut self, filename: String) {
+        self.successes.push(filename);
+    }
+
+    fn add_failure(&mut self, filename: String, error: SipError, content: String) {
+        self.failures.push((filename, error, content));
+    }
+
+    fn report_failures(&self, expected_to_fail: bool) {
+        if self.failures.is_empty() {
+            return;
+        }
+
+        let action = if expected_to_fail { "succeed" } else { "fail" };
+        
+        eprintln!("\n{} files unexpectedly {}ed parsing:", 
+                 self.failures.len(), action);
+        
+        for (i, (file, error, content)) in self.failures.iter().enumerate() {
+            eprintln!("\n{}. File '{}' - {}", i + 1, file, if expected_to_fail { "parsed successfully (expected to fail)" } else { "failed to parse" });
+            if !expected_to_fail {
+                eprintln!("   Error: {}", error);
+            }
+            eprintln!("   --- Message Content ---");
+            eprintln!("   {}", content);
+            eprintln!("   --- End Content ---");
+        }
+    }
+
+    fn summary(&self, dir_name: &str, expected_to_fail: bool) -> String {
+        let total = self.successes.len() + self.failures.len();
+        let success_count = self.successes.len();
+        let failure_count = self.failures.len();
+        
+        let expected_result = if expected_to_fail { "fail" } else { "succeed" };
+        let unexpected_result = if expected_to_fail { "succeeded" } else { "failed" };
+        
+        format!(
+            "{} directory: {} files - {} {} as expected, {} unexpectedly {}",
+            dir_name,
+            total,
+            success_count,
+            expected_result,
+            failure_count,
+            unexpected_result
+        )
+    }
+}
+
+/// Test that all wellformed messages parse successfully
 #[test]
 fn test_wellformed_messages() {
-    let wellformed_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/rfc_compliance/wellformed");
-    let mut failures = Vec::new();
+    let cargo_manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let wellformed_dir = Path::new(&cargo_manifest_dir).join("tests/rfc_compliance/wellformed");
+    
+    if !wellformed_dir.exists() {
+        panic!("Wellformed directory not found: {:?}", wellformed_dir);
+    }
 
-    for entry in fs::read_dir(wellformed_dir).expect("Failed to read wellformed directory") {
+    let mut results = TestResults::new();
+
+    for entry in fs::read_dir(&wellformed_dir).expect("Failed to read wellformed directory") {
         let entry = entry.expect("Failed to read directory entry");
         let path = entry.path();
+        
         if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
-            let filename = path.file_name().unwrap_or_default().to_str().unwrap_or_default();
-            
-            // TODO: Skipping 3.1.1.12_unreason.sip due to incorrect Content-Length header vs actual body length in the file.
-            // The parser correctly identifies this mismatch and fails, but the test expects success.
-             if filename == "3.1.1.12_unreason.sip" {
-                 println!("Skipping known problematic test file: {}", filename);
-                 continue;
-             }
-
-            let content = fs::read(path.clone()).expect(&format!("Failed to read file: {:?}", path));
+            let filename = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
+            let content = fs::read(&path).expect(&format!("Failed to read file: {:?}", path));
+            let content_str = String::from_utf8_lossy(&content).to_string();
             
             match parse_message(&content) {
-                Ok(_) => { /* Successfully parsed */ }
-                Err(e) => {
-                    failures.push((filename.to_string(), e.to_string(), String::from_utf8_lossy(&content).to_string()));
-                }
+                Ok(_) => results.add_success(filename),
+                Err(e) => results.add_failure(filename, e, content_str),
             }
         }
     }
 
-    if !failures.is_empty() {
-        for (file, error, content) in failures {
-            eprintln!("Parser failed on supposedly wellformed message file '{}':", file);
-            eprintln!("Error: {}", error);
-            eprintln!("--- Message Start ---");
-            eprintln!("{}", content);
-            eprintln!("--- Message End ---");
-        }
-        panic!("One or more wellformed messages failed to parse.");
+    // Print summary
+    println!("{}", results.summary("Wellformed", false));
+    
+    // Detailed failure report
+    results.report_failures(false);
+    
+    // Fail test if any wellformed messages failed to parse
+    if !results.failures.is_empty() {
+        panic!("Some wellformed messages failed to parse. See details above.");
     }
 }
 
+/// Test that all malformed messages fail to parse
 #[test]
 fn test_malformed_messages() {
-    let messages = read_sip_files(MALFORMED_DIR);
-    assert!(!messages.is_empty(), "No malformed message files found in {}", MALFORMED_DIR);
+    let cargo_manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let malformed_dir = Path::new(&cargo_manifest_dir).join("tests/rfc_compliance/malformed");
+    
+    if !malformed_dir.exists() {
+        panic!("Malformed directory not found: {:?}", malformed_dir);
+    }
 
-    for (filename, content) in messages {
-        let result = parse_message(&content);
-        assert!(result.is_err(),
-                "Parser unexpectedly succeeded on malformed message file '{}':\n--- Message Start ---\n{}\n--- Message End ---",
-                filename,
-                String::from_utf8_lossy(&content)
-        );
+    let mut results = TestResults::new();
+    
+    for entry in fs::read_dir(&malformed_dir).expect("Failed to read malformed directory") {
+        let entry = entry.expect("Failed to read directory entry");
+        let path = entry.path();
+        
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
+            let filename = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
+            let content = fs::read(&path).expect(&format!("Failed to read file: {:?}", path));
+            let content_str = String::from_utf8_lossy(&content).to_string();
+            
+            match parse_message(&content) {
+                Err(_) => results.add_success(filename),
+                Ok(message) => {
+                    // For malformed messages that parse successfully, we capture the unexpected success
+                    results.add_failure(filename, SipError::Other("Parsed successfully but should have failed".to_string()), content_str);
+                }
+            }
+        }
+    }
+    
+    // Print summary
+    println!("{}", results.summary("Malformed", true));
+    
+    // Detailed failure report
+    results.report_failures(true);
+    
+    // Fail test if any malformed messages parsed successfully
+    if !results.failures.is_empty() {
+        panic!("Some malformed messages parsed successfully. See details above.");
     }
 } 
