@@ -117,6 +117,11 @@ pub(crate) fn parse_via_params(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
     comma_separated_list1(via_param_parser)(input)
 }
 
+// For use with external modules
+pub fn parse_via_params_public(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+    comma_separated_list1(via_param_parser)(input)
+}
+
 /// Validates a Via header according to RFC 3261 requirements
 /// Returns true if the Via header is valid, false otherwise
 pub fn validate_via_header(via: &ViaHeader) -> bool {

@@ -769,9 +769,19 @@ impl TryFrom<Header> for TypedHeader {
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
-            HeaderName::Via => all_consuming(parser::headers::parse_via)(value_bytes)
-                .map(|(_, v)| TypedHeader::Via(Via(v)))
-                .map_err(Error::from),
+            HeaderName::Via => {
+                // Try to parse as regular Via header first
+                match all_consuming(parser::headers::parse_via)(value_bytes) {
+                    Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
+                    Err(e) => {
+                        // If that fails, try to parse as just the via-params part (without "Via:" prefix)
+                        match parser::headers::via::parse_via_params_public(value_bytes) {
+                            Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
+                            Err(e2) => Err(Error::from(e.to_owned())) // Return the original error
+                        }
+                    }
+                }
+            },
             HeaderName::Route => all_consuming(parser::headers::parse_route)(value_bytes)
                 .map(|(_, v)| TypedHeader::Route(v))
                 .map_err(Error::from),
