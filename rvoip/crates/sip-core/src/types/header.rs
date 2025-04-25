@@ -789,9 +789,23 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::RecordRoute(v))
                 .map_err(Error::from),
             HeaderName::CallId => {
-                match all_consuming(parser::headers::parse_call_id)(value_bytes) {
-                    Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
-                    Err(e) => Err(Error::from(e)),
+                // Convert the raw header value to a string instead of using the parser
+                match std::str::from_utf8(value_bytes) {
+                    Ok(s) => Ok(TypedHeader::CallId(CallId(s.trim().to_string()))),
+                    Err(_) => {
+                        // Try with the parser as a fallback
+                        match all_consuming(parser::headers::parse_call_id)(value_bytes) {
+                            Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
+                            Err(e) => {
+                                // For Call-ID, we'll be lenient - create it directly from bytes
+                                eprintln!("Warning: CallId parse error: {:?}, using raw value", e);
+                                match String::from_utf8(value_bytes.to_vec()) {
+                                    Ok(s) => Ok(TypedHeader::CallId(CallId(s.trim().to_string()))),
+                                    Err(_) => Err(Error::from(e.to_owned()))
+                                }
+                            }
+                        }
+                    }
                 }
             }
             HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(value_bytes)

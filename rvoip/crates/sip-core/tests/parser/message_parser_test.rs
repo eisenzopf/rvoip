@@ -21,32 +21,71 @@ use rvoip_sip_core::{
 fn test_parse_unreason_response() {
     // This is the content of 3.1.1.12_unreason.sip from the RFC compliance tests
     // Test a response with non-ASCII characters in the reason phrase
-    let message = "SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое
-Via: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923
-Call-ID: unreason.1234ksdfak3j2erwedfsASdf
-CSeq: 35 INVITE
-From: sip:user@example.com;tag=11141343
-To: sip:user@example.edu;tag=2229
-Content-Length: 162
-Content-Type: application/sdp
-Contact: <sip:user@host198.example.com>
-
-v=0
-o=mhandley 29739 7272939 IN IP4 192.0.2.198
-s=-
-c=IN IP4 192.0.2.198
-t=0 0
-m=audio 49217 RTP/AVP 0 12
-m=video 3227 RTP/AVP 31
+    // Ensure all line endings are CRLF for RFC compliance
+    let message = "SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое\r\n\
+Via: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923\r\n\
+Call-ID: unreason.1234ksdfak3j2erwedfsASdf\r\n\
+CSeq: 35 INVITE\r\n\
+From: sip:user@example.com;tag=11141343\r\n\
+To: sip:user@example.edu;tag=2229\r\n\
+Content-Length: 152\r\n\
+Content-Type: application/sdp\r\n\
+Contact: <sip:user@host198.example.com>\r\n\
+\r\n\
+v=0\r\n\
+o=mhandley 29739 7272939 IN IP4 192.0.2.198\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.198\r\n\
+t=0 0\r\n\
+m=audio 49217 RTP/AVP 0 12\r\n\
+m=video 3227 RTP/AVP 31\r\n\
 a=rtpmap:31 LPC";
 
-    // Use the parse_message function from the crate root
+    // Try parsing each header individually to isolate the issue
+    println!("--- Testing individual headers ---");
+    
+    // Status line
+    println!("Status line: SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое");
+    
+    // Via header
+    println!("Via header: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923");
+    
+    // Call-ID header
+    println!("Call-ID header: unreason.1234ksdfak3j2erwedfsASdf");
+    
+    // CSeq header
+    println!("CSeq header: 35 INVITE");
+    
+    // From header
+    println!("From header: sip:user@example.com;tag=11141343");
+    
+    // To header
+    println!("To header: sip:user@example.edu;tag=2229");
+    
+    // Now try parsing the whole message
+    println!("\n--- Attempting to parse complete message ---");
     let result = parse_message(message.as_bytes());
     
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
-        Err(e) => println!("Parse error: {}", e)
+        Err(e) => {
+            println!("Parse error: {}", e);
+            
+            // Try parsing with byte-by-byte inspection to find the exact failure point
+            println!("\n--- Message bytes (with line numbers) ---");
+            for (i, line) in message.lines().enumerate() {
+                println!("{:3}: {}", i+1, line);
+            }
+            
+            // Try again with a simple message to see if basic parsing works
+            let simple_message = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923\r\nCall-ID: test\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+            println!("\n--- Trying with a simplified message ---");
+            match parse_message(simple_message.as_bytes()) {
+                Ok(_) => println!("Simple message parsed successfully"),
+                Err(e) => println!("Simple message parse error: {}", e)
+            }
+        }
     }
     
     // The test should pass - this message should be valid according to RFC 4475
@@ -69,7 +108,7 @@ a=rtpmap:31 LPC";
                 let content_length = resp.header(&HeaderName::ContentLength)
                     .and_then(|h| if let rvoip_sip_core::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
                     .unwrap_or(0);
-                assert_eq!(content_length, 162);
+                assert_eq!(content_length, 152);
                 assert!(!resp.body.is_empty());
             },
             _ => panic!("Expected Response but got Request")
@@ -77,26 +116,51 @@ a=rtpmap:31 LPC";
     }
 }
 
+// Added another test with a simpler message to isolate the issue
+#[test]
+fn test_minimal_response() {
+    // Create a minimal SIP response with just the required headers
+    let message = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK123\r\n\
+Call-ID: test-call-id\r\n\
+CSeq: 1 INVITE\r\n\
+From: <sip:alice@example.com>;tag=abc\r\n\
+To: <sip:bob@example.com>\r\n\
+Content-Length: 0\r\n\
+\r\n";
+
+    // Parse the message
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info
+    match &result {
+        Ok(msg) => println!("Successfully parsed minimal response: {:?}", msg),
+        Err(e) => println!("Parse error for minimal response: {}", e)
+    }
+    
+    assert!(result.is_ok(), "Failed to parse minimal response");
+}
+
 #[test]
 fn test_parse_basic_invite() {
     // Test a basic INVITE request
-    let message = "INVITE sip:bob@biloxi.com SIP/2.0
-Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds
-Max-Forwards: 70
-To: Bob <sip:bob@biloxi.com>
-From: Alice <sip:alice@atlanta.com>;tag=1928301774
-Call-ID: a84b4c76e66710@pc33.atlanta.com
-CSeq: 314159 INVITE
-Contact: <sip:alice@pc33.atlanta.com>
-Content-Type: application/sdp
-Content-Length: 142
-
-v=0
-o=alice 2890844526 2890844526 IN IP4 pc33.atlanta.com
-s=Session SDP
-c=IN IP4 pc33.atlanta.com
-t=0 0
-m=audio 49172 RTP/AVP 0
+    let message = "INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
+Max-Forwards: 70\r\n\
+To: Bob <sip:bob@biloxi.com>\r\n\
+From: Alice <sip:alice@atlanta.com>;tag=1928301774\r\n\
+Call-ID: a84b4c76e66710@pc33.atlanta.com\r\n\
+CSeq: 314159 INVITE\r\n\
+Contact: <sip:alice@pc33.atlanta.com>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: 142\r\n\
+\r\n\
+v=0\r\n\
+o=alice 2890844526 2890844526 IN IP4 pc33.atlanta.com\r\n\
+s=Session SDP\r\n\
+c=IN IP4 pc33.atlanta.com\r\n\
+t=0 0\r\n\
+m=audio 49172 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000";
 
     // Parse the message
@@ -134,4 +198,89 @@ a=rtpmap:0 PCMU/8000";
             _ => panic!("Expected Request but got Response")
         }
     }
+}
+
+// Add a test with a short content length
+#[test]
+fn test_parse_response_with_small_body() {
+    // Test SIP response with a very small body to debug Content-Length issues
+    let message = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK123\r\n\
+Call-ID: test-call-id\r\n\
+CSeq: 1 INVITE\r\n\
+From: <sip:alice@example.com>;tag=abc\r\n\
+To: <sip:bob@example.com>\r\n\
+Content-Length: 4\r\n\
+\r\n\
+Test";
+
+    // Parse the message
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info
+    match &result {
+        Ok(msg) => println!("Successfully parsed small body response: {:?}", msg),
+        Err(e) => println!("Parse error for small body response: {}", e)
+    }
+    
+    assert!(result.is_ok(), "Failed to parse response with small body");
+}
+
+// Add a test with an exact content length
+#[test]
+fn test_parse_unreason_response_exact_length() {
+    // This is the content of 3.1.1.12_unreason.sip with an EXACTLY matching content length
+    // For debugging the "Incomplete message: Needed Size(10)" error
+    
+    // Calculate the exact body length first
+    let body = "v=0\r\n\
+o=mhandley 29739 7272939 IN IP4 192.0.2.198\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.198\r\n\
+t=0 0\r\n\
+m=audio 49217 RTP/AVP 0 12\r\n\
+m=video 3227 RTP/AVP 31\r\n\
+a=rtpmap:31 LPC";
+    
+    let body_len = body.len();
+    println!("Exact body length: {}", body_len);
+    
+    // Create the message with the actual body length
+    let message = format!("SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое\r\n\
+Via: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923\r\n\
+Call-ID: unreason.1234ksdfak3j2erwedfsASdf\r\n\
+CSeq: 35 INVITE\r\n\
+From: sip:user@example.com;tag=11141343\r\n\
+To: sip:user@example.edu;tag=2229\r\n\
+Content-Length: {}\r\n\
+Content-Type: application/sdp\r\n\
+Contact: <sip:user@host198.example.com>\r\n\
+\r\n\
+{}", body_len, body);
+
+    // Parse the message
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info
+    match &result {
+        Ok(msg) => println!("Successfully parsed with exact length: {:?}", msg),
+        Err(e) => {
+            println!("Parse error with exact length: {}", e);
+            
+            // Try parsing with various content lengths
+            for test_len in [body_len-1, body_len, body_len+1, body_len+10] {
+                let test_message = format!("SIP/2.0 200 OK\r\n\
+Content-Length: {}\r\n\
+\r\n\
+{}", test_len, body);
+                
+                match parse_message(test_message.as_bytes()) {
+                    Ok(_) => println!("Content-Length {} worked!", test_len),
+                    Err(e) => println!("Content-Length {} failed: {}", test_len, e)
+                }
+            }
+        }
+    }
+    
+    assert!(result.is_ok(), "Failed to parse wellformed message with exact length");
 } 

@@ -11,6 +11,7 @@ use nom::{
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated},
     IResult,
+    error::{Error as NomError, ErrorKind},
 };
 use std::str;
 
@@ -58,7 +59,12 @@ fn name_addr(input: &[u8]) -> ParseResult<(Option<&[u8]>, Uri)> {
 fn tag_param(input: &[u8]) -> ParseResult<Param> {
     map_res(
         preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)),
-        |tag_bytes| str::from_utf8(tag_bytes).map(|s| Param::Tag(s.to_string()))
+        |tag_bytes| {
+            match str::from_utf8(tag_bytes) {
+                Ok(tag_str) => Ok(Param::Tag(tag_str.to_string())),
+                Err(_) => Err(nom::Err::Failure(NomError::new(tag_bytes, ErrorKind::Tag)))
+            }
+        }
     )(input)
 }
 
