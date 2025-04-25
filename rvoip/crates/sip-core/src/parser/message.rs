@@ -113,7 +113,8 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
     let (rest, start_line_data) = alt((
         map(parse_request_line, |(m, u, v)| (true, Some(m), Some(u), Some(v), None, None)),
         map(parse_status_line, |(v, s, r)| {
-            let reason_opt = if r.is_empty() { None } else { str::from_utf8(r).ok().map(String::from) };
+            // Always include the reason phrase, even if it's empty
+            let reason_opt = str::from_utf8(r).ok().map(String::from).or(Some(String::new()));
             (false, None, None, Some(v), Some(s), reason_opt)
         })
     ))(input)?;
