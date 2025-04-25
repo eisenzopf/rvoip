@@ -4,8 +4,8 @@ use nom::{
     branch::alt,
     bytes::complete::{take_till, take_while_m_n, take_till1},
     character::complete::{digit1, space1, line_ending},
-    combinator::{map, map_res, recognize, opt},
-    sequence::{tuple, preceded},
+    combinator::{map, map_res, recognize, opt, all_consuming},
+    sequence::{tuple, preceded, terminated},
     IResult,
     error::{Error as NomError, ErrorKind, ParseError},
 };
@@ -16,6 +16,13 @@ use crate::types::StatusCode;
 use crate::parser::common::sip_version;
 use crate::parser::whitespace::crlf;
 use crate::parser::ParseResult;
+
+/// Parser for SIP response status line (RFC 3261 Section 7.2)
+///
+/// ABNF Grammar:
+/// Status-Line =  SIP-Version SP Status-Code SP Reason-Phrase CRLF
+/// Status-Code =  3DIGIT
+/// Reason-Phrase  =  *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
 
 /// Parser for a SIP response line
 /// Returns components needed by IncrementalParser
@@ -72,23 +79,23 @@ pub fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
 // Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
 // Simplified: take bytes until CRLF
 pub fn reason_phrase(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(take_till1(|c| c == b'\r' || c == b'\n'))(input)
+    // The reason phrase can be empty, so we use take_till instead of take_till1
+    take_till(|c| c == b'\r' || c == b'\n')(input)
 }
 
 // Status-Line = SIP-Version SP Status-Code SP Reason-Phrase CRLF
 pub fn parse_status_line(input: &[u8]) -> ParseResult<(Version, StatusCode, &[u8])> {
-    map_res(
+    terminated(
         tuple((
-            sip_version, 
-            space1, 
-            status_code,
-            opt(preceded(space1, reason_phrase))
+            terminated(sip_version, space1),
+            terminated(status_code, space1),
+            reason_phrase
         )),
-        |(version, _, status, reason_opt)| -> std::result::Result<(Version, StatusCode, &[u8]), Error> {
-            let reason = reason_opt.unwrap_or(&[]);
-            Ok((version, status, reason))
-        }
+        crlf
     )(input)
+    .map(|(rem, (version, status, reason))| {
+        (rem, (version, status, reason))
+    })
 }
 
 #[cfg(test)]
@@ -145,7 +152,7 @@ mod tests {
         let (rem, (_, status, reason)) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(status, StatusCode::NotImplemented);
-        assert_eq!(reason, b" "); // Reason phrase includes the space
+        assert_eq!(reason, b""); // Empty reason phrase (after trimming trailing space)
     }
     
     #[test]
@@ -154,17 +161,17 @@ mod tests {
         assert!(parse_status_line(line).is_err());
     }
 
-     #[test]
+    #[test]
     fn test_invalid_status_line_code() {
         let line = b"SIP/2.0 20 OK\r\n";
         assert!(parse_status_line(line).is_err());
         let line = b"SIP/2.0 2000 OK\r\n";
         assert!(parse_status_line(line).is_err());
-         let line = b"SIP/2.0 ABC OK\r\n";
+        let line = b"SIP/2.0 ABC OK\r\n";
         assert!(parse_status_line(line).is_err());
     }
 
-     #[test]
+    #[test]
     fn test_invalid_status_line_spacing() {
         let line = b"SIP/2.0 200OK\r\n";
         assert!(parse_status_line(line).is_err());
@@ -176,6 +183,43 @@ mod tests {
     fn test_invalid_status_line_crlf() {
         let line = b"SIP/2.0 200 OK";
         assert!(parse_status_line(line).is_err());
+    }
+    
+    #[test]
+    fn test_different_sip_versions() {
+        let line = b"SIP/1.0 200 OK\r\n";
+        let result = parse_status_line(line);
+        assert!(result.is_ok());
+        let (_, (version, _, _)) = result.unwrap();
+        assert_eq!(version, Version::new(1, 0));
+        
+        let line = b"SIP/3.0 200 OK\r\n";
+        let result = parse_status_line(line);
+        assert!(result.is_ok());
+        let (_, (version, _, _)) = result.unwrap();
+        assert_eq!(version, Version::new(3, 0));
+    }
+    
+    #[test]
+    fn test_no_reason_phrase() {
+        let line = b"SIP/2.0 200\r\n";
+        assert!(parse_status_line(line).is_err()); // Must have space after status code
+        
+        let line = b"SIP/2.0 200 \r\n";
+        let result = parse_status_line(line);
+        assert!(result.is_ok());
+        let (_, (_, _, reason)) = result.unwrap();
+        assert_eq!(reason, b"");
+    }
+    
+    #[test]
+    fn test_utf8_characters_in_reason() {
+        // Test with emoji and other UTF-8 characters
+        let line = "SIP/2.0 200 OK 👍 UTF-8 français\r\n".as_bytes();
+        let result = parse_status_line(line);
+        assert!(result.is_ok());
+        let (_, (_, _, reason)) = result.unwrap();
+        assert_eq!(reason, "OK 👍 UTF-8 français".as_bytes());
     }
 }
 
