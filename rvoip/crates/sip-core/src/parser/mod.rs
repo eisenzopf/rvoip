@@ -235,11 +235,11 @@ mod tests {
             parse_cseq, parse_call_id, parse_content_type_value
         };
 
-        // Via - temporarily skipped due to known issues with the Via parser
-        // let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        // let result = parse_via(input);
-        // assert!(result.is_ok());
-
+        // Via - uncommented for debugging
+        let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Via header should parse successfully");
+        
         // Contact
         let input = b"<sip:alice@atlanta.com>";
         let result = parse_contact(input);
@@ -256,7 +256,80 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Test parser integration
+    // Add specific test for Via headers
+    #[test]
+    fn test_via_headers() {
+        use super::headers::parse_via;
+        
+        // Test basic Via header
+        let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Basic Via header should parse successfully");
+        if let Ok((_, vias)) = result {
+            assert_eq!(vias.len(), 1, "Should parse exactly one Via header");
+            let via = &vias[0];
+            assert_eq!(via.protocol(), "SIP/2.0");
+            assert_eq!(via.transport(), "UDP");
+            assert_eq!(via.host().to_string(), "pc33.atlanta.com");
+            assert_eq!(via.branch(), Some("z9hG4bK776asdhds"));
+        }
+        
+        // Test Via header with port
+        let input = b"SIP/2.0/TCP 192.168.1.1:5060;branch=z9hG4bKnashds7";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Via header with port should parse successfully");
+        if let Ok((_, vias)) = result {
+            let via = &vias[0];
+            assert_eq!(via.port(), Some(5060));
+            assert_eq!(via.transport(), "TCP");
+        }
+        
+        // Test Via header with multiple parameters
+        let input = b"SIP/2.0/UDP biloxi.com:5060;branch=z9hG4bK123;received=192.0.2.3;ttl=16;maddr=224.2.0.1";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Via header with multiple parameters should parse successfully");
+        if let Ok((_, vias)) = result {
+            let via = &vias[0];
+            assert_eq!(via.branch(), Some("z9hG4bK123"));
+            assert_eq!(via.received(), Some("192.0.2.3".to_string()));
+            assert_eq!(via.ttl(), Some(16));
+            assert_eq!(via.maddr(), Some("224.2.0.1"));
+        }
+        
+        // Test Via header with hidden branch parameter
+        let input = b"SIP/2.0/UDP 192.168.0.1;hidden;branch=z9hG4bK776asdhds";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Via header with hidden parameter should parse successfully");
+        if let Ok((_, vias)) = result {
+            let via = &vias[0];
+            assert_eq!(via.branch(), Some("z9hG4bK776asdhds"));
+            assert!(via.has_param("hidden"), "Should have hidden parameter");
+            assert_eq!(via.param_value("hidden"), None, "Hidden parameter should have no value");
+        }
+        
+        // Test multiple Via headers in one go
+        let input = b"SIP/2.0/UDP first.com:5060;branch=z9hG4bK876, SIP/2.0/TCP second.com;branch=z9hG4bK321";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Multiple Via headers should parse successfully");
+        if let Ok((_, vias)) = result {
+            assert_eq!(vias.len(), 2, "Should parse two Via headers");
+            assert_eq!(vias[0].host().to_string(), "first.com");
+            assert_eq!(vias[0].transport(), "UDP");
+            assert_eq!(vias[1].host().to_string(), "second.com");
+            assert_eq!(vias[1].transport(), "TCP");
+        }
+        
+        // Test IPv6 address in Via header
+        let input = b"SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK776asdhds";
+        let result = parse_via(input);
+        assert!(result.is_ok(), "Via header with IPv6 address should parse successfully");
+        if let Ok((_, vias)) = result {
+            let via = &vias[0];
+            assert!(matches!(via.host(), crate::types::uri::Host::Address(_)), "Host should be an IPv6 address");
+            assert_eq!(via.port(), Some(5060));
+        }
+    }
+
     #[test]
     fn test_parser_integration() {
         // Parse a message, then extract and parse specific headers
@@ -281,10 +354,14 @@ mod tests {
                 
                 // Extract and verify headers
                 let via_headers = request.via_headers();
-                // Note: Currently via_headers returns 0 due to a parsing error in the Via parser
-                // This test is set to pass with the current implementation but should be updated
-                // once Via header parsing is fixed.
-                assert_eq!(via_headers.len(), 0);
+                // Via headers should now be properly parsed
+                assert_eq!(via_headers.len(), 1, "Should have one Via header");
+                if !via_headers.is_empty() {
+                    let via = &via_headers[0];
+                    assert_eq!(via.0[0].sent_by_host.to_string(), "pc33.atlanta.com");
+                    assert_eq!(via.0[0].sent_protocol.transport, "UDP");
+                    assert_eq!(via.0[0].branch(), Some("z9hG4bK776asdhds"));
+                }
                 
                 let from_header = request.header(&HeaderName::From);
                 assert!(from_header.is_some());

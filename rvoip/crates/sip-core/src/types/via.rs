@@ -7,10 +7,9 @@ use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
 use crate::types::Param;
-use crate::types::uri::Host as UriHost;
+use crate::types::uri::Host;
 use crate::types::param::GenericValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use crate::parser::headers::via::ViaHeader;
 
 /// A structured representation of a SIP Via header
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +31,7 @@ impl Via {
             transport: transport.into(),
         };
         // Attempt to parse the host string into the Host enum from types::uri
-        let sent_by_host = UriHost::from_str(&host.into())?;
+        let sent_by_host = Host::from_str(&host.into())?;
 
         let via_header = ViaHeader {
             sent_protocol,
@@ -210,25 +209,37 @@ impl Via {
     }
 
     /// Check if the rport parameter (flag) is present in the first Via entry.
-    pub fn rport(&self) -> bool {
-         self.0.first().map_or(false, |v| {
-            v.params.iter().any(|p| matches!(p, Param::Other(key, None) if key.eq_ignore_ascii_case("rport")))
-         })
+    /// Returns None if rport is not present, Some(None) if rport is a flag,
+    /// and Some(Some(port)) if rport has a value.
+    pub fn rport(&self) -> Option<Option<u16>> {
+        self.0.first().and_then(|v| {
+            v.params.iter().find_map(|p| match p {
+                Param::Rport(port) => Some(*port),
+                Param::Other(key, value) if key.eq_ignore_ascii_case("rport") => {
+                    // Handle as generic for backwards compatibility
+                    if let Some(value) = value {
+                        value.as_str().and_then(|s| s.parse::<u16>().ok()).map(Some)
+                    } else {
+                        Some(None)
+                    }
+                },
+                _ => None,
+            })
+        })
     }
 
-    /// Sets or removes the rport parameter flag in all Via entries.
-    pub fn set_rport(&mut self, present: bool) {
-         for v in self.0.iter_mut() {
-             let rport_pos = v.params.iter().position(|p| matches!(p, Param::Other(key, _) if key.eq_ignore_ascii_case("rport")));
-            if present {
-                if rport_pos.is_none() {
-                     v.params.push(Param::Other("rport".to_string(), None));
-                } else {
-                    // Ensure value is None if already present
-                    v.params[rport_pos.unwrap()] = Param::Other("rport".to_string(), None);
-                }
-            } else if let Some(pos) = rport_pos {
-                 v.params.remove(pos);
+    /// Sets or replaces the rport parameter in all Via entries.
+    /// - If port is None, adds rport as a flag parameter
+    /// - If port is Some(value), adds rport with the specified value
+    pub fn set_rport(&mut self, port: Option<u16>) {
+        for v in self.0.iter_mut() {
+            if let Some(pos) = v.params.iter().position(|p| 
+                matches!(p, Param::Rport(_)) || 
+                matches!(p, Param::Other(key, _) if key.eq_ignore_ascii_case("rport"))
+            ) {
+                v.params[pos] = Param::Rport(port);
+            } else {
+                v.params.push(Param::Rport(port));
             }
         }
     }
@@ -253,6 +264,117 @@ pub struct SentProtocol {
 impl fmt::Display for SentProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}/{}", self.name, self.version, self.transport)
+    }
+}
+
+/// Represents a single Via header entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViaHeader {
+    pub sent_protocol: SentProtocol,
+    pub sent_by_host: Host,
+    pub sent_by_port: Option<u16>,
+    pub params: Vec<Param>,
+}
+
+// Implementation of Display trait for ViaHeader
+impl fmt::Display for ViaHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.sent_protocol)?;
+        
+        // Format sent-by (host:port or host)
+        write!(f, "{}", self.sent_by_host)?;
+        if let Some(port) = self.sent_by_port {
+            write!(f, ":{}", port)?;
+        }
+        
+        // Format parameters
+        for param in &self.params {
+            write!(f, "{}", param)?; // Assuming Param implements Display correctly (e.g., ";key=value")
+        }
+        
+        Ok(())
+    }
+}
+
+impl ViaHeader {
+    /// Returns the protocol as a string in "name/version" format
+    pub fn protocol(&self) -> String {
+        format!("{}/{}", self.sent_protocol.name, self.sent_protocol.version)
+    }
+    
+    /// Returns the transport protocol (e.g., "UDP", "TCP")
+    pub fn transport(&self) -> &str {
+        &self.sent_protocol.transport
+    }
+    
+    /// Returns the host part of the Via header
+    pub fn host(&self) -> &Host {
+        &self.sent_by_host
+    }
+    
+    /// Returns the port in the Via header, if present
+    pub fn port(&self) -> Option<u16> {
+        self.sent_by_port
+    }
+    
+    /// Retrieves the branch parameter value, if present
+    pub fn branch(&self) -> Option<&str> {
+        self.params.iter().find_map(|p| match p {
+            Param::Branch(val) => Some(val.as_str()),
+            _ => None,
+        })
+    }
+    
+    /// Retrieves the received parameter as a string, if present
+    pub fn received(&self) -> Option<String> {
+        self.params.iter().find_map(|p| match p {
+            Param::Received(ip) => Some(ip.to_string()),
+            _ => None,
+        })
+    }
+    
+    /// Retrieves the ttl parameter value, if present
+    pub fn ttl(&self) -> Option<u8> {
+        self.params.iter().find_map(|p| match p {
+            Param::Ttl(val) => Some(*val),
+            _ => None,
+        })
+    }
+    
+    /// Retrieves the maddr parameter value, if present
+    pub fn maddr(&self) -> Option<&str> {
+        self.params.iter().find_map(|p| match p {
+            Param::Maddr(val) => Some(val.as_str()),
+            _ => None,
+        })
+    }
+    
+    /// Checks if the header has a specific parameter
+    pub fn has_param(&self, name: &str) -> bool {
+        self.params.iter().any(|p| match p {
+            Param::Branch(_) if name.eq_ignore_ascii_case("branch") => true,
+            Param::Received(_) if name.eq_ignore_ascii_case("received") => true,
+            Param::Maddr(_) if name.eq_ignore_ascii_case("maddr") => true,
+            Param::Ttl(_) if name.eq_ignore_ascii_case("ttl") => true,
+            Param::Rport(_) if name.eq_ignore_ascii_case("rport") => true,
+            Param::Other(key, _) => key.eq_ignore_ascii_case(name),
+            _ => false,
+        })
+    }
+    
+    /// Gets a parameter value as a string, if present
+    pub fn param_value(&self, name: &str) -> Option<String> {
+        self.params.iter().find_map(|p| match p {
+            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(val.clone()),
+            Param::Received(ip) if name.eq_ignore_ascii_case("received") => Some(ip.to_string()),
+            Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(val.clone()),
+            Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(val.to_string()),
+            Param::Rport(Some(val)) if name.eq_ignore_ascii_case("rport") => Some(val.to_string()),
+            Param::Rport(None) if name.eq_ignore_ascii_case("rport") => None,
+            Param::Other(key, val) if key.eq_ignore_ascii_case(name) => 
+                val.as_ref().map(|v| v.to_string()),
+            _ => None,
+        })
     }
 }
 

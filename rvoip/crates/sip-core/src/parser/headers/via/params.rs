@@ -102,6 +102,22 @@ fn via_branch(input: &[u8]) -> ParseResult<Param> {
     )(input)
 }
 
+/// Parser for the rport parameter of a Via header (RFC 3261 Section 18.2.1)
+/// rport can be a flag or have a port value in responses
+/// Examples: rport (request) or rport=5060 (response)
+fn via_rport(input: &[u8]) -> ParseResult<Param> {
+    let (input, _) = tag_no_case(b"rport")(input)?;
+    let (input, port_val) = opt(preceded(equal, map_res(digit1, |b| {
+        let s = str::from_utf8(b)
+            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
+        let port = s.parse::<u16>()
+            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))?;
+        Ok::<u16, nom::Err<NomError<&[u8]>>>(port)
+    })))(input)?;
+    
+    Ok((input, Param::Rport(port_val)))
+}
+
 /// Parser for a single via parameter (RFC 3261 Section 20.42)
 /// This function combines all the specific via param parsers in priority order
 /// Returns a Param enum representing the parsed parameter
@@ -111,6 +127,7 @@ pub fn via_param_item(input: &[u8]) -> ParseResult<Param> {
         via_maddr,
         via_received,
         via_branch,
+        via_rport,
         generic_param, // Fallback for any other parameter (must be last)
     ))(input)
 }

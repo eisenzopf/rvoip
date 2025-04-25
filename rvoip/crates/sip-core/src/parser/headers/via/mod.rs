@@ -30,39 +30,9 @@ mod params;
 use params::via_param_item; // Use the parser for a single via param item
 
 // Import types
-use crate::types::via::SentProtocol;
+use crate::types::via::{SentProtocol, ViaHeader};
 use crate::types::uri::Host;
 use crate::types::param::Param; // Use the main Param enum
-
-/// Represents a single Via header entry.
-/// Making this struct public for use in types/header.rs
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViaHeader {
-    pub sent_protocol: SentProtocol,
-    pub sent_by_host: Host,
-    pub sent_by_port: Option<u16>,
-    pub params: Vec<Param>,
-}
-
-// Implementation of Display trait for ViaHeader
-impl fmt::Display for ViaHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ", self.sent_protocol)?;
-        
-        // Format sent-by (host:port or host)
-        write!(f, "{}", self.sent_by_host)?;
-        if let Some(port) = self.sent_by_port {
-            write!(f, ":{}", port)?;
-        }
-        
-        // Format parameters
-        for param in &self.params {
-            write!(f, "{}", param)?; // Assuming Param implements Display correctly (e.g., ";key=value")
-        }
-        
-        Ok(())
-    }
-}
 
 // sent-protocol = protocol-name SLASH protocol-version SLASH transport
 // protocol-name = "SIP" / token
@@ -591,5 +561,40 @@ mod tests {
         let result = parse_via_params(whitespace_input);
         println!("6. Whitespace input result: {:?}", result);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_via_rport_parameter() {
+        // Test rport as a flag parameter (in requests)
+        let input = b"SIP/2.0/UDP pc33.atlanta.com;rport;branch=z9hG4bK776asdhds";
+        let (rem, sp) = parse_via_params(input).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(sp.len(), 1);
+        
+        let via = &sp[0];
+        assert_eq!(via.sent_by_host.to_string(), "pc33.atlanta.com");
+        
+        // Check if we can find the rport parameter without a value
+        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(_)));
+        assert!(rport_param.is_some(), "Should have an rport parameter");
+        if let Some(Param::Rport(port)) = rport_param {
+            assert!(port.is_none(), "Flag rport should have no value");
+        }
+        
+        // Test rport with a value (in responses)
+        let input = b"SIP/2.0/UDP pc33.atlanta.com;rport=5060;branch=z9hG4bK776asdhds";
+        let (rem, sp) = parse_via_params(input).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(sp.len(), 1);
+        
+        let via = &sp[0];
+        assert_eq!(via.sent_by_host.to_string(), "pc33.atlanta.com");
+        
+        // Check if we can find the rport parameter with a value
+        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(_)));
+        assert!(rport_param.is_some(), "Should have an rport parameter");
+        if let Some(Param::Rport(port)) = rport_param {
+            assert_eq!(*port, Some(5060), "Response rport should have a port value");
+        }
     }
 }

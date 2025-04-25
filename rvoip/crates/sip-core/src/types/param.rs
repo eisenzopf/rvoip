@@ -86,6 +86,8 @@ pub enum Param {
     Handling(String), // Added for Content-Disposition (Need Handling enum later)
     /// Duration parameter (added for Retry-After)
     Duration(u32), // Added for Retry-After
+    /// The `rport` parameter, a flag in requests, carries port value in responses.
+    Rport(Option<u16>),
     /// Generic parameter represented as key-value.
     Other(String, Option<GenericValue>), // Changed value type
 }
@@ -106,6 +108,8 @@ impl fmt::Display for Param {
             Param::Method(val) => write!(f, "method={}", val),
             Param::Handling(val) => write!(f, "handling={}", val),
             Param::Duration(val) => write!(f, "duration={}", val),
+            Param::Rport(Some(val)) => write!(f, "rport={}", val),
+            Param::Rport(None) => write!(f, "rport"),
             Param::Other(key, Some(val)) => write!(f, "{}={}", key, val), // Use GenericValue::Display
             Param::Other(key, None) => write!(f, "{}", key),
         }

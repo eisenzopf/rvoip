@@ -23,8 +23,7 @@ use crate::types::route::Route;
 use crate::parser::headers::route::RouteEntry; // Import RouteEntry from parser
 use crate::types::record_route::RecordRoute;
 use crate::parser::headers::record_route::RecordRouteEntry; // Import RecordRouteEntry from parser
-use crate::types::via::Via;
-use crate::parser::headers::via::ViaHeader as ViaEntry; // Use ViaHeader from parser as ViaEntry
+use crate::types::via::{Via, ViaHeader}; // Import both Via and ViaHeader
 use crate::types::cseq::CSeq;
 use crate::types::call_id::CallId;
 use crate::types::content_length::ContentLength;
@@ -315,7 +314,7 @@ pub enum HeaderValue {
     ReferTo(ReferTo), // Add ReferTo variant
 
     // === Request/Response Info ===
-    Via(Vec<ViaEntry>), // ViaEntry would contain the parsed tuple
+    Via(Vec<ViaHeader>), // ViaHeader would contain the parsed tuple
     CSeq(CSeq),
     MaxForwards(MaxForwards),
     CallId((Vec<u8>, Option<Vec<u8>>)), // (local_part, Option<host_part>)

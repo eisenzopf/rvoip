@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::types; // Add import
 use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::types::sdp::SdpSession; // Assuming SdpSession is in types::sdp
-use crate::types::via::Via; // Import Via specifically
+use crate::types::via::{Via, ViaHeader};
 
 /// A SIP request message
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,12 +95,8 @@ impl Request {
         for header in &self.headers {
             // Directly match the TypedHeader::Via variant
             if let TypedHeader::Via(via_data) = header {
-                // via_data should be of type types::Via which might contain Vec<ViaHeader> or similar
-                // Assuming types::Via can be directly used or converted
-                // If types::Via holds a Vec<ViaHeader>, we might need to clone/extend
-                // Let's assume types::Via can be cloned directly for now.
-                // If it holds a Vec<ViaHeader>, we'd use result.extend(via_data.0.clone());
-                result.push(via_data.clone()); // Adjust based on actual types::Via structure
+                // Via is already a Vec<ViaHeader> wrapper
+                result.push(via_data.clone());
             }
         }
         result
@@ -111,12 +107,11 @@ impl Request {
     pub fn first_via(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
              if let TypedHeader::Via(via_data) = h {
-                 Some(via_data.clone()) // Clone if necessary
+                 Some(via_data.clone())
              } else {
                  None
              }
         })
-        // Original implementation: self.via_headers().into_iter().next() - less efficient
     }
 
     pub fn get_header_value(&self, name: &HeaderName) -> Option<&str> {
@@ -131,8 +126,8 @@ impl Request {
         for header in &self.headers {
             // Directly match the TypedHeader::Via variant (similar to via_headers)
             if let TypedHeader::Via(via_data) = header {
-                 // Adjust cloning/extending based on actual types::Via structure
-                 result.push(via_data.clone()); 
+                 // Via is already a Vec<ViaHeader> wrapper
+                 result.push(via_data.clone());
             }
         }
         result
@@ -143,12 +138,11 @@ impl Request {
     pub fn first_via_no_body(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
              if let TypedHeader::Via(via_data) = h {
-                 Some(via_data.clone()) // Clone if necessary
+                 Some(via_data.clone())
              } else {
                  None
              }
         })
-        // Original implementation: self.via_headers_no_body().into_iter().next()
     }
 
     /// Convert the message to bytes
@@ -295,8 +289,8 @@ impl Response {
         for header in &self.headers {
             // Directly match the TypedHeader::Via variant
             if let TypedHeader::Via(via_data) = header {
-                 // Adjust cloning/extending based on actual types::Via structure
-                 result.push(via_data.clone()); 
+                // Via is already a Vec<ViaHeader> wrapper
+                result.push(via_data.clone());
             }
         }
         result
@@ -305,13 +299,13 @@ impl Response {
     /// Get the first Via header as a structured Via object
     /// TODO: Refactor similar to via_headers.
     pub fn first_via(&self) -> Option<Via> {
-         self.headers.iter().find_map(|h| {
-              if let TypedHeader::Via(via_data) = h {
-                  Some(via_data.clone()) // Clone if necessary
-              } else {
-                  None
-              }
-         })
+        self.headers.iter().find_map(|h| {
+             if let TypedHeader::Via(via_data) = h {
+                 Some(via_data.clone())
+             } else {
+                 None
+             }
+        })
     }
 }
 
@@ -426,30 +420,19 @@ impl Message {
     }
 
     /// Get Via headers as structured Via objects
-    /// Note: This relies on the Via parser being available where called.
-    /// TODO: Refactor to return `Result<Vec<Via>>` or use a dedicated typed header getter.
     pub fn via_headers(&self) -> Vec<Via> {
-        let mut result = Vec::new();
-        for header in self.headers() {
-             // Directly match the TypedHeader::Via variant
-             if let TypedHeader::Via(via_data) = header {
-                  // Adjust cloning/extending based on actual types::Via structure
-                  result.push(via_data.clone()); 
-             }
+        match self {
+            Message::Request(req) => req.via_headers(),
+            Message::Response(resp) => resp.via_headers(),
         }
-        result
     }
 
     /// Get the first Via header as a structured Via object
-    /// TODO: Refactor similar to via_headers.
     pub fn first_via(&self) -> Option<Via> {
-         self.headers().iter().find_map(|h| {
-              if let TypedHeader::Via(via_data) = h {
-                  Some(via_data.clone()) // Clone if necessary
-              } else {
-                  None
-              }
-         })
+        match self {
+            Message::Request(req) => req.first_via(),
+            Message::Response(resp) => resp.first_via(),
+        }
     }
 
     /// Convert the message to bytes

@@ -147,23 +147,28 @@ impl Address {
         self.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
     }
 
-    /// Checks if a parameter with the given key exists (case-insensitive).
-    pub fn has_param(&self, key: &str) -> bool {
-        self.params.iter().any(|p| match p {
-            Param::Branch(_) => key.eq_ignore_ascii_case("branch"),
-            Param::Tag(_) => key.eq_ignore_ascii_case("tag"),
-            Param::Expires(_) => key.eq_ignore_ascii_case("expires"),
-            Param::Received(_) => key.eq_ignore_ascii_case("received"),
-            Param::Maddr(_) => key.eq_ignore_ascii_case("maddr"),
-            Param::Ttl(_) => key.eq_ignore_ascii_case("ttl"),
-            Param::Lr => key.eq_ignore_ascii_case("lr"),
-            Param::Q(_) => key.eq_ignore_ascii_case("q"),
-            Param::Transport(_) => key.eq_ignore_ascii_case("transport"),
-            Param::User(_) => key.eq_ignore_ascii_case("user"),
-            Param::Method(_) => key.eq_ignore_ascii_case("method"),
-            Param::Other(k, _) => k.eq_ignore_ascii_case(key),
-            Param::Handling(_) => key.eq_ignore_ascii_case("handling"),
-            Param::Duration(_) => key.eq_ignore_ascii_case("duration"),
+    /// Check if a parameter exists (case-insensitive key).
+    pub fn has_param(&self, name: &str) -> bool {
+        let name_lower = name.to_lowercase();
+        self.params.iter().any(|p| {
+            match p {
+                Param::Branch(_) => name_lower == "branch",
+                Param::Tag(_) => name_lower == "tag",
+                Param::Expires(_) => name_lower == "expires",
+                Param::Received(_) => name_lower == "received",
+                Param::Maddr(_) => name_lower == "maddr",
+                Param::Ttl(_) => name_lower == "ttl",
+                Param::Lr => name_lower == "lr",
+                Param::Q(_) => name_lower == "q",
+                Param::Transport(_) => name_lower == "transport",
+                Param::User(_) => name_lower == "user",
+                Param::Method(_) => name_lower == "method",
+                Param::Handling(_) => name_lower == "handling",
+                Param::Duration(_) => name_lower == "duration",
+                Param::Rport(_) => name_lower == "rport",
+                Param::Other(key, _) => key.eq_ignore_ascii_case(&name_lower),
+                _ => false,
+            }
         })
     }
 
@@ -222,6 +227,35 @@ impl Address {
 
         // Add as Param::Other
         self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token)));
+    }
+
+    /// Remove a parameter (case-insensitive key).
+    pub fn remove_param(&mut self, name: &str) {
+        let name_lower = name.to_lowercase();
+        let old_params = std::mem::take(&mut self.params);
+        
+        self.params = old_params.into_iter()
+            .filter(|p| {
+                match p {
+                    Param::Branch(_) => name_lower != "branch",
+                    Param::Tag(_) => name_lower != "tag",
+                    Param::Expires(_) => name_lower != "expires",
+                    Param::Received(_) => name_lower != "received",
+                    Param::Maddr(_) => name_lower != "maddr",
+                    Param::Ttl(_) => name_lower != "ttl",
+                    Param::Lr => name_lower != "lr",
+                    Param::Q(_) => name_lower != "q",
+                    Param::Transport(_) => name_lower != "transport",
+                    Param::User(_) => name_lower != "user",
+                    Param::Method(_) => name_lower != "method",
+                    Param::Handling(_) => name_lower != "handling",
+                    Param::Duration(_) => name_lower != "duration",
+                    Param::Rport(_) => name_lower != "rport",
+                    Param::Other(key, _) => !key.eq_ignore_ascii_case(&name_lower),
+                    _ => true,
+                }
+            })
+            .collect();
     }
 
     // Helper to construct from parser output
