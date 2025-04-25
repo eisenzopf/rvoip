@@ -117,12 +117,19 @@ fn test_uri_to_string() {
 #[test]
 fn test_invalid_uris() {
     // Test missing scheme
-    assert!(Uri::from_str("user@example.com").is_err());
+    assert!(Uri::from_str("user@example.com").is_err(), "Missing scheme should be rejected");
     
     // Test invalid scheme
-    assert!(Uri::from_str("invalid:user@example.com").is_err());
+    assert!(Uri::from_str("invalid:user@example.com").is_err(), "Invalid scheme should be rejected");
     
-    // Skip all other tests as they vary too much by implementation
+    // FIXME: The parser currently accepts malformed IPv6 addresses with unmatched brackets
+    // This is a bug in the IPv6 parser implementation - it should reject this input
+    // but currently the parser allows it through because of how the SIP URI parsing works.
+    // The issue is the closing bracket check in ipv6_reference function doesn't properly 
+    // handle the case when parsing fails due to a missing closing bracket.
+    assert!(Uri::from_str("sip:user@[2001:db8::1").is_err(), "Unclosed IPv6 bracket should be rejected");
+    
+    // Some tests are skipped as they vary by implementation
 }
 
 #[test]
