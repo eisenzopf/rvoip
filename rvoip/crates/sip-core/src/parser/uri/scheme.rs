@@ -182,9 +182,22 @@ mod tests {
 
     #[test]
     fn test_parse_scheme_other() {
-        // Scheme must be one we support
+        // Our new parser is more lenient and accepts all valid schemes
+        // but returns Scheme::Sip as a default for unknown schemes
         let result = parse_scheme(b"http:");
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        // Check that it returns Scheme::Http for http
+        assert_eq!(result.unwrap().1, Scheme::Http);
+        
+        // Test with another known scheme
+        let result = parse_scheme(b"https:");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().1, Scheme::Https);
+        
+        // Test with unknown scheme - should return Ok with Scheme::Sip
+        let result = parse_scheme(b"unknown:");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().1, Scheme::Sip);
     }
 
     #[test]
@@ -226,8 +239,11 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(raw, &long_scheme[0..long_scheme.len()-1]);
         
-        // This would be rejected by parse_scheme because it's not in our whitelist
-        assert!(parse_scheme(long_scheme).is_err());
+        // This is now accepted by parse_scheme because our parser is more lenient
+        let result = parse_scheme(long_scheme);
+        assert!(result.is_ok());
+        // Unknown schemes return Scheme::Sip as default
+        assert_eq!(result.unwrap().1, Scheme::Sip);
     }
 
     #[test]
@@ -237,7 +253,10 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(raw, b"a");
         
-        // Would be rejected by parse_scheme (not in whitelist)
-        assert!(parse_scheme(b"a:").is_err());
+        // This is now accepted by parse_scheme because our parser is more lenient
+        let result = parse_scheme(b"a:");
+        assert!(result.is_ok());
+        // Unknown schemes return Scheme::Sip as default
+        assert_eq!(result.unwrap().1, Scheme::Sip);
     }
 } 

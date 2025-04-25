@@ -276,10 +276,29 @@ mod tests {
     }
     
     #[test]
-    fn test_invalid_request_line_uri() {
+    fn test_request_uri_with_non_sip_schemes() {
+        // We now support non-SIP URI schemes for requests
         let line = b"INVITE http://example.com SIP/2.0\r\n";
         let result = parse_request_line(line);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        let (_, (_, uri, _)) = result.unwrap();
+        assert_eq!(uri.scheme, Scheme::Http);
+        
+        // Test with HTTPS
+        let line = b"OPTIONS https://example.com SIP/2.0\r\n";
+        let result = parse_request_line(line);
+        assert!(result.is_ok());
+        let (_, (_, uri, _)) = result.unwrap();
+        assert_eq!(uri.scheme, Scheme::Https);
+        
+        // Test with unknown scheme
+        let line = b"OPTIONS someunknownscheme:something SIP/2.0\r\n";
+        let result = parse_request_line(line);
+        assert!(result.is_ok());
+        let (_, (_, uri, _)) = result.unwrap();
+        // Unknown schemes are stored in raw_uri
+        assert!(uri.raw_uri.is_some());
+        assert_eq!(uri.raw_uri.unwrap(), "someunknownscheme:something");
     }
 
     #[test]
