@@ -51,6 +51,19 @@ pub fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
 
 // gen-value = token / host / quoted-string
 fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
+    // IP address pattern check - if it looks like an IP, use host parser
+    if input.len() >= 7 && // Min IP length (1.2.3.4)
+       (input.iter().filter(|&&c| c == b'.').count() == 3 || // IPv4 has 3 dots
+        input.iter().filter(|&&c| c == b':').count() >= 2) { // IPv6 has at least 2 colons
+        // Try host parser first for anything that looks like an IP address
+        if let Ok((rem, host_val)) = host(input) {
+            if let Host::Address(_) = host_val {
+                return Ok((rem, GenericValue::Host(host_val)));
+            }
+        }
+    }
+    
+    // For everything else, try token first, then fallback to host and quoted string
     alt((
         map_res(token, |bytes| {
             str::from_utf8(bytes)
