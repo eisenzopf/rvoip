@@ -59,6 +59,10 @@ pub struct MultipartBody {
     pub boundary: String,
     /// The MIME parts contained in the body.
     pub parts: Vec<MimePart>,
+    /// Content appearing before the first boundary (optional).
+    pub preamble: Option<Bytes>,
+    /// Content appearing after the last boundary (optional).
+    pub epilogue: Option<Bytes>,
 }
 
 impl MultipartBody {
@@ -67,6 +71,8 @@ impl MultipartBody {
         Self {
             boundary: boundary.into(),
             parts: Vec::new(),
+            preamble: None,
+            epilogue: None,
         }
     }
 

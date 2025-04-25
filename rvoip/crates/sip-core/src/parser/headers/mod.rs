@@ -105,3 +105,89 @@ pub use authentication_info::parse_authentication_info;
 
 // Re-export shared URI component parser if needed directly?
 // pub use uri_with_params::uri_with_generic_params;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ParseResult;
+
+    /// Test to verify that exported parser functions are correctly accessible
+    #[test]
+    fn test_parser_exports() {
+        // Test sampling of different header parsers to ensure they're correctly exported
+        // This doesn't test the actual parsing, just that the functions are accessible
+        let via_fn: fn(&[u8]) -> ParseResult<_> = parse_via;
+        let contact_fn: fn(&[u8]) -> ParseResult<_> = parse_contact;
+        let from_fn: fn(&[u8]) -> ParseResult<_> = parse_from;
+        let to_fn: fn(&[u8]) -> ParseResult<_> = parse_to;
+        let cseq_fn: fn(&[u8]) -> ParseResult<_> = parse_cseq;
+        let auth_fn: fn(&[u8]) -> ParseResult<_> = parse_www_authenticate;
+        
+        // If this compiles, the exports are working correctly
+        assert!(true);
+    }
+
+    /// Test that parsing a simple Via header works through the exported function
+    #[test]
+    fn test_via_parser() {
+        let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
+        let result = parse_via(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a Contact header works through the exported function
+    #[test]
+    fn test_contact_parser() {
+        let input = b"<sip:alice@atlanta.com>";
+        let result = parse_contact(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a From header works through the exported function
+    #[test]
+    fn test_from_parser() {
+        let input = b"Alice <sip:alice@atlanta.com>;tag=1928301774";
+        let result = parse_from(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a CSeq header works through the exported function
+    #[test]
+    fn test_cseq_parser() {
+        let input = b"314159 INVITE";
+        let result = parse_cseq(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a Call-ID header works through the exported function
+    #[test]
+    fn test_call_id_parser() {
+        let input = b"a84b4c76e66710@pc33.atlanta.com";
+        let result = parse_call_id(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a Content-Type header works through the exported function
+    #[test]
+    fn test_content_type_parser() {
+        let input = b"application/sdp";
+        let result = parse_content_type_value(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a WWW-Authenticate header works through the exported function
+    #[test]
+    fn test_www_authenticate_parser() {
+        let input = b"Digest realm=\"atlanta.com\", nonce=\"8452cd5a\", qop=\"auth\"";
+        let result = parse_www_authenticate(input);
+        assert!(result.is_ok());
+    }
+    
+    /// Test that parsing a Require header works through the exported function
+    #[test]
+    fn test_require_parser() {
+        let input = b"100rel,precondition";
+        let result = parse_require(input);
+        assert!(result.is_ok());
+    }
+}
