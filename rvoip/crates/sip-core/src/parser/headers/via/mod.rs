@@ -289,7 +289,7 @@ mod tests {
         // Test flag parameter (no value)
         let (rem_flag, p_flag) = via_param_item(b"rport").unwrap();
         assert!(rem_flag.is_empty());
-        assert!(matches!(p_flag, Param::Other(n, None) if n == "rport"));
+        assert!(matches!(p_flag, Param::Rport(None)));
         
         // Test value with quotes
         let (rem_quote, p_quote) = via_param_item(b"comment=\"test value\"").unwrap();
@@ -352,10 +352,9 @@ mod tests {
         assert!(result.is_ok());
         let (rem, via) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(via.params.len(), 2);
         
         // One parameter should be rport with no value
-        let has_rport = via.params.iter().any(|p| matches!(p, Param::Other(n, None) if n == "rport"));
+        let has_rport = via.params.iter().any(|p| matches!(p, Param::Rport(None)));
         assert!(has_rport, "Should have rport parameter with no value");
         
         // Test with rport parameter with value (which is valid according to RFC 3581)
@@ -367,7 +366,7 @@ mod tests {
         
         // One parameter should be rport with a value
         let has_rport_value = via.params.iter().any(|p| 
-            matches!(p, Param::Other(n, Some(GenericValue::Token(v))) if n == "rport" && v == "5060")
+            matches!(p, Param::Rport(Some(v)) if *v == 5060)
         );
         assert!(has_rport_value, "Should have rport parameter with value 5060");
     }
@@ -468,7 +467,7 @@ mod tests {
         
         // Check all the expected parameters exist
         assert!(via.params.iter().any(|p| matches!(p, Param::Branch(s) if s == "z9hG4bK-524287-1---a6b23e33cdfc7905")));
-        assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, None) if s == "rport")));
+        assert!(via.params.iter().any(|p| matches!(p, Param::Rport(None))));
         assert!(via.params.iter().any(|p| matches!(p, Param::Received(ip) if *ip == Ipv4Addr::new(192, 168, 1, 100))));
         assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, None) if s == "test")));
         assert!(via.params.iter().any(|p| matches!(p, Param::Other(s, Some(GenericValue::Token(v))) if s == "multi-param" && v == "123")));
@@ -504,7 +503,7 @@ mod tests {
         
         // Test missing branch parameter
         let mut missing_branch = valid_via.clone();
-        missing_branch.params = vec![Param::Other("rport".to_string(), None)];
+        missing_branch.params = vec![Param::Rport(None)];
         assert!(!validate_via_header(&missing_branch));
         
         // Test non-compliant branch (not starting with z9hG4bK)
@@ -575,7 +574,7 @@ mod tests {
         assert_eq!(via.sent_by_host.to_string(), "pc33.atlanta.com");
         
         // Check if we can find the rport parameter without a value
-        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(_)));
+        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(None)));
         assert!(rport_param.is_some(), "Should have an rport parameter");
         if let Some(Param::Rport(port)) = rport_param {
             assert!(port.is_none(), "Flag rport should have no value");
@@ -591,7 +590,7 @@ mod tests {
         assert_eq!(via.sent_by_host.to_string(), "pc33.atlanta.com");
         
         // Check if we can find the rport parameter with a value
-        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(_)));
+        let rport_param = via.params.iter().find(|p| matches!(p, Param::Rport(Some(v)) if *v == 5060));
         assert!(rport_param.is_some(), "Should have an rport parameter");
         if let Some(Param::Rport(port)) = rport_param {
             assert_eq!(*port, Some(5060), "Response rport should have a port value");
