@@ -234,10 +234,11 @@ mod tests {
             parse_via, parse_contact, parse_from, parse_to, 
             parse_cseq, parse_call_id, parse_content_type_value
         };
+        use super::headers::via::parse_via_params;
 
         // Via - uncommented for debugging
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Via header should parse successfully");
         
         // Contact
@@ -260,10 +261,11 @@ mod tests {
     #[test]
     fn test_via_headers() {
         use super::headers::parse_via;
+        use super::headers::via::parse_via_params;
         
         // Test basic Via header
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Basic Via header should parse successfully");
         if let Ok((_, vias)) = result {
             assert_eq!(vias.len(), 1, "Should parse exactly one Via header");
@@ -276,7 +278,7 @@ mod tests {
         
         // Test Via header with port
         let input = b"SIP/2.0/TCP 192.168.1.1:5060;branch=z9hG4bKnashds7";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Via header with port should parse successfully");
         if let Ok((_, vias)) = result {
             let via = &vias[0];
@@ -286,7 +288,7 @@ mod tests {
         
         // Test Via header with multiple parameters
         let input = b"SIP/2.0/UDP biloxi.com:5060;branch=z9hG4bK123;received=192.0.2.3;ttl=16;maddr=224.2.0.1";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Via header with multiple parameters should parse successfully");
         if let Ok((_, vias)) = result {
             let via = &vias[0];
@@ -298,7 +300,7 @@ mod tests {
         
         // Test Via header with hidden branch parameter
         let input = b"SIP/2.0/UDP 192.168.0.1;hidden;branch=z9hG4bK776asdhds";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Via header with hidden parameter should parse successfully");
         if let Ok((_, vias)) = result {
             let via = &vias[0];
@@ -309,7 +311,7 @@ mod tests {
         
         // Test multiple Via headers in one go
         let input = b"SIP/2.0/UDP first.com:5060;branch=z9hG4bK876, SIP/2.0/TCP second.com;branch=z9hG4bK321";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Multiple Via headers should parse successfully");
         if let Ok((_, vias)) = result {
             assert_eq!(vias.len(), 2, "Should parse two Via headers");
@@ -321,7 +323,7 @@ mod tests {
         
         // Test IPv6 address in Via header
         let input = b"SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK776asdhds";
-        let result = parse_via(input);
+        let result = parse_via_params(input);
         assert!(result.is_ok(), "Via header with IPv6 address should parse successfully");
         if let Ok((_, vias)) = result {
             let via = &vias[0];
