@@ -150,9 +150,9 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
         };
         
         // Parse the header name
-        use std::str::FromStr;
-        match str::from_utf8(name_bytes) {
-            Ok(name_str) => {
+                use std::str::FromStr;
+                match str::from_utf8(name_bytes) {
+                    Ok(name_str) => {
                 let header_name = HeaderName::from_str(name_str)
                     .unwrap_or_else(|_| HeaderName::Other(name_str.to_string()));
                 
@@ -161,7 +161,7 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
                 
                 Ok((input, (header_name, value_bytes.to_vec())))
             },
-            Err(_) => {
+                    Err(_) => { 
                 let header_name = HeaderName::Other(String::from_utf8_lossy(name_bytes).into_owned());
                 
                 // Consume the line ending
@@ -194,7 +194,7 @@ fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
 
 /// Tries to parse the raw content bytes based on Content-Type header.
 fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedBody> {
-    let content_type = headers.iter()
+     let content_type = headers.iter()
         .find(|h| h.name == HeaderName::ContentType)
         .and_then(|h| match &h.value {
             HeaderValue::Raw(bytes) => str::from_utf8(bytes).ok(),
@@ -205,7 +205,7 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
         let ct_lowercase = ct.to_lowercase();
         
         if ct_lowercase.starts_with("application/sdp") {
-            match crate::sdp::parser::parse_sdp(raw_content) {
+             match crate::sdp::parser::parse_sdp(raw_content) {
                 Ok(sdp_session) => Some(ParsedBody::Sdp(sdp_session)),
                 Err(_) => {
                     // Keep raw content, return Other
@@ -237,11 +237,11 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
             Some(ParsedBody::Other(raw_content.clone()))
         } else {
             // Other content types, return raw bytes
-            Some(ParsedBody::Other(raw_content.clone()))
+             Some(ParsedBody::Other(raw_content.clone()))
         }
     } else {
         // If no Content-Type header, treat as raw bytes
-        Some(ParsedBody::Other(raw_content.clone()))
+         Some(ParsedBody::Other(raw_content.clone()))
     }
 }
 
@@ -465,7 +465,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
         },
         None => {
             // No boundary found, can't parse
-            return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
+             return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
         }
     }
 
@@ -581,7 +581,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                             let trimmed_content = trim_trailing_newlines(current_input);
                             part.raw_content = Bytes::copy_from_slice(trimmed_content);
                             part.parsed_content = parse_part_content(&part.headers, &part.raw_content);
-                            body.add_part(part);
+        body.add_part(part);
                         }
                         
                         // We've consumed all input
@@ -627,14 +627,14 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                                     current_input = &current_input[1..];
                                 }
                                 
-                                if is_end_boundary {
+        if is_end_boundary {
                                     // End of multipart
                                     if !current_input.is_empty() {
                                         body.epilogue = Some(Bytes::copy_from_slice(current_input));
                                     }
                                     break;
                                 }
-                            } else {
+        } else {
                                 // End of input
                                 break;
                             }
