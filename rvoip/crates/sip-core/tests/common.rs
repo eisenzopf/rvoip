@@ -4,9 +4,10 @@ use std::net::IpAddr;
 use bytes::Bytes;
 use ordered_float::NotNan;
 
-// SIP Core imports
+// SIP Core imports using the rvoip_sip_core crate name
 use rvoip_sip_core::types::uri::{Uri, Scheme, Host};
-use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via};
+use rvoip_sip_core::types::{Address, Method, Param, StatusCode};
+use rvoip_sip_core::types::via::Via;
 use rvoip_sip_core::types::param::GenericValue;
 use rvoip_sip_core::types::sip_message::{Message, Request, Response};
 use rvoip_sip_core::{
@@ -58,7 +59,6 @@ pub fn param_other(key: &str, value: Option<&str>) -> Param {
     )
 }
 
-
 // --- Parser/FromStr Test Helpers ---
 
 /// Asserts that parsing the input string with T::from_str results in the expected value.
@@ -101,7 +101,6 @@ where
         Err(e) => panic!("Failed to parse back displayed string '{}': {:?}", displayed, e),
     }
 }
-
 
 // --- Message Test Helpers (Keep existing for now) ---
 
@@ -185,8 +184,7 @@ pub fn validate_message_basic(
     }
 }
 
-// TODO: Add typed header validation helpers later 
-
+// Helper to create a Via header
 pub fn via(host: Host, port: Option<u16>, transport: &str) -> Via {
     Via::new(
         "SIP",
