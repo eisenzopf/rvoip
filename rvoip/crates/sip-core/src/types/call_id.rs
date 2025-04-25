@@ -27,6 +27,18 @@ impl fmt::Display for CallId {
     }
 }
 
+impl CallId {
+    /// Create a new CallId from a string.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    
+    /// Get a reference to the inner string value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl FromStr for CallId {
     type Err = Error;
 

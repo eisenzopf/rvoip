@@ -10,17 +10,17 @@ use nom::combinator::all_consuming;
 /// Represents the Content-Length header field (RFC 3261 Section 7.3.2).
 /// Indicates the size of the message body in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ContentLength(pub usize);
+pub struct ContentLength(pub u32);
 
 impl ContentLength {
     /// Creates a new Content-Length header value.
-    pub fn new(length: usize) -> Self {
+    pub fn new(length: u32) -> Self {
         Self(length)
     }
 }
 
 impl Deref for ContentLength {
-    type Target = usize;
+    type Target = u32;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -37,13 +37,10 @@ impl FromStr for ContentLength {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::content_length::parse_content_length;
-
-        all_consuming(parse_content_length)(s.as_bytes())
-            .map_err(Error::from)
-            .and_then(|(_, value)| {
-                Ok(ContentLength(value.try_into().map_err(|_| Error::ParseError("Content-Length value out of range for usize".to_string()))?))
-            })
+        match s.trim().parse::<u32>() {
+            Ok(len) => Ok(ContentLength(len)),
+            Err(_) => Err(Error::ParseError(format!("Invalid Content-Length value: {}", s)))
+        }
     }
 }
 
