@@ -124,13 +124,18 @@ impl FromStr for Host {
         // Attempt to parse as IP address first
         if let Ok(addr) = IpAddr::from_str(s) {
             return Ok(Host::Address(addr));
-        } else if s.starts_with('[') && s.ends_with(']') {
-             // Maybe IPv6 literal without brackets parsed?
-             if let Ok(addr) = Ipv6Addr::from_str(&s[1..s.len()-1]) {
-                 return Ok(Host::Address(IpAddr::V6(addr)));
-             }
-             // If it looked like IPv6 but failed, treat as domain
-             Ok(Host::Domain(s.to_string()))
+        } else if s.starts_with('[') {
+            if s.ends_with(']') {
+                // Properly formatted IPv6 with brackets
+                if let Ok(addr) = Ipv6Addr::from_str(&s[1..s.len()-1]) {
+                    return Ok(Host::Address(IpAddr::V6(addr)));
+                }
+                // If it looked like IPv6 but failed, treat as domain
+                Ok(Host::Domain(s.to_string()))
+            } else {
+                // String starts with '[' but doesn't end with ']' - malformed IPv6
+                Err(Error::InvalidUri(format!("Malformed IPv6 address (unclosed bracket): {}", s)))
+            }
         } else {
             // Assume domain name if not a valid IP
             // TODO: Add stricter domain name validation?
