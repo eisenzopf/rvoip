@@ -22,7 +22,6 @@ use crate::types::sdp::SdpSession;
 // Import the structures from the types module
 use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::parser::ParseResult;
-use crate::parser::message::header_value;
 use crate::parser::message::trim_bytes;
 use crate::parser::whitespace::{crlf as parse_crlf, lws, sws}; 
 use crate::parser::utils::{unfold_lws};

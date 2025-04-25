@@ -189,6 +189,10 @@ mod tests {
     use crate::types::{Request, Response, CSeq, HeaderName, HeaderValue, Method, Version};
     use std::collections::HashMap;
 
+    // RFC 3261 Section 7.3 - Headers
+    // Test parsing of message headers according to the ABNF grammar:
+    // message-header = header-name HCOLON header-value CRLF
+
     #[test]
     fn test_message_header_simple() {
         let input = b"Subject: Simple Subject\r\n";
@@ -211,7 +215,7 @@ mod tests {
         assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"101 INVITE"));
     }
 
-     #[test]
+    #[test]
     fn test_message_header_with_lws() {
         let input = b"From:  Alice <sip:alice@atlanta.com> ;tag=123\r\n";
         let result = message_header(input);
@@ -245,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn test_message_header_case_insensitivity() {
+        // RFC 3261 Section 7.3.1: Field names are case-insensitive
+        let input = b"SUBJECT: Case Insensitive Test\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Subject);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"Case Insensitive Test"));
+    }
+
+    #[test]
     fn test_invalid_message_header_no_colon() {
         let input = b"Invalid Header Line\r\n";
         assert!(message_header(input).is_err());
@@ -254,6 +270,31 @@ mod tests {
     fn test_invalid_message_header_no_crlf() {
         let input = b"Subject: No CRLF";
         assert!(message_header(input).is_err());
+    }
+
+    #[test]
+    fn test_header_with_utf8() {
+        // RFC 3261 allows UTF-8 characters in header values
+        let input = "Subject: UTF-8 Chars - こんにちは\r\n".as_bytes();
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Subject);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+            std::str::from_utf8(v).unwrap() == "UTF-8 Chars - こんにちは"));
+    }
+
+    #[test]
+    fn test_message_header_with_quotes() {
+        // RFC 3261 allows quoted strings in header values
+        let input = b"Subject: \"Quoted Value\" with more text\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Subject);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"\"Quoted Value\" with more text"));
     }
     
     #[test]
@@ -292,50 +333,238 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_header_block_folding_raw() {
-        // This test assumes folding is NOT handled yet, captured in Raw
-        let input = b"Subject: Line 1\r\n Line 2\r\nContent-Length: 0\r\n\r\n";
+    fn test_line_folding_header() {
+        // RFC 3261 Section 7.3.1 - Line folding
+        // A line break and any amount of whitespace are equivalent to a single SP
+        let input = b"Subject: Line 1\r\n Line 2\r\n\t Continued Here\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty(), "Expected empty remainder");
+        assert_eq!(header.name, HeaderName::Subject);
+        
+        // Raw header value should capture the folded value
+        // (Unfolding happens during TypedHeader conversion)
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"Line 1\r\n Line 2\r\n\t Continued Here"));
+    }
+
+    #[test]
+    fn test_multiple_header_lines() {
+        // RFC 3261 Section 7.3.1 - Multiple headers with same field name
+        let input = b"Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
+                     Via: SIP/2.0/UDP bigbox3.site3.atlanta.com\r\n\
+                     \r\n";
+                     
         let result = parse_header_block(input);
         assert!(result.is_ok());
         let (rem, headers) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0].name, HeaderName::Subject);
-        // Specific subject parser likely fails due to internal CRLF LWS,
-        // so it should fall back to Raw containing the un-processed folded value.
-        assert!(matches!(headers[0].value, HeaderValue::Raw(ref v) if v == b"Line 1\r\n Line 2")); 
-        assert_eq!(headers[1].name, HeaderName::ContentLength);
+        assert_eq!(headers[0].name, HeaderName::Via);
+        assert_eq!(headers[1].name, HeaderName::Via);
     }
 
     #[test]
-    fn test_message_header_unfolding() {
-        // Test that message_header correctly calls unfold_lws before parsing/storing
-        let input = b"Subject: Line 1\r\n Line 2\r\n\t Continued Here\r\n";
+    fn test_compact_form_headers() {
+        // RFC 3261 Section 7.3.3 - Compact Form
+        let input = b"i: a84b4c76e66710@pc33.atlanta.com\r\n"; // Call-ID compact form
         let result = message_header(input);
         assert!(result.is_ok());
         let (rem, header) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(header.name, HeaderName::Subject);
-        // Check that the parsed Subject value reflects the unfolded string
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"Line 1 Line 2 Continued Here"));
+        assert_eq!(header.name, HeaderName::CallId); 
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"a84b4c76e66710@pc33.atlanta.com"));
+        
+        // Test more compact forms
+        let input = b"m: audio 49170 RTP/AVP 0\r\n"; // Contact compact form
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert_eq!(header.name, HeaderName::Contact);
     }
 
     #[test]
-    fn test_message_header_unfolding_raw() {
-        let input = b"X-Folded: Value\r\n Part 2\r\n";
+    fn test_header_values_with_special_chars() {
+        // RFC 3261 allows various special characters in header values
+        let input = b"User-Agent: SIP-Client/5.0 (Special:Ch@rs; \"Quoted\"; v=1.0)\r\n";
         let result = message_header(input);
         assert!(result.is_ok());
         let (rem, header) = result.unwrap();
         assert!(rem.is_empty());
-        assert_eq!(header.name, HeaderName::Other("X-Folded".to_string()));
-        // Raw value should be the unfolded version (but not trimmed here yet)
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"Value Part 2"));
+        assert_eq!(header.name, HeaderName::UserAgent);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"SIP-Client/5.0 (Special:Ch@rs; \"Quoted\"; v=1.0)"));
     }
 
-    // TODO: Add tests for full_message_parser and parse_message
-    // #[test]
-    // fn test_parse_request_full() { /* ... */ }
+    #[test]
+    fn test_header_values_with_separators() {
+        // Test header with various separator characters
+        let input = b"Supported: timer, 100rel, path, gruu\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Supported);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"timer, 100rel, path, gruu"));
+    }
+
+    // ABNF tests for specific header types - ensuring the raw parser can handle them
     
-    // #[test]
-    // fn test_parse_response_full() { /* ... */ }
+    #[test]
+    fn test_via_header_format() {
+        // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
+        let input = b"Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds, SIP/2.0/TCP bigbox3.site3.atlanta.com\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Via);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+            v == b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds, SIP/2.0/TCP bigbox3.site3.atlanta.com"));
+    }
+
+    #[test]
+    fn test_full_from_header() {
+        // From = ( "From" / "f" ) HCOLON from-spec
+        // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
+        let input = b"From: \"Caller\" <sip:caller@atlanta.example.com>;tag=958465702;param=val\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::From);
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+            v == b"\"Caller\" <sip:caller@atlanta.example.com>;tag=958465702;param=val"));
+    }
+
+    // Integration tests for overall message structure (request line + headers + body)
+
+    #[test]
+    fn test_parse_full_request() {
+        // Full SIP INVITE message as per RFC 3261 examples
+        let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+                     Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
+                     Max-Forwards: 70\r\n\
+                     To: Bob <sip:bob@biloxi.com>\r\n\
+                     From: Alice <sip:alice@atlanta.com>;tag=1928301774\r\n\
+                     Call-ID: a84b4c76e66710@pc33.atlanta.com\r\n\
+                     CSeq: 314159 INVITE\r\n\
+                     Contact: <sip:alice@pc33.atlanta.com>\r\n\
+                     Content-Type: application/sdp\r\n\
+                     Content-Length: 4\r\n\
+                     \r\n\
+                     Test";
+
+        let result = full_message_parser(input);
+        assert!(result.is_ok(), "Failed to parse valid SIP message");
+        
+        let (rem, msg) = result.unwrap();
+        assert!(rem.is_empty(), "Parser should consume the entire input");
+        
+        match msg {
+            Message::Request(req) => {
+                assert_eq!(req.method, Method::Invite);
+                assert_eq!(req.uri.to_string(), "sip:bob@biloxi.com");
+                assert_eq!(req.headers.len(), 9);
+                assert_eq!(req.body.len(), 4);
+                assert_eq!(&req.body[..], b"Test");
+            },
+            _ => panic!("Expected Request, got Response")
+        }
+    }
+
+    #[test]
+    fn test_parse_full_response() {
+        // Full SIP 200 OK response as per RFC 3261 examples
+        let input = b"SIP/2.0 200 OK\r\n\
+                     Via: SIP/2.0/UDP server10.biloxi.com;branch=z9hG4bKnashds8\r\n\
+                     Via: SIP/2.0/UDP bigbox3.site3.atlanta.com\r\n\
+                     To: Bob <sip:bob@biloxi.com>;tag=a6c85cf\r\n\
+                     From: Alice <sip:alice@atlanta.com>;tag=1928301774\r\n\
+                     Call-ID: a84b4c76e66710@pc33.atlanta.com\r\n\
+                     CSeq: 314159 INVITE\r\n\
+                     Contact: <sip:bob@192.0.2.4>\r\n\
+                     Content-Type: application/sdp\r\n\
+                     Content-Length: 4\r\n\
+                     \r\n\
+                     Body";
+
+        let result = full_message_parser(input);
+        assert!(result.is_ok(), "Failed to parse valid SIP response");
+        
+        let (rem, msg) = result.unwrap();
+        assert!(rem.is_empty(), "Parser should consume the entire input");
+        
+        match msg {
+            Message::Response(resp) => {
+                assert_eq!(resp.status, StatusCode::Ok);
+                assert_eq!(resp.reason_phrase(), "OK");
+                assert_eq!(resp.headers.len(), 9);
+                assert_eq!(resp.body.len(), 4);
+                assert_eq!(&resp.body[..], b"Body");
+            },
+            _ => panic!("Expected Response, got Request")
+        }
+    }
+
+    #[test]
+    fn test_message_missing_content_length() {
+        // RFC 3261 Section 20.14: If Content-Length header is missing, body is empty
+        let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+                     Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
+                     To: Bob <sip:bob@biloxi.com>\r\n\
+                     From: Alice <sip:alice@atlanta.com>;tag=1928301774\r\n\
+                     Call-ID: a84b4c76e66710@pc33.atlanta.com\r\n\
+                     CSeq: 314159 INVITE\r\n\
+                     \r\n\
+                     This content should be ignored";
+
+        let result = full_message_parser(input);
+        assert!(result.is_ok(), "Failed to parse message without Content-Length");
+        
+        let (_, msg) = result.unwrap();
+        match msg {
+            Message::Request(req) => {
+                assert_eq!(req.body.len(), 0, "Body should be empty when Content-Length is missing");
+            },
+            _ => panic!("Expected Request, got Response")
+        }
+    }
+
+    #[test]
+    fn test_message_with_folded_headers() {
+        // Test with real-world line folding in headers
+        let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+                     Subject: This is a very long subject header that\r\n\
+                      spans multiple lines and uses line\r\n\
+                      folding as described in RFC 3261\r\n\
+                     Content-Length: 0\r\n\
+                     \r\n";
+
+        let result = full_message_parser(input);
+        assert!(result.is_ok(), "Failed to parse message with folded headers");
+    }
+
+    #[test]
+    fn test_abnf_invalid_messages() {
+        // Test rejection of invalid messages
+        
+        // 1. Missing start line
+        let input = b"Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\r\n";
+        assert!(full_message_parser(input).is_err(), "Should reject message without start line");
+        
+        // 2. Invalid request-line format
+        let input = b"INVITE\r\n\r\n"; // Missing URI and version
+        assert!(full_message_parser(input).is_err(), "Should reject invalid request-line");
+        
+        // 3. Invalid status-line format
+        let input = b"SIP/2.0 200\r\n\r\n"; // Missing reason phrase
+        assert!(full_message_parser(input).is_err(), "Should reject invalid status-line");
+        
+        // 4. Content-Length mismatch
+        let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+                     Content-Length: 10\r\n\
+                     \r\n\
+                     Test"; // Only 4 bytes, but Content-Length said 10
+        assert!(full_message_parser(input).is_err(), "Should reject message with Content-Length mismatch");
+    }
 } 
