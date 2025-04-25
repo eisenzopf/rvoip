@@ -37,3 +37,7 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "torture_tests"
 path = "tests/rfc_compliance/torture_test.rs"
+
+[[test]]
+name = "parser"
+path = "tests/parser_tests.rs"

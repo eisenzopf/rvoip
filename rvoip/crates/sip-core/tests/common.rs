@@ -5,15 +5,15 @@ use bytes::Bytes;
 use ordered_float::NotNan;
 
 // SIP Core imports
-use rvoip_sip_core::uri::{Uri, Scheme, Host};
+use rvoip_sip_core::types::uri::{Uri, Scheme, Host};
 use rvoip_sip_core::types::{Address, Method, Param, StatusCode, Via};
+use rvoip_sip_core::types::param::GenericValue;
 use rvoip_sip_core::types::sip_message::{Message, Request, Response};
 use rvoip_sip_core::{
     Error as SipError,
     Result as SipResult,
-    parse_message, 
-    HeaderName,
-    HeaderValue
+    parser::message::parse_message, 
+    types::header::{HeaderName, HeaderValue, TypedHeader}
 };
 
 // Use crate:: syntax as this will be part of the test crate
@@ -52,7 +52,10 @@ pub fn param_transport(val: &str) -> Param { Param::Transport(val.to_string()) }
 pub fn param_user(val: &str) -> Param { Param::User(val.to_string()) }
 pub fn param_method(val: &str) -> Param { Param::Method(val.to_string()) }
 pub fn param_other(key: &str, value: Option<&str>) -> Param {
-    Param::Other(key.to_string(), value.map(String::from))
+    Param::Other(
+        key.to_string(), 
+        value.map(|v| GenericValue::Token(v.to_string()))
+    )
 }
 
 
@@ -164,7 +167,7 @@ pub fn validate_message_basic(
             let headers = message.headers();
             for (name, value) in expected_headers {
                 let found = headers.iter().any(|h| {
-                    h.name.as_str() == *name && h.value.to_string().contains(value)
+                    h.name().as_str() == *name && h.to_string().contains(value)
                 });
                 
                 if !found {
@@ -190,6 +193,7 @@ pub fn via(host: Host, port: Option<u16>, transport: &str) -> Via {
         "2.0",
         transport.to_string(),
         host.to_string(),
-        port
-    )
+        port,
+        vec![]
+    ).expect("Failed to create Via header")
 }

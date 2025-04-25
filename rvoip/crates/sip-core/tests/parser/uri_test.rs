@@ -1,11 +1,12 @@
 // Tests for URI parsing logic in parser/uri.rs
 
 use crate::common::{uri, addr, param_tag, param_expires, param_q, param_transport, param_method, param_user, param_other, param_received, param_ttl, param_lr, assert_parses_ok, assert_parse_fails, param_branch, param_maddr};
-use rvoip_sip_core::parser::uri::{parse_uri}; // Assuming this is the main entry point
+use rvoip_sip_core::parser::uri::parse_uri; // Assuming this is the main entry point
 // Need to make parameter_parser pub or test via parse_uri
 // use rvoip_sip_core::parser::uri::{parameter_parser};
 use rvoip_sip_core::types::{Param, Method};
-use rvoip_sip_core::uri::{Uri, Scheme, Host};
+use rvoip_sip_core::types::uri::{Uri, Scheme, Host}; // Updated URI path
+use rvoip_sip_core::types::param::GenericValue; // Add GenericValue import
 use std::str::FromStr;
 use std::net::IpAddr;
 use std::collections::HashMap;
@@ -31,10 +32,10 @@ fn parse_just_param(input: &str) -> Param {
 // TODO: Add specific tests for parameter_parser and parameters_parser
 
 #[test]
-fn test_parse_uri_with_params() {
+fn test_uri_from_str() {
     /// Based on RFC 3261 Section 19.1.4 URI Parameters
     let input = "sip:alice@example.com;transport=tcp;method=REGISTER";
-    let uri = parse_uri(input).expect("Failed to parse URI");
+    let uri = Uri::from_str(input).expect("Failed to parse URI");
 
     assert_eq!(uri.scheme, Scheme::Sip);
     assert!(matches!(uri.host, Host::Domain(d) if d == "example.com"));
@@ -46,20 +47,36 @@ fn test_parse_uri_with_params() {
 }
 
 #[test]
-fn test_parse_uri_with_flag_param() {
-     /// Based on RFC 3261 Section 20.42 Via Header Field (lr param example)
+fn test_uri_with_flag_param() {
+    /// Based on RFC 3261 Section 20.42 Via Header Field (lr param example)
     let input = "sip:user@host.com;lr";
-    let uri = parse_uri(input).expect("Failed to parse URI");
+    let uri = Uri::from_str(input).expect("Failed to parse URI");
     assert!(uri.parameters.contains(&Param::Lr));
     assert_eq!(uri.parameters.len(), 1);
 }
 
 #[test]
-fn test_parse_uri_with_escaped_param() {
+fn test_uri_with_escaped_param() {
     /// Test parsing escaped characters in parameters
     let input = "sip:user@host;param=hello%20world";
-    let uri = parse_uri(input).expect("Failed to parse URI");
-    assert!(uri.parameters.contains(&Param::Other("param".to_string(), Some("hello world".to_string()))));
+    let uri = Uri::from_str(input).expect("Failed to parse URI");
+    
+    // Create the expected param with GenericValue
+    let expected_param = Param::Other(
+        "param".to_string(), 
+        Some(GenericValue::Token("hello world".to_string()))
+    );
+    
+    // Check if the param list contains a matching param
+    let has_param = uri.parameters.iter().any(|p| {
+        if let Param::Other(key, Some(GenericValue::Token(val))) = p {
+            key == "param" && val == "hello world"
+        } else {
+            false
+        }
+    });
+    
+    assert!(has_param, "URI should contain param with escaped value");
 }
 
 // Add more tests for edge cases, different param types (q, ttl, expires, received, etc.) 
@@ -69,14 +86,29 @@ fn test_parse_uri_with_escaped_param() {
 #[test]
 fn test_parse_simple_uri_adapted() {
     /// RFC 3261 Section 19.1: SIP and SIPS URIs
-    assert_parses_ok(
-        "sip:example.com", 
-        Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("example.com".to_string()), port: None, parameters: vec![], headers: HashMap::new() }
-    );
-    assert_parses_ok(
-        "sips:secure.example.com:5061", 
-        Uri { scheme: Scheme::Sips, user: None, password: None, host: Host::Domain("secure.example.com".to_string()), port: Some(5061), parameters: vec![], headers: HashMap::new() }
-    );
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: None,
+        password: None,
+        host: Host::domain("example.com"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:example.com".to_string()),
+    };
+    assert_parses_ok("sip:example.com", uri);
+    
+    let uri = Uri {
+        scheme: Scheme::Sips,
+        user: None,
+        password: None,
+        host: Host::domain("secure.example.com"),
+        port: Some(5061),
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sips:secure.example.com:5061".to_string()),
+    };
+    assert_parses_ok("sips:secure.example.com:5061", uri);
 }
 
 #[test]
@@ -86,7 +118,7 @@ fn test_parse_complex_uri_adapted() {
         scheme: Scheme::Sip,
         user: Some("alice".to_string()),
         password: None,
-        host: Host::Domain("example.com".to_string()),
+        host: Host::domain("example.com"),
         port: None,
         parameters: vec![param_transport("tcp"), param_lr()],
         headers: {
@@ -94,6 +126,7 @@ fn test_parse_complex_uri_adapted() {
             map.insert("subject".to_string(), "Meeting".to_string());
             map
         },
+        raw_uri: Some("sip:alice@example.com;transport=tcp;lr?subject=Meeting".to_string()),
     };
     assert_parses_ok("sip:alice@example.com;transport=tcp;lr?subject=Meeting", expected_uri);
 }
@@ -101,24 +134,32 @@ fn test_parse_complex_uri_adapted() {
 #[test]
 fn test_tel_uri_adapted() {
     /// RFC 3966: The tel URI for Telephone Numbers
-    assert_parses_ok(
-        "tel:+1-212-555-0123", 
-        Uri { scheme: Scheme::Tel, user: None, password: None, host: Host::Domain("+1-212-555-0123".to_string()), port: None, parameters: vec![], headers: HashMap::new() }
-    );
+    let uri = Uri {
+        scheme: Scheme::Tel,
+        user: None,
+        password: None,
+        host: Host::domain("+1-212-555-0123"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("tel:+1-212-555-0123".to_string()),
+    };
+    assert_parses_ok("tel:+1-212-555-0123", uri);
 }
 
 #[test]
 fn test_escaped_uri_adapted() {
-     /// RFC 3261 Section 19.1.1: Escaping
-     let expected = Uri {
+    /// RFC 3261 Section 19.1.1: Escaping
+    let expected = Uri {
         scheme: Scheme::Sip, 
         user: Some("user with spaces".to_string()), 
         password: None,
-        host: Host::Domain("example.com".to_string()),
+        host: Host::domain("example.com"),
         port: None,
         parameters: vec![param_other("param", Some("value with spaces"))],
         headers: HashMap::new(),
-     };
+        raw_uri: Some("sip:user%20with%20spaces@example.com;param=value%20with%20spaces".to_string()),
+    };
     assert_parses_ok("sip:user%20with%20spaces@example.com;param=value%20with%20spaces", expected);
 }
 
@@ -152,88 +193,161 @@ fn test_parse_param_types() {
 #[test]
 fn test_parse_param_lr_flag() {
     /// RFC 3261 Section 20.42 Via Header Field (lr param example)
-     assert_parses_ok(
-         "sip:user@host.com;lr", 
-         Uri { 
-             scheme: Scheme::Sip, 
-             user: Some("user".to_string()),
-             password: None,
-             host: Host::Domain("host.com".to_string()),
-             port: None,
-             parameters: vec![param_lr()],
-             headers: HashMap::new(),
-         }
-     );
+    let uri = Uri { 
+        scheme: Scheme::Sip, 
+        user: Some("user".to_string()),
+        password: None,
+        host: Host::domain("host.com"),
+        port: None,
+        parameters: vec![param_lr()],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:user@host.com;lr".to_string()),
+    };
+    assert_parses_ok("sip:user@host.com;lr", uri);
 }
 
 #[test]
 fn test_parse_param_case_insensitive() {
     /// Parameter names are case-insensitive (RFC 3261 Section 19.1.4)
-     assert_parses_ok(
-         "sip:host;BRANCH=xyz;Transport=UDP", 
-         Uri { 
-             scheme: Scheme::Sip, 
-             user: None,
-             password: None,
-             host: Host::Domain("host".to_string()),
-             port: None,
-             parameters: vec![param_branch("xyz"), param_transport("UDP")],
-             headers: HashMap::new(),
-         }
-     );
+    let uri = Uri { 
+        scheme: Scheme::Sip, 
+        user: None,
+        password: None,
+        host: Host::domain("host"),
+        port: None,
+        parameters: vec![param_branch("xyz"), param_transport("UDP")],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:host;BRANCH=xyz;Transport=UDP".to_string()),
+    };
+    assert_parses_ok("sip:host;BRANCH=xyz;Transport=UDP", uri);
 }
 
 #[test]
 fn test_parse_param_invalid_values() {
     /// Test that invalid values for known params fall back to Other
-     assert_parses_ok(
-         "sip:host;expires=bad;ttl=999;q=xyz;received=invalid-ip", 
-          Uri { 
-             scheme: Scheme::Sip, 
-             user: None,
-             password: None,
-             host: Host::Domain("host".to_string()),
-             port: None,
-             parameters: vec![
-                param_other("expires", Some("bad")),
-                param_other("ttl", Some("999")),
-                param_other("q", Some("xyz")),
-                param_other("received", Some("invalid-ip"))
-             ],
-             headers: HashMap::new(),
-         }
-     );
+    let uri = Uri { 
+        scheme: Scheme::Sip, 
+        user: None,
+        password: None,
+        host: Host::domain("host"),
+        port: None,
+        parameters: vec![
+            param_other("expires", Some("bad")),
+            param_other("ttl", Some("999")),
+            param_other("q", Some("xyz")),
+            param_other("received", Some("invalid-ip"))
+        ],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:host;expires=bad;ttl=999;q=xyz;received=invalid-ip".to_string()),
+    };
+    assert_parses_ok("sip:host;expires=bad;ttl=999;q=xyz;received=invalid-ip", uri);
 }
 
 #[test]
 fn test_parse_uri_edge_cases() {
     // No user, no params, no headers
-    assert_parses_ok("sip:example.com", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("example.com".to_string()), port: None, parameters: vec![], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: None,
+        password: None,
+        host: Host::domain("example.com"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:example.com".to_string()),
+    };
+    assert_parses_ok("sip:example.com", uri);
+    
     // User only
-    assert_parses_ok("sip:alice@atlanta.com", Uri { scheme: Scheme::Sip, user: Some("alice".to_string()), password: None, host: Host::Domain("atlanta.com".to_string()), port: None, parameters: vec![], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: Some("alice".to_string()),
+        password: None,
+        host: Host::domain("atlanta.com"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:alice@atlanta.com".to_string()),
+    };
+    assert_parses_ok("sip:alice@atlanta.com", uri);
+    
     // User and password (discouraged)
-    assert_parses_ok("sip:alice:secret@atlanta.com", Uri { scheme: Scheme::Sip, user: Some("alice".to_string()), password: Some("secret".to_string()), host: Host::Domain("atlanta.com".to_string()), port: None, parameters: vec![], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: Some("alice".to_string()),
+        password: Some("secret".to_string()),
+        host: Host::domain("atlanta.com"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:alice:secret@atlanta.com".to_string()),
+    };
+    assert_parses_ok("sip:alice:secret@atlanta.com", uri);
+    
     // Host is IPv4
-    assert_parses_ok("sip:192.168.0.1", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::IPv4("192.168.0.1".to_string()), port: None, parameters: vec![], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: None,
+        password: None,
+        host: Host::ipv4("192.168.0.1"),
+        port: None,
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:192.168.0.1".to_string()),
+    };
+    assert_parses_ok("sip:192.168.0.1", uri);
+    
     // Host is IPv6
-    assert_parses_ok("sips:[2001:db8::1]:5061", Uri { scheme: Scheme::Sips, user: None, password: None, host: Host::IPv6("2001:db8::1".to_string()), port: Some(5061), parameters: vec![], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sips,
+        user: None,
+        password: None,
+        host: Host::ipv6("2001:db8::1"),
+        port: Some(5061),
+        parameters: vec![],
+        headers: HashMap::new(),
+        raw_uri: Some("sips:[2001:db8::1]:5061".to_string()),
+    };
+    assert_parses_ok("sips:[2001:db8::1]:5061", uri);
+    
     // Params but no user
-    assert_parses_ok("sip:host.com;transport=udp", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("host.com".to_string()), port: None, parameters: vec![param_transport("udp")], headers: HashMap::new() });
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: None,
+        password: None,
+        host: Host::domain("host.com"),
+        port: None,
+        parameters: vec![param_transport("udp")],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:host.com;transport=udp".to_string()),
+    };
+    assert_parses_ok("sip:host.com;transport=udp", uri);
+    
     // Headers but no params
-    assert_parses_ok(
-        "sip:host.com?Subject=Hello", 
-        Uri { 
-            scheme: Scheme::Sip, 
-            user: None,
-            password: None,
-            host: Host::Domain("host.com".to_string()), 
-            port: None,
-            parameters: vec![],
-            headers: { let mut h=HashMap::new(); h.insert("Subject".to_string(), "Hello".to_string()); h }, 
-        }
-    );
-     // Empty parameter value
-    assert_parses_ok("sip:host.com;foo=", Uri { scheme: Scheme::Sip, user: None, password: None, host: Host::Domain("host.com".to_string()), port: None, parameters: vec![param_other("foo", Some(""))], headers: HashMap::new() });
+    let uri = Uri { 
+        scheme: Scheme::Sip, 
+        user: None,
+        password: None,
+        host: Host::domain("host.com"), 
+        port: None,
+        parameters: vec![],
+        headers: { let mut h=HashMap::new(); h.insert("Subject".to_string(), "Hello".to_string()); h },
+        raw_uri: Some("sip:host.com?Subject=Hello".to_string()),
+    };
+    assert_parses_ok("sip:host.com?Subject=Hello", uri);
+    
+    // Empty parameter value
+    let uri = Uri {
+        scheme: Scheme::Sip,
+        user: None,
+        password: None,
+        host: Host::domain("host.com"),
+        port: None,
+        parameters: vec![param_other("foo", Some(""))],
+        headers: HashMap::new(),
+        raw_uri: Some("sip:host.com;foo=".to_string()),
+    };
+    assert_parses_ok("sip:host.com;foo=", uri);
 }
 
 #[test]
