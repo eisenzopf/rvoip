@@ -42,7 +42,7 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
     // Track current header being built (for line folding)
     let mut current_name: Option<HeaderName> = None;
     let mut current_value: Vec<u8> = Vec::new();
-    
+
     loop {
         // Check for end of headers (blank line)
         if remaining.starts_with(b"\r\n") {
@@ -52,9 +52,9 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
             remaining = &remaining[1..];
             break;
         } else if remaining.is_empty() {
-            return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::CrLf)));
+             return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::CrLf)));
         }
-        
+
         // Check if this is a continuation line (folded line)
         if remaining.starts_with(b" ") || remaining.starts_with(b"\t") {
             // This is a continuation line - only valid if we have a current header
@@ -108,7 +108,7 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
         let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
         headers.push(Header::new(name, parsed_value));
     }
-    
+
     Ok((remaining, headers))
 }
 
@@ -169,7 +169,7 @@ fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
 
 /// Tries to parse the raw content bytes based on Content-Type header.
 fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedBody> {
-    let content_type = headers.iter()
+     let content_type = headers.iter()
         .find(|h| h.name == HeaderName::ContentType)
         .and_then(|h| match &h.value {
             HeaderValue::Raw(bytes) => str::from_utf8(bytes).ok(),
@@ -178,7 +178,7 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
 
     if let Some(ct) = content_type {
         if ct.trim().starts_with("application/sdp") {
-            match crate::sdp::parser::parse_sdp(raw_content) {
+             match crate::sdp::parser::parse_sdp(raw_content) {
                 Ok(sdp_session) => Some(ParsedBody::Sdp(sdp_session)),
                 Err(e) => {
                     // Keep raw content, return Other
@@ -201,10 +201,10 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
                 Err(_) => Some(ParsedBody::Other(raw_content.clone())),
             }
         } else {
-            Some(ParsedBody::Other(raw_content.clone()))
+             Some(ParsedBody::Other(raw_content.clone()))
         }
     } else {
-        Some(ParsedBody::Other(raw_content.clone()))
+         Some(ParsedBody::Other(raw_content.clone()))
     }
 }
 
@@ -277,7 +277,7 @@ fn find_next_boundary(input: &[u8], boundary: &str) -> Option<(usize, bool)> {
     let dash_boundary_bytes = dash_boundary.as_bytes();
     let end_boundary = format!("--{}--", boundary);
     let end_boundary_bytes = end_boundary.as_bytes();
-    
+
     // To avoid embedded boundaries being confused with actual delimiters,
     // we need to check that the boundary appears at the start of a line
     let mut pos = 0;
@@ -381,10 +381,10 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
         },
         None => {
             // No boundary found, can't parse
-            return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
+             return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
         }
     }
-    
+
     // Main parsing loop for body parts
     loop {
         // First check if this is a boundary - especially important for consecutive boundaries
@@ -433,8 +433,8 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                         part.parsed_content = parse_part_content(&part.headers, &part.raw_content);
                         
                         // Add the part to the body
-                        body.add_part(part);
-                        
+        body.add_part(part);
+
                         // Advance to the boundary position
                         current_input = &current_input[pos..];
                         
@@ -522,14 +522,14 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                             if current_input.len() > skip_len {
                                 current_input = &current_input[skip_len..];
                                 
-                                if is_end_boundary {
+        if is_end_boundary {
                                     // End of multipart
                                     if !current_input.is_empty() {
                                         body.epilogue = Some(Bytes::copy_from_slice(current_input));
                                     }
                                     break;
                                 }
-                            } else {
+        } else {
                                 // End of input
                                 break;
                             }

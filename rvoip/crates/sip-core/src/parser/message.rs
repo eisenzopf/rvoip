@@ -154,17 +154,45 @@ pub fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
 }
 
+// header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
+// This correctly handles line folding according to RFC 3261
+pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
+    let mut remaining = input;
+    let start = input;
+    
+    while !remaining.is_empty() {
+        // Look for CRLF
+        if remaining.len() >= 2 && remaining[0] == b'\r' && remaining[1] == b'\n' {
+            // We found a CRLF, now check if the next character is whitespace (indicating line folding)
+            if remaining.len() >= 3 && (remaining[2] == b' ' || remaining[2] == b'\t') {
+                // Line folding - continue parsing
+                // Skip the CRLF and continue
+                remaining = &remaining[2..];
+            } else {
+                // End of value - we found a CRLF that's not followed by whitespace
+                break;
+            }
+        } else {
+            // Regular character, continue
+            remaining = &remaining[1..];
+        }
+    }
+    
+    // Return the span from start to remaining
+    let len = input.len() - remaining.len();
+    Ok((remaining, &start[..len]))
+}
+
 // message-header = header-name HCOLON header-value CRLF
-// Parses a single logical header line.
-// Unfolds LWS in the value.
-// Returns a raw Header struct.
+// Parses a single logical header line including folded lines
+// Returns a raw Header struct with the value already unfolded
 fn message_header(input: &[u8]) -> ParseResult<Header> {
     map_res(
         tuple((
             header_name,
-            hcolon,      // Separator with whitespace handling
-            header_value, // Parses raw value up to CRLF
-            crlf
+            hcolon,             // Separator with whitespace handling
+            header_value_better, // Handles line folding
+            crlf                // Final CRLF
         )),
         |(name_bytes, _, raw_value_bytes, _)| {
             str::from_utf8(name_bytes)
@@ -173,7 +201,9 @@ fn message_header(input: &[u8]) -> ParseResult<Header> {
                     HeaderName::from_str(name_str)
                         .map_err(|_| nom::Err::Failure(NomError::new(name_bytes, ErrorKind::Verify)))
                         .map(|header_name| {
-                            let header_value = HeaderValue::Raw(raw_value_bytes.to_vec());
+                            // Unfold the raw value to normalize it
+                            let unfolded_value = unfold_lws(raw_value_bytes);
+                            let header_value = HeaderValue::Raw(unfolded_value);
                             Header::new(header_name, header_value)
                         })
                 })
@@ -343,9 +373,33 @@ mod tests {
         assert!(rem.is_empty(), "Expected empty remainder");
         assert_eq!(header.name, HeaderName::Subject);
         
-        // Raw header value should capture the folded value
-        // (Unfolding happens during TypedHeader conversion)
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if v == b"Line 1\r\n Line 2\r\n\t Continued Here"));
+        // Verify that the value was properly unfolded
+        if let HeaderValue::Raw(value) = &header.value {
+            assert_eq!(String::from_utf8_lossy(value), "Line 1 Line 2 Continued Here");
+        } else {
+            panic!("Expected Raw header value");
+        }
+    }
+
+    #[test]
+    fn test_multiple_line_folding() {
+        // Test multiple line foldings in a single header
+        let input = b"Via: SIP/2.0/UDP pc33.atlanta.com\r\n ;branch=z9hG4bK776asdhds\r\n ;received=192.0.2.1\r\n";
+        let result = message_header(input);
+        assert!(result.is_ok());
+        let (rem, header) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(header.name, HeaderName::Via);
+        
+        // Verify that the value was properly unfolded
+        if let HeaderValue::Raw(value) = &header.value {
+            assert_eq!(
+                String::from_utf8_lossy(value), 
+                "SIP/2.0/UDP pc33.atlanta.com ;branch=z9hG4bK776asdhds ;received=192.0.2.1"
+            );
+        } else {
+            panic!("Expected Raw header value");
+        }
     }
 
     #[test]
