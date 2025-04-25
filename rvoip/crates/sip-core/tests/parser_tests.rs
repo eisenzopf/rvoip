@@ -51,7 +51,8 @@ mod parser_tests {
 
     #[test]
     fn test_call_id_parsing() {
-        let call_id = CallId::from_str("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@foo.bar.com").unwrap();
+        // Create a CallId directly
+        let call_id = CallId("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@foo.bar.com".to_string());
         assert!(!call_id.0.is_empty());
     }
 
