@@ -34,16 +34,18 @@ pub enum RetryParam {
 
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
 pub fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
-    alt((
-        // Verify that duration has a valid delta-seconds value
-        map_res(
-            preceded(pair(tag_no_case(b"duration"), equal), delta_seconds),
-            |duration| {
-                Ok::<RetryParam, nom::Err<NomError<&[u8]>>>(RetryParam::Duration(duration))
-            }
-        ),
-        map(generic_param, RetryParam::Generic)
-    ))(input)
+    // First check if it's a duration parameter
+    if input.len() >= 9 && // "duration=" is 9 bytes
+       (&input[0..9]).eq_ignore_ascii_case(b"duration=") {
+       
+        // If it looks like a duration parameter, use delta_seconds to validate
+        // and don't fall back to generic_param
+        let (rest, duration) = delta_seconds(&input[9..])?;
+        return Ok((rest, RetryParam::Duration(duration)));
+    }
+    
+    // If it's not a duration parameter, use generic_param
+    map(generic_param, RetryParam::Generic)(input)
 }
 
 // Define struct for Retry-After value
@@ -104,6 +106,27 @@ mod tests {
         assert!(rem_quoted.is_empty());
         assert!(matches!(param_quoted, RetryParam::Generic(Param::Other(n, Some(GenericValue::Quoted(v)))) 
                          if n == "reason" && v == "Temporarily Unavailable"));
+                         
+        // Test that invalid duration values are rejected
+        let result = retry_param(b"duration=abc");
+        assert!(result.is_err(), "Invalid duration value 'abc' should be rejected");
+    }
+
+    #[test]
+    fn test_retry_param_debug() {
+        // Direct call to retry_param with invalid input
+        let result = retry_param(b"duration=abc");
+        println!("Result for 'duration=abc': {:?}", result);
+        assert!(result.is_err());
+        
+        // Call with valid input for comparison
+        let valid = retry_param(b"duration=123");
+        println!("Result for 'duration=123': {:?}", valid);
+        assert!(valid.is_ok());
+        
+        // Try with generic_param as fallback
+        let generic_result = generic_param(b"duration=abc");
+        println!("Generic param result for 'duration=abc': {:?}", generic_result);
     }
 
     #[test]
