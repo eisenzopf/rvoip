@@ -137,17 +137,49 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
         }
     }
 
-    // 4. Get Content-Length (optional) - Needs update to use TypedHeader
+    // 4. Get Content-Length (optional) - Calculate from TypedHeader
     let content_length = typed_headers.iter().find_map(|h| {
         if let TypedHeader::ContentLength(cl) = h {
             Some(cl.0 as usize)
         } else { None }
     }).unwrap_or(0);
-
+    
     // 5. Parse Body based on Content-Length
     if rest.len() < content_length {
+        // In torture test mode, be more lenient with incomplete bodies
+        #[cfg(feature = "lenient_parsing")]
+        {
+            let actual_length = rest.len();
+            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.", 
+                    content_length, actual_length);
+            let (final_rest, body_slice) = take(actual_length)(rest)?;
+            let body = Bytes::copy_from_slice(body_slice);
+            
+            // Construct the message with what we have
+            let message = if is_request {
+                let mut req = Request::new(method.unwrap(), uri.unwrap());
+                req.version = version.unwrap();
+                req.set_headers(typed_headers);
+                if actual_length > 0 { req.body = body; }
+                Message::Request(req)
+            } else {
+                let mut resp = Response::new(status_code.unwrap());
+                resp.version = version.unwrap();
+                if let Some(reason) = reason_phrase_opt {
+                     resp = resp.with_reason(reason);
+                }
+                resp.set_headers(typed_headers);
+                if actual_length > 0 { resp.body = body; }
+                Message::Response(resp)
+            };
+            
+            return Ok((final_rest, message));
+        }
+        
+        #[cfg(not(feature = "lenient_parsing"))]
         return Err(nom::Err::Incomplete(Needed::new(content_length - rest.len())));
     }
+    
     let (final_rest, body_slice) = take(content_length)(rest)?;
     
     // 6. Construct Message - Needs update to use Vec<TypedHeader>

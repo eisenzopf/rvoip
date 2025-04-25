@@ -13,6 +13,7 @@ use rvoip_sip_core::{
     types::{
         Message,
         StatusCode,
+        Method,
         header::HeaderName
     },
 };
@@ -372,6 +373,233 @@ Contact: <sip:user@host105.example.com>\r\n\
                 assert!(resp.body.is_empty());
             },
             _ => panic!("Expected Response but got Request")
+        }
+    }
+}
+
+// Add a test for a wellformed SIP message with IPv6 addresses
+#[test]
+fn test_parse_ipv6_request() {
+    // This is the content of 4.1_ipv6-good.sip from the RFC compliance tests
+    // Test a request with IPv6 addresses
+    // NOTE: This test may fail due to issues with the URI parser handling IPv6 addresses.
+    // A more comprehensive fix would require more extensive changes to the URI parser.
+    let message = "REGISTER sip:[2001:db8::10] SIP/2.0\r\n\
+To: sip:user@example.com\r\n\
+From: sip:user@example.com;tag=81x2\r\n\
+Via: SIP/2.0/UDP [2001:db8::9:1];branch=z9hG4bKas3-111\r\n\
+Call-ID: SSG9559905523997077@hlau_4100\r\n\
+Max-Forwards: 70\r\n\
+Contact: \"Caller\" <sip:caller@[2001:db8::1]>\r\n\
+CSeq: 98176 REGISTER\r\n\
+Content-Length: 0\r\n\
+\r\n";
+
+    // Try parsing each header individually to isolate the issue
+    println!("--- Testing individual headers ---");
+    
+    // Request line
+    println!("Request line: REGISTER sip:[2001:db8::10] SIP/2.0");
+    
+    // To header
+    println!("To header: sip:user@example.com");
+    
+    // From header
+    println!("From header: sip:user@example.com;tag=81x2");
+    
+    // Via header
+    println!("Via header: SIP/2.0/UDP [2001:db8::9:1];branch=z9hG4bKas3-111");
+    
+    // Call-ID header
+    println!("Call-ID header: SSG9559905523997077@hlau_4100");
+    
+    // Now try parsing the whole message
+    println!("\n--- Attempting to parse complete message ---");
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info on the parse result
+    match &result {
+        Ok(msg) => println!("Successfully parsed message: {:?}", msg),
+        Err(e) => {
+            println!("Parse error: {}", e);
+            
+            // Try parsing with byte-by-byte inspection to find the exact failure point
+            println!("\n--- Message bytes (with line numbers) ---");
+            for (i, line) in message.lines().enumerate() {
+                println!("{:3}: {}", i+1, line);
+            }
+        }
+    }
+    
+    // Comment out the assertion if we know it will fail due to URI parser limitations
+    assert!(result.is_ok(), "Failed to parse wellformed message with IPv6 addresses");
+    
+    // If it parsed successfully, verify the main components
+    if let Ok(parsed_msg) = result {
+        match parsed_msg {
+            Message::Request(req) => {
+                assert_eq!(req.method, Method::Register);
+                assert_eq!(req.uri.to_string(), "sip:[2001:db8::10]");
+                
+                // Verify some headers exist
+                assert!(req.header(&HeaderName::Via).is_some());
+                assert!(req.header(&HeaderName::From).is_some());
+                assert!(req.header(&HeaderName::To).is_some());
+                assert!(req.header(&HeaderName::CallId).is_some());
+                assert!(req.header(&HeaderName::CSeq).is_some());
+                
+                // Check content-length
+                let content_length = req.header(&HeaderName::ContentLength)
+                    .and_then(|h| if let rvoip_sip_core::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+                    .unwrap_or(0);
+                assert_eq!(content_length, 0);
+                assert!(req.body.is_empty());
+            },
+            _ => panic!("Expected Request but got Response")
+        }
+    }
+}
+
+// Add a test for a SIP message with multiple Via headers and transport types
+#[test]
+fn test_parse_multiple_transports() {
+    // This is the content of 3.1.1.10_transports.sip from the RFC compliance tests
+    // Test a request with multiple Via headers with different transport types
+    let message = "OPTIONS sip:user@example.com SIP/2.0\r\n\
+To: sip:user@example.com\r\n\
+From: <sip:caller@example.com>;tag=323\r\n\
+Max-Forwards: 70\r\n\
+Call-ID:  transports.kijh4akdnaqjkwendsasfdj\r\n\
+Accept: application/sdp\r\n\
+CSeq: 60 OPTIONS\r\n\
+Via: SIP/2.0/UDP t1.example.com;branch=z9hG4bKkdjuw\r\n\
+Via: SIP/2.0/SCTP t2.example.com;branch=z9hG4bKklasjdhf\r\n\
+Via: SIP/2.0/TLS t3.example.com;branch=z9hG4bK2980unddj\r\n\
+Via: SIP/2.0/UNKNOWN t4.example.com;branch=z9hG4bKasd0f3en\r\n\
+Via: SIP/2.0/TCP t5.example.com;branch=z9hG4bK0a9idfnee\r\n\
+l: 0\r\n\
+\r\n";
+
+    // Now try parsing the whole message
+    println!("\n--- Attempting to parse message with multiple transports ---");
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info on the parse result
+    match &result {
+        Ok(msg) => println!("Successfully parsed message: {:?}", msg),
+        Err(e) => {
+            println!("Parse error: {}", e);
+            
+            // Try parsing with byte-by-byte inspection to find the exact failure point
+            println!("\n--- Message bytes (with line numbers) ---");
+            for (i, line) in message.lines().enumerate() {
+                println!("{:3}: {}", i+1, line);
+            }
+        }
+    }
+    
+    assert!(result.is_ok(), "Failed to parse wellformed message with multiple transports");
+    
+    // If it parsed successfully, verify the main components
+    if let Ok(parsed_msg) = result {
+        match parsed_msg {
+            Message::Request(req) => {
+                assert_eq!(req.method, Method::Options);
+                assert_eq!(req.uri.to_string(), "sip:user@example.com");
+                
+                // Check Via headers - we should have 5 of them with different transports
+                let via_headers = req.via_headers();
+                assert_eq!(via_headers.len(), 5, "Should have 5 Via headers");
+                
+                // Verify the transports from the Via headers
+                if !via_headers.is_empty() {
+                    let transports: Vec<&str> = via_headers.iter()
+                        .flat_map(|v| v.0.iter())
+                        .map(|vh| vh.sent_protocol.transport.as_str())
+                        .collect();
+                    
+                    println!("Found transports: {:?}", transports);
+                    
+                    // Verify we have all the expected transports
+                    assert!(transports.contains(&"UDP"), "Missing UDP transport");
+                    assert!(transports.contains(&"SCTP"), "Missing SCTP transport");
+                    assert!(transports.contains(&"TLS"), "Missing TLS transport");
+                    assert!(transports.contains(&"UNKNOWN"), "Missing UNKNOWN transport");
+                    assert!(transports.contains(&"TCP"), "Missing TCP transport");
+                }
+                
+                // Check compact header name ('l' for Content-Length)
+                let content_length = req.header(&HeaderName::ContentLength)
+                    .and_then(|h| if let rvoip_sip_core::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+                    .unwrap_or(999); // Default to a non-zero value to detect issues
+                assert_eq!(content_length, 0, "Content-Length should be 0");
+            },
+            _ => panic!("Expected Request but got Response")
+        }
+    }
+}
+
+// Add a test for a SIP message with compact header forms
+#[test]
+fn test_parse_compact_headers() {
+    // This is the content of 3.1.1.8_dblreq.sip from the RFC compliance tests
+    // Test a request with compact header forms (I for Call-ID)
+    let message = "REGISTER sip:example.com SIP/2.0\r\n\
+To: sip:j.user@example.com\r\n\
+From: sip:j.user@example.com;tag=43251j3j324\r\n\
+Max-Forwards: 8\r\n\
+I: dblreq.0ha0isndaksdj99sdfafnl3lk233412\r\n\
+Contact: sip:j.user@host.example.com\r\n\
+CSeq: 8 REGISTER\r\n\
+Via: SIP/2.0/UDP 192.0.2.125;branch=z9hG4bKkdjuw23492\r\n\
+Content-Length: 0\r\n\
+\r\n";
+
+    // Now try parsing the whole message
+    println!("\n--- Attempting to parse message with compact headers ---");
+    let result = parse_message(message.as_bytes());
+    
+    // Print detailed debug info on the parse result
+    match &result {
+        Ok(msg) => println!("Successfully parsed message: {:?}", msg),
+        Err(e) => {
+            println!("Parse error: {}", e);
+            
+            // Try parsing with byte-by-byte inspection to find the exact failure point
+            println!("\n--- Message bytes (with line numbers) ---");
+            for (i, line) in message.lines().enumerate() {
+                println!("{:3}: {}", i+1, line);
+            }
+        }
+    }
+    
+    assert!(result.is_ok(), "Failed to parse wellformed message with compact headers");
+    
+    // If it parsed successfully, verify the main components
+    if let Ok(parsed_msg) = result {
+        match parsed_msg {
+            Message::Request(req) => {
+                assert_eq!(req.method, Method::Register);
+                assert_eq!(req.uri.to_string(), "sip:example.com");
+                
+                // Check the Call-ID header (compact form 'I')
+                let call_id = req.header(&HeaderName::CallId)
+                    .and_then(|h| if let rvoip_sip_core::types::TypedHeader::CallId(cid) = h { Some(cid) } else { None });
+                
+                assert!(call_id.is_some(), "Call-ID header not found despite using compact form 'I'");
+                if let Some(cid) = call_id {
+                    println!("Found Call-ID: {}", cid.0);
+                    assert_eq!(cid.0, "dblreq.0ha0isndaksdj99sdfafnl3lk233412");
+                }
+                
+                // Check Max-Forwards
+                let max_forwards = req.header(&HeaderName::MaxForwards)
+                    .and_then(|h| if let rvoip_sip_core::types::TypedHeader::MaxForwards(mf) = h { Some(mf.0) } else { None })
+                    .unwrap_or(0);
+                
+                assert_eq!(max_forwards, 8, "Max-Forwards should be 8");
+            },
+            _ => panic!("Expected Request but got Response")
         }
     }
 } 

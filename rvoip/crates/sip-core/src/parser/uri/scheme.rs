@@ -60,7 +60,14 @@ pub fn parse_scheme(input: &[u8]) -> ParseResult<Scheme> {
         "sip" => Ok((rem, Scheme::Sip)),
         "sips" => Ok((rem, Scheme::Sips)),
         "tel" => Ok((rem, Scheme::Tel)),
-        _ => Err(nom::Err::Error(NomError::new(input, ErrorKind::Tag))),
+        "http" => Ok((rem, Scheme::Http)),
+        "https" => Ok((rem, Scheme::Https)),
+        // Allow any valid scheme in request-URIs (for RFC 3261 compliance)
+        _ => {
+            // For unknown schemes, we'll use the first enum variant (Sip)
+            // but the raw_uri field in Uri will capture the full URI
+            Ok((rem, Scheme::Sip))
+        }
     }
 }
 

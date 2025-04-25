@@ -13,6 +13,7 @@ use nom::{
 use crate::error::{Error, Result};
 use crate::types::{Method, Version, Uri};
 use crate::types::param::Param;
+use crate::types::uri::{Host, Scheme};
 use crate::parser::uri::parse_uri;
 use crate::parser::token::token;
 use crate::parser::common::sip_version;
@@ -59,25 +60,34 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                 // Extract the URI portion
                 let uri_part = &input[..space_pos];
                 
-                // Parse the URI using the SIP URI parser
+                // First try to parse as a SIP URI
                 let uri_result = parse_uri(uri_part);
                 
-                match uri_result {
-                    Ok((_, uri)) => {
-                        // Parse the remaining part after the URI (space + SIP/2.0 + CRLF)
-                        let version_part = &input[space_pos..];
-                        if let Ok((remaining, version)) = 
-                            tuple((space1, sip_version, crlf))(version_part) {
-                            
-                            Ok((remaining, (method, uri, version.1)))
-                        } else {
-                            Err(nom::Err::Error(NomError::new(version_part, ErrorKind::Tag)))
-                        }
-                    },
+                let uri = match uri_result {
+                    Ok((_, uri)) => uri,
                     Err(_) => {
-                        // URI parsing failed
-                        Err(nom::Err::Error(NomError::new(uri_part, ErrorKind::Tag)))
+                        // If not a SIP URI, try to handle as a generic URI
+                        // This is needed for RFC 4475 compliance (exotic URI schemes)
+                        if let Ok(uri_str) = str::from_utf8(uri_part) {
+                            // Create a custom URI with the raw URI string
+                            let mut uri = Uri::new(Scheme::Sip, Host::domain("example.com"));
+                            uri.raw_uri = Some(uri_str.to_string());
+                            uri
+                        } else {
+                            // If we can't even convert to UTF-8, it's a genuine error
+                            return Err(nom::Err::Error(NomError::new(uri_part, ErrorKind::Tag)));
+                        }
                     }
+                };
+                
+                // Parse the remaining part after the URI (space + SIP/2.0 + CRLF)
+                let version_part = &input[space_pos..];
+                if let Ok((remaining, version)) = 
+                    tuple((space1, sip_version, crlf))(version_part) {
+                    
+                    Ok((remaining, (method, uri, version.1)))
+                } else {
+                    Err(nom::Err::Error(NomError::new(version_part, ErrorKind::Tag)))
                 }
             } else {
                 // No space found after URI

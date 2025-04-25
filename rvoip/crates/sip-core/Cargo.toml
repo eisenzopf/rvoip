@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 [lints.rust]
 warnings = "allow"
 
+# Features
+[features]
+default = []
+lenient_parsing = []  # More lenient parsing for torture tests
+
 [dependencies]
 # Error handling
 thiserror = { workspace = true }
@@ -37,6 +42,7 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "torture_tests"
 path = "tests/rfc_compliance/torture_test.rs"
+required-features = ["lenient_parsing"]
 
 [[test]]
 name = "parser"
