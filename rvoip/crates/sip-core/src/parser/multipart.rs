@@ -43,16 +43,48 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
     let mut current_name: Option<HeaderName> = None;
     let mut current_value: Vec<u8> = Vec::new();
 
+    // Check if input is empty or starts with end of headers
+    if remaining.is_empty() || remaining.starts_with(b"\r\n") || remaining.starts_with(b"\n") {
+        // Empty headers section or no input
+        if remaining.starts_with(b"\r\n") {
+            remaining = &remaining[2..];
+        } else if remaining.starts_with(b"\n") {
+            remaining = &remaining[1..];
+        }
+        return Ok((remaining, headers));
+    }
+
     loop {
         // Check for end of headers (blank line)
         if remaining.starts_with(b"\r\n") {
+            // Process any pending header before ending
+            if let Some(name) = current_name.take() {
+                let value_bytes_trimmed = trim_bytes(&current_value);
+                let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
+                headers.push(Header::new(name, parsed_value));
+            }
+            
             remaining = &remaining[2..];
             break;
         } else if remaining.starts_with(b"\n") {
+            // Process any pending header before ending
+            if let Some(name) = current_name.take() {
+                let value_bytes_trimmed = trim_bytes(&current_value);
+                let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
+                headers.push(Header::new(name, parsed_value));
+            }
+            
             remaining = &remaining[1..];
             break;
         } else if remaining.is_empty() {
-             return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::CrLf)));
+            // Process any pending header before ending
+            if let Some(name) = current_name.take() {
+                let value_bytes_trimmed = trim_bytes(&current_value);
+                let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
+                headers.push(Header::new(name, parsed_value));
+            }
+            
+            break;
         }
 
         // Check if this is a continuation line (folded line)
@@ -100,13 +132,6 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
                 }
             }
         }
-    }
-    
-    // Process final header if any
-    if let Some(name) = current_name {
-        let value_bytes_trimmed = trim_bytes(&current_value);
-        let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
-        headers.push(Header::new(name, parsed_value));
     }
 
     Ok((remaining, headers))
@@ -169,7 +194,7 @@ fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
 
 /// Tries to parse the raw content bytes based on Content-Type header.
 fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedBody> {
-     let content_type = headers.iter()
+    let content_type = headers.iter()
         .find(|h| h.name == HeaderName::ContentType)
         .and_then(|h| match &h.value {
             HeaderValue::Raw(bytes) => str::from_utf8(bytes).ok(),
@@ -177,15 +202,17 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
         });
 
     if let Some(ct) = content_type {
-        if ct.trim().starts_with("application/sdp") {
-             match crate::sdp::parser::parse_sdp(raw_content) {
+        let ct_lowercase = ct.to_lowercase();
+        
+        if ct_lowercase.starts_with("application/sdp") {
+            match crate::sdp::parser::parse_sdp(raw_content) {
                 Ok(sdp_session) => Some(ParsedBody::Sdp(sdp_session)),
-                Err(e) => {
+                Err(_) => {
                     // Keep raw content, return Other
                     Some(ParsedBody::Other(raw_content.clone()))
                 }
             }
-        } else if ct.trim().starts_with("text/") {
+        } else if ct_lowercase.starts_with("text/") {
             match String::from_utf8(raw_content.to_vec()) {
                 Ok(text) => {
                     // Remove trailing CRLF or LF if present
@@ -198,26 +225,48 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
                     };
                     Some(ParsedBody::Text(trimmed_text))
                 },
-                Err(_) => Some(ParsedBody::Other(raw_content.clone())),
+                Err(_) => {
+                    // Not valid UTF-8 text, return as Other
+                    Some(ParsedBody::Other(raw_content.clone()))
+                }
             }
+        } else if ct_lowercase.starts_with("multipart/") {
+            // For nested multipart content, we don't parse it here
+            // The caller would need to extract the boundary and parse it separately
+            // Just return the raw content
+            Some(ParsedBody::Other(raw_content.clone()))
         } else {
-             Some(ParsedBody::Other(raw_content.clone()))
+            // Other content types, return raw bytes
+            Some(ParsedBody::Other(raw_content.clone()))
         }
     } else {
-         Some(ParsedBody::Other(raw_content.clone()))
+        // If no Content-Type header, treat as raw bytes
+        Some(ParsedBody::Other(raw_content.clone()))
     }
 }
 
-/// Trim trailing CRLF or LF from byte slice
+/// Removes trailing CR, LF, or CRLF from the input
 fn trim_trailing_newlines(input: &[u8]) -> &[u8] {
     let mut end = input.len();
     
+    if end == 0 {
+        return input;
+    }
+    
     // Handle CRLF
-    if end >= 2 && input[end-2] == b'\r' && input[end-1] == b'\n' {
+    if end >= 2 && input[end - 2] == b'\r' && input[end - 1] == b'\n' {
         end -= 2;
     } 
     // Handle LF
-    else if end >= 1 && input[end-1] == b'\n' {
+    else if end >= 1 && input[end - 1] == b'\n' {
+        end -= 1;
+        // Also check if there's a preceding CR
+        if end >= 1 && input[end - 1] == b'\r' {
+            end -= 1;
+        }
+    }
+    // Handle lone CR
+    else if end >= 1 && input[end - 1] == b'\r' {
         end -= 1;
     }
     
@@ -240,6 +289,7 @@ fn parse_part<'a>(input: &'a [u8]) -> IResult<&'a [u8], MimePart> {
 /// Returns the input after the boundary, and whether it was an end boundary
 fn parse_boundary_delimiter<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], bool> {
     // RFC 2046 defines boundary as: "--" + boundary [+ "--"] + CRLF
+    // The boundary may have transport padding (trailing whitespace before CRLF)
     let dash_boundary = format!("--{}", boundary);
     let end_boundary = format!("--{}--", boundary);
     
@@ -248,9 +298,16 @@ fn parse_boundary_delimiter<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a 
         // It's an end boundary
         let input = &input[end_boundary.len()..];
         
-        // Consume optional whitespace and line break
+        // Consume transport padding (optional whitespace) and REQUIRED line break
+        // RFC 2046 states a CRLF MUST immediately follow the boundary delimiter line
         let (input, _) = space0(input)?;
-        let (input, _) = alt((parse_crlf, eof))(input)?;
+        
+        // Accept either CRLF, LF (for robustness), or EOF (for final boundary at the end of data)
+        let (input, _) = alt((
+            parse_crlf,
+            tag(b"\n"),
+            eof
+        ))(input)?;
         
         return Ok((input, true));
     }
@@ -260,9 +317,15 @@ fn parse_boundary_delimiter<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a 
         // It's a normal boundary
         let input = &input[dash_boundary.len()..];
         
-        // Consume optional whitespace and line break
+        // Consume transport padding (optional whitespace) and REQUIRED line break
         let (input, _) = space0(input)?;
-        let (input, _) = alt((parse_crlf, eof))(input)?;
+        
+        // Accept either CRLF, LF (for robustness), or EOF (for final boundary at the end of data)
+        let (input, _) = alt((
+            parse_crlf,
+            tag(b"\n"),
+            eof
+        ))(input)?;
         
         return Ok((input, false));
     }
@@ -280,22 +343,28 @@ fn find_next_boundary(input: &[u8], boundary: &str) -> Option<(usize, bool)> {
 
     // To avoid embedded boundaries being confused with actual delimiters,
     // we need to check that the boundary appears at the start of a line
+    // RFC 2046 5.1.1: boundaries must appear at the beginning of a line
+    
     let mut pos = 0;
     while pos < input.len() {
         // Find the next potential boundary
         if let Some(idx) = find_subsequence(&input[pos..], dash_boundary_bytes) {
             let boundary_pos = pos + idx;
             
-            // Check if it's at the start of a line
+            // According to RFC 2046, a boundary delimiter line must:
+            // 1. Begin at the beginning of a line (after a CRLF or at the start of content)
+            // 2. The prefix must be exactly "--"
             let is_start_of_line = boundary_pos == 0 || 
-                                   input[boundary_pos-1] == b'\n' || 
+                                   (boundary_pos >= 1 && input[boundary_pos-1] == b'\n') || 
                                    (boundary_pos >= 2 && input[boundary_pos-2] == b'\r' && input[boundary_pos-1] == b'\n');
             
             if is_start_of_line {
-                // Now check if it's an end boundary or normal boundary
-                let is_end_boundary = boundary_pos + dash_boundary_bytes.len() + 2 <= input.len() &&
-                                     input[boundary_pos + dash_boundary_bytes.len()] == b'-' &&
-                                     input[boundary_pos + dash_boundary_bytes.len() + 1] == b'-';
+                // Check if it's an end boundary (has -- suffix) or a normal boundary
+                let remaining_after_boundary = boundary_pos + dash_boundary_bytes.len();
+                let is_end_boundary = 
+                    remaining_after_boundary + 2 <= input.len() &&
+                    input[remaining_after_boundary] == b'-' &&
+                    input[remaining_after_boundary + 1] == b'-';
                 
                 return Some((boundary_pos, is_end_boundary));
             }
@@ -327,16 +396,12 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
     match find_next_boundary(current_input, boundary) {
         Some((pos, is_end)) => {
             if is_end {
-                // Empty multipart body
+                // Empty multipart body - just a closing boundary
                 let preamble = &current_input[..pos];
                 
                 if pos > 0 {
                     body.preamble = Some(Bytes::copy_from_slice(preamble));
                 }
-                
-                // Skip to the end of the boundary
-                let end_boundary = format!("--{}--", boundary);
-                let after_boundary = &current_input[pos + end_boundary.len()..];
                 
                 // Try to parse the end boundary properly
                 if let Ok((remaining, _)) = parse_boundary_delimiter(&current_input[pos..], boundary) {
@@ -347,7 +412,19 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                     return Ok((remaining, body));
                 }
                 
-                // Couldn't parse properly, just return what we have
+                // Couldn't parse properly, just skip over the boundary manually
+                let end_boundary = format!("--{}--", boundary);
+                let after_boundary = &current_input[pos + end_boundary.len()..];
+                
+                // Try to skip any CRLF after the boundary
+                let after_boundary = if after_boundary.starts_with(b"\r\n") {
+                    &after_boundary[2..]
+                } else if after_boundary.starts_with(b"\n") {
+                    &after_boundary[1..]
+                } else {
+                    after_boundary
+                };
+                
                 if !after_boundary.is_empty() {
                     body.epilogue = Some(Bytes::copy_from_slice(after_boundary));
                 }
@@ -370,9 +447,16 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                 },
                 Err(_) => {
                     // Try to skip over the boundary manually if parsing fails
-                    let skip_len = dash_boundary.len() + 2; // Add 2 for CRLF
+                    let skip_len = dash_boundary.len();
                     if current_input.len() > skip_len {
                         current_input = &current_input[skip_len..];
+                        
+                        // Try to skip any CRLF after the boundary
+                        if current_input.starts_with(b"\r\n") {
+                            current_input = &current_input[2..];
+                        } else if current_input.starts_with(b"\n") {
+                            current_input = &current_input[1..];
+                        }
                     } else {
                         return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
                     }
@@ -381,7 +465,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
         },
         None => {
             // No boundary found, can't parse
-             return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
+            return Err(nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)));
         }
     }
 
@@ -389,8 +473,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
     loop {
         // First check if this is a boundary - especially important for consecutive boundaries
         if current_input.starts_with(dash_boundary_bytes) {
-            // Check if it's immediately followed by another boundary
-            // For empty parts in consecutive boundaries, we need to create an empty part
+            // Found a boundary immediately - this means we have an empty part
             let mut empty_part = MimePart::new();
             body.add_part(empty_part);
             
@@ -403,10 +486,17 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                 // Continue the loop without parsing a part
                 continue;
             } else {
-                // Couldn't parse boundary - skip over it
-                let skip_len = dash_boundary.len() + 2; // +2 for CRLF
+                // Couldn't parse boundary - skip over it manually
+                let skip_len = dash_boundary.len();
                 if current_input.len() > skip_len {
                     current_input = &current_input[skip_len..];
+                    
+                    // Try to skip any CRLF after the boundary
+                    if current_input.starts_with(b"\r\n") {
+                        current_input = &current_input[2..];
+                    } else if current_input.starts_with(b"\n") {
+                        current_input = &current_input[1..];
+                    }
                 } else {
                     break; // End of input
                 }
@@ -433,7 +523,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                         part.parsed_content = parse_part_content(&part.headers, &part.raw_content);
                         
                         // Add the part to the body
-        body.add_part(part);
+                        body.add_part(part);
 
                         // Advance to the boundary position
                         current_input = &current_input[pos..];
@@ -452,16 +542,23 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                                 }
                             },
                             Err(_) => {
-                                // Couldn't parse boundary properly, try to skip over it
+                                // Couldn't parse boundary properly, try to skip over it manually
                                 let boundary_marker = if is_end_boundary {
                                     format!("--{}--", boundary)
                                 } else {
                                     format!("--{}", boundary)
                                 };
                                 
-                                let skip_len = boundary_marker.len() + 2; // Add 2 for CRLF
+                                let skip_len = boundary_marker.len();
                                 if current_input.len() > skip_len {
                                     current_input = &current_input[skip_len..];
+                                    
+                                    // Try to skip any CRLF after the boundary
+                                    if current_input.starts_with(b"\r\n") {
+                                        current_input = &current_input[2..];
+                                    } else if current_input.starts_with(b"\n") {
+                                        current_input = &current_input[1..];
+                                    }
                                     
                                     if is_end_boundary {
                                         // End of multipart
@@ -479,6 +576,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                     },
                     None => {
                         // No more boundaries, treat the rest as the last part's content
+                        // This is technically an error according to RFC 2046, but we're being lenient
                         if !current_input.is_empty() {
                             let trimmed_content = trim_trailing_newlines(current_input);
                             part.raw_content = Bytes::copy_from_slice(trimmed_content);
@@ -511,25 +609,32 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                                 break;
                             }
                         } else {
-                            // Couldn't parse boundary, just skip to the next one
+                            // Couldn't parse boundary, just skip to the next one manually
                             let boundary_marker = if is_end_boundary {
                                 format!("--{}--", boundary)
                             } else {
                                 format!("--{}", boundary)
                             };
                             
-                            let skip_len = boundary_marker.len() + 2; // Add 2 for CRLF
+                            let skip_len = boundary_marker.len();
                             if current_input.len() > skip_len {
                                 current_input = &current_input[skip_len..];
                                 
-        if is_end_boundary {
+                                // Try to skip any CRLF after the boundary
+                                if current_input.starts_with(b"\r\n") {
+                                    current_input = &current_input[2..];
+                                } else if current_input.starts_with(b"\n") {
+                                    current_input = &current_input[1..];
+                                }
+                                
+                                if is_end_boundary {
                                     // End of multipart
                                     if !current_input.is_empty() {
                                         body.epilogue = Some(Bytes::copy_from_slice(current_input));
                                     }
                                     break;
                                 }
-        } else {
+                            } else {
                                 // End of input
                                 break;
                             }
@@ -548,10 +653,36 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
 }
 
 /// Public entry point to parse a multipart body
+/// Processes a multipart MIME body according to RFC 2046
 pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> {
+    // Validate the boundary according to RFC 2046
+    // The boundary string must be 1 to 70 characters in length
+    if boundary.is_empty() || boundary.len() > 70 {
+        return Err(Error::ParseError(
+            format!("Invalid boundary length: {} (must be 1-70 characters)", boundary.len())
+        ));
+    }
+    
+    // RFC 2046 states boundaries must not end with spaces
+    if boundary.ends_with(' ') || boundary.ends_with('\t') {
+        return Err(Error::ParseError(
+            "Invalid boundary: must not end with whitespace".to_string()
+        ));
+    }
+    
+    // Boundaries should not contain control characters (except for tabs)
+    for c in boundary.chars() {
+        if c.is_control() && c != '\t' {
+            return Err(Error::ParseError(
+                format!("Invalid boundary: contains control character: U+{:04X}", c as u32)
+            ));
+        }
+    }
+    
+    // Perform the actual parsing
     match multipart_parser(content, boundary) {
         Ok((remaining, body)) => {
-            // We can ignore any remaining input (epilogue)
+            // RFC 2046 compliant - any epilogue after the final boundary is ignored
             Ok(body)
         },
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
