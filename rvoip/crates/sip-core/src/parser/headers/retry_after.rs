@@ -37,16 +37,9 @@ pub fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
     alt((
         // Verify that duration has a valid delta-seconds value
         map_res(
-            preceded(pair(tag_no_case(b"duration"), equal), take_while(|c| c != b';' && c != b' ')),
-            |duration_bytes: &[u8]| {
-                // Convert to string and then parse as a number
-                let duration_str = std::str::from_utf8(duration_bytes)
-                    .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Digit)))?;
-                
-                // Try to parse as a u32
-                duration_str.parse::<u32>()
-                    .map(RetryParam::Duration)
-                    .map_err(|_| nom::Err::Error(NomError::new(input, ErrorKind::Digit)))
+            preceded(pair(tag_no_case(b"duration"), equal), delta_seconds),
+            |duration| {
+                Ok::<RetryParam, nom::Err<NomError<&[u8]>>>(RetryParam::Duration(duration))
             }
         ),
         map(generic_param, RetryParam::Generic)

@@ -129,6 +129,14 @@ impl UriAdapter {
                     uri_str
                 )));
             }
+            
+            // Check for @ at the end (missing host after @)
+            if uri_str.ends_with('@') || uri_str.matches('@').count() > 1 {
+                return Err(Error::InvalidUri(format!(
+                    "Invalid SIP URI: Malformed userinfo part (missing host after @ or multiple @ symbols): {}", 
+                    uri_str
+                )));
+            }
         }
         
         // Check for empty SIP URIs like "sip:" or "sips:" with no host
