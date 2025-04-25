@@ -296,6 +296,9 @@ Content-Length: {}\r\n\
 fn test_parse_noreason_response() {
     // This is the content of 3.1.1.13_noreason.sip from the RFC compliance tests
     // Test a response with empty reason phrase
+    // NOTE: While this specific test passes, the SIP torture tests from RFC 4475 are currently failing
+    // due to issues with the URI parser handling non-standard schemes, unusual IPV6 addresses,
+    // and various character encodings. A more comprehensive fix would require more extensive changes.
     let message = "SIP/2.0 100 \r\n\
 Via: SIP/2.0/UDP 192.0.2.105;branch=z9hG4bK2398ndaoe\r\n\
 Call-ID: noreason.asndj203insdf99223ndf\r\n\
