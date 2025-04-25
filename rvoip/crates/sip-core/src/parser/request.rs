@@ -69,8 +69,19 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                         // If not a SIP URI, try to handle as a generic URI
                         // This is needed for RFC 4475 compliance (exotic URI schemes)
                         if let Ok(uri_str) = str::from_utf8(uri_part) {
-                            // Create a custom URI with the raw URI string
-                            let mut uri = Uri::new(Scheme::Sip, Host::domain("example.com"));
+                            // Check for known schemes
+                            let scheme = if uri_str.starts_with("http:") {
+                                Scheme::Http
+                            } else if uri_str.starts_with("https:") {
+                                Scheme::Https
+                            } else if uri_str.starts_with("tel:") {
+                                Scheme::Tel
+                            } else {
+                                Scheme::Sip // Default for unknown schemes
+                            };
+                            
+                            // Create a custom URI with the detected scheme
+                            let mut uri = Uri::new(scheme, Host::domain("example.com"));
                             uri.raw_uri = Some(uri_str.to_string());
                             uri
                         } else {
