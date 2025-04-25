@@ -75,14 +75,15 @@ fn full_message_parser(input: &[u8]) -> IResult<&[u8], Message> {
     // 2. Parse Raw Headers block
     let (rest, raw_headers) = parse_header_block(rest)?;
 
-    // 3. Convert Raw Headers to Typed Headers
+    // 3. Convert Raw Headers to Typed Headers - with error tolerance
     let mut typed_headers: Vec<TypedHeader> = Vec::with_capacity(raw_headers.len());
     for header in raw_headers {
-        match TypedHeader::try_from(header) {
+        match TypedHeader::try_from(header.clone()) {
             Ok(typed) => typed_headers.push(typed),
             Err(e) => {
-                eprintln!("Header parsing error: {}", e); 
-                 return Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify))); 
+                eprintln!("Warning: Header parsing error (skipping): {}", e); 
+                // Add a fallback for unparseable headers
+                typed_headers.push(TypedHeader::Other(header.name, header.value));
             }
         }
     }
@@ -157,30 +158,35 @@ pub fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
 // header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
 // This correctly handles line folding according to RFC 3261
 pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
-    let mut remaining = input;
+    // Find the next non-continuation line ending (i.e., CRLF not followed by SP/HTAB)
+    let mut i = 0;
+    let len = input.len();
     let start = input;
     
-    while !remaining.is_empty() {
+    while i + 1 < len {
         // Look for CRLF
-        if remaining.len() >= 2 && remaining[0] == b'\r' && remaining[1] == b'\n' {
-            // We found a CRLF, now check if the next character is whitespace (indicating line folding)
-            if remaining.len() >= 3 && (remaining[2] == b' ' || remaining[2] == b'\t') {
-                // Line folding - continue parsing
-                // Skip the CRLF and continue
-                remaining = &remaining[2..];
+        if input[i] == b'\r' && input[i + 1] == b'\n' {
+            // Check if followed by whitespace (folding)
+            if i + 2 < len && (input[i + 2] == b' ' || input[i + 2] == b'\t') {
+                // This is a folded line, continue scanning
+                i += 2; // Skip the CR LF
+                
+                // Skip all whitespace in this folded line
+                while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                    i += 1;
+                }
             } else {
-                // End of value - we found a CRLF that's not followed by whitespace
+                // This is a non-folded line ending, end of header value
                 break;
             }
         } else {
-            // Regular character, continue
-            remaining = &remaining[1..];
+            // Regular character
+            i += 1;
         }
     }
     
-    // Return the span from start to remaining
-    let len = input.len() - remaining.len();
-    Ok((remaining, &start[..len]))
+    // Return the span from start to the end of the value
+    Ok((&input[i..], &start[..i]))
 }
 
 // message-header = header-name HCOLON header-value CRLF
@@ -586,16 +592,41 @@ mod tests {
 
     #[test]
     fn test_message_with_folded_headers() {
-        // Test with real-world line folding in headers
+        // Test with properly formatted line folding in headers (according to RFC 3261)
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
-                     Subject: This is a very long subject header that\r\n\
-                      spans multiple lines and uses line\r\n\
+                     Subject: This is a very long subject header that\r\n \
+                      spans multiple lines and uses line\r\n \
                       folding as described in RFC 3261\r\n\
                      Content-Length: 0\r\n\
                      \r\n";
-
+        
         let result = full_message_parser(input);
+        
+        // Print detailed error info if it fails
+        if let Err(e) = &result {
+            println!("Parsing error: {:?}", e);
+            
+            // If it's a failure error, try to get more info
+            if let nom::Err::Failure(ref ne) = e {
+                println!("Failure input: {:?}", String::from_utf8_lossy(ne.input));
+                println!("Failure code: {:?}", ne.code);
+            }
+        }
+        
         assert!(result.is_ok(), "Failed to parse message with folded headers");
+        
+        // If parsing succeeded, check that the subject header was properly unfolded
+        if let Ok((_, message)) = result {
+            if let Message::Request(request) = message {
+                let subject_header = request.headers.iter().find(|h| matches!(h, TypedHeader::Subject(_)));
+                assert!(subject_header.is_some(), "Subject header not found in parsed message");
+                if let Some(TypedHeader::Subject(subject)) = subject_header {
+                    assert_eq!(subject.text(), "This is a very long subject header that spans multiple lines and uses line folding as described in RFC 3261");
+                }
+            } else {
+                panic!("Expected Request, got Response");
+            }
+        }
     }
 
     #[test]
