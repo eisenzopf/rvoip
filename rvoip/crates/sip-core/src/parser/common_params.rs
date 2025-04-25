@@ -52,13 +52,11 @@ pub fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
 // gen-value = token / host / quoted-string
 fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
     alt((
-        // Try token parser first since we want tokens to take priority over host names
         map_res(token, |bytes| {
             str::from_utf8(bytes)
                 .map(|s| GenericValue::Token(s.to_string()))
-                .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
+                .map_err(|_| nom::error::Error::new(input, nom::error::ErrorKind::Char))
         }),
-        // Then try host parser for URI parameters that expect hostnames/IP addresses
         map(host, GenericValue::Host),
         map_res(quoted_string, |bytes| {
             unquote_string(bytes).map(GenericValue::Quoted)
@@ -227,17 +225,19 @@ mod tests {
         // Token values that don't look like hosts
         let (rem_tok, val_tok) = gen_value(b"token-value").unwrap();
         assert!(rem_tok.is_empty());
-        // The parser will now parse anything with a dash as a valid hostname
-        assert!(matches!(val_tok, GenericValue::Host(Host::Domain(s)) if s == "token-value"));
+        // Now that token parser is first, it should be parsed as a token, not a domain
+        assert!(matches!(val_tok, GenericValue::Token(s) if s == "token-value"));
         
         // Host (domain)
         let (rem_host, val_host) = gen_value(b"example.com").unwrap();
         assert!(rem_host.is_empty());
-        assert!(matches!(val_host, GenericValue::Host(Host::Domain(d)) if d == "example.com"));
+        // Domains should still be parsed as tokens since they're valid tokens
+        assert!(matches!(val_host, GenericValue::Token(d) if d == "example.com"));
 
         // Host (IPv4)
         let (rem_ip, val_ip) = gen_value(b"192.0.2.1").unwrap();
         assert!(rem_ip.is_empty());
+        // IP addresses aren't valid tokens, so they should be parsed as hosts
         assert!(matches!(val_ip, GenericValue::Host(Host::Address(a)) if a == IpAddr::from(Ipv4Addr::new(192,0,2,1))));
 
         // Quoted String
@@ -255,14 +255,15 @@ mod tests {
     fn test_generic_param_value() {
         let (rem, param) = generic_param(b"name=value").unwrap();
         assert!(rem.is_empty());
-        // The simple "value" could be parsed as a domain name in hostname parser
-        assert!(matches!(param, Param::Other(n, Some(GenericValue::Host(Host::Domain(v)))) if n == "name" && v == "value"));
+        // With token parser having priority, "value" should be parsed as a token
+        assert!(matches!(param, Param::Other(n, Some(GenericValue::Token(v))) if n == "name" && v == "value"));
     }
 
     #[test]
     fn test_generic_param_host() {
         let (rem, param) = generic_param(b"maddr=192.0.2.1").unwrap();
         assert!(rem.is_empty());
+        // IP addresses aren't valid tokens, so they should still be parsed as hosts
         assert!(matches!(param, Param::Other(n, Some(GenericValue::Host(Host::Address(a)))) if n == "maddr" && a == IpAddr::from(Ipv4Addr::new(192,0,2,1))));
     }
 
@@ -298,8 +299,8 @@ mod tests {
     fn test_accept_param_generic() {
         let (rem, param) = accept_param(b"level=1").unwrap();
         assert!(rem.is_empty());
-        // A number could be treated as a domain name in hostname parser
-        assert!(matches!(param, Param::Other(n, Some(GenericValue::Host(Host::Domain(v)))) if n == "level" && v == "1"));
+        // A number is now parsed as a token, not a domain name
+        assert!(matches!(param, Param::Other(n, Some(GenericValue::Token(v))) if n == "level" && v == "1"));
     }
 
     #[test]
@@ -329,8 +330,8 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(params.len(), 3);
         
-        // Check the first parameter (name1=value1)
-        assert!(matches!(&params[0], Param::Other(n, Some(GenericValue::Host(Host::Domain(v)))) 
+        // Check the first parameter (name1=value1) - now parsed as a token
+        assert!(matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
             if n == "name1" && v == "value1"));
             
         // Check the second parameter (name2, no value)
@@ -354,19 +355,10 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(params.len(), 1);
         
-        // Debug output
-        println!("First parameter: {:?}", &params[0]);
-        
-        // Try both possibilities to see which one is matching
-        let is_token = matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
-            if n == "param1" && v == "value1");
-        let is_host = matches!(&params[0], Param::Other(n, Some(GenericValue::Host(Host::Domain(v)))) 
-            if n == "param1" && v == "value1");
-        
-        println!("Is token: {}, Is host: {}", is_token, is_host);
-        
-        // Accept either token or host for now
-        assert!(is_token || is_host, "Parameter should be either Token or Host::Domain");
+        // With token parser having priority, this should now be a token
+        assert!(matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
+            if n == "param1" && v == "value1"), 
+            "Parameter value should be a token");
         
         // RFC 4475 - 3.1.1.13 - Escaped Semicolons in URI Parameters
         // Parameter with quoted string containing semicolons
@@ -396,20 +388,10 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(params.len(), 3);
         
-        // Debug the first parameter
-        println!("Multiple param test - First parameter: {:?}", &params[0]);
-        
-        // Try both possibilities for the first parameter
-        // Note: The value has a trailing space due to the parser preserving whitespace
-        let mp_is_token = matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
-            if n == "param1" && v == "value1 ");
-        let mp_is_host = matches!(&params[0], Param::Other(n, Some(GenericValue::Host(Host::Domain(v)))) 
-            if n == "param1" && v == "value1 ");
-        
-        println!("Multiple param test - Is token: {}, Is host: {}", mp_is_token, mp_is_host);
-        
-        // Accept either token or host for now
-        assert!(mp_is_token || mp_is_host, "Parameter should be either Token or Host::Domain");
+        // With token parser having priority, this should now be a token
+        assert!(matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
+            if n == "param1" && v == "value1 "),
+            "Parameter value should be a token");
         
         assert!(matches!(&params[1], Param::Other(n, None) if n == "param2"));
         assert!(matches!(&params[2], Param::Other(n, Some(GenericValue::Quoted(v))) 
