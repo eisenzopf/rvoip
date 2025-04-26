@@ -66,7 +66,7 @@ impl fmt::Display for Address {
 
         // Write parameters
         for param in &self.params {
-            write!(f, "{}", param)?;
+            write!(f, ";{}", param)?;
         }
 
         Ok(())
