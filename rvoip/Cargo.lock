@@ -2333,6 +2333,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-parser-demo"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rvoip-sip-core",
+]
+
+[[package]]
 name = "sip-test-client"
 version = "0.1.0"
 dependencies = [

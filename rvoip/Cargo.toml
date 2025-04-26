@@ -18,6 +18,7 @@ members = [
     "examples/simple-call-engine",
     "examples/sip-test-client",
     "examples/sip-client-demo",
+    "examples/sip-parser-demo",
 ]
 
 # Silence all Rust warnings
