@@ -556,7 +556,7 @@ fn build_with_macros() {
     
     let sdp_body = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
     
-    // Create a request using the macro
+    // Create a request using the macro with no trailing comma on the last item
     let request = sip_request! {
         method: Method::Invite,
         uri: "sip:bob@example.com",
@@ -578,7 +578,7 @@ fn build_with_macros() {
     
     println!("\n  Using sip_response! macro for 200 OK:");
     
-    // Create a response using the macro
+    // Create a response using the macro with no trailing comma on the last item
     let response = sip_response! {
         status: StatusCode::Ok,
         reason: "OK",

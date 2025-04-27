@@ -34,7 +34,6 @@ macro_rules! sip_request {
         $(, max_forwards: $max_forwards:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
-        $(, $custom_header:tt: $custom_value:expr )*
     ) => {
         {
             use $crate::types::builder::RequestBuilder;
@@ -109,10 +108,77 @@ macro_rules! sip_request {
             $(
                 builder = builder.body($body);
             )?
-
-            // Custom headers would go here...
             
             builder.build()
+        }
+    };
+    
+    // Handle custom headers with separate rule
+    (
+        method: $method:expr,
+        uri: $uri:expr
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, call_id: $call_id:expr )?
+        $(, cseq: $cseq:expr )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, contact: $contact_uri:expr )?
+        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
+        $(, max_forwards: $max_forwards:expr )?
+        $(, content_type: $content_type:expr )?
+        $(, body: $body:expr )?
+        , $custom_header:ident: $custom_value:expr
+        $(, $rest:tt)*
+    ) => {
+        {
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
+            let mut request = $crate::sip_request! {
+                method: $method,
+                uri: $uri
+                $(, from: ($from_name, $from_uri $(, tag=$from_tag)? $(, $from_param_name=$from_param_val)* ) )?
+                $(, to: ($to_name, $to_uri $(, tag=$to_tag)? $(, $to_param_name=$to_param_val)* ) )?
+                $(, call_id: $call_id )?
+                $(, cseq: $cseq )?
+                $(, via: ($via_host, $via_transport $(, branch=$branch)? $(, $via_param_name=$via_param_val)* ) )?
+                $(, contact: $contact_uri )?
+                $(, contact_name: ($contact_name, $contact_name_uri) )?
+                $(, max_forwards: $max_forwards )?
+                $(, content_type: $content_type )?
+                $(, body: $body )?
+            };
+            
+            // Add the custom header
+            request.headers.push(TypedHeader::Other(HeaderName::Other(stringify!($custom_header).to_string()), HeaderValue::text($custom_value.to_string())));
+            
+            // Process rest recursively if any
+            $(
+                // Handle any remaining headers
+                sip_request_add_headers!(request, $rest);
+            )?
+            
+            request
+        }
+    };
+}
+
+// Helper macro to process additional headers
+#[macro_export]
+macro_rules! sip_request_add_headers {
+    // Base case - no more headers
+    ($request:expr, ) => {};
+    
+    // Process one header and continue
+    ($request:expr, $custom_header:ident: $custom_value:expr, $($rest:tt)*) => {
+        {
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
+            $request.headers.push(TypedHeader::Other(HeaderName::Other(stringify!($custom_header).to_string()), HeaderValue::text($custom_value.to_string())));
+            
+            // Process remaining headers
+            $crate::sip_request_add_headers!($request, $($rest)*);
         }
     };
 }
@@ -150,7 +216,6 @@ macro_rules! sip_response {
         $(, contact: $contact_uri:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
-        $(, $custom_header:tt: $custom_value:expr )*
     ) => {
         {
             use $crate::types::builder::ResponseBuilder;
@@ -219,10 +284,73 @@ macro_rules! sip_response {
             $(
                 builder = builder.body($body);
             )?
-
-            // Custom headers would go here...
             
             builder.build()
+        }
+    };
+    
+    // Handle custom headers with separate rule
+    (
+        status: $status:expr
+        $(, reason: $reason:expr )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, call_id: $call_id:expr )?
+        $(, cseq: ($cseq:expr, $cseq_method:expr) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, contact: $contact_uri:expr )?
+        $(, content_type: $content_type:expr )?
+        $(, body: $body:expr )?
+        , $custom_header:ident: $custom_value:expr
+        $(, $rest:tt)*
+    ) => {
+        {
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
+            let mut response = $crate::sip_response! {
+                status: $status
+                $(, reason: $reason )?
+                $(, from: ($from_name, $from_uri $(, tag=$from_tag)? $(, $from_param_name=$from_param_val)* ) )?
+                $(, to: ($to_name, $to_uri $(, tag=$to_tag)? $(, $to_param_name=$to_param_val)* ) )?
+                $(, call_id: $call_id )?
+                $(, cseq: ($cseq, $cseq_method) )?
+                $(, via: ($via_host, $via_transport $(, branch=$branch)? $(, $via_param_name=$via_param_val)* ) )?
+                $(, contact: $contact_uri )?
+                $(, content_type: $content_type )?
+                $(, body: $body )?
+            };
+            
+            // Add the custom header
+            response.headers.push(TypedHeader::Other(HeaderName::Other(stringify!($custom_header).to_string()), HeaderValue::text($custom_value.to_string())));
+            
+            // Process rest recursively if any
+            $(
+                // Handle any remaining headers
+                sip_response_add_headers!(response, $rest);
+            )?
+            
+            response
+        }
+    };
+}
+
+// Helper macro to process additional headers for responses
+#[macro_export]
+macro_rules! sip_response_add_headers {
+    // Base case - no more headers
+    ($response:expr, ) => {};
+    
+    // Process one header and continue
+    ($response:expr, $custom_header:ident: $custom_value:expr, $($rest:tt)*) => {
+        {
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
+            $response.headers.push(TypedHeader::Other(HeaderName::Other(stringify!($custom_header).to_string()), HeaderValue::text($custom_value.to_string())));
+            
+            // Process remaining headers
+            $crate::sip_response_add_headers!($response, $($rest)*);
         }
     };
 } 

@@ -75,7 +75,7 @@ m=audio 49172 RTP/AVP 0
 a=rtpmap:0 PCMU/8000
 ";
 
-    // Macro approach
+    // Macro approach - fixed to avoid ambiguity
     let request = sip_request! {
         method: Method::Invite,
         uri: "sip:bob@example.com",
@@ -216,20 +216,30 @@ m=audio 49174 RTP/AVP 0
 a=rtpmap:0 PCMU/8000
 ";
 
-        // Create response using the macro
+        // Create response using the fixed macro call
         if let Some((via_host, via_transport, branch)) = via {
-            let response = sip_response! {
-                status: StatusCode::Ok,
-                reason: "OK",
-                from: (from.display_name.unwrap_or_default(), from.uri.to_string(), tag=from.tag().unwrap_or_default()),
-                to: (to.display_name.unwrap_or_default(), to.uri.to_string(), tag="as83kd9bs"),
-                call_id: call_id,
-                cseq: (cseq.0, cseq.1),
-                via: (via_host, via_transport, branch=branch),
-                contact: "sip:bob@192.168.1.2",
-                content_type: "application/sdp",
-                body: sdp_body
-            };
+            // Fixed macro format
+            let display_name = from.display_name.unwrap_or_default();
+            let from_tag = from.tag().unwrap_or_default();
+            let to_display = to.display_name.unwrap_or_default();
+            
+            let response = ResponseBuilder::ok()
+                .reason("OK")
+                .from(&display_name, &from.uri.to_string())
+                    .with_tag(from_tag)
+                    .done()
+                .to(&to_display, &to.uri.to_string())
+                    .with_tag("as83kd9bs")
+                    .done()
+                .call_id(&call_id)
+                .cseq(cseq.0, cseq.1)
+                .via(&via_host, &via_transport)
+                    .with_branch(&branch)
+                    .done()
+                .contact("sip:bob@192.168.1.2").expect("Contact URI parse error")
+                .content_type("application/sdp").expect("Content-Type parse error")
+                .body(sdp_body)
+                .build();
             
             return Ok(Message::Response(response));
         } else {
@@ -282,7 +292,7 @@ pub fn build_register_request_using_macro() -> Result<Message, Error> {
     let branch = format!("z9hG4bK-{}", timestamp % 10000);
     let call_id = format!("reg-{}-{}", timestamp, timestamp % 1000);
     
-    // Using the macro
+    // Using the macro with fixed format
     let request = sip_request! {
         method: Method::Register,
         uri: "sip:registrar.example.com",
