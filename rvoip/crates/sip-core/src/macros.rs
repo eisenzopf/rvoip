@@ -35,9 +35,16 @@ macro_rules! sip_request {
         $(, max_forwards: $max_forwards:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
+        $(, accept: $accept:expr )?
+        $(, user_agent: $user_agent:expr )?
+        $(, server: $server:expr )?
+        $(, warning: $warning:expr )?
     ) => {
         {
             use $crate::types::builder::RequestBuilder;
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
             let mut builder = RequestBuilder::new($method, $uri)
                 .expect("URI parse error");
 
@@ -130,6 +137,34 @@ macro_rules! sip_request {
                 builder = builder.body($body);
             )?
             
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Accept,
+                    HeaderValue::text($accept)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::UserAgent,
+                    HeaderValue::text($user_agent)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Server,
+                    HeaderValue::text($server)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Warning,
+                    HeaderValue::text($warning)
+                ));
+            )?
+            
             builder.build()
         }
     };
@@ -148,6 +183,10 @@ macro_rules! sip_request {
         $(, max_forwards: $max_forwards:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
+        $(, accept: $accept:expr )?
+        $(, user_agent: $user_agent:expr )?
+        $(, server: $server:expr )?
+        $(, warning: $warning:expr )?
     ) => {
         $crate::sip_request! {
             method: $method,
@@ -162,6 +201,10 @@ macro_rules! sip_request {
             $(, max_forwards: $max_forwards )?
             $(, content_type: $content_type )?
             $(, body: $body )?
+            $(, accept: $accept )?
+            $(, user_agent: $user_agent )?
+            $(, server: $server )?
+            $(, warning: $warning )?
         }
     };
     
@@ -266,9 +309,16 @@ macro_rules! sip_response {
         $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
+        $(, accept: $accept:expr )?
+        $(, user_agent: $user_agent:expr )?
+        $(, server: $server:expr )?
+        $(, warning: $warning:expr )?
     ) => {
         {
             use $crate::types::builder::ResponseBuilder;
+            use $crate::types::header::{HeaderName, HeaderValue};
+            use $crate::types::TypedHeader;
+            
             let mut builder = ResponseBuilder::new($status);
 
             $(
@@ -360,6 +410,34 @@ macro_rules! sip_response {
                 builder = builder.body($body);
             )?
             
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Accept,
+                    HeaderValue::text($accept)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::UserAgent,
+                    HeaderValue::text($user_agent)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Server,
+                    HeaderValue::text($server)
+                ));
+            )?
+            
+            $(
+                builder = builder.header(TypedHeader::Other(
+                    HeaderName::Warning,
+                    HeaderValue::text($warning)
+                ));
+            )?
+            
             builder.build()
         }
     };
@@ -377,6 +455,10 @@ macro_rules! sip_response {
         $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
+        $(, accept: $accept:expr )?
+        $(, user_agent: $user_agent:expr )?
+        $(, server: $server:expr )?
+        $(, warning: $warning:expr )?
     ) => {
         $crate::sip_response! {
             status: $status
@@ -390,6 +472,10 @@ macro_rules! sip_response {
             $(, contact_name: ($contact_name, $contact_name_uri) )?
             $(, content_type: $content_type )?
             $(, body: $body )?
+            $(, accept: $accept )?
+            $(, user_agent: $user_agent )?
+            $(, server: $server )?
+            $(, warning: $warning )?
         }
     };
     
