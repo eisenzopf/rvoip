@@ -35,6 +35,11 @@ impl RequestBuilder {
         request.version = Version::new(2, 0); // Default to SIP/2.0
         Ok(Self { request })
     }
+    
+    /// Create a RequestBuilder from an existing Request
+    pub fn from_request(request: Request) -> Self {
+        Self { request }
+    }
 
     /// Create an INVITE request
     pub fn invite(uri: &str) -> Result<Self> {
