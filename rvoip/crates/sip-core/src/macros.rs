@@ -263,6 +263,7 @@ macro_rules! sip_response {
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
         $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
         $(, contact: $contact_uri:expr )?
+        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
     ) => {
@@ -346,6 +347,11 @@ macro_rules! sip_response {
             )?
 
             $(
+                builder = builder.contact_with_name($contact_name, $contact_name_uri)
+                    .expect("Contact URI parse error");
+            )?
+
+            $(
                 builder = builder.content_type($content_type)
                     .expect("Content-Type parse error");
             )?
@@ -368,6 +374,7 @@ macro_rules! sip_response {
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
         $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
         $(, contact: $contact_uri:expr )?
+        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
     ) => {
@@ -380,6 +387,7 @@ macro_rules! sip_response {
             $(, cseq: ($cseq, $cseq_method) )?
             $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
             $(, contact: $contact_uri )?
+            $(, contact_name: ($contact_name, $contact_name_uri) )?
             $(, content_type: $content_type )?
             $(, body: $body )?
         }
@@ -395,6 +403,7 @@ macro_rules! sip_response {
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
         $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
         $(, contact: $contact_uri:expr )?
+        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
         , headers: { $( $custom_header:ident: $custom_value:expr ),* }
@@ -412,6 +421,7 @@ macro_rules! sip_response {
                 $(, cseq: ($cseq, $cseq_method) )?
                 $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
                 $(, contact: $contact_uri )?
+                $(, contact_name: ($contact_name, $contact_name_uri) )?
                 $(, content_type: $content_type )?
                 $(, body: $body )?
             };

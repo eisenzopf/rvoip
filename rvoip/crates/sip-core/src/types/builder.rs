@@ -296,6 +296,17 @@ impl ResponseBuilder {
         Ok(self)
     }
 
+    /// Add a contact header with display name
+    pub fn contact_with_name(mut self, display_name: &str, uri: &str) -> Result<Self> {
+        let contact_uri = Uri::from_str(uri)?;
+        let contact_address = Address::new(Some(display_name), contact_uri);
+        let contact_param = ContactParamInfo { address: contact_address };
+        self.response = self.response.with_header(TypedHeader::Contact(
+            Contact::new_params(vec![contact_param])
+        ));
+        Ok(self)
+    }
+
     /// Add a Content-Type header
     pub fn content_type(mut self, content_type: &str) -> Result<Self> {
         self.response = self.response.with_header(TypedHeader::ContentType(
