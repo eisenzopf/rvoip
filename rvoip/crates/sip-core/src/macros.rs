@@ -134,15 +134,15 @@ macro_rules! sip_request {
         }
     };
 
-    // Alternative pattern for "spaced" format
+    // Alternative pattern for "spaced" format - correctly handle same format as main pattern
     (
         method: $method:expr,
         uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:ident = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:ident = $to_param_val:expr)*) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:ident = $via_param_val:expr)*) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
         $(, contact: $contact_uri:expr )?
         $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, max_forwards: $max_forwards:expr )?
@@ -339,15 +339,15 @@ macro_rules! sip_response {
         }
     };
 
-    // Alternative pattern for "spaced" format
+    // Alternative pattern for "spaced" format - correctly handle same format as main pattern
     (
         status: $status:expr
         $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:ident = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:ident = $to_param_val:expr)*) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:ident = $via_param_val:expr)*) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
         $(, contact: $contact_uri:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
