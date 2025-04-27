@@ -233,20 +233,19 @@ impl Uri {
     pub fn custom(uri_string: impl Into<String>) -> Self {
         let uri_string = uri_string.into();
         
-        // If it's a SIP URI, parse it normally
-        if uri_string.starts_with("sip:") || uri_string.starts_with("sips:") || uri_string.starts_with("tel:") {
-            return Self::from_str(&uri_string).unwrap_or_else(|_| {
-                // Fallback to custom storage if parsing fails
-                let mut uri = Self::new(Scheme::Sip, Host::domain("unknown.host"));
-                uri.raw_uri = Some(uri_string);
-                uri
-            });
+        // Uri::custom should simply store the raw string without attempting to parse.
+        // The `scheme` field is less relevant when `raw_uri` is Some.
+        // We use Sip as a default placeholder.
+        Uri {
+            scheme: Scheme::Sip, // Default scheme, raw_uri takes precedence
+            user: None,
+            password: None,
+            host: Host::domain("unknown.host"), // Placeholder host
+            port: None,
+            parameters: Vec::new(),
+            headers: HashMap::new(),
+            raw_uri: Some(uri_string),
         }
-        
-        // For non-SIP URIs, store the raw string
-        let mut uri = Self::new(Scheme::Sip, Host::domain("unknown.host"));
-        uri.raw_uri = Some(uri_string);
-        uri
     }
 
     /// Check if this URI has a custom scheme (non-SIP)
