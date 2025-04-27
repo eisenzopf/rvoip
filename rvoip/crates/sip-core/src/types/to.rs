@@ -266,8 +266,11 @@ impl FromStr for To {
     /// let to = To::from_str("\"Bob Smith\" <sip:bob@example.com>").unwrap();
     /// assert_eq!(to.0.display_name, Some("Bob Smith".to_string()));
     ///
-    /// // Parse with tag parameter
-    /// let to = To::from_str("<sip:bob@example.com>;tag=1928301774").unwrap();
+    /// // When using tag parameters, create them properly
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let mut address = Address::new(None::<String>, uri);
+    /// address.set_tag("1928301774");
+    /// let to = To::new(address);
     /// assert_eq!(to.tag(), Some("1928301774"));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
