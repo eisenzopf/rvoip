@@ -589,9 +589,9 @@ impl Uri {
     ///     .with_header("subject", "Meeting")
     ///     .with_header("priority", "urgent");
     ///
-    /// // Note: headers may be serialized in any order
+    /// // Headers are added to the URI string
     /// let uri_str = uri.to_string();
-    /// assert!(uri_str.contains("?subject=Meeting"));
+    /// assert!(uri_str.contains("subject=Meeting"));
     /// assert!(uri_str.contains("priority=urgent"));
     /// ```
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {

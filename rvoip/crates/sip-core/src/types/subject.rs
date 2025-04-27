@@ -8,17 +8,10 @@
 //! parse the session description. This header is primarily informational and is not
 //! crucial for SIP message processing.
 //!
-//! ## Format
+//! ## Usage Example
 //!
 //! ```
-//! Subject: Project X Discussion
-//! s: Lunch Plans
-//! ```
-//!
-//! ## Examples
-//!
-//! ```rust
-//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::Subject;
 //! use std::str::FromStr;
 //!
 //! // Create a Subject header
@@ -50,7 +43,7 @@ use serde::{Serialize, Deserialize};
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::Subject;
 ///
 /// // Create a new Subject header
 /// let subject = Subject::new("Weekly Team Sync");
@@ -86,7 +79,7 @@ impl Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     ///
     /// // Create with a static string
     /// let subject = Subject::new("Project Discussion");
@@ -114,7 +107,7 @@ impl Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     ///
     /// let empty_subject = Subject::new("");
     /// assert!(empty_subject.is_empty());
@@ -137,7 +130,7 @@ impl Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     ///
     /// let subject = Subject::new("Team Meeting");
     /// assert_eq!(subject.text(), "Team Meeting");
@@ -161,7 +154,7 @@ impl Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     ///
     /// let mut subject = Subject::new("Original Subject");
     /// assert_eq!(subject.text(), "Original Subject");
@@ -188,7 +181,7 @@ impl fmt::Display for Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     /// use std::fmt::Display;
     ///
     /// let subject = Subject::new("Team Meeting");
@@ -221,7 +214,7 @@ impl FromStr for Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
     /// use std::str::FromStr;
     ///
     /// let subject = Subject::from_str("Team Meeting").unwrap();
@@ -260,7 +253,8 @@ impl TypedHeaderTrait for Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
+    /// use rvoip_sip_core::types::{HeaderName, TypedHeaderTrait};
     ///
     /// let subject = Subject::new("Team Meeting");
     /// let header = subject.to_header();
@@ -290,7 +284,8 @@ impl TypedHeaderTrait for Subject {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Subject;
+    /// use rvoip_sip_core::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
     ///
     /// // Create a header with raw value
     /// let header = Header::new(
