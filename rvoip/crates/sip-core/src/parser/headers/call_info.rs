@@ -119,7 +119,14 @@ fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
             };
 
             // Create URI using FromStr - will create custom URI for non-SIP schemes
-            let uri = Uri::from_str(uri_str).unwrap_or_else(|_| Uri::custom(uri_str));
+            // Our `Uri::from` implementation already preserves the raw URI for custom schemes
+            let mut uri = match Uri::from_str(uri_str) {
+                Ok(uri) => uri,
+                Err(_) => Uri::custom(uri_str),
+            };
+            
+            // Always preserve the raw URI string for Call-Info headers
+            uri.raw_uri = Some(uri_str.to_string());
 
             // Convert InfoParam to Param
             let params = params_vec.into_iter()
