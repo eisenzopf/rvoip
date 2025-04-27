@@ -515,7 +515,7 @@ mod tests {
         // Test adding custom headers
         let request = sip_request! {
             method: Method::Options,
-            uri: "*",
+            uri: "sip:server.example.com",
             from: ("System", "sip:system@example.com"),
             to: ("Server", "sip:server@example.com"),
             call_id: "options-4321@example.com",
@@ -734,9 +734,9 @@ mod tests {
             uri: "sip:bob@example.com",
             from: ("Alice", "sip:alice@example.com", tag="1928301774"),
             to: ("Bob", "sip:bob@example.com"),
-            via: ("example.com", "UDP", branch="z9hG4bK1234", received="192.168.1.1"),
             call_id: "abc123@example.com",
-            cseq: 1
+            cseq: 1,
+            via: ("example.com", "UDP", branch="z9hG4bK1234", received="192.168.1.1")
         };
         
         // Test with spaces around equals
@@ -745,9 +745,9 @@ mod tests {
             uri: "sip:bob@example.com",
             from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
             to: ("Bob", "sip:bob@example.com"),
-            via: ("example.com", "UDP", branch = "z9hG4bK1234", received = "192.168.1.1"),
             call_id: "abc123@example.com",
-            cseq: 1
+            cseq: 1,
+            via: ("example.com", "UDP", branch = "z9hG4bK1234", received = "192.168.1.1")
         };
         
         // Test mixed styles
@@ -756,9 +756,9 @@ mod tests {
             uri: "sip:bob@example.com",
             from: ("Alice", "sip:alice@example.com", tag="1928301774"),
             to: ("Bob", "sip:bob@example.com"),
-            via: ("example.com", "UDP", branch = "z9hG4bK1234", received="192.168.1.1"),
             call_id: "abc123@example.com",
-            cseq: 1
+            cseq: 1,
+            via: ("example.com", "UDP", branch = "z9hG4bK1234", received="192.168.1.1")
         };
         
         // Verify all requests are equivalent
