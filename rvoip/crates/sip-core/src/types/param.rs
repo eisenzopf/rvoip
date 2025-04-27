@@ -57,6 +57,20 @@ impl fmt::Display for GenericValue {
     }
 }
 
+// Add From<&str> implementation for GenericValue
+impl From<&str> for GenericValue {
+    fn from(s: &str) -> Self {
+        // Check if it should be quoted - if it has spaces or special chars
+        if s.contains(char::is_whitespace) || s.contains(|c: char| {
+            matches!(c, ';' | ',' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | '/' | '<' | '>' | '#' | '['| ']' | '"')
+        }) {
+            GenericValue::Quoted(s.to_string())
+        } else {
+            GenericValue::Token(s.to_string())
+        }
+    }
+}
+
 /// Represents a generic URI parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Param {

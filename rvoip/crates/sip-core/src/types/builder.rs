@@ -392,6 +392,16 @@ impl<P> ViaBuilder<P> {
         self.params.push(Param::Maddr(maddr.to_string()));
         self
     }
+    
+    /// Add a generic parameter 
+    pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
+        let param = match value {
+            Some(val) => Param::Other(name.to_string(), Some(val.into())),
+            None => Param::Other(name.to_string(), None),
+        };
+        self.params.push(param);
+        self
+    }
 }
 
 // Via builder for Request

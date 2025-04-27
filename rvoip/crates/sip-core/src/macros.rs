@@ -21,6 +21,7 @@
 /// ```
 #[macro_export]
 macro_rules! sip_request {
+    // Main macro pattern using token tree matching for parameters
     (
         method: $method:expr,
         uri: $uri:expr
@@ -75,10 +76,31 @@ macro_rules! sip_request {
                 $(
                     match stringify!($via_param_key) {
                         "branch" => { via_builder = via_builder.with_branch($via_param_val); },
-                        "ttl" => { via_builder = via_builder.with_ttl($via_param_val); },
+                        "received" => { 
+                            // Parse IP address if possible, otherwise use generic param
+                            if let Ok(ip) = $via_param_val.parse::<std::net::IpAddr>() {
+                                via_builder = via_builder.with_received(ip);
+                            } else {
+                                via_builder = via_builder.with_param("received", Some($via_param_val));
+                            }
+                        },
+                        "ttl" => { 
+                            if let Ok(ttl) = $via_param_val.parse::<u8>() {
+                                via_builder = via_builder.with_ttl(ttl);
+                            } else {
+                                via_builder = via_builder.with_param("ttl", Some($via_param_val));
+                            }
+                        },
                         "maddr" => { via_builder = via_builder.with_maddr($via_param_val); },
-                        "rport" => { via_builder = via_builder.with_rport_value($via_param_val); },
-                        "received" => { via_builder = via_builder.with_param("received", Some($via_param_val)); },
+                        "rport" => {
+                            if $via_param_val == "" || $via_param_val == "true" {
+                                via_builder = via_builder.with_rport();
+                            } else if let Ok(port) = $via_param_val.parse::<u16>() {
+                                via_builder = via_builder.with_rport_value(port);
+                            } else {
+                                via_builder = via_builder.with_param("rport", Some($via_param_val));
+                            }
+                        },
                         _ => { via_builder = via_builder.with_param(stringify!($via_param_key), Some($via_param_val)); }
                     }
                 )*
@@ -109,6 +131,37 @@ macro_rules! sip_request {
             )?
             
             builder.build()
+        }
+    };
+
+    // Alternative pattern for "spaced" format
+    (
+        method: $method:expr,
+        uri: $uri:expr
+        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:ident = $from_param_val:expr)*) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:ident = $to_param_val:expr)*) )?
+        $(, call_id: $call_id:expr )?
+        $(, cseq: $cseq:expr )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:ident = $via_param_val:expr)*) )?
+        $(, contact: $contact_uri:expr )?
+        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
+        $(, max_forwards: $max_forwards:expr )?
+        $(, content_type: $content_type:expr )?
+        $(, body: $body:expr )?
+    ) => {
+        $crate::sip_request! {
+            method: $method,
+            uri: $uri
+            $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
+            $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
+            $(, call_id: $call_id )?
+            $(, cseq: $cseq )?
+            $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
+            $(, contact: $contact_uri )?
+            $(, contact_name: ($contact_name, $contact_name_uri) )?
+            $(, max_forwards: $max_forwards )?
+            $(, content_type: $content_type )?
+            $(, body: $body )?
         }
     };
     
@@ -259,10 +312,31 @@ macro_rules! sip_response {
                 $(
                     match stringify!($via_param_key) {
                         "branch" => { via_builder = via_builder.with_branch($via_param_val); },
-                        "ttl" => { via_builder = via_builder.with_ttl($via_param_val); },
+                        "received" => { 
+                            // Parse IP address if possible, otherwise use generic param
+                            if let Ok(ip) = $via_param_val.parse::<std::net::IpAddr>() {
+                                via_builder = via_builder.with_received(ip);
+                            } else {
+                                via_builder = via_builder.with_param("received", Some($via_param_val));
+                            }
+                        },
+                        "ttl" => { 
+                            if let Ok(ttl) = $via_param_val.parse::<u8>() {
+                                via_builder = via_builder.with_ttl(ttl);
+                            } else {
+                                via_builder = via_builder.with_param("ttl", Some($via_param_val));
+                            }
+                        },
                         "maddr" => { via_builder = via_builder.with_maddr($via_param_val); },
-                        "rport" => { via_builder = via_builder.with_rport_value($via_param_val); },
-                        "received" => { via_builder = via_builder.with_param("received", Some($via_param_val)); },
+                        "rport" => {
+                            if $via_param_val == "" || $via_param_val == "true" {
+                                via_builder = via_builder.with_rport();
+                            } else if let Ok(port) = $via_param_val.parse::<u16>() {
+                                via_builder = via_builder.with_rport_value(port);
+                            } else {
+                                via_builder = via_builder.with_param("rport", Some($via_param_val));
+                            }
+                        },
                         _ => { via_builder = via_builder.with_param(stringify!($via_param_key), Some($via_param_val)); }
                     }
                 )*
@@ -284,6 +358,33 @@ macro_rules! sip_response {
             )?
             
             builder.build()
+        }
+    };
+
+    // Alternative pattern for "spaced" format
+    (
+        status: $status:expr
+        $(, reason: $reason:expr )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:ident = $from_param_val:expr)*) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:ident = $to_param_val:expr)*) )?
+        $(, call_id: $call_id:expr )?
+        $(, cseq: ($cseq:expr, $cseq_method:expr) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:ident = $via_param_val:expr)*) )?
+        $(, contact: $contact_uri:expr )?
+        $(, content_type: $content_type:expr )?
+        $(, body: $body:expr )?
+    ) => {
+        $crate::sip_response! {
+            status: $status
+            $(, reason: $reason )?
+            $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
+            $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
+            $(, call_id: $call_id )?
+            $(, cseq: ($cseq, $cseq_method) )?
+            $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
+            $(, contact: $contact_uri )?
+            $(, content_type: $content_type )?
+            $(, body: $body )?
         }
     };
     
@@ -663,5 +764,116 @@ mod tests {
         assert!(from.to_string().contains("transport=tcp"));
         assert!(to.to_string().contains("transport=tcp"));
         assert!(contact.to_string().contains("transport=tcp"));
+    }
+
+    #[test]
+    fn test_flexible_param_syntax() {
+        // Test with no spaces around equals
+        let request1 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag="1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            via: ("example.com", "UDP", branch="z9hG4bK1234", received="192.168.1.1"),
+            call_id: "abc123@example.com",
+            cseq: 1
+        };
+        
+        // Test with spaces around equals
+        let request2 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            via: ("example.com", "UDP", branch = "z9hG4bK1234", received = "192.168.1.1"),
+            call_id: "abc123@example.com",
+            cseq: 1
+        };
+        
+        // Test mixed styles
+        let request3 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag="1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            via: ("example.com", "UDP", branch = "z9hG4bK1234", received="192.168.1.1"),
+            call_id: "abc123@example.com",
+            cseq: 1
+        };
+        
+        // Verify all requests are equivalent
+        let tag1 = find_header_value(&request1.headers, "From", "tag");
+        let tag2 = find_header_value(&request2.headers, "From", "tag");
+        let tag3 = find_header_value(&request3.headers, "From", "tag");
+        
+        assert_eq!(tag1, Some("1928301774".to_string()));
+        assert_eq!(tag2, Some("1928301774".to_string()));
+        assert_eq!(tag3, Some("1928301774".to_string()));
+        
+        let branch1 = find_header_value(&request1.headers, "Via", "branch");
+        let branch2 = find_header_value(&request2.headers, "Via", "branch");
+        let branch3 = find_header_value(&request3.headers, "Via", "branch");
+        
+        assert_eq!(branch1, Some("z9hG4bK1234".to_string()));
+        assert_eq!(branch2, Some("z9hG4bK1234".to_string()));
+        assert_eq!(branch3, Some("z9hG4bK1234".to_string()));
+
+        // Test response macro with both styles
+        let response1 = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag="1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag="as83kd9bs"),
+            call_id: "abc123@example.com",
+            cseq: (1, Method::Invite),
+            via: ("example.com", "UDP", branch="z9hG4bK1234")
+        };
+        
+        let response2 = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            call_id: "abc123@example.com",
+            cseq: (1, Method::Invite),
+            via: ("example.com", "UDP", branch = "z9hG4bK1234")
+        };
+        
+        // Verify responses are equivalent
+        let from_tag1 = find_header_value(&response1.headers, "From", "tag");
+        let from_tag2 = find_header_value(&response2.headers, "From", "tag");
+        
+        assert_eq!(from_tag1, Some("1928301774".to_string()));
+        assert_eq!(from_tag2, Some("1928301774".to_string()));
+        
+        let to_tag1 = find_header_value(&response1.headers, "To", "tag");
+        let to_tag2 = find_header_value(&response2.headers, "To", "tag");
+        
+        assert_eq!(to_tag1, Some("as83kd9bs".to_string()));
+        assert_eq!(to_tag2, Some("as83kd9bs".to_string()));
+    }
+
+    // Helper function to extract parameter value from a header
+    fn find_header_value(headers: &[TypedHeader], header_name: &str, param_name: &str) -> Option<String> {
+        for header in headers {
+            if header.to_string().starts_with(&format!("{}:", header_name)) {
+                let header_str = header.to_string();
+                
+                // Find parameter in header string
+                if let Some(param_start) = header_str.find(&format!(";{}=", param_name)) {
+                    let param_value_start = param_start + param_name.len() + 2; // +2 for ;=
+                    
+                    // Find end of parameter value
+                    let param_value_end = header_str[param_value_start..]
+                        .find(|c| c == ';' || c == '>' || c == ' ')
+                        .map(|pos| param_value_start + pos)
+                        .unwrap_or(header_str.len());
+                    
+                    // Return a cloned substring to avoid lifetime issues
+                    return Some(header_str[param_value_start..param_value_end].to_string());
+                }
+            }
+        }
+        None
     }
 } 
