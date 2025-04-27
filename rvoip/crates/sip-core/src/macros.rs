@@ -335,6 +335,21 @@ macro_rules! sip_request {
             builder
         }
     };
+
+    // Add a new pattern to handle tuples for 'from' that include tag
+    (@process_field $builder:ident, from, ($name:expr, $uri:expr, $tag:expr)) => {{
+        $builder.from($name, $uri).with_tag($tag).done()
+    }};
+
+    // Add a new pattern to handle tuples for 'to'
+    (@process_field $builder:ident, to, ($name:expr, $uri:expr)) => {{
+        $builder.to($name, $uri).done()
+    }};
+
+    // Add a new pattern to handle tuples for 'via' that include branch param
+    (@process_field $builder:ident, via, ($host:expr, $transport:expr, $branch:expr)) => {{
+        $builder.via($host, $transport).with_branch($branch.split('=').nth(1).unwrap_or($branch)).done()
+    }};
 }
 
 /// Macro for creating SIP response messages with a more concise syntax.
@@ -663,6 +678,19 @@ macro_rules! sip_response {
             builder
         }
     };
+
+    // Also add similar patterns for the sip_response macro:
+    (@process_field $builder:ident, from, ($name:expr, $uri:expr, $tag:expr)) => {{
+        $builder.from($name, $uri).with_tag($tag).done()
+    }};
+
+    (@process_field $builder:ident, to, ($name:expr, $uri:expr)) => {{
+        $builder.to($name, $uri).done()
+    }};
+
+    (@process_field $builder:ident, via, ($host:expr, $transport:expr, $branch:expr)) => {{
+        $builder.via($host, $transport).with_branch($branch.split('=').nth(1).unwrap_or($branch)).done()
+    }};
 }
 
 #[cfg(test)]

@@ -167,6 +167,13 @@ fn build_request_with_macro(
     let content_type_opt = extract_header_value(headers, "Content-Type").ok();
     let body = extract_body(headers).unwrap_or_default();
     
+    // Unpack tuples to their components for correct macro use
+    let (from_name, from_uri, from_tag) = from_tuple;
+    let (to_name, to_uri) = to_tuple;
+    let (via_host, via_transport, via_branch_param) = via_tuple;
+    // Extract just the branch value from the "branch=value" format
+    let via_branch = via_branch_param.split('=').nth(1).unwrap_or(via_branch_param);
+    
     // Build the basic request with the sip_request macro
     let request = match method {
         Method::Register => {
@@ -175,11 +182,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: Method::Register,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards,
                     content_type: "application/sdp",
                     body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
@@ -188,11 +195,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: Method::Register,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards
                 }
             };
@@ -204,11 +211,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: Method::Invite,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards,
                     content_type: "application/sdp",
                     body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
@@ -217,11 +224,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: Method::Invite,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards
                 }
             };
@@ -233,11 +240,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: method,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards,
                     content_type: "application/sdp",
                     body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
@@ -246,11 +253,11 @@ fn build_request_with_macro(
                 sip_request! {
                     method: method,
                     uri: uri,
-                    from: from_tuple,
-                    to: to_tuple,
+                    from: (from_name, from_uri, tag = from_tag),
+                    to: (to_name, to_uri),
                     call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
-                    via: via_tuple,
+                    via: (via_host, via_transport, branch = via_branch),
                     max_forwards: max_forwards
                 }
             };
@@ -291,15 +298,22 @@ fn build_response_with_macro(
     let cseq_tuple = extract_cseq_tuple(headers)?;
     let via_tuple = extract_via(headers)?;
     
+    // Unpack tuples to their components for correct macro use
+    let (from_name, from_uri, from_tag) = from_tuple;
+    let (to_name, to_uri) = to_tuple;
+    let (via_host, via_transport, via_branch_param) = via_tuple;
+    // Extract just the branch value from the "branch=value" format
+    let via_branch = via_branch_param.split('=').nth(1).unwrap_or(via_branch_param);
+    
     // Build the response with the sip_response macro
     let response = sip_response! {
         status: status_code,
         reason: reason,
-        from: from_tuple,
-        to: to_tuple,
+        from: (from_name, from_uri, tag = from_tag),
+        to: (to_name, to_uri),
         call_id: "dummy-call-id-for-test",
         cseq: cseq_tuple,
-        via: via_tuple
+        via: (via_host, via_transport, branch = via_branch)
     };
     
     Ok(response)
