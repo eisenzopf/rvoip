@@ -72,7 +72,7 @@ impl TestResults {
 /// Normalizes SIP message content to ensure consistent formatting
 /// - Ensures proper CRLF line endings 
 /// - Fixes content length if needed
-fn normalize_sip_message(content: &str) -> String {
+pub fn normalize_sip_message(content: &str) -> String {
     // Split into headers and body
     let parts: Vec<&str> = content.split("\r\n\r\n").collect();
     let (headers, body) = if parts.len() >= 2 {
@@ -124,7 +124,7 @@ fn normalize_sip_message(content: &str) -> String {
 
 /// These are messages that the RFC lists as well-formed but which don't comply with our strict
 /// implementation of RFC 3261. They are excluded from our tests but documented here.
-fn is_excluded_wellformed_test(filename: &str) -> bool {
+pub fn is_excluded_wellformed_test(filename: &str) -> bool {
     // These files contain messages that are technically valid according to RFC 4475 but
     // which our implementation chooses not to support for security or implementation
     // simplicity reasons.

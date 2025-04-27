@@ -5,6 +5,7 @@
 
 // Current active modules
 pub mod torture_test; // RFC 4475 torture tests
+pub mod macro_builder_tests; // Tests for macro builder roundtrip conversion
 
 // Future modules - uncomment when implemented
 // pub mod rfc3261_examples; // Examples from core SIP spec RFC 3261
