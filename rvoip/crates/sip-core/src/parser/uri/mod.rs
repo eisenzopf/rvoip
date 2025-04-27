@@ -122,6 +122,62 @@ pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
     alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
 }
 
+/// Special version of parse_uri that allows for non-standard schemes
+/// This should only be used in contexts where we need to handle arbitrary URIs, 
+/// such as in the macro builder or when processing messages from other systems
+pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<Uri> {
+    // First try the standard parsers (SIP, SIPS, TEL)
+    let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input);
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // If standard parsers fail, try our fallback generic URI parser
+    parse_generic_uri(input)
+}
+
+/// Fallback parser for non-standard URI schemes (RFC 3986 compliant)
+fn parse_generic_uri(input: &[u8]) -> ParseResult<Uri> {
+    // Try to extract the scheme part (up to the ':')
+    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+        // Convert the raw input to a string for the Uri struct
+        if let Ok(uri_str) = std::str::from_utf8(input) {
+            // Extract the scheme
+            let scheme = if colon_pos > 0 {
+                let scheme_str = &uri_str[0..colon_pos];
+                match scheme_str.to_lowercase().as_str() {
+                    "sip" => Scheme::Sip,
+                    "sips" => Scheme::Sips,
+                    "tel" => Scheme::Tel,
+                    "http" => Scheme::Http,
+                    "https" => Scheme::Https,
+                    _ => Scheme::Custom(scheme_str.to_string()),
+                }
+            } else {
+                // Colon at position 0 is invalid, but we'll create a custom scheme
+                Scheme::Custom("invalid".to_string())
+            };
+            
+            // Create a Uri with the raw text preserved
+            let uri = Uri {
+                scheme,
+                user: None,
+                password: None,
+                host: Host::domain("example.com"), // Default host
+                port: None,
+                parameters: Vec::new(),
+                headers: HashMap::new(),
+                raw_uri: Some(uri_str.to_string()),
+            };
+            return Ok((b"", uri)); // Successfully consumed all input
+        }
+    }
+    
+    // If we can't even extract a scheme, it's not a valid URI
+    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+}
+
 // Fixed implementation of SIP URI parser that correctly handles params and headers
 fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
     let (input, _) = tag_no_case(b"sip:")(input)?;

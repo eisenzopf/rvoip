@@ -22,7 +22,7 @@ use crate::types::param::Param; // Updated import path
 use crate::parser::uri::parse_uri; // Import the nom parser
 
 /// SIP URI schema types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scheme {
     /// SIP URI (non-secure)
     Sip,
@@ -34,6 +34,8 @@ pub enum Scheme {
     Http,
     /// HTTPS URI
     Https,
+    /// Custom scheme (any other scheme)
+    Custom(String),
 }
 
 impl Scheme {
@@ -45,6 +47,7 @@ impl Scheme {
             Scheme::Tel => "tel",
             Scheme::Http => "http",
             Scheme::Https => "https",
+            Scheme::Custom(scheme) => scheme,
         }
     }
 }
@@ -68,7 +71,7 @@ impl FromStr for Scheme {
             "tel" => Ok(Scheme::Tel),
             "http" => Ok(Scheme::Http),
             "https" => Ok(Scheme::Https),
-            _ => Err(Error::InvalidUri(format!("Invalid scheme token: {}", s))),
+            _ => Ok(Scheme::Custom(s.to_string())), // Support arbitrary schemes
         }
     }
 }
@@ -234,11 +237,24 @@ impl Uri {
     pub fn custom(uri_string: impl Into<String>) -> Self {
         let uri_string = uri_string.into();
         
-        // Uri::custom should simply store the raw string without attempting to parse.
-        // The `scheme` field is less relevant when `raw_uri` is Some.
-        // We use Sip as a default placeholder.
+        // Try to extract the scheme if possible
+        let scheme = if let Some(colon_pos) = uri_string.find(':') {
+            let scheme_str = &uri_string[0..colon_pos];
+            match scheme_str.to_lowercase().as_str() {
+                "http" => Scheme::Http,
+                "https" => Scheme::Https,
+                "tel" => Scheme::Tel,
+                "sip" => Scheme::Sip,
+                "sips" => Scheme::Sips,
+                _ => Scheme::Custom(scheme_str.to_string()), // Preserve custom schemes
+            }
+        } else {
+            // If no scheme found, create a custom scheme from the whole string
+            Scheme::Custom(uri_string.clone())
+        };
+        
         Uri {
-            scheme: Scheme::Sip, // Default scheme, raw_uri takes precedence
+            scheme,
             user: None,
             password: None,
             host: Host::domain("unknown.host"), // Placeholder host
@@ -381,11 +397,7 @@ impl FromStr for Uri {
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
         all_consuming(parse_uri)(s.as_bytes())
-            .map(|(_rem, mut uri)| {
-                // Always preserve the original string
-                uri.raw_uri = Some(s.to_string());
-                uri
-            })
+            .map(|(_rem, uri)| uri)
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }

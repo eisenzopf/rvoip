@@ -7,7 +7,7 @@ use crate::types::{
     StatusCode, 
     Version,
     sip_message::{Request, Response},
-    uri::{Uri, Host},
+    uri::{Uri, Host, Scheme},
     to::To,
     from::From,
     call_id::CallId,
@@ -21,6 +21,7 @@ use crate::types::{
     Param,
     max_forwards::MaxForwards,
 };
+use crate::parser::uri::parse_uri_lenient;
 
 /// Builder for SIP request messages
 pub struct RequestBuilder {
@@ -30,10 +31,37 @@ pub struct RequestBuilder {
 impl RequestBuilder {
     /// Create a new RequestBuilder with the specified method and URI
     pub fn new(method: Method, uri: &str) -> Result<Self> {
-        let uri = Uri::from_str(uri)?;
-        let mut request = Request::new(method, uri);
-        request.version = Version::new(2, 0); // Default to SIP/2.0
-        Ok(Self { request })
+        // First try parsing as a standard URI
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                let mut request = Request::new(method, uri);
+                request.version = Version::new(2, 0); // Default to SIP/2.0
+                Ok(Self { request })
+            },
+            Err(_) => {
+                // Use our lenient parser for non-standard schemes like in RFC compliance tests
+                match parse_uri_lenient(uri.as_bytes()) {
+                    Ok((_, uri)) => {
+                        let mut request = Request::new(method, uri);
+                        request.version = Version::new(2, 0); // Default to SIP/2.0
+                        Ok(Self { request })
+                    },
+                    Err(_) => {
+                        // If not even the lenient parser works, check if it has a colon
+                        if uri.contains(':') {
+                            // Just create a custom URI that preserves the raw string
+                            let uri = Uri::custom(uri);
+                            let mut request = Request::new(method, uri);
+                            request.version = Version::new(2, 0); // Default to SIP/2.0
+                            Ok(Self { request })
+                        } else {
+                            // It's not a valid URI and doesn't have a scheme, so report error
+                            Err(Error::InvalidUri("URI missing scheme".to_string()))
+                        }
+                    }
+                }
+            }
+        }
     }
     
     /// Create a RequestBuilder from an existing Request
