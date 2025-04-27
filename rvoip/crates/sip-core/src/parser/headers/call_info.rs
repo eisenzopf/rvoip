@@ -8,7 +8,7 @@ use nom::{
     bytes::complete::{tag_no_case, take_while1},
     combinator::{map, map_res},
     multi::{many0, separated_list1},
-    sequence::{pair, preceded, delimited, tuple},
+    sequence::{pair, preceded, delimited, tuple, terminated},
     IResult,
     error::{Error as NomError, ErrorKind, ParseError},
 };
@@ -98,38 +98,35 @@ fn trim_uri_whitespace(s: &str) -> &str {
 // info = LAQUOT absoluteURI RAQUOT *( SEMI info-param)
 // Returns (Uri, Vec<Param>)
 fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
-    map_res(
-        pair(
-            delimited(
-                laquot,
-                // We're using take_while1 instead of parse_absolute_uri because
-                // we just need the raw URI string for now
-                take_while1(|c| c != b'>'),
-                raquot
+    map(
+        // Consume trailing whitespace after parameters
+        terminated(
+            pair(
+                delimited(
+                    laquot,
+                    take_while1(|c| c != b'>'),
+                    raquot
+                ),
+                many0(preceded(semi, info_param))
             ),
-            many0(preceded(semi, info_param))
+            crate::parser::whitespace::sws // Consume optional whitespace
         ),
-        |(uri_bytes, params_vec)| -> Result<CallInfoValue, nom::error::Error<&[u8]>> {
+        |(uri_bytes, params_vec)| {
             // Extract URI string
             let uri_str = match str::from_utf8(uri_bytes) {
                 Ok(s) => trim_uri_whitespace(s),
-                Err(_) => return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify)),
+                Err(_) => "", // This should never happen with valid input
             };
 
-            // Create URI using FromStr, which handles SIP/SIPS/TEL via nom parser
-            // and falls back to Uri::custom for other schemes.
-            let uri = match Uri::from_str(uri_str) {
-                 Ok(u) => u,
-                 // FromStr now always returns Ok, but handle potential future changes
-                 Err(_) => return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify)),
-            };
-            
+            // Create URI using FromStr - will create custom URI for non-SIP schemes
+            let uri = Uri::from_str(uri_str).unwrap_or_else(|_| Uri::custom(uri_str));
+
             // Convert InfoParam to Param
             let params = params_vec.into_iter()
                 .map(convert_info_param_to_param)
                 .collect();
-                
-            Ok(CallInfoValue { uri, params })
+
+            CallInfoValue { uri, params }
         }
     )(input)
 }
@@ -155,20 +152,17 @@ fn trim_ws(input: &[u8]) -> &[u8] {
 // Call-Info = "Call-Info" HCOLON info *(COMMA info)
 /// Parses a Call-Info header value.
 pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
-    // Trim the input
-    let input_trimmed = trim_ws(input);
+    // Removed initial trim_ws(input)
     
-    // Helper function to trim whitespace around commas
-    fn trim_comma_ws(input: &[u8]) -> ParseResult<&[u8]> {
-        let (mut input, _) = comma(input)?;
-        // Trim all whitespace after comma (space, tab, CR, LF)
-        while !input.is_empty() && (input[0] == b' ' || input[0] == b'\t' || input[0] == b'\r' || input[0] == b'\n') {
-            input = &input[1..];
-        }
-        Ok((input, input))
+    // Separator: Optional whitespace, comma, optional whitespace
+    fn comma_separator(input: &[u8]) -> ParseResult<&[u8]> {
+        let (input, _) = crate::parser::whitespace::sws(input)?;
+        let (input, _) = comma(input)?;
+        let (input, _) = crate::parser::whitespace::sws(input)?;
+        Ok((input, &input[0..0])) // Return success indicator (empty slice)
     }
     
-    separated_list1(trim_comma_ws, info)(input_trimmed)
+    separated_list1(comma_separator, info)(input)
 }
 
 /// Parses a complete Call-Info header, including the header name
