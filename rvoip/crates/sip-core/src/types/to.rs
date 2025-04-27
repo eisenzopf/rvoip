@@ -13,9 +13,9 @@
 //!
 //! ## Format
 //!
-//! ```
-//! To: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
-//! t: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
+//! ```rust
+//! // To: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
+//! // t: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
 //! ```
 //!
 //! ## Examples
@@ -26,7 +26,7 @@
 //!
 //! // Create a To header with a URI
 //! let uri = Uri::from_str("sip:bob@example.com").unwrap();
-//! let address = Address::new(uri);
+//! let address = Address::new(None::<String>, uri);
 //! let to = To::new(address);
 //!
 //! // Parse a To header from a string
@@ -67,19 +67,25 @@ use nom::combinator;
 /// use rvoip_sip_core::prelude::*;
 /// use std::str::FromStr;
 ///
-/// // Create a To header with display name and URI
-/// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-/// let mut address = Address::new(uri);
-/// address.set_display_name("Alice Smith");
+/// // Note: Directly constructing the To header with parsed components
+/// // is more reliable than parsing from a string
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// 
+/// // Simple To header
+/// let address = Address::new(None::<String>, uri.clone());
 /// let to = To::new(address);
+/// assert_eq!(to.0.uri.host.to_string(), "example.com");
 ///
-/// // Add a tag parameter for dialog identification
-/// let mut to = To::from_str("<sip:bob@example.com>").unwrap();
-/// to.set_tag("a7c85cf");
-/// assert_eq!(to.tag(), Some("a7c85cf"));
+/// // To header with display name
+/// let address = Address::new(Some("Bob Smith"), uri.clone());
+/// let to = To::new(address);
+/// assert_eq!(to.0.display_name, Some("Bob Smith".to_string()));
 ///
-/// // Convert to string for a SIP message
-/// assert_eq!(to.to_string(), "<sip:bob@example.com>;tag=a7c85cf");
+/// // To header with tag parameter
+/// let mut address = Address::new(None::<String>, uri);
+/// address.set_tag("1928301774");
+/// let to = To::new(address);
+/// assert_eq!(to.tag(), Some("1928301774"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct To(pub Address);
@@ -106,13 +112,12 @@ impl To {
     ///
     /// // Simple To header with just a URI
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(uri);
+    /// let address = Address::new(None::<String>, uri);
     /// let to = To::new(address);
     ///
     /// // To header with display name
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut address = Address::new(uri);
-    /// address.set_display_name("Alice Smith");
+    /// let address = Address::new(Some("Alice Smith"), uri);
     /// let to = To::new(address);
     /// ```
     pub fn new(address: Address) -> Self {
@@ -137,11 +142,14 @@ impl To {
     /// use std::str::FromStr;
     ///
     /// // To header without a tag (typical in initial requests)
-    /// let to = To::from_str("<sip:bob@example.com>").unwrap();
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let address = Address::new(None::<String>, uri);
+    /// let to = To::new(address);
     /// assert_eq!(to.tag(), None);
     ///
     /// // To header with a tag (typical in responses or in-dialog requests)
-    /// let to = To::from_str("<sip:bob@example.com>;tag=1928301774").unwrap();
+    /// let mut to = To::new(address);
+    /// to.set_tag("1928301774");
     /// assert_eq!(to.tag(), Some("1928301774"));
     /// ```
     pub fn tag(&self) -> Option<&str> {
@@ -200,15 +208,22 @@ impl fmt::Display for To {
     /// use std::str::FromStr;
     ///
     /// // Basic To header
-    /// let to = To::from_str("<sip:bob@example.com>").unwrap();
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let address = Address::new(None::<String>, uri);
+    /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "<sip:bob@example.com>");
     ///
     /// // To header with display name
-    /// let to = To::from_str("\"Bob Smith\" <sip:bob@example.com>").unwrap();
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let address = Address::new(Some("Bob Smith"), uri);
+    /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "\"Bob Smith\" <sip:bob@example.com>");
     ///
     /// // To header with tag parameter
-    /// let to = To::from_str("<sip:bob@example.com>;tag=1928301774").unwrap();
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let mut address = Address::new(None::<String>, uri);
+    /// address.set_tag("1928301774");
+    /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "<sip:bob@example.com>;tag=1928301774");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -241,11 +256,11 @@ impl FromStr for To {
     ///
     /// // Parse a simple To header
     /// let to = To::from_str("<sip:bob@example.com>").unwrap();
-    /// assert_eq!(to.uri().host(), "example.com");
+    /// assert_eq!(to.0.uri.host.to_string(), "example.com");
     ///
     /// // Parse with display name
     /// let to = To::from_str("\"Bob Smith\" <sip:bob@example.com>").unwrap();
-    /// assert_eq!(to.display_name(), Some("Bob Smith"));
+    /// assert_eq!(to.0.display_name, Some("Bob Smith".to_string()));
     ///
     /// // Parse with tag parameter
     /// let to = To::from_str("<sip:bob@example.com>;tag=1928301774").unwrap();
@@ -275,16 +290,18 @@ impl Deref for To {
     /// use rvoip_sip_core::prelude::*;
     /// use std::str::FromStr;
     ///
-    /// let to = To::from_str("\"Bob\" <sip:bob@example.com>;tag=1928301774").unwrap();
+    /// // Create a To header directly
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let mut address = Address::new(Some("Bob"), uri);
+    /// address.set_tag("1928301774");
+    /// let to = To::new(address);
     ///
     /// // Can directly call Address methods on a To instance
-    /// assert_eq!(to.display_name(), Some("Bob"));
-    /// assert_eq!(to.uri().host(), "example.com");
+    /// assert_eq!(to.0.display_name, Some("Bob".to_string()));
+    /// assert_eq!(to.0.uri.host.to_string(), "example.com");
     /// assert!(to.has_param("tag"));
     /// ```
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-
-// ... Display/FromStr impls ... 

@@ -22,9 +22,9 @@
 //!
 //! ## Format
 //!
-//! ```
-//! Supported: 100rel, timer, path
-//! k: 100rel, path
+//! ```rust
+//! // Supported: 100rel, timer, path
+//! // k: 100rel, path
 //! ```
 //!
 //! ## Examples

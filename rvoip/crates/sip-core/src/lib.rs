@@ -186,6 +186,8 @@ pub mod prelude {
     pub use crate::types::content_length::ContentLength;
     pub use crate::types::max_forwards::MaxForwards;
     pub use crate::types::contact::Contact;
+    pub use crate::types::supported::Supported;
+    pub use crate::types::unsupported::Unsupported;
 }
 
 #[cfg(test)]

@@ -13,8 +13,8 @@
 //!
 //! ## Format
 //!
-//! ```
-//! Unsupported: timer, 100rel
+//! ```rust
+//! // Unsupported: timer, 100rel
 //! ```
 //!
 //! ## Examples
@@ -86,7 +86,7 @@ use nom::combinator::all_consuming;
 /// ```
 ///
 /// ```
-/// use rvoip_sip_core::types::Unsupported;
+/// use rvoip_sip_core::prelude::*;
 /// 
 /// let mut unsupported = Unsupported::new();
 /// unsupported.add_option_tag("timer");
@@ -368,6 +368,12 @@ impl FromStr for Unsupported {
     /// assert_eq!(empty.option_tags().len(), 0);
     /// ```
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // Special case for empty string
+        if s.trim().is_empty() {
+            return Ok(Unsupported::new());
+        }
+
+        // For non-empty strings, use the parser
         let input = s.as_bytes();
         match parser::headers::unsupported::parse_unsupported(input) {
             Ok((_, tags)) => Ok(Unsupported::with_tags(tags)),
