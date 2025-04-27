@@ -6,11 +6,8 @@ use rvoip_sip_core::{
         header::{HeaderName, TypedHeader},
         contact::ContactValue,
         builder::{RequestBuilder, ResponseBuilder},
-        uri::{Uri, Host, Scheme},
     },
     parser::message::ParseMode,
-    sip_request,
-    sip_response,
 };
 
 // Import our message builder module
@@ -552,47 +549,55 @@ fn build_with_builder() {
 }
 
 fn build_with_macros() {
-    println!("  Using sip_request! macro for INVITE:");
+    println!("  Using builder approach instead of macros for INVITE:");
     
     let sdp_body = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
     
-    // Create a request using the macro with no trailing comma on the last item
-    let request = sip_request! {
-        method: Method::Invite,
-        uri: "sip:bob@example.com",
-        from: ("Alice", "sip:alice@example.com", tag="1928301774"),
-        to: ("Bob", "sip:bob@example.com"),
-        call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-        cseq: 1,
-        via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
-        contact: "sip:alice@alice.example.com",
-        max_forwards: 70,
-        content_type: "application/sdp",
-        body: sdp_body
-    };
+    // Create a request using the builder pattern instead of a macro
+    let request = RequestBuilder::invite("sip:bob@example.com").expect("URI parse error")
+        .from("Alice", "sip:alice@example.com")
+            .with_tag("1928301774")
+            .done()
+        .to("Bob", "sip:bob@example.com")
+            .done()
+        .call_id("a84b4c76e66710@pc33.atlanta.example.com")
+        .cseq(1)
+        .via("alice.example.com:5060", "UDP")
+            .with_branch("z9hG4bK776asdhds")
+            .done()
+        .contact("sip:alice@alice.example.com").expect("Contact URI parse error")
+        .max_forwards(70)
+        .content_type("application/sdp").expect("Content-Type parse error")
+        .body(sdp_body)
+        .build();
     
-    println!("  Successfully built INVITE request with macro!");
+    println!("  Successfully built INVITE request with builder!");
     println!("  Method: {}", request.method);
     println!("  URI: {}", request.uri);
     println!("  Headers: {} headers", request.headers.len());
     
-    println!("\n  Using sip_response! macro for 200 OK:");
+    println!("\n  Using builder approach instead of macros for 200 OK:");
     
-    // Create a response using the macro with no trailing comma on the last item
-    let response = sip_response! {
-        status: StatusCode::Ok,
-        reason: "OK",
-        from: ("Alice", "sip:alice@example.com", tag="1928301774"),
-        to: ("Bob", "sip:bob@example.com", tag="as83kd9bs"),
-        call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-        cseq: (1, Method::Invite),
-        via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
-        contact: "sip:bob@192.168.1.2",
-        content_type: "application/sdp",
-        body: sdp_body
-    };
+    // Create a response using the builder pattern instead of a macro
+    let response = ResponseBuilder::ok()
+        .reason("OK")
+        .from("Alice", "sip:alice@example.com")
+            .with_tag("1928301774")
+            .done()
+        .to("Bob", "sip:bob@example.com")
+            .with_tag("as83kd9bs")
+            .done()
+        .call_id("a84b4c76e66710@pc33.atlanta.example.com")
+        .cseq(1, Method::Invite)
+        .via("alice.example.com:5060", "UDP")
+            .with_branch("z9hG4bK776asdhds")
+            .done()
+        .contact("sip:bob@192.168.1.2").expect("Contact URI parse error")
+        .content_type("application/sdp").expect("Content-Type parse error")
+        .body(sdp_body)
+        .build();
     
-    println!("  Successfully built 200 OK response with macro!");
+    println!("  Successfully built 200 OK response with builder!");
     println!("  Status: {} {}", 
         match response.status {
             StatusCode::Ok => 200,

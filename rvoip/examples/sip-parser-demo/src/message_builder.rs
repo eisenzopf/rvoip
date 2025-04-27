@@ -3,30 +3,16 @@ use rvoip_sip_core::{
         Message, 
         StatusCode, 
         Method,
-        Version,
-        to::To,
-        from::From,
-        call_id::CallId,
-        cseq::CSeq,
-        content_type::ContentType,
-        content_length::ContentLength,
-        via::{Via, ViaHeader, SentProtocol},
-        uri::Uri,
-        sip_message::{Request, Response},
-        Address,
         TypedHeader,
         Param,
         header::{HeaderName, HeaderValue},
         builder::{RequestBuilder, ResponseBuilder},
+        to::To,
     },
     error::Error,
-    sip_request,
-    sip_response,
 };
 
-use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use bytes::Bytes;
 
 /// Builds a simple SIP INVITE request
 pub fn build_invite_request() -> Result<Message, Error> {
@@ -75,20 +61,23 @@ m=audio 49172 RTP/AVP 0
 a=rtpmap:0 PCMU/8000
 ";
 
-    // Macro approach - fixed to avoid ambiguity
-    let request = sip_request! {
-        method: Method::Invite,
-        uri: "sip:bob@example.com",
-        from: ("Alice", "sip:alice@example.com", tag="1928301774"),
-        to: ("Bob", "sip:bob@example.com"),
-        call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-        cseq: 1,
-        via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
-        contact: "sip:alice@alice.example.com",
-        max_forwards: 70,
-        content_type: "application/sdp",
-        body: sdp_body
-    };
+    // Builder approach instead of macro
+    let request = RequestBuilder::invite("sip:bob@example.com").expect("URI parse error")
+        .from("Alice", "sip:alice@example.com")
+            .with_tag("1928301774")
+            .done()
+        .to("Bob", "sip:bob@example.com")
+            .done()
+        .call_id("a84b4c76e66710@pc33.atlanta.example.com")
+        .cseq(1)
+        .via("alice.example.com:5060", "UDP")
+            .with_branch("z9hG4bK776asdhds")
+            .done()
+        .contact("sip:alice@alice.example.com").expect("Contact URI parse error")
+        .max_forwards(70)
+        .content_type("application/sdp").expect("Content-Type parse error")
+        .body(sdp_body)
+        .build();
     
     // Convert to a generic Message
     Ok(Message::Request(request))
@@ -219,7 +208,7 @@ a=rtpmap:0 PCMU/8000
         // Create response using the fixed macro call
         if let Some((via_host, via_transport, branch)) = via {
             // Fixed macro format
-            let display_name = from.display_name.unwrap_or_default();
+            let display_name = from.display_name.clone().unwrap_or_default();
             let from_tag = from.tag().unwrap_or_default();
             let to_display = to.display_name.unwrap_or_default();
             
@@ -292,23 +281,22 @@ pub fn build_register_request_using_macro() -> Result<Message, Error> {
     let branch = format!("z9hG4bK-{}", timestamp % 10000);
     let call_id = format!("reg-{}-{}", timestamp, timestamp % 1000);
     
-    // Using the macro with fixed format
-    let request = sip_request! {
-        method: Method::Register,
-        uri: "sip:registrar.example.com",
-        from: ("Alice", "sip:alice@example.com", tag="reg-tag"),
-        to: ("Alice", "sip:alice@example.com"),
-        call_id: call_id,
-        cseq: 1,
-        via: ("192.168.1.2:5060", "UDP", branch=branch),
-        contact: "sip:alice@192.168.1.2:5060",
-        max_forwards: 70
-    };
-    
-    // Add additional headers (would be nice to add to the macro in the future)
-    let mut request = request;
-    request.headers.push(TypedHeader::Other(HeaderName::Expires, HeaderValue::integer(3600)));
-    request.headers.push(TypedHeader::Other(HeaderName::UserAgent, HeaderValue::text("rvoip-sip-demo/1.0".to_string())));
+    // Using the builder pattern instead of macro
+    let request = RequestBuilder::register("sip:registrar.example.com").expect("URI parse error")
+        .from("Alice", "sip:alice@example.com")
+            .with_tag("reg-tag")
+            .done()
+        .to("Alice", "sip:alice@example.com")
+            .done()
+        .call_id(&call_id)
+        .via("192.168.1.2:5060", "UDP")
+            .with_branch(&branch)
+            .done()
+        .contact("sip:alice@192.168.1.2:5060").expect("Contact URI parse error")
+        .max_forwards(70)
+        .header(TypedHeader::Other(HeaderName::Expires, HeaderValue::integer(3600)))
+        .header(TypedHeader::Other(HeaderName::UserAgent, HeaderValue::text("rvoip-sip-demo/1.0".to_string())))
+        .build();
     
     // Convert to a generic Message
     Ok(Message::Request(request))
