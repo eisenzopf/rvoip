@@ -116,110 +116,22 @@ fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
                 Err(_) => return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify)),
             };
 
-            // Create URI directly to avoid stack overflow
-            // Instead of using UriAdapter::parse_uri, implement simplified parsing
-            let uri = create_safe_uri(uri_str);
-            if uri.is_err() {
-                return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify));
-            }
+            // Create URI using FromStr, which handles SIP/SIPS/TEL via nom parser
+            // and falls back to Uri::custom for other schemes.
+            let uri = match Uri::from_str(uri_str) {
+                 Ok(u) => u,
+                 // FromStr now always returns Ok, but handle potential future changes
+                 Err(_) => return Err(nom::error::Error::new(uri_bytes, nom::error::ErrorKind::Verify)),
+            };
             
             // Convert InfoParam to Param
             let params = params_vec.into_iter()
                 .map(convert_info_param_to_param)
                 .collect();
                 
-            Ok(CallInfoValue { uri: uri.unwrap(), params })
+            Ok(CallInfoValue { uri, params })
         }
     )(input)
-}
-
-// Safe URI creation function to avoid stack overflow
-fn create_safe_uri(uri_str: &str) -> Result<Uri, String> {
-    use crate::types::uri::{Scheme, Host, Uri};
-    use std::collections::HashMap;
-    
-    // Check what kind of URI we have by examining scheme
-    if uri_str.to_lowercase().starts_with("sip:") || uri_str.to_lowercase().starts_with("sips:") {
-        // For SIP URIs, create a simple URI directly
-        let scheme = if uri_str.to_lowercase().starts_with("sip:") {
-            Scheme::Sip
-        } else {
-            Scheme::Sips
-        };
-        
-        // Extract host part simply (after @ or after colon)
-        let host_part = uri_str.split('@').last().unwrap_or(uri_str.split(':').nth(1).unwrap_or(""));
-        let host = Host::Domain(host_part.trim().to_string());
-        
-        // Create minimal URI
-        let simple_uri = Uri {
-            scheme,
-            user: None,
-            password: None,
-            host,
-            port: None,
-            parameters: Vec::new(),
-            headers: HashMap::new(),
-            raw_uri: Some(uri_str.to_string()),
-        };
-        
-        return Ok(simple_uri);
-    }
-    else {
-        // For non-SIP URIs, parse with fluent-uri if possible
-        match fluent_uri::Uri::parse(uri_str) {
-            Ok(fluent_uri) => {
-                // Extract the scheme
-                let scheme_str = fluent_uri.scheme().as_str();
-                
-                // Determine scheme
-                let scheme = match scheme_str.to_lowercase().as_str() {
-                    "http" => Scheme::Http,
-                    "https" => Scheme::Https,
-                    "tel" => Scheme::Tel,
-                    _ => Scheme::Sip, // Default to SIP for unknown schemes
-                };
-                
-                // Extract host from fluent_uri if available
-                let host = if let Some(authority) = fluent_uri.authority() {
-                    let host_str = authority.host();
-                    Host::Domain(host_str.to_string())
-                } else {
-                    // Fallback to a simple domain
-                    Host::Domain("example.com".to_string())
-                };
-                
-                // Create a new URI with only the basic components
-                let uri = Uri {
-                    scheme,
-                    user: None,
-                    password: None,
-                    host,
-                    port: None,
-                    parameters: Vec::new(),
-                    headers: HashMap::new(),
-                    raw_uri: Some(uri_str.to_string()),
-                };
-                
-                Ok(uri)
-            },
-            Err(_) => {
-                // For unparseable URIs, create a default URI with the original as raw_uri
-                let uri = Uri {
-                    scheme: Scheme::Sip,
-                    user: None,
-                    password: None,
-                    host: Host::Domain("invalid.example.com".to_string()),
-                    port: None,
-                    parameters: Vec::new(),
-                    headers: HashMap::new(),
-                    raw_uri: Some(uri_str.to_string()),
-                };
-                
-                Ok(uri)
-            }
-        }
-    }
 }
 
 // Helper function to trim leading and trailing whitespace

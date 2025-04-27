@@ -26,11 +26,12 @@ serde_bytes = "0.11"
 bytes = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, version = "1.7", features = ["v4"] }
 # Parsing
-nom = "7.1.3"
-fluent-uri = "0.3.2"
+nom = "7.1"
+rand = "0.8"
+log = "0.4"
 # Logging
 tracing = { workspace = true }
-ordered-float = { version = "5.0.0", features = ["serde"] }
+ordered-float = { version = "4.2.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]

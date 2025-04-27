@@ -17,7 +17,8 @@ use nom::{
 use std::str;
 use std::fmt;
 use std::str::FromStr;
-use fluent_uri::Uri as FluentUri;  // Import for RFC 3986 URI parsing
+// Remove fluent_uri import
+// use fluent_uri::Uri as FluentUri;  // Import for RFC 3986 URI parsing
 
 // Import from base parser modules
 use crate::parser::separators::{hcolon, semi, comma, laquot, raquot};
@@ -58,34 +59,30 @@ impl FromStr for AlertInfoUri {
     type Err = CrateError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Check if this is a SIP URI
+        // Check if this is a SIP or SIPS URI
         if s.to_lowercase().starts_with("sip:") || s.to_lowercase().starts_with("sips:") {
-            // PROBLEM: Using Uri::from_str can cause stack overflow in recursive cases
-            // Fix: Use UriAdapter directly which is what Uri::from_str uses
-            use crate::types::uri_adapter::UriAdapter;
-            match UriAdapter::parse_uri(s) {
+            // Use Uri::from_str which now calls the internal nom parser
+            match Uri::from_str(s) {
                 Ok(uri) => return Ok(AlertInfoUri::Sip(uri)),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e), // Propagate parsing error
             }
         }
 
-        // For non-SIP URIs, use fluent-uri for RFC 3986 compliant parsing and validation
-        match fluent_uri::Uri::parse(s) {
-            Ok(uri) => {
-                // Extract the scheme from the URI
-                let scheme = uri.scheme().as_str();
-
-                // Basic validation - scheme must be non-empty and alphabetic
-                if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic()) {
-                    Ok(AlertInfoUri::Other {
-                        scheme: scheme.to_string(),
-                        uri: s.to_string(),
-                    })
-                } else {
-                    Err(CrateError::ParseError(format!("Invalid URI scheme: {}", scheme)))
-                }
-            },
-            Err(_) => Err(CrateError::ParseError(format!("Invalid URI: {}", s)))
+        // For non-SIP URIs, perform basic validation manually
+        if let Some(colon_pos) = s.find(':') {
+            let scheme = &s[..colon_pos];
+            // Basic validation: scheme must not be empty and start with a letter
+            if !scheme.is_empty() && scheme.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+                Ok(AlertInfoUri::Other {
+                    scheme: scheme.to_string(),
+                    uri: s.to_string(),
+                })
+            } else {
+                Err(CrateError::ParseError(format!("Invalid URI scheme: {}", scheme)))
+            }
+        } else {
+            // No colon found, invalid URI
+            Err(CrateError::ParseError(format!("Invalid URI (missing scheme): {}", s)))
         }
     }
 }
@@ -141,56 +138,9 @@ fn alert_param(input: &[u8]) -> ParseResult<AlertInfoValue> {
 }
 
 // Helper function to create an AlertInfoUri without using FromStr implementation
-// which avoids the recursive call path
 fn create_alert_info_uri(uri_str: &str) -> Result<AlertInfoUri, CrateError> {
-    use crate::types::uri::{Scheme, Host, Uri};
-    use std::collections::HashMap;
-    
-    // Check if this is a SIP URI
-    if uri_str.to_lowercase().starts_with("sip:") || uri_str.to_lowercase().starts_with("sips:") {
-        // For SIP URIs, create a simple URI directly
-        let scheme = if uri_str.to_lowercase().starts_with("sip:") {
-            Scheme::Sip
-        } else {
-            Scheme::Sips
-        };
-        
-        // Just extract the host part for testing - this avoids parsing entirely
-        let host_part = uri_str.split('@').last().unwrap_or(uri_str.split(':').nth(1).unwrap_or(""));
-        let host = Host::Domain(host_part.to_string());
-        
-        let simple_uri = Uri {
-            scheme,
-            user: None,
-            password: None,
-            host,
-            port: None,
-            parameters: Vec::new(),
-            headers: HashMap::new(),
-            raw_uri: Some(uri_str.to_string()),
-        };
-        
-        return Ok(AlertInfoUri::Sip(simple_uri));
-    }
-    
-    // For non-SIP URIs, use fluent-uri as before
-    match fluent_uri::Uri::parse(uri_str) {
-        Ok(uri) => {
-            // Extract the scheme from the URI
-            let scheme = uri.scheme().as_str();
-            
-            // Basic validation - scheme must be non-empty and alphabetic
-            if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic()) {
-                Ok(AlertInfoUri::Other {
-                    scheme: scheme.to_string(),
-                    uri: uri_str.to_string(),
-                })
-            } else {
-                Err(CrateError::ParseError(format!("Invalid URI scheme: {}", scheme)))
-            }
-        },
-        Err(_) => Err(CrateError::ParseError(format!("Invalid URI: {}", uri_str)))
-    }
+    // Use the FromStr implementation which is now safe
+    AlertInfoUri::from_str(uri_str)
 }
 
 /// Parses an Alert-Info header value.
@@ -229,18 +179,23 @@ mod tests {
 
     // Helper function to create an HTTP URI for testing
     fn http_uri(url: &str) -> AlertInfoUri {
-        let uri = fluent_uri::Uri::parse(url).expect("Failed to parse test URI");
-        AlertInfoUri::Other {
-            scheme: uri.scheme().as_str().to_string(),
-            uri: url.to_string(),
+        // Manually construct AlertInfoUri::Other after basic validation
+        if let Some(colon_pos) = url.find(':') {
+            let scheme = &url[..colon_pos];
+            if !scheme.is_empty() && scheme.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+                return AlertInfoUri::Other {
+                    scheme: scheme.to_string(),
+                    uri: url.to_string(),
+                };
+            }
         }
+        panic!("Invalid test URI for http_uri: {}", url);
     }
 
     // Helper function to create a SIP URI for testing
     fn sip_uri(uri_str: &str) -> AlertInfoUri {
-        // Avoid using Uri::from_str which can cause recursion
-        use crate::types::uri_adapter::UriAdapter;
-        let uri = UriAdapter::parse_uri(uri_str).unwrap();
+        // Use Uri::from_str directly
+        let uri = Uri::from_str(uri_str).expect(&format!("Failed to parse test SIP URI: {}", uri_str));
         AlertInfoUri::Sip(uri)
     }
 

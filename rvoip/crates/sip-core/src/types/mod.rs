@@ -19,9 +19,9 @@ pub use param::Param;
 pub mod uri;
 pub use uri::{Uri, Host, Scheme};
 
-// Add URI adapter module
-pub mod uri_adapter;
-pub use uri_adapter::UriAdapter;
+// Add URI adapter module - REMOVED
+// pub mod uri_adapter;
+// pub use uri_adapter::UriAdapter;
 
 // Add Version module
 pub mod version;

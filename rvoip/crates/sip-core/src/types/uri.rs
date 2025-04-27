@@ -10,7 +10,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, hex_digit1},
-    combinator::{map, map_res, opt, recognize, verify},
+    combinator::{map, map_res, opt, recognize, verify, all_consuming},
     multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::types::param::Param; // Updated import path
+use crate::parser::uri::parse_uri; // Import the nom parser
 
 /// SIP URI schema types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -373,158 +374,27 @@ impl fmt::Display for Uri {
     }
 }
 
-// We keep only one FromStr implementation and make it use the UriAdapter for parsing
+// Use the internal nom parser for FromStr
 impl FromStr for Uri {
     type Err = Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        use crate::types::uri_adapter::UriAdapter;
-        
-        // Use the adapter to parse the URI string
-        UriAdapter::parse_uri(s)
+    fn from_str(s: &str) -> Result<Self> {
+        // Use the nom parser from the parser module
+        all_consuming(parse_uri)(s.as_bytes())
+            .map(|(_rem, uri)| uri) // Extract the URI from the tuple
+            .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }
 
-// Implementation to allow `uri: "sip:alice@example.com".into()`
+// Use the internal nom parser for From<&str>
 impl<'a> From<&'a str> for Uri {
     fn from(s: &'a str) -> Self {
-        // FIXME: This creates an infinite recursion - from_str calls UriAdapter
-        // which may trigger a From<&str> conversion which calls from_str again
-        // 
-        // The recursion loop is:
-        // 1. From<&str> implementation calls from_str
-        // 2. from_str calls UriAdapter::parse_uri
-        // 3. Inside UriAdapter::parse_uri, .into() is called on a string
-        // 4. Which calls this From<&str> implementation again
-        //
-        // Two potential fixes:
-        // 1. Refactor UriAdapter to avoid calling .into() during URI parsing
-        // 2. Enhance this implementation to directly create a Uri without using from_str
-        //
-        // As a temporary fix, the tests have been disabled and this function 
-        // has been fixed with a direct implementation instead of using from_str.
-        
-        // First, try to extract the scheme to create a basic URI
-        if let Some(scheme_end) = s.find(':') {
-            let scheme_str = &s[0..scheme_end];
-            match scheme_str.to_lowercase().as_str() {
-                "sip" => {
-                    // Basic SIP URI
-                    let after_scheme = &s[scheme_end+1..];
-                    // Look for @ to detect user@host format
-                    if let Some(at_idx) = after_scheme.find('@') {
-                        let user = &after_scheme[0..at_idx];
-                        let host_part = &after_scheme[at_idx+1..];
-                        // Extract host (ignoring parameters for fallback)
-                        let host_end = host_part.find(|c| c == ';' || c == '?' || c == ':').unwrap_or(host_part.len());
-                        let host_str = &host_part[0..host_end];
-                        
-                        Uri {
-                            scheme: Scheme::Sip,
-                            user: Some(user.to_string()),
-                            password: None,
-                            host: Host::Domain(host_str.to_string()),
-                            port: None,
-                            parameters: Vec::new(),
-                            headers: HashMap::new(),
-                            raw_uri: Some(s.to_string()), // Store original for complete info
-                        }
-                    } else {
-                        // Just host without user
-                        let host_end = after_scheme.find(|c| c == ';' || c == '?' || c == ':').unwrap_or(after_scheme.len());
-                        let host_str = &after_scheme[0..host_end];
-                        
-                        Uri {
-                            scheme: Scheme::Sip,
-                            user: None,
-                            password: None,
-                            host: Host::Domain(host_str.to_string()),
-                            port: None,
-                            parameters: Vec::new(),
-                            headers: HashMap::new(),
-                            raw_uri: Some(s.to_string()), // Store original for complete info
-                        }
-                    }
-                },
-                "sips" => {
-                    // Basic SIPS URI
-                    let after_scheme = &s[scheme_end+1..];
-                    // Look for @ to detect user@host format
-                    if let Some(at_idx) = after_scheme.find('@') {
-                        let user = &after_scheme[0..at_idx];
-                        let host_part = &after_scheme[at_idx+1..];
-                        // Extract host (ignoring parameters for fallback)
-                        let host_end = host_part.find(|c| c == ';' || c == '?' || c == ':').unwrap_or(host_part.len());
-                        let host_str = &host_part[0..host_end];
-                        
-                        Uri {
-                            scheme: Scheme::Sips,
-                            user: Some(user.to_string()),
-                            password: None,
-                            host: Host::Domain(host_str.to_string()),
-                            port: None,
-                            parameters: Vec::new(),
-                            headers: HashMap::new(),
-                            raw_uri: Some(s.to_string()), // Store original for complete info
-                        }
-                    } else {
-                        // Just host without user
-                        let host_end = after_scheme.find(|c| c == ';' || c == '?' || c == ':').unwrap_or(after_scheme.len());
-                        let host_str = &after_scheme[0..host_end];
-                        
-                        Uri {
-                            scheme: Scheme::Sips,
-                            user: None,
-                            password: None,
-                            host: Host::Domain(host_str.to_string()),
-                            port: None,
-                            parameters: Vec::new(),
-                            headers: HashMap::new(),
-                            raw_uri: Some(s.to_string()), // Store original for complete info
-                        }
-                    }
-                },
-                "tel" => {
-                    // Basic TEL URI
-                    let number = &s[scheme_end+1..];
-                    Uri {
-                        scheme: Scheme::Tel,
-                        user: None,
-                        password: None,
-                        host: Host::Domain(number.to_string()),
-                        port: None,
-                        parameters: Vec::new(),
-                        headers: HashMap::new(),
-                        raw_uri: Some(s.to_string()), // Store original for complete info
-                    }
-                },
-                _ => {
-                    // For other schemes, store as custom
-                    Uri {
-                        scheme: Scheme::Sip, // Default, but will be overridden by raw_uri
-                        user: None,
-                        password: None,
-                        host: Host::Domain("invalid.example.com".to_string()),
-                        port: None,
-                        parameters: Vec::new(),
-                        headers: HashMap::new(),
-                        raw_uri: Some(s.to_string()),
-                    }
-                }
-            }
-        } else {
-            // Create a minimal default URI if we can't even find a scheme
-            Uri {
-                scheme: Scheme::Sip,
-                user: None,
-                password: None,
-                host: Host::Domain("invalid.example.com".to_string()),
-                port: None,
-                parameters: Vec::new(),
-                headers: HashMap::new(),
-                raw_uri: Some(s.to_string()), // Store original for debugging
-            }
-        }
+        // Attempt to parse using the internal nom parser.
+        // If it fails, fall back to a custom URI with the raw string.
+        Uri::from_str(s).unwrap_or_else(|_| {
+            // If parsing fails, create a custom URI to preserve the string
+            Uri::custom(s)
+        })
     }
 }
 
