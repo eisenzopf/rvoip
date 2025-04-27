@@ -24,11 +24,11 @@ macro_rules! sip_request {
     (
         method: $method:expr,
         uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag = $from_tag:expr)? $(, $from_param_name:ident = $from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag = $to_tag:expr)? $(, $to_param_name:ident = $to_param_val:expr)* ) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch = $branch:expr)? $(, $via_param_name:ident = $via_param_val:expr)* ) )?
         $(, contact: $contact_uri:expr )?
         $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, max_forwards: $max_forwards:expr )?
@@ -117,11 +117,11 @@ macro_rules! sip_request {
     (
         method: $method:expr,
         uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag = $from_tag:expr)? $(, $from_param_name:ident = $from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag = $to_tag:expr)? $(, $to_param_name:ident = $to_param_val:expr)* ) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch = $branch:expr)? $(, $via_param_name:ident = $via_param_val:expr)* ) )?
         $(, contact: $contact_uri:expr )?
         $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
         $(, max_forwards: $max_forwards:expr )?
@@ -137,11 +137,11 @@ macro_rules! sip_request {
             let mut request = $crate::sip_request! {
                 method: $method,
                 uri: $uri
-                $(, from: ($from_name, $from_uri $(, tag=$from_tag)? $(, $from_param_name=$from_param_val)* ) )?
-                $(, to: ($to_name, $to_uri $(, tag=$to_tag)? $(, $to_param_name=$to_param_val)* ) )?
+                $(, from: ($from_name, $from_uri $(, tag = $from_tag)? $(, $from_param_name = $from_param_val)* ) )?
+                $(, to: ($to_name, $to_uri $(, tag = $to_tag)? $(, $to_param_name = $to_param_val)* ) )?
                 $(, call_id: $call_id )?
                 $(, cseq: $cseq )?
-                $(, via: ($via_host, $via_transport $(, branch=$branch)? $(, $via_param_name=$via_param_val)* ) )?
+                $(, via: ($via_host, $via_transport $(, branch = $branch)? $(, $via_param_name = $via_param_val)* ) )?
                 $(, contact: $contact_uri )?
                 $(, contact_name: ($contact_name, $contact_name_uri) )?
                 $(, max_forwards: $max_forwards )?
@@ -208,11 +208,11 @@ macro_rules! sip_response {
     (
         status: $status:expr
         $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag = $from_tag:expr)? $(, $from_param_name:ident = $from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag = $to_tag:expr)? $(, $to_param_name:ident = $to_param_val:expr)* ) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch = $branch:expr)? $(, $via_param_name:ident = $via_param_val:expr)* ) )?
         $(, contact: $contact_uri:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
@@ -293,11 +293,11 @@ macro_rules! sip_response {
     (
         status: $status:expr
         $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, tag=$from_tag:expr)? $(, $from_param_name:ident=$from_param_val:expr)* ) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, tag=$to_tag:expr)? $(, $to_param_name:ident=$to_param_val:expr)* ) )?
+        $(, from: ($from_name:expr, $from_uri:expr $(, tag = $from_tag:expr)? $(, $from_param_name:ident = $from_param_val:expr)* ) )?
+        $(, to: ($to_name:expr, $to_uri:expr $(, tag = $to_tag:expr)? $(, $to_param_name:ident = $to_param_val:expr)* ) )?
         $(, call_id: $call_id:expr )?
         $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, branch=$branch:expr)? $(, $via_param_name:ident=$via_param_val:expr)* ) )?
+        $(, via: ($via_host:expr, $via_transport:expr $(, branch = $branch:expr)? $(, $via_param_name:ident = $via_param_val:expr)* ) )?
         $(, contact: $contact_uri:expr )?
         $(, content_type: $content_type:expr )?
         $(, body: $body:expr )?
@@ -311,11 +311,11 @@ macro_rules! sip_response {
             let mut response = $crate::sip_response! {
                 status: $status
                 $(, reason: $reason )?
-                $(, from: ($from_name, $from_uri $(, tag=$from_tag)? $(, $from_param_name=$from_param_val)* ) )?
-                $(, to: ($to_name, $to_uri $(, tag=$to_tag)? $(, $to_param_name=$to_param_val)* ) )?
+                $(, from: ($from_name, $from_uri $(, tag = $from_tag)? $(, $from_param_name = $from_param_val)* ) )?
+                $(, to: ($to_name, $to_uri $(, tag = $to_tag)? $(, $to_param_name = $to_param_val)* ) )?
                 $(, call_id: $call_id )?
                 $(, cseq: ($cseq, $cseq_method) )?
-                $(, via: ($via_host, $via_transport $(, branch=$branch)? $(, $via_param_name=$via_param_val)* ) )?
+                $(, via: ($via_host, $via_transport $(, branch = $branch)? $(, $via_param_name = $via_param_val)* ) )?
                 $(, contact: $contact_uri )?
                 $(, content_type: $content_type )?
                 $(, body: $body )?
@@ -353,4 +353,317 @@ macro_rules! sip_response_add_headers {
             $crate::sip_response_add_headers!($response, $($rest)*);
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        sip_request,
+        sip_response,
+        types::{
+            Method, StatusCode, uri::Uri, uri::Scheme,
+            TypedHeader, header::{HeaderName, HeaderValue},
+        },
+    };
+
+    #[test]
+    fn test_sip_request_basic() {
+        // Test a basic INVITE request
+        let request = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            contact: "sip:alice@alice.example.com",
+            max_forwards: 70
+        };
+
+        // Check that fields were properly set
+        assert_eq!(request.method, Method::Invite);
+        assert_eq!(request.uri.to_string(), "sip:bob@example.com");
+        
+        // Check headers
+        let from = request.headers.iter().find(|h| h.to_string().starts_with("From:"))
+            .expect("From header missing");
+        let to = request.headers.iter().find(|h| h.to_string().starts_with("To:"))
+            .expect("To header missing");
+        let call_id = request.headers.iter().find(|h| h.to_string().starts_with("Call-ID:"))
+            .expect("Call-ID header missing");
+        
+        assert!(from.to_string().contains("Alice"));
+        assert!(from.to_string().contains("tag=1928301774"));
+        assert!(to.to_string().contains("Bob"));
+        assert!(call_id.to_string().contains("a84b4c76e66710@pc33.atlanta.example.com"));
+    }
+
+    #[test]
+    fn test_sip_request_with_body() {
+        // Test an INVITE with SDP body
+        let sdp_body = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
+        
+        let request = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            content_type: "application/sdp",
+            body: sdp_body
+        };
+
+        // Check body and content-type
+        assert_eq!(String::from_utf8_lossy(&request.body), sdp_body);
+        
+        let content_type = request.headers.iter().find(|h| h.to_string().starts_with("Content-Type:"))
+            .expect("Content-Type header missing");
+        assert!(content_type.to_string().contains("application/sdp"));
+    }
+
+    #[test]
+    fn test_sip_request_register() {
+        // Test a REGISTER request
+        let request = sip_request! {
+            method: Method::Register,
+            uri: "sip:registrar.example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "reg-tag"),
+            to: ("Alice", "sip:alice@example.com"),
+            call_id: "register-1234@example.com",
+            cseq: 1,
+            via: ("192.168.1.2:5060", "UDP", branch = "z9hG4bK-reg"),
+            contact: "sip:alice@192.168.1.2:5060",
+            max_forwards: 70
+        };
+
+        // Check method and URI
+        assert_eq!(request.method, Method::Register);
+        assert_eq!(request.uri.to_string(), "sip:registrar.example.com");
+        
+        // Check From/To has same value but From has tag
+        let from = request.headers.iter().find(|h| h.to_string().starts_with("From:"))
+            .expect("From header missing");
+        let to = request.headers.iter().find(|h| h.to_string().starts_with("To:"))
+            .expect("To header missing");
+        
+        assert!(from.to_string().contains("Alice"));
+        assert!(from.to_string().contains("tag=reg-tag"));
+        assert!(to.to_string().contains("Alice"));
+        assert!(!to.to_string().contains("tag="));
+    }
+
+    #[test]
+    fn test_sip_request_with_custom_headers() {
+        // Test adding custom headers
+        let request = sip_request! {
+            method: Method::Options,
+            uri: "*",
+            from: ("System", "sip:system@example.com"),
+            to: ("Server", "sip:server@example.com"),
+            call_id: "options-4321@example.com",
+            cseq: 100,
+            via: ("system.example.com:5060", "TCP", branch="z9hG4bK-opts"),
+            max_forwards: 70,
+            accept: "application/sdp",
+            user_agent: "Test Client/1.0"
+        };
+
+        // Check custom headers
+        let accept = request.headers.iter().find(|h| h.to_string().starts_with("Accept:"))
+            .expect("Accept header missing");
+        let user_agent = request.headers.iter().find(|h| h.to_string().starts_with("User-Agent:"))
+            .expect("User-Agent header missing");
+        
+        assert!(accept.to_string().contains("application/sdp"));
+        assert!(user_agent.to_string().contains("Test Client/1.0"));
+    }
+    
+    #[test]
+    fn test_sip_request_with_via_params() {
+        // Test Via header with various parameters
+        let request = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds", received = "192.168.1.1", rport = "5060"),
+            max_forwards: 70
+        };
+
+        // Check Via parameters
+        let via = request.headers.iter().find(|h| h.to_string().starts_with("Via:"))
+            .expect("Via header missing");
+        
+        assert!(via.to_string().contains("branch=z9hG4bK776asdhds"));
+        assert!(via.to_string().contains("received=192.168.1.1"));
+        assert!(via.to_string().contains("rport=5060"));
+    }
+
+    #[test]
+    fn test_sip_response_basic() {
+        // Test a basic 200 OK response
+        let response = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: (1, Method::Invite),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds")
+        };
+
+        // Check status and reason
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.reason, Some("OK".to_string()));
+        
+        // Check From/To tags
+        let from = response.headers.iter().find(|h| h.to_string().starts_with("From:"))
+            .expect("From header missing");
+        let to = response.headers.iter().find(|h| h.to_string().starts_with("To:"))
+            .expect("To header missing");
+        
+        assert!(from.to_string().contains("tag=1928301774"));
+        assert!(to.to_string().contains("tag=as83kd9bs"));
+    }
+
+    #[test]
+    fn test_sip_response_with_body() {
+        // Test a 200 OK with SDP body
+        let sdp_body = "v=0\r\no=bob 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
+        
+        let response = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: (1, Method::Invite),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            content_type: "application/sdp",
+            body: sdp_body
+        };
+
+        // Check body
+        assert_eq!(String::from_utf8_lossy(&response.body), sdp_body);
+        
+        // Check Content-Type
+        let content_type = response.headers.iter().find(|h| h.to_string().starts_with("Content-Type:"))
+            .expect("Content-Type header missing");
+        assert!(content_type.to_string().contains("application/sdp"));
+    }
+
+    #[test]
+    fn test_sip_response_error_codes() {
+        // Test 4xx response
+        let error_response = sip_response! {
+            status: StatusCode::BadRequest,
+            reason: "Bad Request",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "error-123@example.com",
+            cseq: (42, Method::Message),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds")
+        };
+
+        // Check status
+        assert_eq!(error_response.status, StatusCode::BadRequest);
+        assert_eq!(error_response.reason, Some("Bad Request".to_string()));
+        
+        // Check CSeq
+        let cseq = error_response.headers.iter().find(|h| h.to_string().starts_with("CSeq:"))
+            .expect("CSeq header missing");
+        assert!(cseq.to_string().contains("42 MESSAGE"));
+    }
+
+    #[test]
+    fn test_sip_response_with_custom_headers() {
+        // Test adding custom headers to response
+        let response = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: (1, Method::Invite),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            server: "Test Server/1.0",
+            warning: "399 example.com \"Miscellaneous warning\""
+        };
+
+        // Check custom headers
+        let server = response.headers.iter().find(|h| h.to_string().starts_with("Server:"))
+            .expect("Server header missing");
+        let warning = response.headers.iter().find(|h| h.to_string().starts_with("Warning:"))
+            .expect("Warning header missing");
+        
+        assert!(server.to_string().contains("Test Server/1.0"));
+        assert!(warning.to_string().contains("399 example.com"));
+    }
+
+    #[test]
+    fn test_multiple_via_headers() {
+        // Test multiple Via headers using header() method
+        let base_request = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("proxy1.example.com:5060", "UDP", branch = "z9hG4bK-p1"),
+            max_forwards: 70
+        };
+        
+        // Add a second Via header
+        let mut request = base_request;
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Via, 
+            HeaderValue::text("SIP/2.0/UDP proxy2.example.com:5060;branch=z9hG4bK-p2")
+        ));
+        
+        // Check that we have two Via headers
+        let via_headers: Vec<_> = request.headers.iter()
+            .filter(|h| h.to_string().starts_with("Via:"))
+            .collect();
+        
+        assert_eq!(via_headers.len(), 2);
+        assert!(via_headers[0].to_string().contains("proxy1.example.com"));
+        assert!(via_headers[1].to_string().contains("proxy2.example.com"));
+    }
+
+    #[test]
+    fn test_complex_uri_params() {
+        // Test URI with parameters in the from/to/contact fields
+        let request = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com;transport=tcp",
+            from: ("Alice", "sip:alice@example.com;transport=tcp", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com;transport=tcp"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("alice.example.com:5060", "TCP", branch = "z9hG4bK776asdhds"),
+            contact: "sip:alice@alice.example.com;transport=tcp",
+            max_forwards: 70
+        };
+        
+        // Check that parameters were included in the URI
+        assert!(request.uri.to_string().contains("transport=tcp"));
+        
+        // Check that parameters were included in the headers
+        let from = request.headers.iter().find(|h| h.to_string().starts_with("From:"))
+            .expect("From header missing");
+        let to = request.headers.iter().find(|h| h.to_string().starts_with("To:"))
+            .expect("To header missing");
+        let contact = request.headers.iter().find(|h| h.to_string().starts_with("Contact:"))
+            .expect("Contact header missing");
+        
+        assert!(from.to_string().contains("transport=tcp"));
+        assert!(to.to_string().contains("transport=tcp"));
+        assert!(contact.to_string().contains("transport=tcp"));
+    }
 } 

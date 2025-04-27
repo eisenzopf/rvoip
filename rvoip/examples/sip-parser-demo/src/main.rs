@@ -12,6 +12,8 @@ use rvoip_sip_core::{
 
 // Import our message builder module
 mod message_builder;
+// Import our new macro examples
+mod macro_examples;
 
 fn main() {
     println!("SIP Parser Demo");
@@ -71,6 +73,21 @@ fn main() {
     // Example 10: Building with macros
     println!("\nExample 10: Building with macros");
     build_with_macros();  // Uncomment - should be fixed now
+    
+    // Part 4: SIP macro examples and tests
+    println!("\n\n--- PART 4: SIP MACRO EXAMPLES AND TESTS ---");
+    
+    // Example 11: Demonstrate SIP request macros
+    println!("\nExample 11: Demonstrate SIP request macros");
+    macro_examples::demonstrate_sip_request_macros();
+    
+    // Example 12: Demonstrate SIP response macros
+    println!("\nExample 12: Demonstrate SIP response macros");
+    macro_examples::demonstrate_sip_response_macros();
+    
+    // Example 13: Test macro-generated messages
+    println!("\nExample 13: Test macro-generated messages");
+    macro_examples::test_macro_generated_messages();
 }
 
 fn parse_sip_request() {
