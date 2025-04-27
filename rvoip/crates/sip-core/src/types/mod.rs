@@ -134,7 +134,6 @@ pub mod route;
 pub mod sdp;
 pub mod subject;
 pub mod to;
-pub mod uri_with_params;
 pub mod warning;
 pub mod multipart;
 
