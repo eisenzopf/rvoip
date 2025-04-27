@@ -202,18 +202,27 @@ macro_rules! sip_request {
             
             // Add the custom headers
             $(
-                // Convert first character to uppercase for header name
-                let header_name = {
-                    let mut name = stringify!($custom_header).to_string();
-                    if !name.is_empty() {
-                        let first_char = name.remove(0).to_uppercase().to_string();
-                        name = first_char + &name;
+                // Convert header name to proper format
+                let header_name = match stringify!($custom_header) {
+                    "accept" => HeaderName::Accept,
+                    "user_agent" => HeaderName::UserAgent,
+                    "server" => HeaderName::Server,
+                    "warning" => HeaderName::Warning,
+                    _ => {
+                        // For other headers, capitalize the first letter of each word
+                        let mut name = stringify!($custom_header).to_string();
+                        if !name.is_empty() {
+                            let first_char = name.remove(0).to_uppercase().to_string();
+                            name = first_char + &name;
+                            // Replace underscores with hyphens
+                            name = name.replace('_', "-");
+                        }
+                        HeaderName::Other(name)
                     }
-                    name
                 };
                 
                 request.headers.push(TypedHeader::Other(
-                    HeaderName::Other(header_name),
+                    header_name,
                     HeaderValue::text($custom_value)
                 ));
             )*
@@ -409,18 +418,27 @@ macro_rules! sip_response {
             
             // Add the custom headers
             $(
-                // Convert first character to uppercase for header name
-                let header_name = {
-                    let mut name = stringify!($custom_header).to_string();
-                    if !name.is_empty() {
-                        let first_char = name.remove(0).to_uppercase().to_string();
-                        name = first_char + &name;
+                // Convert header name to proper format
+                let header_name = match stringify!($custom_header) {
+                    "accept" => HeaderName::Accept,
+                    "user_agent" => HeaderName::UserAgent,
+                    "server" => HeaderName::Server,
+                    "warning" => HeaderName::Warning,
+                    _ => {
+                        // For other headers, capitalize the first letter of each word
+                        let mut name = stringify!($custom_header).to_string();
+                        if !name.is_empty() {
+                            let first_char = name.remove(0).to_uppercase().to_string();
+                            name = first_char + &name;
+                            // Replace underscores with hyphens
+                            name = name.replace('_', "-");
+                        }
+                        HeaderName::Other(name)
                     }
-                    name
                 };
                 
                 response.headers.push(TypedHeader::Other(
-                    HeaderName::Other(header_name),
+                    header_name,
                     HeaderValue::text($custom_value)
                 ));
             )*
@@ -839,8 +857,9 @@ mod tests {
             if header.to_string().starts_with(&format!("{}:", header_name)) {
                 let header_str = header.to_string();
                 
-                // Find parameter in header string - search for both ";param=" formats
-                if let Some(param_start) = header_str.find(&format!(";{}=", param_name)) {
+                // Find parameter in header string - match both formats with and without spaces
+                let param_pattern = format!(";{}=", param_name);
+                if let Some(param_start) = header_str.find(&param_pattern) {
                     let param_value_start = param_start + param_name.len() + 2; // +2 for ;=
                     
                     // Find end of parameter value

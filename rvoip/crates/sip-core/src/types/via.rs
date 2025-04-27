@@ -289,7 +289,7 @@ impl fmt::Display for ViaHeader {
         
         // Format parameters
         for param in &self.params {
-            write!(f, "{}", param)?; // Assuming Param implements Display correctly (e.g., ";key=value")
+            write!(f, ";{}", param)?; // Add semicolon before each parameter
         }
         
         Ok(())
