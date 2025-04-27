@@ -381,7 +381,11 @@ impl FromStr for Uri {
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
         all_consuming(parse_uri)(s.as_bytes())
-            .map(|(_rem, uri)| uri) // Extract the URI from the tuple
+            .map(|(_rem, mut uri)| {
+                // Always preserve the original string
+                uri.raw_uri = Some(s.to_string());
+                uri
+            })
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 }
