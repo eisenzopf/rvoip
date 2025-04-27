@@ -5,7 +5,7 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case, take_while1},
+    bytes::complete::{tag_no_case, take_while1, tag},
     combinator::{map, map_res},
     multi::{many0, separated_list1},
     sequence::{pair, preceded, delimited, tuple, terminated},
@@ -152,14 +152,15 @@ fn trim_ws(input: &[u8]) -> &[u8] {
 // Call-Info = "Call-Info" HCOLON info *(COMMA info)
 /// Parses a Call-Info header value.
 pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
-    // Removed initial trim_ws(input)
-    
-    // Separator: Optional whitespace, comma, optional whitespace
+    // First, use a custom comma_separator that handles various whitespace including line breaks
     fn comma_separator(input: &[u8]) -> ParseResult<&[u8]> {
+        // Skip any leading whitespace including newlines
         let (input, _) = crate::parser::whitespace::sws(input)?;
-        let (input, _) = comma(input)?;
+        // Match a comma
+        let (input, _) = tag(b",")(input)?;
+        // Skip any trailing whitespace including newlines
         let (input, _) = crate::parser::whitespace::sws(input)?;
-        Ok((input, &input[0..0])) // Return success indicator (empty slice)
+        Ok((input, &b""[..]))
     }
     
     separated_list1(comma_separator, info)(input)
@@ -397,14 +398,18 @@ mod tests {
         assert_eq!(infos[0].uri.to_string(), "http://www.example.com/alice/photo.jpg");
         assert_eq!(infos[1].uri.to_string(), "http://www.example.com/alice/");
         
-        // Test with different whitespace variants
+        // Test with different whitespace variants - but make sure they're valid per RFC
+        // RFC 3261 allows folding with CRLF only if followed by at least one WSP (SP or HTAB)
         let whitespace_inputs = [
             b"<http://example.com>;purpose=icon,<http://another.example.com>;purpose=card".as_slice(),
             b"<http://example.com>;purpose=icon, <http://another.example.com>;purpose=card".as_slice(),
             b"<http://example.com>;purpose=icon,  <http://another.example.com>;purpose=card".as_slice(),
             b"<http://example.com>;purpose=icon,\t<http://another.example.com>;purpose=card".as_slice(),
-            b"<http://example.com>;purpose=icon,\r\n<http://another.example.com>;purpose=card".as_slice(),
-            b"<http://example.com>;purpose=icon,\n<http://another.example.com>;purpose=card".as_slice(),
+            // Line folding in SIP requires whitespace after the CRLF
+            b"<http://example.com>;purpose=icon,\r\n <http://another.example.com>;purpose=card".as_slice(),
+            b"<http://example.com>;purpose=icon,\r\n\t<http://another.example.com>;purpose=card".as_slice(),
+            // Line folding with LF only (more lenient)
+            b"<http://example.com>;purpose=icon,\n <http://another.example.com>;purpose=card".as_slice(),
         ];
         
         for input in whitespace_inputs.iter() {
