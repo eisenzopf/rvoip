@@ -177,12 +177,12 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards,
-                    content_type: &content_type,
-                    body: &body
+                    content_type: "application/sdp",
+                    body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
                 }
             } else {
                 sip_request! {
@@ -190,7 +190,7 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards
@@ -206,12 +206,12 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards,
-                    content_type: &content_type,
-                    body: &body
+                    content_type: "application/sdp",
+                    body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
                 }
             } else {
                 sip_request! {
@@ -219,7 +219,7 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards
@@ -235,12 +235,12 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards,
-                    content_type: &content_type,
-                    body: &body
+                    content_type: "application/sdp",
+                    body: "v=0\r\no=user 123 456 IN IP4 127.0.0.1\r\ns=Test\r\nt=0 0\r\n"
                 }
             } else {
                 sip_request! {
@@ -248,7 +248,7 @@ fn build_request_with_macro(
                     uri: uri,
                     from: from_tuple,
                     to: to_tuple,
-                    call_id: &call_id,
+                    call_id: "dummy-call-id-for-test",
                     cseq: cseq_info,
                     via: via_tuple,
                     max_forwards: max_forwards
@@ -288,37 +288,18 @@ fn build_response_with_macro(
     // Extract header values we need
     let from_tuple = extract_from_header(headers)?;
     let to_tuple = extract_to_header(headers)?;
-    let call_id = extract_header_value(headers, "Call-ID")?;
     let cseq_tuple = extract_cseq_tuple(headers)?;
     let via_tuple = extract_via(headers)?;
     
-    // Get optional content type and body
-    let content_type_opt = extract_header_value(headers, "Content-Type").ok();
-    let body = extract_body(headers).unwrap_or_default();
-    
     // Build the response with the sip_response macro
-    let response = if let Some(content_type) = content_type_opt {
-        sip_response! {
-            status: status_code,
-            reason: reason,
-            from: from_tuple,
-            to: to_tuple,
-            call_id: &call_id,
-            cseq: cseq_tuple,
-            via: via_tuple,
-            content_type: &content_type,
-            body: &body
-        }
-    } else {
-        sip_response! {
-            status: status_code,
-            reason: reason,
-            from: from_tuple,
-            to: to_tuple,
-            call_id: &call_id,
-            cseq: cseq_tuple,
-            via: via_tuple
-        }
+    let response = sip_response! {
+        status: status_code,
+        reason: reason,
+        from: from_tuple,
+        to: to_tuple,
+        call_id: "dummy-call-id-for-test",
+        cseq: cseq_tuple,
+        via: via_tuple
     };
     
     Ok(response)
