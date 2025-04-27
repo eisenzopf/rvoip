@@ -28,7 +28,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Warning: 307 example.com "Session parameter 'foo' not understood"
 //! ```
 //!

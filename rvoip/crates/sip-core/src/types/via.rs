@@ -56,7 +56,6 @@
 //!
 //! // Add received parameter (used by servers)
 //! use std::net::IpAddr;
-//! use std::str::FromStr;
 //! let addr = IpAddr::from_str("203.0.113.1").unwrap();
 //! via.set_received(addr);
 //! ```
@@ -296,7 +295,7 @@ impl Via {
     /// assert_eq!(via.get("custom"), Some(Some("value".to_string())));
     ///
     /// // Set a flag parameter
-    /// via.set("lr", None);
+    /// via.set("lr", None::<String>);
     /// assert_eq!(via.get("lr"), Some(None));
     /// ```
     pub fn set(&mut self, name: impl Into<String> + Clone, value: Option<impl Into<String> + Clone>) {
@@ -1012,41 +1011,48 @@ impl ViaHeader {
     ///     },
     ///     sent_by_host: Host::domain("example.com"),
     ///     sent_by_port: None,
-    ///     params: vec![
-    ///         Param::branch("z9hG4bK776asdhds"),
-    ///         Param::Other("custom".to_string(), Some("value".into())),
-    ///     ],
+    ///     params: vec![Param::branch("z9hG4bK776asdhds")],
     /// };
     ///
-    /// assert!(via_header.has_param("branch"));
-    /// assert!(via_header.has_param("custom"));
-    /// assert!(!via_header.has_param("nonexistent"));
+    /// assert!(via_header.contains("branch"));
+    /// assert!(!via_header.contains("nonexistent"));
     /// ```
-    pub fn has_param(&self, name: &str) -> bool {
+    pub fn contains(&self, name: &str) -> bool {
         self.params.iter().any(|p| match p {
+            Param::Other(key, _) => key.eq_ignore_ascii_case(name),
             Param::Branch(_) if name.eq_ignore_ascii_case("branch") => true,
             Param::Received(_) if name.eq_ignore_ascii_case("received") => true,
             Param::Maddr(_) if name.eq_ignore_ascii_case("maddr") => true,
             Param::Ttl(_) if name.eq_ignore_ascii_case("ttl") => true,
-            Param::Rport(_) if name.eq_ignore_ascii_case("rport") => true,
-            Param::Other(key, _) => key.eq_ignore_ascii_case(name),
+            Param::Lr if name.eq_ignore_ascii_case("lr") => true,
             _ => false,
         })
     }
-    
-    /// Gets a parameter value as a string, if present
-    ///
-    /// This method provides access to any parameter in the Via header by name.
-    /// Unlike `branch()`, `received()`, etc., which return typed values, this
-    /// method returns the string representation of the parameter.
+
+    /// Alias for contains() method to maintain backward compatibility
     ///
     /// # Parameters
     ///
-    /// - `name`: The parameter name to look for (case-insensitive)
+    /// - `name`: The parameter name to look for
     ///
     /// # Returns
     ///
-    /// The parameter value as a String if present and has a value, None otherwise
+    /// `true` if the parameter exists, `false` otherwise
+    pub fn has_param(&self, name: &str) -> bool {
+        self.contains(name)
+    }
+
+    /// Returns the value of a parameter, if present
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The parameter name to look for
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Some(value))` if the parameter exists and has a value
+    /// - `Some(None)` if the parameter exists but has no value (flag parameter)
+    /// - `None` if the parameter doesn't exist
     ///
     /// # Examples
     ///
@@ -1054,8 +1060,6 @@ impl ViaHeader {
     /// use rvoip_sip_core::types::via::{SentProtocol, ViaHeader};
     /// use rvoip_sip_core::types::uri::Host;
     /// use rvoip_sip_core::types::Param;
-    /// use std::net::IpAddr;
-    /// use std::str::FromStr;
     ///
     /// let via_header = ViaHeader {
     ///     sent_protocol: SentProtocol {
@@ -1067,30 +1071,29 @@ impl ViaHeader {
     ///     sent_by_port: None,
     ///     params: vec![
     ///         Param::branch("z9hG4bK776asdhds"),
-    ///         Param::Other("custom".to_string(), Some("value".into())),
-    ///         Param::Lr, // Flag parameter with no value
+    ///         Param::Lr,
+    ///         Param::Other("custom".to_string(), Some("value".into()))
     ///     ],
     /// };
     ///
-    /// assert_eq!(via_header.param_value("branch"), Some("z9hG4bK776asdhds".to_string()));
-    /// assert_eq!(via_header.param_value("custom"), Some("value".to_string()));
-    /// assert_eq!(via_header.param_value("lr"), None); // Flag parameter has no value
+    /// assert_eq!(via_header.param_value("branch"), Some(Some("z9hG4bK776asdhds".to_string())));
+    /// assert_eq!(via_header.param_value("lr"), Some(None));
+    /// assert_eq!(via_header.param_value("custom"), Some(Some("value".to_string())));
     /// assert_eq!(via_header.param_value("nonexistent"), None);
     /// ```
-    pub fn param_value(&self, name: &str) -> Option<String> {
+    pub fn param_value(&self, name: &str) -> Option<Option<String>> {
         self.params.iter().find_map(|p| match p {
-            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(val.clone()),
-            Param::Received(ip) if name.eq_ignore_ascii_case("received") => Some(ip.to_string()),
-            Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(val.clone()),
-            Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(val.to_string()),
-            Param::Rport(Some(val)) if name.eq_ignore_ascii_case("rport") => Some(val.to_string()),
-            Param::Rport(None) if name.eq_ignore_ascii_case("rport") => None,
-            Param::Other(key, val) if key.eq_ignore_ascii_case(name) => 
-                val.as_ref().map(|v| v.to_string()),
+            Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
+                Some(value.as_ref().and_then(|gv| gv.as_str().map(String::from)))
+            },
+            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(Some(val.to_string())),
+            Param::Received(val) if name.eq_ignore_ascii_case("received") => Some(Some(val.to_string())),
+            Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(Some(val.to_string())),
+            Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(Some(val.to_string())),
+            Param::Rport(val) if name.eq_ignore_ascii_case("rport") => 
+                Some(val.map(|v| v.to_string())),
+            Param::Lr if name.eq_ignore_ascii_case("lr") => Some(None),
             _ => None,
         })
     }
 }
-
-// Note: FromStr implementation requires the parser, so it will live 
-// with the parsing logic in parser/headers.rs 

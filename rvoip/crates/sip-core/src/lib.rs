@@ -174,6 +174,20 @@ pub mod prelude {
     pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
     pub use crate::sip_request;
     pub use crate::sip_response;
+    
+    // Add missing types needed for doc tests
+    pub use crate::types::uri_with_params::UriWithParams;
+    pub use crate::types::uri_with_params_list::UriWithParamsList;
+    pub use crate::types::param::Param;
+    pub use crate::types::warning::Warning;
+    pub use crate::types::address::Address;
+    pub use crate::types::from::From;
+    pub use crate::types::to::To;
+    pub use crate::types::call_id::CallId;
+    pub use crate::types::cseq::CSeq;
+    pub use crate::types::content_length::ContentLength;
+    pub use crate::types::max_forwards::MaxForwards;
+    pub use crate::types::contact::Contact;
 }
 
 #[cfg(test)]
