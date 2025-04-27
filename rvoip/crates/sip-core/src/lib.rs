@@ -176,8 +176,6 @@ pub mod prelude {
     pub use crate::sip_response;
     
     // Add missing types needed for doc tests
-    pub use crate::types::uri_with_params::UriWithParams;
-    pub use crate::types::uri_with_params_list::UriWithParamsList;
     pub use crate::types::param::Param;
     pub use crate::types::warning::Warning;
     pub use crate::types::address::Address;

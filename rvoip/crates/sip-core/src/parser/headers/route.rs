@@ -24,7 +24,6 @@ use crate::types::uri::Uri;
 // Import types (assuming)
 use crate::types::address::Address;
 use crate::types::route::Route as RouteHeader; // Use the specific header type
-use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::types::uri_with_params::UriWithParams;
 use crate::parser::parse_address;
 use serde::{Serialize, Deserialize}; // Added serde

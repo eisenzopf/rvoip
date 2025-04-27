@@ -48,7 +48,6 @@
 //! let record_route = RecordRoute::new(entries);
 //! ```
 
-use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::parser::headers::parse_record_route;
 use crate::error::{Result, Error};
 use std::fmt;

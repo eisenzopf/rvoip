@@ -45,7 +45,6 @@
 //! let route = Route::from_str("<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>").unwrap();
 //! ```
 
-use crate::types::uri_with_params_list::UriWithParamsList;
 use crate::parser::headers::parse_route;
 use crate::error::{Result, Error};
 use std::fmt;
