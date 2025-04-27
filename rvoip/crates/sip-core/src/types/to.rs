@@ -21,18 +21,21 @@
 //! ## Examples
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
-//! use std::str::FromStr;
-//!
-//! // Create a To header with a URI
-//! let uri = Uri::from_str("sip:bob@example.com").unwrap();
-//! let address = Address::new(None::<String>, uri);
-//! let to = To::new(address);
-//!
-//! // Parse a To header from a string
-//! let to = To::from_str("\"Bob\" <sip:bob@example.com>;tag=1928301774").unwrap();
-//! assert_eq!(to.tag(), Some("1928301774"));
-//! ```
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create a To header with a URI
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// let address = Address::new(None::<String>, uri);
+/// let to = To::new(address);
+///
+/// // Create a To header with a tag
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// let mut address = Address::new(Some("Bob"), uri);
+/// address.set_tag("1928301774");
+/// let to = To::new(address);
+/// assert_eq!(to.tag(), Some("1928301774"));
+/// ```
 
 use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
 use crate::types::address::Address;
@@ -143,12 +146,13 @@ impl To {
     ///
     /// // To header without a tag (typical in initial requests)
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(None::<String>, uri);
+    /// let address = Address::new(None::<String>, uri.clone());
     /// let to = To::new(address);
     /// assert_eq!(to.tag(), None);
     ///
     /// // To header with a tag (typical in responses or in-dialog requests)
-    /// let mut to = To::new(address);
+    /// let uri2 = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let mut to = To::new(Address::new(None::<String>, uri2));
     /// to.set_tag("1928301774");
     /// assert_eq!(to.tag(), Some("1928301774"));
     /// ```
