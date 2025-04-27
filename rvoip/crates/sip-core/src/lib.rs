@@ -24,6 +24,8 @@ pub use error::{Error, Result};
 pub use types::header::{Header, HeaderName, HeaderValue};
 pub use types::Method;
 pub use parser::parse_message;
+pub use parser::message::parse_message_with_mode;
+pub use parser::message::ParseMode;
 pub use types::StatusCode;
 pub use types::{
     Address, 
@@ -68,8 +70,9 @@ pub mod prelude {
     pub use crate::types::sip_message::{Request, Response, Message};
     pub use crate::types::via::Via;
     pub use crate::types::Version; // Added Version
-    pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
+    pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE, ParseMode};
     pub use crate::parser::parse_message;
+    pub use crate::parser::message::parse_message_with_mode;
     pub use crate::types::multipart::{MultipartBody, MimePart};
     pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
     pub use crate::sip_request;

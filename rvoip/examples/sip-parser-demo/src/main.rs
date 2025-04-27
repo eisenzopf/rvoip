@@ -1,5 +1,6 @@
 use rvoip_sip_core::{
     parse_message,
+    parse_message_with_mode,
     types::{
         Message, Param, Method, StatusCode,
         header::{HeaderName, TypedHeader},
@@ -7,6 +8,7 @@ use rvoip_sip_core::{
         builder::{RequestBuilder, ResponseBuilder},
         uri::{Uri, Host, Scheme},
     },
+    parser::message::ParseMode,
     sip_request,
     sip_response,
 };
@@ -41,33 +43,37 @@ fn main() {
     println!("\nExample 5: Working with SIP headers");
     work_with_headers();
 
+    // Example 6: Demonstrating Parse Modes
+    println!("\nExample 6: Demonstrating Strict vs. Lenient parsing modes");
+    demonstrate_parse_modes();
+
     // Part 2: Building examples - Traditional approach
     println!("\n\n--- PART 2: BUILDING EXAMPLES (TRADITIONAL) ---");
 
     // Example 6: Building a SIP INVITE request
     println!("\nExample 6: Building a SIP INVITE request");
-    // build_and_parse_invite();  // Causes stack overflow
+    build_and_parse_invite();  // Uncomment - should be fixed now
     test_uri_creation(); // Simple test function
     test_simple_builder(); // Another simple test
 
     // Example 7: Building a SIP response based on a request
     println!("\nExample 7: Building a SIP response based on a request");
-    // build_and_parse_response();  // Temporarily disabled
+    build_and_parse_response();  // Uncomment - should be fixed now
 
     // Example 8: Building a SIP REGISTER request
     println!("\nExample 8: Building a SIP REGISTER request");
-    // build_and_parse_register();  // Temporarily disabled
+    build_and_parse_register();  // Uncomment - should be fixed now
     
     // Part 3: Building examples - New approach with builders and macros
     println!("\n\n--- PART 3: BUILDING EXAMPLES (IMPROVED API) ---");
     
     // Example 9: Building with the builder pattern
     println!("\nExample 9: Building with the builder pattern");
-    // build_with_builder();  // Temporarily disabled
+    build_with_builder();  // Uncomment - should be fixed now
     
     // Example 10: Building with macros
     println!("\nExample 10: Building with macros");
-    // build_with_macros();  // Temporarily disabled
+    build_with_macros();  // Uncomment - should be fixed now
 }
 
 fn parse_sip_request() {
@@ -258,9 +264,22 @@ Content-Length: 100\r\n\
 \r\n\
 This body is shorter than 100 bytes!";
 
+    // Try in Lenient mode (default)
     match parse_message(content_length_mismatch.as_bytes()) {
-        Ok(_) => println!("  Parser accepts Content-Length mismatch in lenient mode"),
-        Err(e) => println!("  Error handling example 3: {}", e)
+        Ok(message) => {
+            println!("  Parser accepts Content-Length mismatch in Lenient mode (default)");
+            if let Message::Request(req) = &message {
+                println!("    Actual body length: {} bytes (Content-Length said 100)", req.body.len());
+                println!("    Body content: {}", String::from_utf8_lossy(&req.body));
+            }
+        },
+        Err(e) => println!("  Error in Lenient mode: {}", e)
+    }
+
+    // Try in Strict mode
+    match parse_message_with_mode(content_length_mismatch.as_bytes(), ParseMode::Strict) {
+        Ok(_) => println!("  Strict mode unexpectedly accepted Content-Length mismatch"),
+        Err(e) => println!("  Strict mode correctly rejected the message: {}", e)
     }
 }
 
@@ -538,37 +557,19 @@ fn build_with_macros() {
     let sdp_body = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
     
     // Create a request using the macro
-    // let request = sip_request! {
-    //     method: Method::Invite,
-    //     uri: "sip:bob@example.com",
-    //     from: ("Alice", "sip:alice@example.com", tag="1928301774"),
-    //     to: ("Bob", "sip:bob@example.com"),
-    //     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-    //     cseq: 1,
-    //     via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
-    //     contact: "sip:alice@alice.example.com",
-    //     max_forwards: 70,
-    //     content_type: "application/sdp",
-    //     body: sdp_body
-    // };
-    
-    // Use direct method calls instead of macro
-    let request = RequestBuilder::invite("sip:bob@example.com").expect("URI parse error")
-        .from("Alice", "sip:alice@example.com")
-            .with_tag("1928301774")
-            .done()
-        .to("Bob", "sip:bob@example.com")
-            .done()
-        .call_id("a84b4c76e66710@pc33.atlanta.example.com")
-        .via("alice.example.com:5060", "UDP")
-            .with_branch("z9hG4bK776asdhds")
-            .done()
-        .cseq(1)
-        .contact("sip:alice@alice.example.com").expect("Contact URI parse error")
-        .max_forwards(70)
-        .content_type("application/sdp").expect("Content-Type parse error")
-        .body(sdp_body)
-        .build();
+    let request = sip_request! {
+        method: Method::Invite,
+        uri: "sip:bob@example.com",
+        from: ("Alice", "sip:alice@example.com", tag="1928301774"),
+        to: ("Bob", "sip:bob@example.com"),
+        call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+        cseq: 1,
+        via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
+        contact: "sip:alice@alice.example.com",
+        max_forwards: 70,
+        content_type: "application/sdp",
+        body: sdp_body
+    };
     
     println!("  Successfully built INVITE request with macro!");
     println!("  Method: {}", request.method);
@@ -578,37 +579,18 @@ fn build_with_macros() {
     println!("\n  Using sip_response! macro for 200 OK:");
     
     // Create a response using the macro
-    // let response = sip_response! {
-    //     status: StatusCode::Ok,
-    //     reason: "OK",
-    //     from: ("Alice", "sip:alice@example.com", tag="1928301774"),
-    //     to: ("Bob", "sip:bob@example.com", tag="as83kd9bs"),
-    //     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-    //     cseq: (1, Method::Invite),
-    //     via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
-    //     contact: "sip:bob@192.168.1.2",
-    //     content_type: "application/sdp",
-    //     body: sdp_body
-    // };
-    
-    // Use direct method calls instead of macro
-    let response = ResponseBuilder::ok()
-        .reason("OK")
-        .from("Alice", "sip:alice@example.com")
-            .with_tag("1928301774")
-            .done()
-        .to("Bob", "sip:bob@example.com")
-            .with_tag("as83kd9bs")
-            .done()
-        .call_id("a84b4c76e66710@pc33.atlanta.example.com")
-        .cseq(1, Method::Invite)
-        .via("alice.example.com:5060", "UDP")
-            .with_branch("z9hG4bK776asdhds")
-            .done()
-        .contact("sip:bob@192.168.1.2").expect("Contact URI parse error")
-        .content_type("application/sdp").expect("Content-Type parse error")
-        .body(sdp_body)
-        .build();
+    let response = sip_response! {
+        status: StatusCode::Ok,
+        reason: "OK",
+        from: ("Alice", "sip:alice@example.com", tag="1928301774"),
+        to: ("Bob", "sip:bob@example.com", tag="as83kd9bs"),
+        call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+        cseq: (1, Method::Invite),
+        via: ("alice.example.com:5060", "UDP", branch="z9hG4bK776asdhds"),
+        contact: "sip:bob@192.168.1.2",
+        content_type: "application/sdp",
+        body: sdp_body
+    };
     
     println!("  Successfully built 200 OK response with macro!");
     println!("  Status: {} {}", 
@@ -672,4 +654,70 @@ fn test_simple_builder() {
     println!("  Method: {}", request.method);
     println!("  URI: {}", request.uri);
     println!("  Headers: {} headers", request.headers.len());
+}
+
+// Add this new function
+fn demonstrate_parse_modes() {
+    // A SIP message with unusual but technically recoverable issues
+    let message_with_issues = "\
+INVITE sip:bob@biloxi.example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP pc33.atlanta.example.com;branch=z9hG4bK776asdhds\r\n\
+To: Bob <sip:bob@biloxi.example.com>\r\n\
+From: Alice <sip:alice@atlanta.example.com>;tag=1928301774\r\n\
+Call-ID: a84b4c76e66710@pc33.atlanta.example.com\r\n\
+CSeq: 314159 INVITE\r\n\
+Content-Length: 25\r\n\
+Content-Length: 50\r\n\
+\r\n\
+This body is only 31 bytes long.";
+    
+    println!("  Message with duplicate Content-Length headers and mismatched body length:");
+    
+    // Try with default Lenient mode
+    println!("\n  Using Lenient mode (default):");
+    match parse_message(message_with_issues.as_bytes()) {
+        Ok(message) => {
+            if let Message::Request(req) = &message {
+                println!("    ✓ Successfully parsed in Lenient mode");
+                println!("    ✓ Used last Content-Length header value (50)");
+                println!("    ✓ Actual body bytes used: {}", req.body.len());
+                println!("    ✓ Body content: {}", String::from_utf8_lossy(&req.body));
+            }
+        },
+        Err(e) => println!("    ✗ Failed in Lenient mode: {}", e)
+    }
+    
+    // Try with Strict mode
+    println!("\n  Using Strict mode:");
+    match parse_message_with_mode(message_with_issues.as_bytes(), ParseMode::Strict) {
+        Ok(_) => println!("    ✗ Unexpectedly succeeded in Strict mode"),
+        Err(e) => println!("    ✓ Correctly rejected in Strict mode: {}", e)
+    }
+    
+    // Show a message that would work in both modes
+    let valid_message = "\
+REGISTER sip:registrar.example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-74bf9\r\n\
+To: Bob <sip:bob@example.com>\r\n\
+From: Bob <sip:bob@example.com>;tag=456248\r\n\
+Call-ID: 843817637684230@998sdasdh09\r\n\
+CSeq: 1826 REGISTER\r\n\
+Contact: <sip:bob@192.0.2.1>\r\n\
+Expires: 7200\r\n\
+Content-Length: 0\r\n\
+\r\n";
+
+    println!("\n  Valid message that works in both modes:");
+    
+    // Try with Lenient mode
+    match parse_message(valid_message.as_bytes()) {
+        Ok(_) => println!("    ✓ Successfully parsed in Lenient mode"),
+        Err(e) => println!("    ✗ Failed in Lenient mode: {}", e)
+    }
+    
+    // Try with Strict mode
+    match parse_message_with_mode(valid_message.as_bytes(), ParseMode::Strict) {
+        Ok(_) => println!("    ✓ Successfully parsed in Strict mode"),
+        Err(e) => println!("    ✗ Failed in Strict mode: {}", e)
+    }
 } 
