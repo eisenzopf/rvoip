@@ -1,3 +1,46 @@
+//! # SIP Headers
+//! 
+//! This module provides a comprehensive implementation of SIP headers as defined in 
+//! [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261) and related RFCs.
+//! 
+//! The header system is built around three key types:
+//! 
+//! - [`HeaderName`]: Represents standard and custom SIP header names
+//! - [`TypedHeader`]: A strongly-typed representation of parsed SIP headers
+//! - [`Header`]: A more generic representation with [`HeaderName`] and [`HeaderValue`]
+//! 
+//! ## Architecture
+//! 
+//! The header system uses a two-tiered approach:
+//! 
+//! 1. During parsing, headers are initially parsed into a [`Header`] with a [`HeaderName`] and 
+//!    possibly complex [`HeaderValue`].
+//! 
+//! 2. These can then be converted into [`TypedHeader`] variants which provide a strongly-typed 
+//!    API for each header type.
+//! 
+//! This design allows for both flexibility when handling unknown headers and type safety
+//! when working with standard headers.
+//! 
+//! ## Usage Examples
+//! 
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//! 
+//! // Creating a typed header directly
+//! let call_id = CallId::new("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+//! let header = TypedHeader::CallId(call_id);
+//! 
+//! // Converting between typed and untyped headers
+//! let generic_header: Header = header.to_header();
+//! assert_eq!(generic_header.name, HeaderName::CallId);
+//! 
+//! // Parsing a header from a string
+//! let header_str = "From: Alice <sip:alice@example.com>;tag=1928301774";
+//! let from_header = TypedHeader::try_from(Header::from_str(header_str).unwrap()).unwrap();
+//! ```
+
 use crate::error::{Error, Result};
 use crate::types; // Import the types module itself
 use crate::parser; // Import the parser module
@@ -72,6 +115,33 @@ impl From<FromUtf8Error> for Error {
 // }
 
 /// Common SIP header names
+///
+/// This enum represents all standard SIP header names defined in RFC 3261 and related
+/// specifications, along with their compact forms and aliases. It also supports
+/// custom header names through the `Other` variant.
+///
+/// Header names are case-insensitive in SIP, and this enum preserves the canonical
+/// capitalization for standard headers while providing case-insensitive matching
+/// during parsing.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Standard headers
+/// let from = HeaderName::From;
+/// assert_eq!(from.as_str(), "From");
+///
+/// // From compact form
+/// let from_compact = HeaderName::from_str("f").unwrap();
+/// assert_eq!(from_compact, HeaderName::From);
+///
+/// // Custom header
+/// let custom = HeaderName::from_str("X-Custom-Header").unwrap();
+/// assert_eq!(custom, HeaderName::Other("X-Custom-Header".to_string()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeaderName {
     /// Call-ID: Unique identifier for this call
@@ -302,6 +372,35 @@ impl FromStr for HeaderName {
 }
 
 /// Value of a SIP header, parsed into its specific structure.
+///
+/// This enum represents the value part of a SIP header, with variants for 
+/// different header types. During parsing, header values are stored in the
+/// appropriate variant based on the header name.
+///
+/// Most variants store partially parsed structured data (like addresses, 
+/// parameters, etc.), while the `Raw` variant is used for unparsed or 
+/// unknown header values.
+///
+/// This type is primarily used during the parsing process before converting
+/// to more strongly-typed header representations.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a simple text value
+/// let value = HeaderValue::text("Hello World");
+/// assert_eq!(value.as_text(), Some("Hello World"));
+///
+/// // Create an integer value
+/// let value = HeaderValue::integer(42);
+/// assert_eq!(value.as_integer(), Some(42));
+///
+/// // Create a list value
+/// let value = HeaderValue::text_list(vec!["foo".to_string(), "bar".to_string()]);
+/// assert_eq!(value.as_text_list(), Some(vec!["foo", "bar"]));
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HeaderValue {
     // === Address Headers ===
@@ -435,6 +534,24 @@ impl fmt::Display for HeaderValue {
 }
 
 /// SIP header, consisting of a name and value
+///
+/// This struct represents a SIP header with a [`HeaderName`] and a [`HeaderValue`].
+/// It provides a more generic representation of headers compared to [`TypedHeader`],
+/// and is primarily used during parsing and in cases where type-safety is not required.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a text header
+/// let header = Header::text(HeaderName::Subject, "Meeting tomorrow");
+/// assert_eq!(header.to_wire_format(), "Subject: Meeting tomorrow");
+///
+/// // Create an integer header
+/// let header = Header::integer(HeaderName::ContentLength, 123);
+/// assert_eq!(header.to_wire_format(), "Content-Length: 123");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
     /// Header name
@@ -472,6 +589,32 @@ impl fmt::Display for Header {
 }
 
 /// Represents any parsed SIP header in a strongly-typed way.
+///
+/// This enum provides variants for all standard SIP headers with each variant
+/// containing the appropriate strongly-typed data structure. This approach gives
+/// type safety when working with headers, allowing for compile-time checking
+/// of header usage.
+///
+/// For standard headers like `From`, `To`, `Via`, etc., specialized types from
+/// the `types` module are used as variant values. For non-standard or custom
+/// headers, the `Other` variant is used.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a Call-ID header
+/// let call_id = CallId::new("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+/// let header = TypedHeader::CallId(call_id);
+///
+/// // Access the header name
+/// assert_eq!(header.name(), HeaderName::CallId);
+///
+/// // Convert to a string representation
+/// let header_str = header.to_string();
+/// assert_eq!(header_str, "Call-ID: f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // Add Serialize, Deserialize
 pub enum TypedHeader {
     // Core Headers (Examples)
@@ -1032,7 +1175,52 @@ impl TryFrom<Header> for TypedHeader {
     }
 }
 
-/// Trait for typed headers
+/// Trait for header types that can be converted to/from the generic `Header` type.
+///
+/// This trait should be implemented by all strongly-typed header structs to allow
+/// seamless conversion between generic `Header` instances and strongly-typed
+/// representations.
+///
+/// By implementing this trait, a header type can be:
+/// - Extracted from a generic `Header` using `from_header`
+/// - Converted to a generic `Header` using `to_header`
+/// - Identified by its canonical header name
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::convert::TryFrom;
+///
+/// // Implementing TypedHeaderTrait for a custom header
+/// struct MyCustomHeader(String);
+///
+/// impl TypedHeaderTrait for MyCustomHeader {
+///     type Name = HeaderName;
+///
+///     fn header_name() -> Self::Name {
+///         HeaderName::Other("X-Custom".to_string())
+///     }
+///
+///     fn to_header(&self) -> Header {
+///         Header::text(Self::header_name(), &self.0)
+///     }
+///
+///     fn from_header(header: &Header) -> Result<Self> {
+///         if let HeaderValue::Raw(bytes) = &header.value {
+///             if let Ok(s) = std::str::from_utf8(bytes) {
+///                 return Ok(MyCustomHeader(s.to_string()));
+///             }
+///         }
+///         Err(Error::InvalidHeaderValue("Not a valid MyCustomHeader".to_string()))
+///     }
+/// }
+///
+/// // Using the trait
+/// let header = Header::text(HeaderName::Other("X-Custom".to_string()), "test value");
+/// let typed = MyCustomHeader::from_header(&header).unwrap();
+/// assert_eq!(typed.0, "test value");
+/// ```
 pub trait TypedHeaderTrait: Sized {
     /// Type of header name
     type Name: Into<HeaderName> + Clone;

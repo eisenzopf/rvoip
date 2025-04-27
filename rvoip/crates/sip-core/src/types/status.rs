@@ -1,3 +1,42 @@
+//! # SIP Status Codes
+//!
+//! This module provides an implementation of SIP status codes as defined in
+//! [RFC 3261 Section 21](https://datatracker.ietf.org/doc/html/rfc3261#section-21) and its extensions.
+//!
+//! SIP status codes are three-digit integers that indicate the outcome of a SIP request.
+//! They are similar in concept to HTTP status codes and follow the same general pattern:
+//!
+//! - `1xx`: Provisional — Request received, continuing to process the request
+//! - `2xx`: Success — The action was successfully received, understood, and accepted
+//! - `3xx`: Redirection — Further action needs to be taken to complete the request
+//! - `4xx`: Client Error — The request contains bad syntax or cannot be fulfilled at this server
+//! - `5xx`: Server Error — The server failed to fulfill an apparently valid request
+//! - `6xx`: Global Failure — The request cannot be fulfilled at any server
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create a status code enum variant
+//! let status = StatusCode::Ok;
+//! assert_eq!(status.as_u16(), 200);
+//! assert_eq!(status.reason_phrase(), "OK");
+//!
+//! // Check status code classification
+//! assert!(status.is_success());
+//! assert!(!status.is_error());
+//!
+//! // Create from a numeric value
+//! let status = StatusCode::from_u16(404).unwrap();
+//! assert_eq!(status, StatusCode::NotFound);
+//!
+//! // Parse from a string
+//! let status = StatusCode::from_str("486").unwrap();
+//! assert_eq!(status, StatusCode::BusyHere);
+//! ```
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -6,6 +45,39 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// SIP status codes as defined in RFC 3261 and extensions
+///
+/// SIP response status codes are used to indicate the outcome of a SIP request.
+/// These status codes are organized into six classes:
+///
+/// - `1xx` (100-199): Provisional — Request received, continuing to process the request
+/// - `2xx` (200-299): Success — The action was successfully received, understood, and accepted
+/// - `3xx` (300-399): Redirection — Further action needs to be taken to complete the request
+/// - `4xx` (400-499): Client Error — The request contains bad syntax or cannot be fulfilled at this server
+/// - `5xx` (500-599): Server Error — The server failed to fulfill an apparently valid request
+/// - `6xx` (600-699): Global Failure — The request cannot be fulfilled at any server
+///
+/// Each status code has a standard reason phrase associated with it, but the numeric value
+/// is what determines the meaning of the response.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Check status code classes
+/// let trying = StatusCode::Trying;
+/// assert!(trying.is_provisional());  // 1xx class
+///
+/// let ok = StatusCode::Ok;
+/// assert!(ok.is_success());  // 2xx class
+///
+/// let not_found = StatusCode::NotFound;
+/// assert!(not_found.is_client_error());  // 4xx class
+/// assert!(not_found.is_error());  // Any 4xx, 5xx, or 6xx
+///
+/// // Format status code
+/// assert_eq!(ok.to_string(), "200 OK");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum StatusCode {
@@ -129,6 +201,42 @@ pub enum StatusCode {
 
 impl StatusCode {
     /// Creates a status code from a raw u16 value
+    ///
+    /// This method converts a numeric status code into the corresponding
+    /// `StatusCode` enum variant. If the numeric code matches a known
+    /// status code, the specific variant is returned. Otherwise, if the
+    /// code is within the valid range (100-699), a `Custom` variant is
+    /// returned. If the code is outside this range, an error is returned.
+    ///
+    /// # Parameters
+    ///
+    /// - `code`: The numeric status code value
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(StatusCode)`: If the code is valid (100-699)
+    /// - `Err(Error::InvalidStatusCode)`: If the code is outside the valid range
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Create known status code
+    /// let status = StatusCode::from_u16(200).unwrap();
+    /// assert_eq!(status, StatusCode::Ok);
+    ///
+    /// // Create custom status code
+    /// let status = StatusCode::from_u16(599).unwrap();
+    /// match status {
+    ///     StatusCode::Custom(code) => assert_eq!(code, 599),
+    ///     _ => panic!("Expected Custom variant"),
+    /// }
+    ///
+    /// // Invalid status code
+    /// assert!(StatusCode::from_u16(99).is_err());  // Too low
+    /// assert!(StatusCode::from_u16(700).is_err()); // Too high
+    /// ```
     pub fn from_u16(code: u16) -> Result<Self> {
         match code {
             100 => Ok(StatusCode::Trying),
@@ -194,6 +302,22 @@ impl StatusCode {
     }
 
     /// Returns the numeric value of this status code
+    ///
+    /// Converts the `StatusCode` enum variant back to its underlying numeric value.
+    ///
+    /// # Returns
+    ///
+    /// The numeric value of the status code as a `u16`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert_eq!(StatusCode::Ok.as_u16(), 200);
+    /// assert_eq!(StatusCode::NotFound.as_u16(), 404);
+    /// assert_eq!(StatusCode::Custom(499).as_u16(), 499);
+    /// ```
     pub fn as_u16(&self) -> u16 {
         match self {
             StatusCode::Trying => 100,
@@ -258,6 +382,23 @@ impl StatusCode {
     }
 
     /// Returns the canonical reason phrase for this status code
+    ///
+    /// Gets the standard reason phrase associated with this status code,
+    /// as defined in RFC 3261. For custom status codes, "Unknown" is returned.
+    ///
+    /// # Returns
+    ///
+    /// A static string containing the reason phrase
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert_eq!(StatusCode::Ok.reason_phrase(), "OK");
+    /// assert_eq!(StatusCode::NotFound.reason_phrase(), "Not Found");
+    /// assert_eq!(StatusCode::Custom(499).reason_phrase(), "Unknown");
+    /// ```
     pub fn reason_phrase(&self) -> &'static str {
         match self {
             StatusCode::Trying => "Trying",
@@ -322,48 +463,199 @@ impl StatusCode {
     }
 
     /// Returns true if this status code is provisional (1xx)
+    ///
+    /// Checks if the status code is in the provisional (1xx) range.
+    /// Provisional responses indicate that the request was received and is being processed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 100-199, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::Trying.is_provisional());      // 100
+    /// assert!(StatusCode::Ringing.is_provisional());     // 180
+    /// assert!(!StatusCode::Ok.is_provisional());         // 200
+    /// assert!(!StatusCode::NotFound.is_provisional());   // 404
+    /// ```
     pub fn is_provisional(&self) -> bool {
         let code = self.as_u16();
         code >= 100 && code < 200
     }
 
     /// Returns true if this status code is success (2xx)
+    ///
+    /// Checks if the status code is in the success (2xx) range.
+    /// Success responses indicate that the request was successfully received,
+    /// understood, and accepted.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 200-299, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::Ok.is_success());                // 200
+    /// assert!(StatusCode::Accepted.is_success());          // 202
+    /// assert!(!StatusCode::Trying.is_success());           // 100
+    /// assert!(!StatusCode::MovedTemporarily.is_success()); // 302
+    /// ```
     pub fn is_success(&self) -> bool {
         let code = self.as_u16();
         code >= 200 && code < 300
     }
 
     /// Returns true if this status code is redirection (3xx)
+    ///
+    /// Checks if the status code is in the redirection (3xx) range.
+    /// Redirection responses indicate that further action needs to be
+    /// taken in order to complete the request.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 300-399, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::MovedTemporarily.is_redirection());   // 302
+    /// assert!(StatusCode::MultipleChoices.is_redirection());    // 300
+    /// assert!(!StatusCode::Ok.is_redirection());                // 200
+    /// assert!(!StatusCode::BadRequest.is_redirection());        // 400
+    /// ```
     pub fn is_redirection(&self) -> bool {
         let code = self.as_u16();
         code >= 300 && code < 400
     }
 
     /// Returns true if this status code is client error (4xx)
+    ///
+    /// Checks if the status code is in the client error (4xx) range.
+    /// Client error responses indicate that the request contains bad syntax
+    /// or cannot be fulfilled at this server.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 400-499, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::BadRequest.is_client_error());         // 400
+    /// assert!(StatusCode::NotFound.is_client_error());           // 404
+    /// assert!(StatusCode::BusyHere.is_client_error());           // 486
+    /// assert!(!StatusCode::Ok.is_client_error());                // 200
+    /// assert!(!StatusCode::ServerInternalError.is_client_error()); // 500
+    /// ```
     pub fn is_client_error(&self) -> bool {
         let code = self.as_u16();
         code >= 400 && code < 500
     }
 
     /// Returns true if this status code is server error (5xx)
+    ///
+    /// Checks if the status code is in the server error (5xx) range.
+    /// Server error responses indicate that the server failed to fulfill
+    /// an apparently valid request.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 500-599, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::ServerInternalError.is_server_error()); // 500
+    /// assert!(StatusCode::ServiceUnavailable.is_server_error());  // 503
+    /// assert!(!StatusCode::NotFound.is_server_error());           // 404
+    /// assert!(!StatusCode::BusyEverywhere.is_server_error());     // 600
+    /// ```
     pub fn is_server_error(&self) -> bool {
         let code = self.as_u16();
         code >= 500 && code < 600
     }
 
     /// Returns true if this status code is global failure (6xx)
+    ///
+    /// Checks if the status code is in the global failure (6xx) range.
+    /// Global failure responses indicate that the request cannot be
+    /// fulfilled at any server.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is in the range 600-699, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::BusyEverywhere.is_global_failure());      // 600
+    /// assert!(StatusCode::Decline.is_global_failure());             // 603
+    /// assert!(!StatusCode::ServiceUnavailable.is_global_failure()); // 503
+    /// assert!(!StatusCode::NotFound.is_global_failure());           // 404
+    /// ```
     pub fn is_global_failure(&self) -> bool {
         let code = self.as_u16();
         code >= 600 && code < 700
     }
 
     /// Returns true if this status code indicates an error (4xx, 5xx, 6xx)
+    ///
+    /// Checks if the status code is in any of the error ranges:
+    /// client error (4xx), server error (5xx), or global failure (6xx).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the status code is 400 or greater, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert!(StatusCode::NotFound.is_error());           // 404 (4xx)
+    /// assert!(StatusCode::ServerInternalError.is_error()); // 500 (5xx)
+    /// assert!(StatusCode::BusyEverywhere.is_error());     // 600 (6xx)
+    /// assert!(!StatusCode::Ok.is_error());                // 200 (2xx)
+    /// assert!(!StatusCode::MovedTemporarily.is_error());  // 302 (3xx)
+    /// assert!(!StatusCode::Trying.is_error());            // 100 (1xx)
+    /// ```
     pub fn is_error(&self) -> bool {
         let code = self.as_u16();
         code >= 400 && code < 700
     }
 
     /// Get the textual reason phrase for the status code
+    ///
+    /// This is an alias for `reason_phrase()` that provides
+    /// the standard reason phrase associated with this status code.
+    ///
+    /// # Returns
+    ///
+    /// A static string containing the reason phrase
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// assert_eq!(StatusCode::Ok.as_reason(), "OK");
+    /// assert_eq!(StatusCode::NotFound.as_reason(), "Not Found");
+    /// assert_eq!(StatusCode::Custom(499).as_reason(), "Custom Status Code");
+    /// ```
     pub fn as_reason(&self) -> &'static str {
         match self {
             Self::Trying => "Trying",
@@ -423,6 +715,21 @@ impl StatusCode {
 }
 
 impl fmt::Display for StatusCode {
+    /// Formats the status code as a string.
+    ///
+    /// Formats the status code as "<numeric code> <reason phrase>",
+    /// following the standard SIP protocol format.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::fmt::Display;
+    ///
+    /// assert_eq!(StatusCode::Ok.to_string(), "200 OK");
+    /// assert_eq!(StatusCode::NotFound.to_string(), "404 Not Found");
+    /// assert_eq!(StatusCode::Custom(499).to_string(), "499 Unknown");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.as_u16(), self.reason_phrase())
     }
@@ -431,6 +738,45 @@ impl fmt::Display for StatusCode {
 impl FromStr for StatusCode {
     type Err = Error;
 
+    /// Parses a string into a StatusCode.
+    ///
+    /// Parses a string containing a numeric status code into the corresponding
+    /// StatusCode enum variant. The string should contain just the numeric
+    /// value (e.g., "200", "404").
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse, containing a numeric status code
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(StatusCode)`: If parsing is successful
+    /// - `Err(Error::InvalidStatusCode)`: If the string cannot be parsed as a valid status code
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Parse known status codes
+    /// let ok = StatusCode::from_str("200").unwrap();
+    /// assert_eq!(ok, StatusCode::Ok);
+    ///
+    /// let not_found = StatusCode::from_str("404").unwrap();
+    /// assert_eq!(not_found, StatusCode::NotFound);
+    ///
+    /// // Parse custom status code
+    /// let custom = StatusCode::from_str("499").unwrap();
+    /// match custom {
+    ///     StatusCode::Custom(code) => assert_eq!(code, 499),
+    ///     _ => panic!("Expected Custom variant"),
+    /// }
+    ///
+    /// // Invalid input
+    /// assert!(StatusCode::from_str("abc").is_err());
+    /// assert!(StatusCode::from_str("99").is_err());
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         let code = s.parse::<u16>().map_err(|_| Error::InvalidStatusCode(0))?;
         StatusCode::from_u16(code)

@@ -1,3 +1,37 @@
+//! # SIP Accept-Language Header
+//! 
+//! This module provides an implementation of the SIP Accept-Language header field as defined in
+//! [RFC 3261 Section 20.3](https://datatracker.ietf.org/doc/html/rfc3261#section-20.3).
+//!
+//! The Accept-Language header field is used to indicate the preferred languages for reason phrases,
+//! session descriptions, or status responses carried as message bodies in the response. The syntax
+//! and semantics are identical to HTTP Accept-Language header field as defined in
+//! [RFC 2616 Section 14.4](https://datatracker.ietf.org/doc/html/rfc2616#section-14.4).
+//!
+//! If the Accept-Language header field is not present, the server SHOULD assume all languages are
+//! acceptable to the client.
+//!
+//! ## Example
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Parse an Accept-Language header
+//! let header = AcceptLanguage::from_str("en-US;q=0.8, fr;q=1.0, de;q=0.7").unwrap();
+//!
+//! // Check if a language is acceptable
+//! assert!(header.accepts("fr"));
+//! assert!(header.accepts("en-us"));
+//!
+//! // Find the best match from available languages
+//! let available = vec!["es", "de", "en-us"];
+//! assert_eq!(header.best_match(available), Some("fr"));
+//!
+//! // Format as a string (ordered by q-value)
+//! assert_eq!(header.to_string(), "fr, en-us;q=0.800, de;q=0.700");
+//! ```
+
 use crate::parser::headers::accept_language::{LanguageInfo, parse_accept_language};
 use crate::error::{Result, Error};
 use std::fmt;
@@ -6,22 +40,123 @@ use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 
 /// Represents the Accept-Language header field (RFC 3261 Section 20.3).
-/// Indicates the preferred languages for the response.
+///
+/// The Accept-Language header indicates the preferred languages for message content in responses.
+/// It contains a prioritized list of language tags, each potentially with a quality value ("q-value")
+/// that indicates its relative preference (from 0.0 to 1.0, with 1.0 being the default and highest priority).
+///
+/// As per RFC 3261, if this header is not present in a request, the server should assume all languages 
+/// are acceptable to the client.
+///
+/// # Language matching
+///
+/// This implementation follows the language matching rules outlined in RFC 2616:
+///
+/// - Languages are matched case-insensitively
+/// - A wildcard (`*`) matches any language
+/// - Languages with higher q-values are preferred over languages with lower q-values
+/// - Languages with the same q-value are ordered by their original order in the header
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create from a header string
+/// let header = AcceptLanguage::from_str("Accept-Language: en-US;q=0.8, fr, de;q=0.7").unwrap();
+///
+/// // Or just from the header value part
+/// let header = AcceptLanguage::from_str("en-US;q=0.8, fr, de;q=0.7").unwrap();
+///
+/// // Create programmatically
+/// use rvoip_sip_core::parser::headers::accept_language::LanguageInfo;
+/// use ordered_float::NotNan;
+///
+/// let en = LanguageInfo {
+///     range: "en".to_string(),
+///     q: Some(NotNan::new(0.8).unwrap()),
+///     params: vec![],
+/// };
+///
+/// let fr = LanguageInfo {
+///     range: "fr".to_string(),
+///     q: None, // Default q-value is 1.0
+///     params: vec![],
+/// };
+///
+/// let header = AcceptLanguage::from_languages(vec![en, fr]);
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcceptLanguage(pub Vec<LanguageInfo>);
 
 impl AcceptLanguage {
     /// Creates an empty Accept-Language header.
+    ///
+    /// An empty Accept-Language header means all languages are acceptable,
+    /// according to RFC 3261 Section 20.3.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let header = AcceptLanguage::new();
+    /// assert!(header.accepts("any-language"));
+    /// ```
     pub fn new() -> Self {
         Self(Vec::new())
     }
 
     /// Creates an Accept-Language header with specified capacity.
+    ///
+    /// This is useful when you know approximately how many languages
+    /// you'll be adding to avoid reallocations.
+    ///
+    /// # Parameters
+    ///
+    /// - `capacity`: The initial capacity for the languages vector
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let mut header = AcceptLanguage::with_capacity(3);
+    /// // Can now add up to 3 languages without reallocation
+    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         Self(Vec::with_capacity(capacity))
     }
 
     /// Creates an Accept-Language header from an iterator of language info items.
+    ///
+    /// # Parameters
+    ///
+    /// - `languages`: An iterator yielding `LanguageInfo` items
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::parser::headers::accept_language::LanguageInfo;
+    /// use ordered_float::NotNan;
+    ///
+    /// let en = LanguageInfo {
+    ///     range: "en".to_string(),
+    ///     q: Some(NotNan::new(0.8).unwrap()),
+    ///     params: vec![],
+    /// };
+    ///
+    /// let fr = LanguageInfo {
+    ///     range: "fr".to_string(),
+    ///     q: None, // Default q-value is 1.0
+    ///     params: vec![],
+    /// };
+    ///
+    /// let header = AcceptLanguage::from_languages(vec![en, fr]);
+    /// assert_eq!(header.languages().len(), 2);
+    /// ```
     pub fn from_languages<I>(languages: I) -> Self
     where
         I: IntoIterator<Item = LanguageInfo>
@@ -30,17 +165,77 @@ impl AcceptLanguage {
     }
 
     /// Adds a language to the list.
+    ///
+    /// # Parameters
+    ///
+    /// - `language`: The language info to add
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::parser::headers::accept_language::LanguageInfo;
+    ///
+    /// let mut header = AcceptLanguage::new();
+    /// let en = LanguageInfo {
+    ///     range: "en".to_string(),
+    ///     q: None,
+    ///     params: vec![],
+    /// };
+    /// header.push(en);
+    /// assert_eq!(header.languages().len(), 1);
+    /// ```
     pub fn push(&mut self, language: LanguageInfo) {
         self.0.push(language);
     }
 
     /// Returns the list of languages in this header.
+    ///
+    /// # Returns
+    ///
+    /// A slice containing all language info items in this header
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = AcceptLanguage::from_str("en;q=0.8, fr").unwrap();
+    /// let languages = header.languages();
+    /// assert_eq!(languages.len(), 2);
+    /// assert_eq!(languages[0].range, "fr"); // Sorted by q-value
+    /// assert_eq!(languages[1].range, "en");
+    /// ```
     pub fn languages(&self) -> &[LanguageInfo] {
         &self.0
     }
 
     /// Checks if a specific language is acceptable.
-    /// Performs a basic language tag match, respecting wildcards.
+    ///
+    /// Performs a basic language tag match, respecting wildcards and case-insensitivity.
+    /// According to RFC 3261, if the header is empty, all languages are acceptable.
+    ///
+    /// # Parameters
+    ///
+    /// - `language_tag`: The language tag to check (e.g., "en", "en-US", "fr")
+    ///
+    /// # Returns
+    ///
+    /// `true` if the language is acceptable, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = AcceptLanguage::from_str("en-US;q=0.8, fr, *;q=0.1").unwrap();
+    ///
+    /// assert!(header.accepts("en-us"));  // Case-insensitive
+    /// assert!(header.accepts("fr"));
+    /// assert!(header.accepts("de"));     // Matched by wildcard
+    /// ```
     pub fn accepts(&self, language_tag: &str) -> bool {
         // If empty, accept everything (RFC 3261 Section 20.3)
         if self.0.is_empty() {
@@ -54,7 +249,44 @@ impl AcceptLanguage {
     }
 
     /// Find the best acceptable language from a list of available languages.
-    /// Returns None if no language is acceptable.
+    ///
+    /// This method determines the most preferred language based on q-values and
+    /// the order of languages in the header.
+    ///
+    /// # Parameters
+    ///
+    /// - `available_languages`: An iterator yielding available language tags
+    ///
+    /// # Returns
+    ///
+    /// The best matching language if any is acceptable, or `None` if no language matches
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If the AcceptLanguage header is empty, all languages are acceptable and
+    ///    the first available language is returned
+    /// 2. Languages are compared by their q-values, with higher values preferred
+    /// 3. When q-values are equal, the order in the header determines preference
+    /// 4. Wildcards match any language but are only used if no specific match is found
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = AcceptLanguage::from_str("en-US;q=0.8, fr;q=1.0, de;q=0.5").unwrap();
+    ///
+    /// // Available languages
+    /// let available = vec!["es", "de", "en-us"];
+    ///
+    /// // The best match is "en-us" (higher q-value than "de")
+    /// assert_eq!(header.best_match(available), Some("en-us"));
+    ///
+    /// // If "fr" is available, it will be preferred (highest q-value)
+    /// let available = vec!["fr", "en-us", "de"];
+    /// assert_eq!(header.best_match(available), Some("fr"));
+    /// ```
     pub fn best_match<'a, I>(&self, available_languages: I) -> Option<&'a str>
     where
         I: IntoIterator<Item = &'a str>

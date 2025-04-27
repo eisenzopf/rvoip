@@ -1,3 +1,49 @@
+//! # SIP Address
+//! 
+//! This module provides an implementation of the SIP Address format as defined in
+//! [RFC 3261 Section 20.10](https://datatracker.ietf.org/doc/html/rfc3261#section-20.10).
+//!
+//! The Address format is used in various SIP headers including:
+//! - From
+//! - To
+//! - Contact
+//! - Route
+//! - Record-Route
+//!
+//! ## Structure of a SIP Address
+//!
+//! A SIP address can take two forms:
+//!
+//! 1. **Name Address**: `"Display Name" <sip:user@domain>;param=value`
+//! 2. **URI Address**: `sip:user@domain;param=value`
+//!
+//! In this implementation, all addresses are treated as Name Addresses internally,
+//! with an optional display name.
+//!
+//! ## Common Parameters
+//!
+//! - `tag`: Uniquely identifies dialog participants (in From/To headers)
+//! - `expires`: Indicates expiration time in seconds (in Contact headers)
+//! - `q`: Priority value between 0.0 and 1.0 (in Contact headers)
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create an Address from a string
+//! let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+//! assert_eq!(addr.display_name, Some("John Doe".to_string()));
+//! assert_eq!(addr.uri.to_string(), "sip:john@example.com");
+//! assert_eq!(addr.tag(), Some("1234"));
+//!
+//! // Create an Address programmatically
+//! let uri = Uri::from_str("sip:alice@example.com").unwrap();
+//! let mut addr = Address::new(Some("Alice Smith"), uri);
+//! addr.set_tag("5678");
+//! ```
+
 use crate::types::uri::Uri;
 use crate::types::param::{Param, GenericValue};
 use crate::error::{Error, Result};
@@ -8,10 +54,35 @@ use std::str::FromStr;
 use ordered_float::NotNan;
 
 /// Represents a SIP Name Address (Display Name <URI>; params).
+///
+/// A SIP address consists of:
+/// - An optional display name (e.g., "John Doe")
+/// - A mandatory URI (e.g., sip:john@example.com)
+/// - Optional parameters (e.g., tag=1234)
+///
+/// The Address type is used in multiple SIP headers including From, To, 
+/// Contact, Route, and Record-Route headers.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Parse from a string
+/// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+///
+/// // Create programmatically
+/// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+/// let addr = Address::new(Some("Alice"), uri);
+/// ```
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct Address {
+    /// Optional display name component
     pub display_name: Option<String>,
+    /// Mandatory URI component
     pub uri: Uri,
+    /// Optional parameters (including tag, expires, q-value, etc.)
     pub params: Vec<Param>,
 }
 
@@ -30,9 +101,9 @@ impl PartialEq for Address {
     }
 }
 
-// Function to check if quoting is needed for display-name
-// Based on RFC 3261 relaxed LWS rules and token definition.
-// Quotes are needed if it's not a token or contains specific characters like ", \, or spaces.
+/// Function to check if quoting is needed for display-name
+/// Based on RFC 3261 relaxed LWS rules and token definition.
+/// Quotes are needed if it's not a token or contains specific characters like ", \, or spaces.
 pub fn needs_quoting(display_name: &str) -> bool {
     if display_name.is_empty() {
         return false; // Empty string should NOT be quoted
@@ -78,7 +149,41 @@ impl fmt::Display for Address {
 }
 
 impl Address {
-    /// Creates a new Address.
+    /// Creates a new Address with the given display name and URI.
+    ///
+    /// The display name is optional and will be normalized:
+    /// - An empty or whitespace-only display name will be converted to None
+    /// - A non-empty display name will be preserved as provided
+    ///
+    /// # Parameters
+    ///
+    /// - `display_name`: Optional display name (e.g., "John Doe")
+    /// - `uri`: The SIP URI (e.g., sip:john@example.com)
+    ///
+    /// # Returns
+    ///
+    /// A new Address with no parameters
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// 
+    /// // With display name
+    /// let addr1 = Address::new(Some("Alice Smith"), uri.clone());
+    /// assert_eq!(addr1.display_name, Some("Alice Smith".to_string()));
+    ///
+    /// // Without display name
+    /// let addr2 = Address::new(None::<String>, uri.clone());
+    /// assert_eq!(addr2.display_name, None);
+    ///
+    /// // Empty display name becomes None
+    /// let addr3 = Address::new(Some(""), uri);
+    /// assert_eq!(addr3.display_name, None);
+    /// ```
     pub fn new(display_name: Option<impl Into<String>>, uri: Uri) -> Self {
         let normalized_display_name = display_name
             .map(|s| s.into()) // Convert to String
@@ -92,6 +197,31 @@ impl Address {
     }
 
     /// Sets or replaces the tag parameter.
+    ///
+    /// The tag parameter is used in From and To headers to uniquely 
+    /// identify dialog participants and ensure dialog matching.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: The tag value to set
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(Some("Alice"), uri);
+    ///
+    /// // Set the tag
+    /// addr.set_tag("1234abcd");
+    /// assert_eq!(addr.tag(), Some("1234abcd"));
+    ///
+    /// // Replace an existing tag
+    /// addr.set_tag("5678efgh");
+    /// assert_eq!(addr.tag(), Some("5678efgh"));
+    /// ```
     pub fn set_tag(&mut self, tag: impl Into<String>) {
         // Remove existing tag parameter(s)
         self.params.retain(|p| !matches!(p, Param::Tag(_)));
@@ -99,7 +229,27 @@ impl Address {
         self.params.push(Param::Tag(tag.into()));
     }
     
-    /// Gets the tag parameter value.
+    /// Gets the tag parameter value, if present.
+    ///
+    /// The tag parameter is used in From and To headers to uniquely
+    /// identify dialog participants and ensure dialog matching.
+    ///
+    /// # Returns
+    ///
+    /// The tag parameter value as a string slice, or None if not present
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+    /// assert_eq!(addr.tag(), Some("1234"));
+    ///
+    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
+    /// assert_eq!(addr.tag(), None);
+    /// ```
     pub fn tag(&self) -> Option<&str> {
         self.params.iter().find_map(|p| match p {
             Param::Tag(tag_val) => Some(tag_val.as_str()),
@@ -108,6 +258,26 @@ impl Address {
     }
     
     /// Gets the expires parameter value, if present and valid.
+    ///
+    /// The expires parameter is commonly used in Contact headers to 
+    /// indicate registration expiration time in seconds.
+    ///
+    /// # Returns
+    ///
+    /// The expires parameter value as seconds (u32), or None if not present
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>;expires=3600").unwrap();
+    /// assert_eq!(addr.expires(), Some(3600));
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>").unwrap();
+    /// assert_eq!(addr.expires(), None);
+    /// ```
     pub fn expires(&self) -> Option<u32> {
         self.params.iter().find_map(|p| match p {
             Param::Expires(val) => Some(*val),
@@ -119,6 +289,26 @@ impl Address {
     }
 
     /// Set the expires parameter value.
+    ///
+    /// The expires parameter is commonly used in Contact headers to
+    /// indicate registration expiration time in seconds.
+    ///
+    /// # Parameters
+    ///
+    /// - `expires`: The expiration time in seconds
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None, uri);
+    ///
+    /// addr.set_expires(3600); // 1 hour
+    /// assert_eq!(addr.expires(), Some(3600));
+    /// ```
     pub fn set_expires(&mut self, expires: u32) {
         // Remove existing expires param
         self.params.retain(|p| {
@@ -132,6 +322,28 @@ impl Address {
     }
 
     /// Get the q parameter value, if present.
+    ///
+    /// The q parameter (quality factor) is commonly used in Contact headers to
+    /// indicate a relative priority between 0.0 and 1.0, with higher values
+    /// indicating higher priority.
+    ///
+    /// # Returns
+    ///
+    /// The q parameter value as a non-NaN f32 between 0.0 and 1.0, or None if not present
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    /// use ordered_float::NotNan;
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>;q=0.5").unwrap();
+    /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(0.5));
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>").unwrap();
+    /// assert_eq!(addr.q(), None);
+    /// ```
     pub fn q(&self) -> Option<NotNan<f32>> {
         self.params.iter().find_map(|p| match p {
             Param::Q(val) => Some(*val),
@@ -143,6 +355,34 @@ impl Address {
     }
 
     /// Set the q parameter value, clamping between 0.0 and 1.0.
+    ///
+    /// The q parameter (quality factor) is commonly used in Contact headers to
+    /// indicate a relative priority, with higher values indicating higher priority.
+    ///
+    /// # Parameters
+    ///
+    /// - `q`: The quality value (automatically clamped between 0.0 and 1.0)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None, uri);
+    ///
+    /// // Set normal q-value
+    /// addr.set_q(0.8);
+    /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(0.8));
+    ///
+    /// // Value is clamped if outside valid range
+    /// addr.set_q(1.5); // Value > 1.0
+    /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(1.0));
+    ///
+    /// addr.set_q(-0.5); // Value < 0.0
+    /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(0.0));
+    /// ```
     pub fn set_q(&mut self, q: f32) {
         // Clamp the value
         let clamped_q = q.max(0.0).min(1.0);
@@ -152,6 +392,28 @@ impl Address {
     }
 
     /// Check if a parameter exists (case-insensitive key).
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The parameter name to check for (case-insensitive)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the parameter exists, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>;tag=1234;expires=3600").unwrap();
+    /// 
+    /// assert!(addr.has_param("tag"));
+    /// assert!(addr.has_param("TAG")); // Case-insensitive
+    /// assert!(addr.has_param("expires"));
+    /// assert!(!addr.has_param("q")); // Not present
+    /// ```
     pub fn has_param(&self, name: &str) -> bool {
         let name_lower = name.to_lowercase();
         self.params.iter().any(|p| {
@@ -177,8 +439,32 @@ impl Address {
     }
 
     /// Gets the value of a parameter by key (case-insensitive).
-    /// Returns Some(Some(value)) for key-value pairs, Some(None) for flags, None if not found.
-    /// Note: For typed params like Expires, this returns the string representation.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The parameter name to look for (case-insensitive)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Some(value))` if the parameter exists and has a value
+    /// - `Some(None)` if the parameter exists but has no value (flag parameter)
+    /// - `None` if the parameter doesn't exist
+    ///
+    /// For typed parameters (like Expires, Q, etc.), this returns the string representation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let addr = Address::from_str("<sip:alice@example.com>;tag=1234;lr;custom=value").unwrap();
+    /// 
+    /// assert_eq!(addr.get_param("tag"), Some(Some("1234")));
+    /// assert_eq!(addr.get_param("lr"), Some(None)); // Flag parameter
+    /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
+    /// assert_eq!(addr.get_param("nonexistent"), None);
+    /// ```
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
         Some(
             self.params
@@ -210,7 +496,37 @@ impl Address {
     }
 
     /// Sets or replaces a parameter, storing it as Param::Other.
-    /// Removes any existing parameter (typed or Other) with the same key (case-insensitive).
+    ///
+    /// This method can be used to set any parameter, but specialized methods
+    /// like `set_tag()`, `set_expires()`, etc., should be preferred for
+    /// standard parameters.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The parameter name to set
+    /// - `value`: The parameter value to set, or None to add a flag parameter
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None, uri);
+    ///
+    /// // Set a parameter with a value
+    /// addr.set_param("custom", Some("value"));
+    /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
+    ///
+    /// // Set a flag parameter (no value)
+    /// addr.set_param("lr", None);
+    /// assert_eq!(addr.get_param("lr"), Some(None));
+    ///
+    /// // Replace an existing parameter
+    /// addr.set_param("custom", Some("new-value"));
+    /// assert_eq!(addr.get_param("custom"), Some(Some("new-value")));
+    /// ```
     pub fn set_param(&mut self, key: impl Into<String>, value: Option<impl Into<String>>) {
         let key_string = key.into();
         let value_opt_string = value.map(|v| v.into());
@@ -239,6 +555,31 @@ impl Address {
     }
 
     /// Remove a parameter (case-insensitive key).
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The parameter name to remove (case-insensitive)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let mut addr = Address::from_str("<sip:alice@example.com>;tag=1234;expires=3600").unwrap();
+    /// 
+    /// // Remove a parameter
+    /// addr.remove_param("tag");
+    /// assert!(!addr.has_param("tag"));
+    /// assert!(addr.has_param("expires"));
+    ///
+    /// // Case-insensitive
+    /// addr.remove_param("EXPIRES");
+    /// assert!(!addr.has_param("expires"));
+    ///
+    /// // No-op if parameter doesn't exist
+    /// addr.remove_param("nonexistent");
+    /// ```
     pub fn remove_param(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
         let old_params = std::mem::take(&mut self.params);
@@ -285,6 +626,35 @@ impl Address {
 impl FromStr for Address {
     type Err = crate::error::Error;
 
+    /// Parse a string as a SIP Address.
+    ///
+    /// This method parses a string representation of a SIP address into
+    /// an Address struct.
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed Address, or an Error if parsing fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::Address;
+    /// use std::str::FromStr;
+    ///
+    /// // Parse a name address with display name and parameters
+    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+    /// assert_eq!(addr.display_name, Some("John Doe".to_string()));
+    /// assert_eq!(addr.uri.to_string(), "sip:john@example.com");
+    /// assert_eq!(addr.tag(), Some("1234"));
+    ///
+    /// // Parse a name address without display name
+    /// let addr = Address::from_str("<sip:john@example.com>").unwrap();
+    /// assert_eq!(addr.display_name, None);
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming, handle input type, map result and error
         nom::combinator::all_consuming(parse_address)(s.as_bytes())

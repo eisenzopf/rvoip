@@ -1,3 +1,52 @@
+//! # SIP CSeq Header
+//!
+//! This module provides an implementation of the SIP CSeq header as defined in
+//! [RFC 3261 Section 20.16](https://datatracker.ietf.org/doc/html/rfc3261#section-20.16).
+//!
+//! The CSeq (Command Sequence) header serves multiple purposes in SIP:
+//!
+//! - It uniquely identifies transactions within a dialog
+//! - It orders transactions in a dialog
+//! - It distinguishes between new requests and retransmissions
+//! - It matches requests to their corresponding responses
+//!
+//! ## Format
+//!
+//! ```
+//! CSeq: 4711 INVITE
+//! CSeq: 21 BYE
+//! ```
+//!
+//! The CSeq header consists of a sequence number (an unsigned 32-bit integer)
+//! and a method name. The method name MUST match the method in the request line.
+//!
+//! ## Usage in Dialog Management
+//!
+//! Within a dialog, the CSeq value for requests sent by the dialog initiator 
+//! increases by one for each new request. The CSeq for the dialog recipient 
+//! also increases by one for each new request, but uses a separate counter from 
+//! the initiator.
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create a CSeq for an INVITE request
+//! let invite_cseq = CSeq::new(1, Method::Invite);
+//! assert_eq!(invite_cseq.to_string(), "1 INVITE");
+//!
+//! // Parse a CSeq header
+//! let cseq = CSeq::from_str("2 BYE").unwrap();
+//! assert_eq!(cseq.sequence(), 2);
+//! assert_eq!(cseq.method(), &Method::Bye);
+//!
+//! // Increment the sequence number for a new request
+//! let next_cseq = cseq.increment();
+//! assert_eq!(next_cseq.sequence(), 3);
+//! ```
+
 use crate::types::method::Method;
 use crate::parser;
 use crate::error::{Result, Error};
@@ -14,6 +63,10 @@ use serde::{Serialize, Deserialize};
 /// CSeq header field MUST match the method name in the start-line, and the
 /// sequence number value MUST be expressible as a 32-bit unsigned integer.
 /// 
+/// The CSeq header is mandatory in all SIP requests and responses. It helps
+/// to identify retransmissions, match responses to requests, and maintain
+/// the order of transactions within a dialog.
+/// 
 /// # Examples
 /// ```
 /// use crate::types::cseq::CSeq;
@@ -29,39 +82,157 @@ use serde::{Serialize, Deserialize};
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CSeq {
+    /// Sequence number (32-bit unsigned integer)
     pub seq: u32,
+    /// SIP method
     pub method: Method,
 }
 
 impl CSeq {
     /// Creates a new CSeq header with the specified sequence number and method.
+    ///
+    /// # Parameters
+    ///
+    /// - `seq`: The sequence number, a 32-bit unsigned integer
+    /// - `method`: The SIP method (Invite, Bye, etc.)
+    ///
+    /// # Returns
+    ///
+    /// A new `CSeq` instance with the specified sequence number and method
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Create a CSeq for an INVITE request
+    /// let cseq = CSeq::new(1, Method::Invite);
+    /// assert_eq!(cseq.sequence(), 1);
+    /// assert_eq!(cseq.method(), &Method::Invite);
+    ///
+    /// // Create a CSeq for a BYE request
+    /// let cseq = CSeq::new(2, Method::Bye);
+    /// assert_eq!(cseq.to_string(), "2 BYE");
+    /// ```
     pub fn new(seq: u32, method: Method) -> Self {
         Self { seq, method }
     }
     
     /// Creates a new CSeq header with the specified sequence number and method string.
     /// 
+    /// This is a convenience method that parses a method string into a `Method` enum
+    /// and creates a CSeq header.
+    /// 
+    /// # Parameters
+    ///
+    /// - `seq`: The sequence number, a 32-bit unsigned integer
+    /// - `method_str`: The method name as a string (e.g., "INVITE", "BYE")
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new `CSeq` instance, or an error if the method string
+    /// cannot be parsed
+    ///
     /// # Errors
+    /// 
     /// Returns an error if the method string is not a valid SIP method.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Create a CSeq with a standard method name
+    /// let cseq = CSeq::with_method_str(1, "INVITE").unwrap();
+    /// assert_eq!(cseq.to_string(), "1 INVITE");
+    ///
+    /// // Create a CSeq with an extension method name
+    /// let cseq = CSeq::with_method_str(2, "CUSTOM").unwrap();
+    /// assert_eq!(cseq.method(), &Method::Extension("CUSTOM".to_string()));
+    ///
+    /// // Invalid method name (empty string)
+    /// let result = CSeq::with_method_str(3, "");
+    /// assert!(result.is_err());
+    /// ```
     pub fn with_method_str(seq: u32, method_str: &str) -> Result<Self> {
         let method = Method::from_str(method_str)?;
         Ok(Self::new(seq, method))
     }
     
     /// Get the sequence number.
+    ///
+    /// # Returns
+    ///
+    /// The sequence number as a u32
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(42, Method::Invite);
+    /// assert_eq!(cseq.sequence(), 42);
+    ///
+    /// // Using the sequence number in calculations
+    /// let next_seq = cseq.sequence() + 1;
+    /// assert_eq!(next_seq, 43);
+    /// ```
     pub fn sequence(&self) -> u32 {
         self.seq
     }
     
     /// Get the method.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the Method enum
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(42, Method::Invite);
+    /// assert_eq!(cseq.method(), &Method::Invite);
+    ///
+    /// // Use in pattern matching
+    /// match cseq.method() {
+    ///     &Method::Invite => println!("This is an INVITE!"),
+    ///     &Method::Bye => println!("This is a BYE!"),
+    ///     _ => println!("This is some other method"),
+    /// }
+    /// ```
     pub fn method(&self) -> &Method {
         &self.method
     }
     
     /// Increments the sequence number by 1 and returns a new CSeq with the same method.
+    ///
+    /// This is useful for creating a new CSeq for the next request in a dialog
+    /// using the same method.
     /// 
+    /// # Returns
+    ///
+    /// A new `CSeq` with the sequence number incremented by 1 and the same method
+    ///
     /// # Panics
-    /// Panics if the sequence number would overflow.
+    /// 
+    /// Panics if the sequence number would overflow (exceed u32::MAX).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(1, Method::Invite);
+    /// let next_cseq = cseq.increment();
+    ///
+    /// assert_eq!(next_cseq.sequence(), 2);
+    /// assert_eq!(next_cseq.method(), &Method::Invite);
+    ///
+    /// // Original CSeq is unchanged
+    /// assert_eq!(cseq.sequence(), 1);
+    /// ```
     pub fn increment(&self) -> Self {
         Self {
             seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
@@ -70,9 +241,41 @@ impl CSeq {
     }
     
     /// Increments the sequence number by 1 and changes the method.
+    ///
+    /// This is useful for creating a new CSeq for the next request in a dialog
+    /// with a different method.
+    /// 
+    /// # Parameters
+    ///
+    /// - `method`: The new method to use
+    ///
+    /// # Returns
+    ///
+    /// A new `CSeq` with the sequence number incremented by 1 and the specified method
     /// 
     /// # Panics
-    /// Panics if the sequence number would overflow.
+    /// 
+    /// Panics if the sequence number would overflow (exceed u32::MAX).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let invite_cseq = CSeq::new(1, Method::Invite);
+    /// let bye_cseq = invite_cseq.increment_with_method(Method::Bye);
+    ///
+    /// assert_eq!(bye_cseq.sequence(), 2);
+    /// assert_eq!(bye_cseq.method(), &Method::Bye);
+    ///
+    /// // Using for multiple sequential requests
+    /// let cseq1 = CSeq::new(1, Method::Invite);
+    /// let cseq2 = cseq1.increment_with_method(Method::Ack);
+    /// let cseq3 = cseq2.increment_with_method(Method::Bye);
+    ///
+    /// assert_eq!(cseq3.sequence(), 3);
+    /// assert_eq!(cseq3.method(), &Method::Bye);
+    /// ```
     pub fn increment_with_method(&self, method: Method) -> Self {
         Self {
             seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
@@ -82,6 +285,23 @@ impl CSeq {
 }
 
 impl fmt::Display for CSeq {
+    /// Formats the CSeq as a string.
+    ///
+    /// The format follows the SIP specification: sequence number, followed by
+    /// a space, followed by the method name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(42, Method::Invite);
+    /// assert_eq!(cseq.to_string(), "42 INVITE");
+    ///
+    /// // Using in a formatted string
+    /// let header = format!("CSeq: {}", cseq);
+    /// assert_eq!(header, "CSeq: 42 INVITE");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.seq, self.method) // Method already implements Display
     }
@@ -90,6 +310,40 @@ impl fmt::Display for CSeq {
 impl FromStr for CSeq {
     type Err = Error;
 
+    /// Parses a string into a CSeq.
+    ///
+    /// This method can parse both the full header (with "CSeq:" prefix) and
+    /// just the header value. It is case-insensitive for the header name.
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed CSeq, or an error if parsing fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Parse just the value
+    /// let cseq = CSeq::from_str("42 INVITE").unwrap();
+    /// assert_eq!(cseq.sequence(), 42);
+    /// assert_eq!(cseq.method(), &Method::Invite);
+    ///
+    /// // Parse the full header
+    /// let cseq = CSeq::from_str("CSeq: 43 BYE").unwrap();
+    /// assert_eq!(cseq.sequence(), 43);
+    /// assert_eq!(cseq.method(), &Method::Bye);
+    ///
+    /// // Case-insensitive header name
+    /// let cseq = CSeq::from_str("cseq: 44 ACK").unwrap();
+    /// assert_eq!(cseq.sequence(), 44);
+    /// assert_eq!(cseq.method(), &Method::Ack);
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         let trimmed_s = s.trim();
         

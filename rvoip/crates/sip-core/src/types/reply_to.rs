@@ -1,3 +1,44 @@
+//! # SIP Reply-To Header
+//!
+//! This module provides an implementation of the SIP Reply-To header as defined in
+//! [RFC 3261 Section 20.32](https://datatracker.ietf.org/doc/html/rfc3261#section-20.32).
+//!
+//! The Reply-To header field indicates where the user prefers to receive replies
+//! to a request. This is particularly useful in situations where the initiating UA may be
+//! unavailable after the request is sent, and wants replies directed to an alternate address.
+//!
+//! ## Purpose
+//!
+//! The Reply-To header serves several purposes:
+//!
+//! - Provides an alternate address for responses when the initiator may be unavailable
+//! - Allows responses to be directed to a different person or department
+//! - Enables more sophisticated call routing scenarios
+//!
+//! ## Format
+//!
+//! ```
+//! Reply-To: "Support Team" <sip:support@example.com>
+//! Reply-To: <sip:help@example.com>;dept=sales
+//! Reply-To: tel:+1-212-555-1234
+//! ```
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create a Reply-To header
+//! let uri = Uri::from_str("sip:support@example.com").unwrap();
+//! let address = Address::new(Some("Support Team"), uri);
+//! let reply_to = ReplyTo::new(address);
+//!
+//! // Parse a Reply-To header from a string
+//! let header = "<sip:sales@example.com;dept=billing>";
+//! let reply_to = ReplyTo::from_str(header).unwrap();
+//! ```
+
 use crate::types::address::Address; // Or maybe UriWithParams?
 use crate::parser::headers::reply_to::parse_reply_to; // Use the parser
 use crate::error::{Error, Result};
@@ -12,36 +53,200 @@ use serde::{Deserialize, Serialize}; // Add import
 /// Reply-To = "Reply-To" HCOLON rplyto-spec
 /// rplyto-spec = ( name-addr / addr-spec ) *( SEMI rplyto-param )
 /// rplyto-param = generic-param
+///
+/// The Reply-To header indicates where the user would prefer replies to a request
+/// to be sent. This can be different from the From header when the initiating user
+/// agent will not be available to receive responses, or when replies should be
+/// directed to a different entity.
+///
+/// This implementation wraps an `Address` structure that contains a URI, optional
+/// display name, and optional parameters.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create from an Address
+/// let uri = Uri::from_str("sip:support@example.com").unwrap();
+/// let address = Address::new(Some("Support Team"), uri);
+/// let reply_to = ReplyTo::new(address);
+/// assert_eq!(reply_to.to_string(), "\"Support Team\" <sip:support@example.com>");
+///
+/// // Parse from a string
+/// let reply_to = ReplyTo::from_str("<sip:help@example.com>;dept=sales").unwrap();
+/// assert_eq!(reply_to.uri().to_string(), "sip:help@example.com");
+/// assert!(reply_to.has_param("dept"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Added Serialize, Deserialize
 pub struct ReplyTo(pub Address); // Or UriWithParams
 
 impl ReplyTo {
     /// Creates a new ReplyTo header.
+    ///
+    /// Initializes a Reply-To header with the specified address, which can include
+    /// a display name, URI, and parameters.
+    ///
+    /// # Parameters
+    ///
+    /// - `address`: The Address to use for the Reply-To header
+    ///
+    /// # Returns
+    ///
+    /// A new `ReplyTo` instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a simple Reply-To with just a URI
+    /// let uri = Uri::from_str("sip:support@example.com").unwrap();
+    /// let address = Address::new(None, uri);
+    /// let reply_to = ReplyTo::new(address);
+    ///
+    /// // Create with display name
+    /// let uri = Uri::from_str("sip:help@example.com").unwrap();
+    /// let address = Address::new(Some("Help Desk"), uri);
+    /// let reply_to = ReplyTo::new(address);
+    /// ```
     pub fn new(address: Address) -> Self {
         Self(address)
     }
     
     /// Access the underlying Address
+    ///
+    /// Returns a reference to the Address structure contained in this Reply-To header.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the Address object
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = "\"Support\" <sip:support@example.com>";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    ///
+    /// let address = reply_to.address();
+    /// assert_eq!(address.display_name(), Some("Support"));
+    /// ```
     pub fn address(&self) -> &Address {
         &self.0
     }
 
     /// Access the URI from the Address
+    ///
+    /// Provides direct access to the URI contained in the Address.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the URI
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = "<sip:support@example.com>";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    ///
+    /// let uri = reply_to.uri();
+    /// assert_eq!(uri.scheme(), Scheme::Sip);
+    /// assert_eq!(uri.host_port().to_string(), "example.com");
+    /// ```
     pub fn uri(&self) -> &crate::types::uri::Uri {
         &self.0.uri
     }
 
     /// Access parameters from the Address
+    ///
+    /// Returns a slice containing all parameters associated with the Address.
+    ///
+    /// # Returns
+    ///
+    /// A slice of Param objects
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = "<sip:support@example.com>;dept=sales;priority=high";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    ///
+    /// let params = reply_to.params();
+    /// assert_eq!(params.len(), 2);
+    /// ```
     pub fn params(&self) -> &[crate::types::param::Param] {
         &self.0.params
     }
 
     /// Check if a parameter is present (case-insensitive key)
+    ///
+    /// Tests whether a parameter with the specified key exists in the Address parameters.
+    /// The search is case-insensitive.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The parameter name to search for
+    ///
+    /// # Returns
+    ///
+    /// `true` if the parameter exists, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = "<sip:support@example.com>;dept=sales";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    ///
+    /// assert!(reply_to.has_param("dept"));
+    /// assert!(reply_to.has_param("DEPT")); // Case-insensitive
+    /// assert!(!reply_to.has_param("unknown"));
+    /// ```
     pub fn has_param(&self, key: &str) -> bool {
         self.0.has_param(key)
     }
 
     /// Get a parameter value (case-insensitive key)
+    ///
+    /// Retrieves the value of a parameter with the specified key.
+    /// The search is case-insensitive.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The parameter name to search for
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Some(value))`: If the parameter exists and has a value
+    /// - `Some(None)`: If the parameter exists but has no value
+    /// - `None`: If the parameter does not exist
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let header = "<sip:support@example.com>;dept=sales;urgent";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    ///
+    /// assert_eq!(reply_to.get_param("dept"), Some(Some("sales")));
+    /// assert_eq!(reply_to.get_param("urgent"), Some(None));
+    /// assert_eq!(reply_to.get_param("unknown"), None);
+    /// ```
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
         self.0.get_param(key)
     }
@@ -51,6 +256,28 @@ impl ReplyTo {
     /// While RFC 3261 doesn't specify many restrictions on Reply-To,
     /// this method performs basic validation to ensure URI scheme is valid
     /// and header parameters are properly formed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the header is valid, or an `Error` if validation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Valid header
+    /// let header = "<sip:support@example.com>";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    /// assert!(reply_to.validate().is_ok());
+    ///
+    /// // Create an invalid header (manually, for demonstration)
+    /// let uri = Uri::from_str("http://example.com").unwrap(); // HTTP not allowed
+    /// let address = Address::new(None, uri);
+    /// let invalid_reply_to = ReplyTo::new(address);
+    /// assert!(invalid_reply_to.validate().is_err());
+    /// ```
     pub fn validate(&self) -> Result<()> {
         // Validate URI scheme is supported
         match self.0.uri.scheme {
@@ -62,12 +289,65 @@ impl ReplyTo {
     }
     
     /// Add a parameter to this Reply-To header
+    ///
+    /// Adds a parameter to the header and returns the modified header.
+    /// This method uses a builder pattern to enable method chaining.
+    ///
+    /// # Parameters
+    ///
+    /// - `param`: The parameter to add
+    ///
+    /// # Returns
+    ///
+    /// The modified `ReplyTo` instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:support@example.com").unwrap();
+    /// let address = Address::new(None, uri);
+    /// let reply_to = ReplyTo::new(address)
+    ///     .with_param(Param::new("dept", Some("sales")))
+    ///     .with_param(Param::new("priority", Some("high")));
+    ///
+    /// assert!(reply_to.has_param("dept"));
+    /// assert!(reply_to.has_param("priority"));
+    /// ```
     pub fn with_param(mut self, param: crate::types::param::Param) -> Self {
         self.0.params.push(param);
         self
     }
     
     /// Creates a new ReplyTo with a SIP URI
+    ///
+    /// Convenience method to create a Reply-To header with a SIP URI.
+    ///
+    /// # Parameters
+    ///
+    /// - `host`: The host part of the URI
+    /// - `user`: Optional user part of the URI
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a new `ReplyTo` instance, or an error if creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // With user part
+    /// let reply_to = ReplyTo::sip("example.com", Some("support")).unwrap();
+    /// assert_eq!(reply_to.uri().scheme(), Scheme::Sip);
+    /// assert_eq!(reply_to.uri().user(), Some("support"));
+    ///
+    /// // Without user part
+    /// let reply_to = ReplyTo::sip("example.com", None::<&str>).unwrap();
+    /// assert_eq!(reply_to.uri().user(), None);
+    /// ```
     pub fn sip(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<Self> {
         let mut uri = crate::types::uri::Uri::sip(host);
         if let Some(u) = user {
@@ -78,6 +358,27 @@ impl ReplyTo {
     }
     
     /// Creates a new ReplyTo with a SIPS URI
+    ///
+    /// Convenience method to create a Reply-To header with a SIPS (secure SIP) URI.
+    ///
+    /// # Parameters
+    ///
+    /// - `host`: The host part of the URI
+    /// - `user`: Optional user part of the URI
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a new `ReplyTo` instance, or an error if creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let reply_to = ReplyTo::sips("secure.example.com", Some("support")).unwrap();
+    /// assert_eq!(reply_to.uri().scheme(), Scheme::Sips);
+    /// assert_eq!(reply_to.uri().host_port().to_string(), "secure.example.com");
+    /// ```
     pub fn sips(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<Self> {
         let mut uri = crate::types::uri::Uri::sips(host);
         if let Some(u) = user {
@@ -88,6 +389,25 @@ impl ReplyTo {
     }
     
     /// Creates a new ReplyTo with a TEL URI
+    ///
+    /// Convenience method to create a Reply-To header with a TEL URI.
+    ///
+    /// # Parameters
+    ///
+    /// - `number`: The telephone number
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a new `ReplyTo` instance, or an error if creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let reply_to = ReplyTo::tel("+1-212-555-1234").unwrap();
+    /// assert_eq!(reply_to.uri().scheme(), Scheme::Tel);
+    /// ```
     pub fn tel(number: impl Into<String>) -> Result<Self> {
         let uri = crate::types::uri::Uri::tel(number);
         let address = Address::new(None::<String>, uri);
@@ -95,6 +415,29 @@ impl ReplyTo {
     }
     
     /// Creates a new ReplyTo with a display name
+    ///
+    /// Adds a display name to the Reply-To header and returns the modified header.
+    /// This method uses a builder pattern to enable method chaining.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The display name to add
+    ///
+    /// # Returns
+    ///
+    /// The modified `ReplyTo` instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let reply_to = ReplyTo::sip("example.com", Some("support"))
+    ///     .unwrap()
+    ///     .with_display_name("Support Team");
+    ///
+    /// assert_eq!(reply_to.address().display_name(), Some("Support Team"));
+    /// ```
     pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
         self.0.display_name = Some(name.into());
         self
@@ -102,6 +445,29 @@ impl ReplyTo {
 }
 
 impl fmt::Display for ReplyTo {
+    /// Formats the Reply-To header as a string.
+    ///
+    /// Converts the header to its string representation, following
+    /// the format specified in RFC 3261.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Simple URI
+    /// let uri = Uri::from_str("sip:support@example.com").unwrap();
+    /// let address = Address::new(None, uri);
+    /// let reply_to = ReplyTo::new(address);
+    /// assert_eq!(reply_to.to_string(), "<sip:support@example.com>");
+    ///
+    /// // With display name
+    /// let uri = Uri::from_str("sip:support@example.com").unwrap();
+    /// let address = Address::new(Some("Support Team"), uri);
+    /// let reply_to = ReplyTo::new(address);
+    /// assert_eq!(reply_to.to_string(), "\"Support Team\" <sip:support@example.com>");
+    /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Use direct formatting for the Address, not delegate to avoid potential recursion
         let mut wrote_display_name = false;
@@ -139,6 +505,36 @@ impl fmt::Display for ReplyTo {
 impl FromStr for ReplyTo {
     type Err = Error;
 
+    /// Parses a string into a ReplyTo header.
+    ///
+    /// This method converts a string representation of a Reply-To header into
+    /// a structured ReplyTo object. It parses both name-addr and addr-spec formats
+    /// as well as parameters, and validates the result.
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed ReplyTo, or an error if parsing fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Simple URI
+    /// let reply_to = ReplyTo::from_str("<sip:support@example.com>").unwrap();
+    /// assert_eq!(reply_to.uri().to_string(), "sip:support@example.com");
+    ///
+    /// // With display name and parameters
+    /// let header = "\"Support\" <sip:support@example.com>;dept=sales";
+    /// let reply_to = ReplyTo::from_str(header).unwrap();
+    /// assert_eq!(reply_to.address().display_name(), Some("Support"));
+    /// assert_eq!(reply_to.get_param("dept").flatten(), Some("sales"));
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming to ensure entire input is parsed
         let result = all_consuming(parse_reply_to)(s.as_bytes())

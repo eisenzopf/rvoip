@@ -1,3 +1,42 @@
+//! # SIP Allow Header
+//! 
+//! This module provides an implementation of the SIP Allow header as defined in
+//! [RFC 3261 Section 20.5](https://datatracker.ietf.org/doc/html/rfc3261#section-20.5).
+//!
+//! The Allow header lists the set of methods supported by the User Agent (UA)
+//! generating the message. It serves as a way to indicate capabilities of UAs
+//! and is particularly important in the following scenarios:
+//!
+//! - In REGISTER requests and responses to inform registrars about supported methods
+//! - In OPTIONS responses to answer capability queries
+//! - In 405 (Method Not Allowed) responses to indicate which methods are allowed
+//!
+//! ## Format
+//!
+//! The Allow header takes the form of a comma-separated list of SIP methods:
+//!
+//! ```
+//! Allow: INVITE, ACK, CANCEL, OPTIONS, BYE
+//! ```
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create an Allow header from a string
+//! let allow = Allow::from_str("INVITE, ACK, BYE, CANCEL, OPTIONS").unwrap();
+//! assert!(allow.allows(&Method::INVITE));
+//! assert!(!allow.allows(&Method::REFER));
+//!
+//! // Create an Allow header programmatically
+//! let mut allow = Allow::new();
+//! allow.add_method(Method::INVITE);
+//! allow.add_method(Method::ACK);
+//! allow.add_method(Method::BYE);
+//! ```
+
 use crate::types::Method;
 use crate::parser::headers::parse_allow;
 use crate::error::{Result, Error};
@@ -8,21 +47,105 @@ use serde::{Deserialize, Serialize};
 
 /// Represents the Allow header field (RFC 3261 Section 20.5).
 /// Lists the SIP methods supported by the User Agent.
+///
+/// The Allow header is used by a User Agent to indicate which methods it supports.
+/// This is useful for capability negotiation and to prevent method-unsupported errors.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create an Allow header from a string
+/// let allow = Allow::from_str("INVITE, ACK, BYE, CANCEL, OPTIONS").unwrap();
+/// 
+/// // Check if a method is allowed
+/// assert!(allow.allows(&Method::INVITE));
+/// assert!(!allow.allows(&Method::REFER));
+///
+/// // Iterate through allowed methods
+/// for method in &allow {
+///     println!("Method: {}", method);
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allow(pub Vec<Method>);
 
 impl Allow {
     /// Creates an empty Allow header.
+    ///
+    /// # Returns
+    ///
+    /// A new Allow header with no methods.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let mut allow = Allow::new();
+    /// allow.add_method(Method::INVITE);
+    /// allow.add_method(Method::ACK);
+    /// ```
     pub fn new() -> Self {
         Self(Vec::new())
     }
 
     /// Creates an Allow header with specified capacity.
+    ///
+    /// This is useful when you know in advance how many methods you'll be adding,
+    /// to avoid multiple allocations.
+    ///
+    /// # Parameters
+    ///
+    /// - `capacity`: The initial capacity for the internal vector
+    ///
+    /// # Returns
+    ///
+    /// A new Allow header with the specified capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Create an Allow header with space for 5 methods
+    /// let mut allow = Allow::with_capacity(5);
+    /// allow.add_method(Method::INVITE);
+    /// allow.add_method(Method::ACK);
+    /// allow.add_method(Method::BYE);
+    /// // ... can add 2 more methods without reallocation
+    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         Self(Vec::with_capacity(capacity))
     }
 
     /// Creates an Allow header from an iterator of methods.
+    ///
+    /// # Parameters
+    ///
+    /// - `methods`: An iterator that yields Method items
+    ///
+    /// # Returns
+    ///
+    /// A new Allow header containing the specified methods.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Create from an array
+    /// let methods = [Method::INVITE, Method::ACK, Method::BYE];
+    /// let allow = Allow::from_methods(methods);
+    /// assert!(allow.allows(&Method::INVITE));
+    ///
+    /// // Create from a Vec
+    /// let methods = vec![Method::REGISTER, Method::OPTIONS];
+    /// let allow = Allow::from_methods(methods);
+    /// assert!(allow.allows(&Method::REGISTER));
+    /// ```
     pub fn from_methods<I>(methods: I) -> Self
     where
         I: IntoIterator<Item = Method>
@@ -31,11 +154,57 @@ impl Allow {
     }
 
     /// Checks if a specific method is allowed.
+    ///
+    /// # Parameters
+    ///
+    /// - `method`: The method to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the method is allowed, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let allow = Allow::from_str("INVITE, ACK, BYE").unwrap();
+    /// assert!(allow.allows(&Method::INVITE));
+    /// assert!(allow.allows(&Method::ACK));
+    /// assert!(!allow.allows(&Method::REGISTER));
+    /// ```
     pub fn allows(&self, method: &Method) -> bool {
         self.0.contains(method)
     }
 
     /// Adds a method if not already present.
+    ///
+    /// This method is idempotent - if the method is already in the Allow header,
+    /// nothing happens.
+    ///
+    /// # Parameters
+    ///
+    /// - `method`: The method to add
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let mut allow = Allow::new();
+    /// 
+    /// // Add methods
+    /// allow.add_method(Method::INVITE);
+    /// allow.add_method(Method::ACK);
+    /// assert!(allow.allows(&Method::INVITE));
+    ///
+    /// // Adding the same method twice has no effect
+    /// allow.add_method(Method::INVITE);
+    /// 
+    /// // The string representation shows each method only once
+    /// assert_eq!(allow.to_string(), "INVITE, ACK");
+    /// ```
     pub fn add_method(&mut self, method: Method) {
         if !self.allows(&method) {
             self.0.push(method);
@@ -53,6 +222,37 @@ impl fmt::Display for Allow {
 impl FromStr for Allow {
     type Err = Error;
 
+    /// Parses a string into an Allow header.
+    ///
+    /// The string should be a comma-separated list of SIP methods.
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed Allow header, or an error if parsing fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Parse a simple list
+    /// let allow = Allow::from_str("INVITE, ACK, BYE").unwrap();
+    /// assert!(allow.allows(&Method::INVITE));
+    ///
+    /// // Parse with extra whitespace
+    /// let allow = Allow::from_str(" INVITE,ACK ,  BYE ").unwrap();
+    /// assert!(allow.allows(&Method::BYE));
+    ///
+    /// // Parse with extended methods (e.g., methods not defined in the standard)
+    /// let allow = Allow::from_str("INVITE, MEETING").unwrap();
+    /// assert!(allow.allows(&Method::INVITE));
+    /// assert!(allow.allows(&Method::Extension("MEETING".into())));
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::allow::parse_allow;
 
