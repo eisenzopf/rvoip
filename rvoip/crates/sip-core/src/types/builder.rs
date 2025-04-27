@@ -376,6 +376,23 @@ impl ResponseBuilder {
 }
 
 // Builder for Via header
+/// Builder for Via header
+///
+/// The Via header provides information about the path taken by the SIP request
+/// and the path that should be followed for responses.
+///
+/// # Example
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .via("192.168.1.1", "UDP")
+///         .with_branch("z9hG4bK776asdhds")
+///         .with_rport()
+///         .done()
+///     .build();
+/// ```
 pub struct ViaBuilder<P> {
     parent: P,
     protocol: SentProtocol,
@@ -385,6 +402,15 @@ pub struct ViaBuilder<P> {
 }
 
 impl<P> ViaBuilder<P> {
+    /// Creates a new ViaBuilder with the given host and transport
+    ///
+    /// # Parameters
+    /// - `parent`: The parent builder to return to when done
+    /// - `host`: The host or IP address
+    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
+    ///
+    /// # Returns
+    /// A new ViaBuilder
     fn new(parent: P, host: &str, transport: &str) -> Self {
         let protocol = SentProtocol {
             name: "SIP".to_string(),
@@ -401,43 +427,95 @@ impl<P> ViaBuilder<P> {
         }
     }
 
-    /// Add a branch parameter
+    /// Adds a branch parameter
+    ///
+    /// The branch parameter is a unique identifier for the SIP transaction.
+    ///
+    /// # Parameters
+    /// - `branch`: The branch identifier (should start with "z9hG4bK" for RFC 3261 compliance)
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_branch(mut self, branch: &str) -> Self {
         self.params.push(Param::Branch(branch.to_string()));
         self
     }
 
-    /// Add a received parameter
+    /// Adds a received parameter
+    ///
+    /// The received parameter indicates the source IP address from which the message was received.
+    ///
+    /// # Parameters
+    /// - `ip`: The IP address from which the request was received
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_received(mut self, ip: std::net::IpAddr) -> Self {
         self.params.push(Param::Received(ip));
         self
     }
 
-    /// Add a rport parameter
+    /// Adds a rport parameter
+    ///
+    /// The rport parameter with no value enables response routing back through NAT.
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_rport(mut self) -> Self {
         self.params.push(Param::Rport(None));
         self
     }
 
-    /// Add a rport parameter with value
+    /// Adds a rport parameter with value
+    ///
+    /// The rport parameter with a value indicates the port from which the request was sent.
+    ///
+    /// # Parameters
+    /// - `port`: The port number
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_rport_value(mut self, port: u16) -> Self {
         self.params.push(Param::Rport(Some(port)));
         self
     }
 
-    /// Add a ttl parameter
+    /// Adds a ttl parameter
+    ///
+    /// The ttl parameter indicates the time-to-live value for multicast messages.
+    ///
+    /// # Parameters
+    /// - `ttl`: The time-to-live value
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_ttl(mut self, ttl: u8) -> Self {
         self.params.push(Param::Ttl(ttl));
         self
     }
 
-    /// Add a maddr parameter
+    /// Adds a maddr parameter
+    ///
+    /// The maddr parameter indicates the multicast address.
+    ///
+    /// # Parameters
+    /// - `maddr`: The multicast address
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_maddr(mut self, maddr: &str) -> Self {
         self.params.push(Param::Maddr(maddr.to_string()));
         self
     }
     
-    /// Add a generic parameter 
+    /// Adds a generic parameter 
+    ///
+    /// # Parameters
+    /// - `name`: The parameter name
+    /// - `value`: The optional parameter value
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
         let param = match value {
             Some(val) => Param::Other(name.to_string(), Some(val.into())),
@@ -450,7 +528,10 @@ impl<P> ViaBuilder<P> {
 
 // Via builder for Request
 impl ViaBuilder<RequestBuilder> {
-    /// Finish building the Via header and return to the RequestBuilder
+    /// Finishes building the Via header and returns to the RequestBuilder
+    ///
+    /// # Returns
+    /// The parent RequestBuilder with the Via header added
     pub fn done(self) -> RequestBuilder {
         let sent_by_host = match self.host.parse() {
             Ok(host) => host,
@@ -473,7 +554,10 @@ impl ViaBuilder<RequestBuilder> {
 
 // Via builder for Response
 impl ViaBuilder<ResponseBuilder> {
-    /// Finish building the Via header and return to the ResponseBuilder
+    /// Finishes building the Via header and returns to the ResponseBuilder
+    ///
+    /// # Returns
+    /// The parent ResponseBuilder with the Via header added
     pub fn done(self) -> ResponseBuilder {
         let sent_by_host = match self.host.parse() {
             Ok(host) => host,
@@ -495,10 +579,35 @@ impl ViaBuilder<ResponseBuilder> {
 }
 
 // Marker traits for From/To header types
+/// Marker trait for From header in AddressBuilder
+///
+/// This is used as a type parameter in the AddressBuilder to indicate
+/// that it's building a From header.
 pub struct FromHeader;
+
+/// Marker trait for To header in AddressBuilder
+///
+/// This is used as a type parameter in the AddressBuilder to indicate
+/// that it's building a To header.
 pub struct ToHeader;
 
 // Builder for address-based headers (From, To)
+/// Builder for address headers (From, To)
+///
+/// This builder creates headers like From and To that contain a SIP address
+/// with possible parameters including tags for dialog identification.
+///
+/// # Example
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com")
+///         .with_tag("1928301774")
+///         .done()
+///     .build();
+/// ```
 pub struct AddressBuilder<P, T> {
     parent: P,
     address: Address,
@@ -506,6 +615,16 @@ pub struct AddressBuilder<P, T> {
 }
 
 impl<P, T> AddressBuilder<P, T> {
+    /// Creates a new AddressBuilder with the given display name and URI
+    ///
+    /// # Parameters
+    /// - `parent`: The parent builder to return to when done
+    /// - `display_name`: The display name for the address (empty string for none)
+    /// - `uri`: The SIP URI as a string
+    /// - `_marker`: Type marker to determine the header type (FromHeader or ToHeader)
+    ///
+    /// # Returns
+    /// A new AddressBuilder with the specified address
     fn new(parent: P, display_name: &str, uri: &str, _marker: T) -> Self {
         let uri = match Uri::from_str(uri) {
             Ok(uri) => uri,
@@ -520,13 +639,30 @@ impl<P, T> AddressBuilder<P, T> {
         }
     }
 
-    /// Add a tag parameter
+    /// Adds a tag parameter to the address
+    ///
+    /// Tags are used to uniquely identify dialogs. UAs must generate
+    /// unique tags for From headers, and copy To tags from requests
+    /// when creating responses within a dialog.
+    ///
+    /// # Parameters
+    /// - `tag`: The tag value
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.address.set_tag(tag);
         self
     }
 
-    /// Add a custom parameter
+    /// Adds a custom parameter to the address
+    ///
+    /// # Parameters
+    /// - `name`: The parameter name
+    /// - `value`: The optional parameter value
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
         self.address.set_param(name, value);
         self
@@ -535,7 +671,10 @@ impl<P, T> AddressBuilder<P, T> {
 
 // AddressBuilder for From header in Request
 impl AddressBuilder<RequestBuilder, FromHeader> {
-    /// Finish building the From header and return to the RequestBuilder
+    /// Finishes building the From header and returns to the RequestBuilder
+    ///
+    /// # Returns
+    /// The parent RequestBuilder with the From header added
     pub fn done(self) -> RequestBuilder {
         let mut parent = self.parent;
         let from_header = TypedHeader::From(From(self.address));
@@ -546,7 +685,10 @@ impl AddressBuilder<RequestBuilder, FromHeader> {
 
 // AddressBuilder for To header in Request
 impl AddressBuilder<RequestBuilder, ToHeader> {
-    /// Finish building the To header and return to the RequestBuilder
+    /// Finishes building the To header and returns to the RequestBuilder
+    ///
+    /// # Returns
+    /// The parent RequestBuilder with the To header added
     pub fn done(self) -> RequestBuilder {
         let mut parent = self.parent;
         let to_header = TypedHeader::To(To(self.address));
@@ -557,7 +699,10 @@ impl AddressBuilder<RequestBuilder, ToHeader> {
 
 // AddressBuilder for From header in Response
 impl AddressBuilder<ResponseBuilder, FromHeader> {
-    /// Finish building the From header and return to the ResponseBuilder
+    /// Finishes building the From header and returns to the ResponseBuilder
+    ///
+    /// # Returns
+    /// The parent ResponseBuilder with the From header added
     pub fn done(self) -> ResponseBuilder {
         let mut parent = self.parent;
         let from_header = TypedHeader::From(From(self.address));
@@ -568,7 +713,10 @@ impl AddressBuilder<ResponseBuilder, FromHeader> {
 
 // AddressBuilder for To header in Response
 impl AddressBuilder<ResponseBuilder, ToHeader> {
-    /// Finish building the To header and return to the ResponseBuilder
+    /// Finishes building the To header and returns to the ResponseBuilder
+    ///
+    /// # Returns
+    /// The parent ResponseBuilder with the To header added
     pub fn done(self) -> ResponseBuilder {
         let mut parent = self.parent;
         let to_header = TypedHeader::To(To(self.address));
