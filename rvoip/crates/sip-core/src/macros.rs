@@ -202,9 +202,19 @@ macro_rules! sip_request {
             
             // Add the custom headers
             $(
+                // Convert first character to uppercase for header name
+                let header_name = {
+                    let mut name = stringify!($custom_header).to_string();
+                    if !name.is_empty() {
+                        let first_char = name.remove(0).to_uppercase().to_string();
+                        name = first_char + &name;
+                    }
+                    name
+                };
+                
                 request.headers.push(TypedHeader::Other(
-                    HeaderName::Other(stringify!($custom_header).to_string()),
-                    HeaderValue::text($custom_value.to_string())
+                    HeaderName::Other(header_name),
+                    HeaderValue::text($custom_value)
                 ));
             )*
             
@@ -399,9 +409,19 @@ macro_rules! sip_response {
             
             // Add the custom headers
             $(
+                // Convert first character to uppercase for header name
+                let header_name = {
+                    let mut name = stringify!($custom_header).to_string();
+                    if !name.is_empty() {
+                        let first_char = name.remove(0).to_uppercase().to_string();
+                        name = first_char + &name;
+                    }
+                    name
+                };
+                
                 response.headers.push(TypedHeader::Other(
-                    HeaderName::Other(stringify!($custom_header).to_string()),
-                    HeaderValue::text($custom_value.to_string())
+                    HeaderName::Other(header_name),
+                    HeaderValue::text($custom_value)
                 ));
             )*
             
@@ -819,17 +839,16 @@ mod tests {
             if header.to_string().starts_with(&format!("{}:", header_name)) {
                 let header_str = header.to_string();
                 
-                // Find parameter in header string
+                // Find parameter in header string - search for both ";param=" formats
                 if let Some(param_start) = header_str.find(&format!(";{}=", param_name)) {
                     let param_value_start = param_start + param_name.len() + 2; // +2 for ;=
                     
                     // Find end of parameter value
                     let param_value_end = header_str[param_value_start..]
-                        .find(|c| c == ';' || c == '>' || c == ' ')
+                        .find(|c: char| c == ';' || c == '>' || c == ' ' || c == '\r' || c == '\n')
                         .map(|pos| param_value_start + pos)
                         .unwrap_or(header_str.len());
                     
-                    // Return a cloned substring to avoid lifetime issues
                     return Some(header_str[param_value_start..param_value_end].to_string());
                 }
             }
