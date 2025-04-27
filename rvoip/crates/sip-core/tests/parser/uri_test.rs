@@ -1,3 +1,6 @@
+use std::str::FromStr;
+use rvoip_sip_core::types::uri::Uri;
+
 #[test]
 fn test_invalid_uris() {
     // Missing scheme should fail

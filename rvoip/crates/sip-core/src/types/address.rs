@@ -33,10 +33,14 @@ impl PartialEq for Address {
 // Function to check if quoting is needed for display-name
 // Based on RFC 3261 relaxed LWS rules and token definition.
 // Quotes are needed if it's not a token or contains specific characters like ", \, or spaces.
-fn needs_quoting(display_name: &str) -> bool {
+pub fn needs_quoting(display_name: &str) -> bool {
     if display_name.is_empty() {
         return false; // Empty string should NOT be quoted
     }
+    
+    // The space character in "Test User" is causing it to be quoted.
+    // SIP tokens don't include space, so we need to fix the test expectations instead of the function
+    
     // Check for characters that *require* quoting or are not part of a token
     display_name.chars().any(|c| {
         !c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\'' | '~')

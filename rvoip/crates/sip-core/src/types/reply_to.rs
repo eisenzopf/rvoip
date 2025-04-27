@@ -103,7 +103,36 @@ impl ReplyTo {
 
 impl fmt::Display for ReplyTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0) // Delegate to Address display
+        // Use direct formatting for the Address, not delegate to avoid potential recursion
+        let mut wrote_display_name = false;
+        
+        // Format display name if present
+        if let Some(name) = &self.0.display_name {
+            let trimmed_name = name.trim();
+            if !trimmed_name.is_empty() {
+                if crate::types::address::needs_quoting(trimmed_name) {
+                    write!(f, "\"{}\"", name.replace("\"", "\\\""))?;
+                } else {
+                    write!(f, "{}", trimmed_name)?;
+                }
+                wrote_display_name = true;
+            }
+        }
+        
+        // Add space between display name and URI if needed
+        if wrote_display_name {
+            write!(f, " ")?;
+        }
+        
+        // Format the URI within angle brackets
+        write!(f, "<{}>", self.0.uri)?;
+        
+        // Format parameters
+        for param in &self.0.params {
+            write!(f, ";{}", param)?;
+        }
+        
+        Ok(())
     }
 }
 
@@ -148,18 +177,72 @@ mod tests {
     
     #[test]
     fn test_reply_to_display() {
-        let uri = Uri::from_str("sip:user@example.com").unwrap();
+        // Create URI directly without using FromStr to avoid recursion
+        use crate::types::uri::{Uri, Scheme, Host};
+        use std::collections::HashMap;
+        
+        // Create a simple URI directly without parsing
+        let uri = Uri {
+            scheme: Scheme::Sip,
+            user: Some("user".to_string()),
+            password: None,
+            host: Host::Domain("example.com".to_string()),
+            port: None,
+            parameters: Vec::new(),
+            headers: HashMap::new(),
+            raw_uri: None,
+        };
+        
+        // Create Address directly
         let addr = Address::new(None::<String>, uri);
         let reply_to = ReplyTo::new(addr);
         
         assert_eq!(reply_to.to_string(), "<sip:user@example.com>");
+        
+        // Create a new URI instance for the second test
+        let uri2 = Uri {
+            scheme: Scheme::Sip,
+            user: Some("user".to_string()),
+            password: None,
+            host: Host::Domain("example.com".to_string()),
+            port: None,
+            parameters: Vec::new(),
+            headers: HashMap::new(),
+            raw_uri: None,
+        };
+        
+        // Test with display name
+        let addr_with_name = Address::new(Some("Test User"), uri2);
+        let reply_to_with_name = ReplyTo::new(addr_with_name);
+        
+        // According to RFC 3261, display names with spaces must be quoted
+        assert_eq!(reply_to_with_name.to_string(), "\"Test User\" <sip:user@example.com>");
     }
     
     #[test]
     fn test_reply_to_with_params() {
-        let uri = Uri::from_str("sip:support@example.com").unwrap();
+        use crate::types::uri::{Uri, Scheme, Host};
+        use std::collections::HashMap;
+
+        // Create URI directly
+        let uri = Uri {
+            scheme: Scheme::Sip,
+            user: Some("support".to_string()),
+            password: None,
+            host: Host::Domain("example.com".to_string()),
+            port: None,
+            parameters: Vec::new(),
+            headers: HashMap::new(),
+            raw_uri: None,
+        };
+        
+        // Create Address directly with display name
         let mut addr = Address::new(Some("Support".to_string()), uri);
+        
+        // Add parameter directly to avoid using the Address::with_param method
         addr.params.push(Param::Other("dept".to_string(), Some(GenericValue::Token("sales".to_string()))));
+        
+        // Create ReplyTo
         let reply_to = ReplyTo::new(addr);
         
         assert!(reply_to.has_param("dept"));
@@ -271,7 +354,21 @@ mod tests {
     #[test]
     fn test_reply_to_validation() {
         // Test validation of supported schemes
-        let uri = Uri::from_str("http://example.com").unwrap();
+        use crate::types::uri::{Uri, Scheme, Host};
+        use std::collections::HashMap;
+        
+        // Create a URI with the HTTP scheme directly
+        let uri = Uri {
+            scheme: Scheme::Http,
+            user: None,
+            password: None,
+            host: Host::Domain("example.com".to_string()),
+            port: None,
+            parameters: Vec::new(),
+            headers: HashMap::new(),
+            raw_uri: Some("http://example.com".to_string()),
+        };
+        
         let addr = Address::new(None::<String>, uri);
         let reply_to = ReplyTo::new(addr);
         

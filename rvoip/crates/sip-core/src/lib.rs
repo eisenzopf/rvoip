@@ -10,6 +10,7 @@ pub mod error;
 pub mod parser;
 pub mod types;
 pub mod sdp;
+pub mod macros;
 
 // Remove these commented out modules - they're now part of types/
 // // pub mod header;
@@ -54,6 +55,8 @@ pub use types::{
 };
 pub use types::uri::{Uri, Host, Scheme}; // Updated path
 pub use sdp::attributes::MediaDirection;
+pub use types::builder::{RequestBuilder, ResponseBuilder};
+pub use macros::*;
 
 /// Re-export of common types and functions
 pub mod prelude {
@@ -68,6 +71,9 @@ pub mod prelude {
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE};
     pub use crate::parser::parse_message;
     pub use crate::types::multipart::{MultipartBody, MimePart};
+    pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
+    pub use crate::sip_request;
+    pub use crate::sip_response;
 }
 
 #[cfg(test)]
