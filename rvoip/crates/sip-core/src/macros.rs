@@ -19,412 +19,320 @@
 ///     body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
 /// };
 /// ```
+///
+/// The order of headers doesn't matter (except that method and uri must come first), complying with RFC 3261.
 #[macro_export]
 macro_rules! sip_request {
-    // Special case for OPTIONS * (RFC 3261 Section 10.1)
     (
-        method: Method::Options,
-        uri: "*"
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, max_forwards: $max_forwards:expr )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        $(, accept: $accept:expr )?
-        $(, user_agent: $user_agent:expr )?
-        $(, server: $server:expr )?
-        $(, warning: $warning:expr )?
+        method: $method:expr,
+        uri: $uri:expr
+        $(, $key:ident : $value:tt)*
     ) => {
         {
             use $crate::types::builder::RequestBuilder;
             use $crate::types::header::{HeaderName, HeaderValue};
             use $crate::types::TypedHeader;
             use $crate::types::uri::{Uri, Host, Scheme};
+            use $crate::types::Method;
             use $crate::types::sip_message::Request;
             use $crate::types::Version;
             
-            // Create a basic request directly with "*" as the raw URI
-            let mut request = Request::new(Method::Options, Uri::sip("example.com"));
-            request.uri.raw_uri = Some("*".to_string());
-            
-            let mut builder = RequestBuilder::from_request(request);
-
-            $(
-                let mut from_builder = builder.from($from_name, $from_uri);
-                $(
-                    match stringify!($from_param_key) {
-                        "tag" => { from_builder = from_builder.with_tag($from_param_val); },
-                        _ => { from_builder = from_builder.with_param(stringify!($from_param_key), Some($from_param_val)); }
-                    }
-                )*
-                builder = from_builder.done();
-            )?
-
-            $(
-                let mut to_builder = builder.to($to_name, $to_uri);
-                $(
-                    match stringify!($to_param_key) {
-                        "tag" => { to_builder = to_builder.with_tag($to_param_val); },
-                        _ => { to_builder = to_builder.with_param(stringify!($to_param_key), Some($to_param_val)); }
-                    }
-                )*
-                builder = to_builder.done();
-            )?
-
-            $(
-                builder = builder.call_id($call_id);
-            )?
-
-            $(
-                builder = builder.cseq($cseq);
-            )?
-
-            $(
-                let mut via_builder = builder.via($via_host, $via_transport);
-                $(
-                    match stringify!($via_param_key) {
-                        "branch" => { via_builder = via_builder.with_branch($via_param_val); },
-                        "received" => { 
-                            // Parse IP address if possible, otherwise use generic param
-                            if let Ok(ip) = $via_param_val.parse::<std::net::IpAddr>() {
-                                via_builder = via_builder.with_received(ip);
-                            } else {
-                                via_builder = via_builder.with_param("received", Some($via_param_val));
-                            }
-                        },
-                        "ttl" => { 
-                            if let Ok(ttl) = $via_param_val.parse::<u8>() {
-                                via_builder = via_builder.with_ttl(ttl);
-                            } else {
-                                via_builder = via_builder.with_param("ttl", Some($via_param_val));
-                            }
-                        },
-                        "maddr" => { via_builder = via_builder.with_maddr($via_param_val); },
-                        "rport" => {
-                            if $via_param_val == "" || $via_param_val == "true" {
-                                via_builder = via_builder.with_rport();
-                            } else if let Ok(port) = $via_param_val.parse::<u16>() {
-                                via_builder = via_builder.with_rport_value(port);
-                            } else {
-                                via_builder = via_builder.with_param("rport", Some($via_param_val));
-                            }
-                        },
-                        _ => { via_builder = via_builder.with_param(stringify!($via_param_key), Some($via_param_val)); }
-                    }
-                )*
-                builder = via_builder.done();
-            )?
-
-            $(
-                builder = builder.contact($contact_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.contact_with_name($contact_name, $contact_name_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.max_forwards($max_forwards);
-            )?
-
-            $(
-                builder = builder.content_type($content_type)
-                    .expect("Content-Type parse error");
-            )?
-
-            $(
-                builder = builder.body($body);
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Accept,
-                    HeaderValue::text($accept)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::UserAgent,
-                    HeaderValue::text($user_agent)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Server,
-                    HeaderValue::text($server)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Warning,
-                    HeaderValue::text($warning)
-                ));
-            )?
-            
-            builder.build()
-        }
-    };
-
-    // Main macro pattern using token tree matching for parameters
-    (
-        method: $method:expr,
-        uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, max_forwards: $max_forwards:expr )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        $(, accept: $accept:expr )?
-        $(, user_agent: $user_agent:expr )?
-        $(, server: $server:expr )?
-        $(, warning: $warning:expr )?
-    ) => {
-        {
-            use $crate::types::builder::RequestBuilder;
-            use $crate::types::header::{HeaderName, HeaderValue};
-            use $crate::types::TypedHeader;
-            
-            let mut builder = RequestBuilder::new($method, $uri)
-                .expect("URI parse error");
-
-            $(
-                let mut from_builder = builder.from($from_name, $from_uri);
-                $(
-                    match stringify!($from_param_key) {
-                        "tag" => { from_builder = from_builder.with_tag($from_param_val); },
-                        _ => { from_builder = from_builder.with_param(stringify!($from_param_key), Some($from_param_val)); }
-                    }
-                )*
-                builder = from_builder.done();
-            )?
-
-            $(
-                let mut to_builder = builder.to($to_name, $to_uri);
-                $(
-                    match stringify!($to_param_key) {
-                        "tag" => { to_builder = to_builder.with_tag($to_param_val); },
-                        _ => { to_builder = to_builder.with_param(stringify!($to_param_key), Some($to_param_val)); }
-                    }
-                )*
-                builder = to_builder.done();
-            )?
-
-            $(
-                builder = builder.call_id($call_id);
-            )?
-
-            $(
-                builder = builder.cseq($cseq);
-            )?
-
-            $(
-                let mut via_builder = builder.via($via_host, $via_transport);
-                $(
-                    match stringify!($via_param_key) {
-                        "branch" => { via_builder = via_builder.with_branch($via_param_val); },
-                        "received" => { 
-                            // Parse IP address if possible, otherwise use generic param
-                            if let Ok(ip) = $via_param_val.parse::<std::net::IpAddr>() {
-                                via_builder = via_builder.with_received(ip);
-                            } else {
-                                via_builder = via_builder.with_param("received", Some($via_param_val));
-                            }
-                        },
-                        "ttl" => { 
-                            if let Ok(ttl) = $via_param_val.parse::<u8>() {
-                                via_builder = via_builder.with_ttl(ttl);
-                            } else {
-                                via_builder = via_builder.with_param("ttl", Some($via_param_val));
-                            }
-                        },
-                        "maddr" => { via_builder = via_builder.with_maddr($via_param_val); },
-                        "rport" => {
-                            if $via_param_val == "" || $via_param_val == "true" {
-                                via_builder = via_builder.with_rport();
-                            } else if let Ok(port) = $via_param_val.parse::<u16>() {
-                                via_builder = via_builder.with_rport_value(port);
-                            } else {
-                                via_builder = via_builder.with_param("rport", Some($via_param_val));
-                            }
-                        },
-                        _ => { via_builder = via_builder.with_param(stringify!($via_param_key), Some($via_param_val)); }
-                    }
-                )*
-                builder = via_builder.done();
-            )?
-
-            $(
-                builder = builder.contact($contact_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.contact_with_name($contact_name, $contact_name_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.max_forwards($max_forwards);
-            )?
-
-            $(
-                builder = builder.content_type($content_type)
-                    .expect("Content-Type parse error");
-            )?
-
-            $(
-                builder = builder.body($body);
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Accept,
-                    HeaderValue::text($accept)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::UserAgent,
-                    HeaderValue::text($user_agent)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Server,
-                    HeaderValue::text($server)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Warning,
-                    HeaderValue::text($warning)
-                ));
-            )?
-            
-            builder.build()
-        }
-    };
-
-    // Alternative pattern for "spaced" format - correctly handle same format as main pattern
-    (
-        method: $method:expr,
-        uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, max_forwards: $max_forwards:expr )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        $(, accept: $accept:expr )?
-        $(, user_agent: $user_agent:expr )?
-        $(, server: $server:expr )?
-        $(, warning: $warning:expr )?
-    ) => {
-        $crate::sip_request! {
-            method: $method,
-            uri: $uri
-            $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
-            $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
-            $(, call_id: $call_id )?
-            $(, cseq: $cseq )?
-            $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
-            $(, contact: $contact_uri )?
-            $(, contact_name: ($contact_name, $contact_name_uri) )?
-            $(, max_forwards: $max_forwards )?
-            $(, content_type: $content_type )?
-            $(, body: $body )?
-            $(, accept: $accept )?
-            $(, user_agent: $user_agent )?
-            $(, server: $server )?
-            $(, warning: $warning )?
-        }
-    };
-    
-    // Handle custom headers with a dedicated "headers" field
-    (
-        method: $method:expr,
-        uri: $uri:expr
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: $cseq:expr )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, max_forwards: $max_forwards:expr )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        , headers: { $( $custom_header:ident: $custom_value:expr ),* }
-    ) => {
-        {
-            use $crate::types::header::{HeaderName, HeaderValue};
-            use $crate::types::TypedHeader;
-            
-            let mut request = $crate::sip_request! {
-                method: $method,
-                uri: $uri
-                $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
-                $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
-                $(, call_id: $call_id )?
-                $(, cseq: $cseq )?
-                $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
-                $(, contact: $contact_uri )?
-                $(, contact_name: ($contact_name, $contact_name_uri) )?
-                $(, max_forwards: $max_forwards )?
-                $(, content_type: $content_type )?
-                $(, body: $body )?
+            let builder = if $method == Method::Options && $uri == "*" {
+                let mut request = Request::new(Method::Options, Uri::sip("example.com"));
+                request.uri.raw_uri = Some("*".to_string());
+                RequestBuilder::from_request(request)
+            } else {
+                RequestBuilder::new($method, $uri).expect("Failed to create RequestBuilder")
             };
             
-            // Add the custom headers
+            let mut builder = builder;
+
             $(
-                // Convert header name to proper format
-                let header_name = match stringify!($custom_header) {
-                    "accept" => HeaderName::Accept,
-                    "user_agent" => HeaderName::UserAgent,
-                    "server" => HeaderName::Server,
-                    "warning" => HeaderName::Warning,
+                builder = $crate::sip_request!(@process_field builder, $key, $value);
+            )*
+
+            builder.build()
+        }
+    };
+
+    // Process individual header fields based on key
+    (@process_field $builder:ident, from, $from:tt) => {{
+        $crate::sip_request!(@process_from $builder, $from)
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr)) => {{
+        $builder.from($name, $uri).done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr)) => {{
+        $builder.from($name, $uri).with_tag($tag).done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.from($name, $uri).with_tag($tag);
+        $crate::sip_request!(@process_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.from($name, $uri);
+        match stringify!($param_key) {
+            "tag" => { builder = builder.with_tag($param_val); },
+            _ => { builder = builder.with_param(stringify!($param_key), Some($param_val)); }
+        }
+        $(
+            $crate::sip_request!(@process_params builder, $rest);
+        )*
+        builder.done()
+    }};
+    
+    (@process_params $builder:ident, $key:ident = $val:expr $(, $rest:tt)*) => {{
+        match stringify!($key) {
+            "tag" => { $builder = $builder.with_tag($val); },
+            _ => { $builder = $builder.with_param(stringify!($key), Some($val)); }
+        }
+        $(
+            $crate::sip_request!(@process_params $builder, $rest);
+        )*
+    }};
+    
+    (@process_field $builder:ident, to, $to:tt) => {{
+        $crate::sip_request!(@process_to $builder, $to)
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr)) => {{
+        $builder.to($name, $uri).done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr)) => {{
+        $builder.to($name, $uri).with_tag($tag).done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.to($name, $uri).with_tag($tag);
+        $crate::sip_request!(@process_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.to($name, $uri);
+        match stringify!($param_key) {
+            "tag" => { builder = builder.with_tag($param_val); },
+            _ => { builder = builder.with_param(stringify!($param_key), Some($param_val)); }
+        }
+        $(
+            $crate::sip_request!(@process_params builder, $rest);
+        )*
+        builder.done()
+    }};
+    
+    (@process_field $builder:ident, call_id, $call_id:expr) => {
+        $builder.call_id($call_id)
+    };
+    
+    (@process_field $builder:ident, cseq, $cseq:expr) => {
+        $builder.cseq($cseq)
+    };
+    
+    (@process_field $builder:ident, via, $via:tt) => {{
+        $crate::sip_request!(@process_via $builder, $via)
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr)) => {{
+        $builder.via($host, $transport).done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr)) => {{
+        $builder.via($host, $transport).with_branch($branch).done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr, received = $received:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport).with_branch($branch);
+        
+        // Parse IP address if possible, otherwise use generic param
+        if let Ok(ip) = $received.parse::<std::net::IpAddr>() {
+            builder = builder.with_received(ip);
+        } else {
+            builder = builder.with_param("received", Some($received));
+        }
+        
+        $crate::sip_request!(@process_via_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport).with_branch($branch);
+        $crate::sip_request!(@process_via_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport);
+        
+        $crate::sip_request!(@process_via_param builder, $param_key, $param_val);
+        $(
+            $crate::sip_request!(@process_via_params builder, $rest);
+        )*
+        
+        builder.done()
+    }};
+    
+    (@process_via_params $builder:ident, $key:ident = $val:expr $(, $rest:tt)*) => {{
+        $crate::sip_request!(@process_via_param $builder, $key, $val);
+        $(
+            $crate::sip_request!(@process_via_params $builder, $rest);
+        )*
+    }};
+    
+    (@process_via_param $builder:ident, branch, $val:expr) => {{
+        $builder = $builder.with_branch($val);
+    }};
+    
+    (@process_via_param $builder:ident, received, $val:expr) => {{
+        if let Ok(ip) = $val.parse::<std::net::IpAddr>() {
+            $builder = $builder.with_received(ip);
+        } else {
+            $builder = $builder.with_param("received", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, ttl, $val:expr) => {{
+        if let Ok(ttl) = $val.parse::<u8>() {
+            $builder = $builder.with_ttl(ttl);
+        } else {
+            $builder = $builder.with_param("ttl", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, maddr, $val:expr) => {{
+        $builder = $builder.with_maddr($val);
+    }};
+    
+    (@process_via_param $builder:ident, rport, $val:expr) => {{
+        if $val == "" || $val == "true" {
+            $builder = $builder.with_rport();
+        } else if let Ok(port) = $val.parse::<u16>() {
+            $builder = $builder.with_rport_value(port);
+        } else {
+            $builder = $builder.with_param("rport", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, $key:ident, $val:expr) => {{
+        $builder = $builder.with_param(stringify!($key), Some($val));
+    }};
+    
+    (@process_field $builder:ident, contact, $contact_uri:expr) => {
+        $builder.contact($contact_uri)
+            .expect("Contact URI parse error")
+    };
+    
+    (@process_field $builder:ident, contact_name, ($name:expr, $uri:expr)) => {
+        $builder.contact_with_name($name, $uri)
+            .expect("Contact URI parse error")
+    };
+    
+    (@process_field $builder:ident, max_forwards, $max_forwards:expr) => {
+        $builder.max_forwards($max_forwards)
+    };
+    
+    (@process_field $builder:ident, content_type, $content_type:expr) => {
+        $builder.content_type($content_type)
+            .expect("Content-Type parse error")
+    };
+    
+    (@process_field $builder:ident, body, $body:expr) => {
+        $builder.body($body)
+    };
+    
+    (@process_field $builder:ident, accept, $value:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Accept,
+            HeaderValue::text($value)
+        ))
+    };
+    
+    (@process_field $builder:ident, user_agent, $user_agent:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::UserAgent,
+            HeaderValue::text($user_agent)
+        ))
+    };
+    
+    (@process_field $builder:ident, server, $server:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Server,
+            HeaderValue::text($server)
+        ))
+    };
+    
+    (@process_field $builder:ident, warning, $warning:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Warning,
+            HeaderValue::text($warning)
+        ))
+    };
+    
+    // Special case for headers block
+    (@process_field $builder:ident, headers, { $($custom_header:ident : $custom_value:expr),* }) => {
+        {
+            let mut builder = $builder;
+            $(
+                match stringify!($custom_header) {
+                    "accept" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Accept,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "user_agent" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::UserAgent,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "server" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Server,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "warning" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Warning,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
                     _ => {
                         // For other headers, capitalize the first letter of each word
                         let mut name = stringify!($custom_header).to_string();
                         if !name.is_empty() {
                             let first_char = name.remove(0).to_uppercase().to_string();
                             name = first_char + &name;
-                            // Replace underscores with hyphens
-                            name = name.replace('_', "-");
+                            
+                            // Replace underscores with hyphens and capitalize each word
+                            let parts: Vec<&str> = name.split('_').collect();
+                            if parts.len() > 1 {
+                                name = parts.iter().map(|part| {
+                                    if !part.is_empty() {
+                                        let mut p = part.to_string();
+                                        let first = p.remove(0).to_uppercase().to_string();
+                                        first + &p
+                                    } else {
+                                        String::new()
+                                    }
+                                }).collect::<Vec<_>>().join("-");
+                            }
                         }
-                        HeaderName::Other(name)
+                        
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Other(name),
+                            HeaderValue::text($custom_value)
+                        ));
                     }
-                };
-                
-                request.headers.push(TypedHeader::Other(
-                    header_name,
-                    HeaderValue::text($custom_value)
-                ));
+                }
             )*
-            
-            request
+            builder
         }
     };
 }
@@ -449,251 +357,310 @@ macro_rules! sip_request {
 ///     body: "v=0\r\no=bob 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
 /// };
 /// ```
+///
+/// The order of headers doesn't matter (except that status must come first), complying with RFC 3261.
 #[macro_export]
 macro_rules! sip_response {
     (
         status: $status:expr
-        $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        $(, accept: $accept:expr )?
-        $(, user_agent: $user_agent:expr )?
-        $(, server: $server:expr )?
-        $(, warning: $warning:expr )?
+        $(, $key:ident : $value:tt)*
     ) => {
         {
             use $crate::types::builder::ResponseBuilder;
             use $crate::types::header::{HeaderName, HeaderValue};
             use $crate::types::TypedHeader;
+            use $crate::types::uri::{Uri, Host, Scheme};
+            use $crate::types::Method;
+            use $crate::types::StatusCode;
             
             let mut builder = ResponseBuilder::new($status);
 
             $(
-                builder = builder.reason($reason);
-            )?
+                builder = $crate::sip_response!(@process_field builder, $key, $value);
+            )*
 
-            $(
-                let mut from_builder = builder.from($from_name, $from_uri);
-                $(
-                    match stringify!($from_param_key) {
-                        "tag" => { from_builder = from_builder.with_tag($from_param_val); },
-                        _ => { from_builder = from_builder.with_param(stringify!($from_param_key), Some($from_param_val)); }
-                    }
-                )*
-                builder = from_builder.done();
-            )?
-
-            $(
-                let mut to_builder = builder.to($to_name, $to_uri);
-                $(
-                    match stringify!($to_param_key) {
-                        "tag" => { to_builder = to_builder.with_tag($to_param_val); },
-                        _ => { to_builder = to_builder.with_param(stringify!($to_param_key), Some($to_param_val)); }
-                    }
-                )*
-                builder = to_builder.done();
-            )?
-
-            $(
-                builder = builder.call_id($call_id);
-            )?
-
-            $(
-                builder = builder.cseq($cseq, $cseq_method);
-            )?
-
-            $(
-                let mut via_builder = builder.via($via_host, $via_transport);
-                $(
-                    match stringify!($via_param_key) {
-                        "branch" => { via_builder = via_builder.with_branch($via_param_val); },
-                        "received" => { 
-                            // Parse IP address if possible, otherwise use generic param
-                            if let Ok(ip) = $via_param_val.parse::<std::net::IpAddr>() {
-                                via_builder = via_builder.with_received(ip);
-                            } else {
-                                via_builder = via_builder.with_param("received", Some($via_param_val));
-                            }
-                        },
-                        "ttl" => { 
-                            if let Ok(ttl) = $via_param_val.parse::<u8>() {
-                                via_builder = via_builder.with_ttl(ttl);
-                            } else {
-                                via_builder = via_builder.with_param("ttl", Some($via_param_val));
-                            }
-                        },
-                        "maddr" => { via_builder = via_builder.with_maddr($via_param_val); },
-                        "rport" => {
-                            if $via_param_val == "" || $via_param_val == "true" {
-                                via_builder = via_builder.with_rport();
-                            } else if let Ok(port) = $via_param_val.parse::<u16>() {
-                                via_builder = via_builder.with_rport_value(port);
-                            } else {
-                                via_builder = via_builder.with_param("rport", Some($via_param_val));
-                            }
-                        },
-                        _ => { via_builder = via_builder.with_param(stringify!($via_param_key), Some($via_param_val)); }
-                    }
-                )*
-                builder = via_builder.done();
-            )?
-
-            $(
-                builder = builder.contact($contact_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.contact_with_name($contact_name, $contact_name_uri)
-                    .expect("Contact URI parse error");
-            )?
-
-            $(
-                builder = builder.content_type($content_type)
-                    .expect("Content-Type parse error");
-            )?
-
-            $(
-                builder = builder.body($body);
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Accept,
-                    HeaderValue::text($accept)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::UserAgent,
-                    HeaderValue::text($user_agent)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Server,
-                    HeaderValue::text($server)
-                ));
-            )?
-            
-            $(
-                builder = builder.header(TypedHeader::Other(
-                    HeaderName::Warning,
-                    HeaderValue::text($warning)
-                ));
-            )?
-            
             builder.build()
         }
     };
-
-    // Alternative pattern for "spaced" format - correctly handle same format as main pattern
-    (
-        status: $status:expr
-        $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        $(, accept: $accept:expr )?
-        $(, user_agent: $user_agent:expr )?
-        $(, server: $server:expr )?
-        $(, warning: $warning:expr )?
-    ) => {
-        $crate::sip_response! {
-            status: $status
-            $(, reason: $reason )?
-            $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
-            $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
-            $(, call_id: $call_id )?
-            $(, cseq: ($cseq, $cseq_method) )?
-            $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
-            $(, contact: $contact_uri )?
-            $(, contact_name: ($contact_name, $contact_name_uri) )?
-            $(, content_type: $content_type )?
-            $(, body: $body )?
-            $(, accept: $accept )?
-            $(, user_agent: $user_agent )?
-            $(, server: $server )?
-            $(, warning: $warning )?
-        }
+    
+    // Process individual header fields based on key
+    (@process_field $builder:ident, reason, $reason:expr) => {
+        $builder.reason($reason)
     };
     
-    // Handle custom headers with a dedicated "headers" field
-    (
-        status: $status:expr
-        $(, reason: $reason:expr )?
-        $(, from: ($from_name:expr, $from_uri:expr $(, $from_param_key:tt = $from_param_val:expr)*) )?
-        $(, to: ($to_name:expr, $to_uri:expr $(, $to_param_key:tt = $to_param_val:expr)*) )?
-        $(, call_id: $call_id:expr )?
-        $(, cseq: ($cseq:expr, $cseq_method:expr) )?
-        $(, via: ($via_host:expr, $via_transport:expr $(, $via_param_key:tt = $via_param_val:expr)*) )?
-        $(, contact: $contact_uri:expr )?
-        $(, contact_name: ($contact_name:expr, $contact_name_uri:expr) )?
-        $(, content_type: $content_type:expr )?
-        $(, body: $body:expr )?
-        , headers: { $( $custom_header:ident: $custom_value:expr ),* }
-    ) => {
+    (@process_field $builder:ident, from, $from:tt) => {{
+        $crate::sip_response!(@process_from $builder, $from)
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr)) => {{
+        $builder.from($name, $uri).done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr)) => {{
+        $builder.from($name, $uri).with_tag($tag).done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.from($name, $uri).with_tag($tag);
+        $crate::sip_response!(@process_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_from $builder:ident, ($name:expr, $uri:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.from($name, $uri);
+        match stringify!($param_key) {
+            "tag" => { builder = builder.with_tag($param_val); },
+            _ => { builder = builder.with_param(stringify!($param_key), Some($param_val)); }
+        }
+        $(
+            $crate::sip_response!(@process_params builder, $rest);
+        )*
+        builder.done()
+    }};
+    
+    (@process_params $builder:ident, $key:ident = $val:expr $(, $rest:tt)*) => {{
+        match stringify!($key) {
+            "tag" => { $builder = $builder.with_tag($val); },
+            _ => { $builder = $builder.with_param(stringify!($key), Some($val)); }
+        }
+        $(
+            $crate::sip_response!(@process_params $builder, $rest);
+        )*
+    }};
+    
+    (@process_field $builder:ident, to, $to:tt) => {{
+        $crate::sip_response!(@process_to $builder, $to)
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr)) => {{
+        $builder.to($name, $uri).done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr)) => {{
+        $builder.to($name, $uri).with_tag($tag).done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, tag = $tag:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.to($name, $uri).with_tag($tag);
+        $crate::sip_response!(@process_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_to $builder:ident, ($name:expr, $uri:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.to($name, $uri);
+        match stringify!($param_key) {
+            "tag" => { builder = builder.with_tag($param_val); },
+            _ => { builder = builder.with_param(stringify!($param_key), Some($param_val)); }
+        }
+        $(
+            $crate::sip_response!(@process_params builder, $rest);
+        )*
+        builder.done()
+    }};
+    
+    (@process_field $builder:ident, call_id, $call_id:expr) => {
+        $builder.call_id($call_id)
+    };
+    
+    (@process_field $builder:ident, cseq, $cseq:tt) => {
+        $builder.cseq($cseq.0, $cseq.1)
+    };
+    
+    (@process_field $builder:ident, via, $via:tt) => {{
+        $crate::sip_response!(@process_via $builder, $via)
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr)) => {{
+        $builder.via($host, $transport).done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr)) => {{
+        $builder.via($host, $transport).with_branch($branch).done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr, received = $received:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport).with_branch($branch);
+        
+        // Parse IP address if possible, otherwise use generic param
+        if let Ok(ip) = $received.parse::<std::net::IpAddr>() {
+            builder = builder.with_received(ip);
+        } else {
+            builder = builder.with_param("received", Some($received));
+        }
+        
+        $crate::sip_response!(@process_via_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, branch = $branch:expr, $($rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport).with_branch($branch);
+        $crate::sip_response!(@process_via_params builder, $($rest)*);
+        builder.done()
+    }};
+    
+    (@process_via $builder:ident, ($host:expr, $transport:expr, $param_key:ident = $param_val:expr $(, $rest:tt)*)) => {{
+        let mut builder = $builder.via($host, $transport);
+        
+        $crate::sip_response!(@process_via_param builder, $param_key, $param_val);
+        $(
+            $crate::sip_response!(@process_via_params builder, $rest);
+        )*
+        
+        builder.done()
+    }};
+    
+    (@process_via_params $builder:ident, $key:ident = $val:expr $(, $rest:tt)*) => {{
+        $crate::sip_response!(@process_via_param $builder, $key, $val);
+        $(
+            $crate::sip_response!(@process_via_params $builder, $rest);
+        )*
+    }};
+    
+    (@process_via_param $builder:ident, branch, $val:expr) => {{
+        $builder = $builder.with_branch($val);
+    }};
+    
+    (@process_via_param $builder:ident, received, $val:expr) => {{
+        if let Ok(ip) = $val.parse::<std::net::IpAddr>() {
+            $builder = $builder.with_received(ip);
+        } else {
+            $builder = $builder.with_param("received", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, ttl, $val:expr) => {{
+        if let Ok(ttl) = $val.parse::<u8>() {
+            $builder = $builder.with_ttl(ttl);
+        } else {
+            $builder = $builder.with_param("ttl", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, maddr, $val:expr) => {{
+        $builder = $builder.with_maddr($val);
+    }};
+    
+    (@process_via_param $builder:ident, rport, $val:expr) => {{
+        if $val == "" || $val == "true" {
+            $builder = $builder.with_rport();
+        } else if let Ok(port) = $val.parse::<u16>() {
+            $builder = $builder.with_rport_value(port);
+        } else {
+            $builder = $builder.with_param("rport", Some($val));
+        }
+    }};
+    
+    (@process_via_param $builder:ident, $key:ident, $val:expr) => {{
+        $builder = $builder.with_param(stringify!($key), Some($val));
+    }};
+    
+    (@process_field $builder:ident, contact, $contact_uri:expr) => {
+        $builder.contact($contact_uri)
+            .expect("Contact URI parse error")
+    };
+    
+    (@process_field $builder:ident, contact_name, ($name:expr, $uri:expr)) => {
+        $builder.contact_with_name($name, $uri)
+            .expect("Contact URI parse error")
+    };
+    
+    (@process_field $builder:ident, content_type, $content_type:expr) => {
+        $builder.content_type($content_type)
+            .expect("Content-Type parse error")
+    };
+    
+    (@process_field $builder:ident, body, $body:expr) => {
+        $builder.body($body)
+    };
+    
+    (@process_field $builder:ident, accept, $accept:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Accept,
+            HeaderValue::text($accept)
+        ))
+    };
+    
+    (@process_field $builder:ident, user_agent, $user_agent:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::UserAgent,
+            HeaderValue::text($user_agent)
+        ))
+    };
+    
+    (@process_field $builder:ident, server, $server:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Server,
+            HeaderValue::text($server)
+        ))
+    };
+    
+    (@process_field $builder:ident, warning, $warning:expr) => {
+        $builder.header(TypedHeader::Other(
+            HeaderName::Warning,
+            HeaderValue::text($warning)
+        ))
+    };
+    
+    // Special case for headers block
+    (@process_field $builder:ident, headers, { $($custom_header:ident : $custom_value:expr),* }) => {
         {
-            use $crate::types::header::{HeaderName, HeaderValue};
-            use $crate::types::TypedHeader;
-            
-            let mut response = $crate::sip_response! {
-                status: $status
-                $(, reason: $reason )?
-                $(, from: ($from_name, $from_uri $(, $from_param_key = $from_param_val)*) )?
-                $(, to: ($to_name, $to_uri $(, $to_param_key = $to_param_val)*) )?
-                $(, call_id: $call_id )?
-                $(, cseq: ($cseq, $cseq_method) )?
-                $(, via: ($via_host, $via_transport $(, $via_param_key = $via_param_val)*) )?
-                $(, contact: $contact_uri )?
-                $(, contact_name: ($contact_name, $contact_name_uri) )?
-                $(, content_type: $content_type )?
-                $(, body: $body )?
-            };
-            
-            // Add the custom headers
+            let mut builder = $builder;
             $(
-                // Convert header name to proper format
-                let header_name = match stringify!($custom_header) {
-                    "accept" => HeaderName::Accept,
-                    "user_agent" => HeaderName::UserAgent,
-                    "server" => HeaderName::Server,
-                    "warning" => HeaderName::Warning,
+                match stringify!($custom_header) {
+                    "accept" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Accept,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "user_agent" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::UserAgent,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "server" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Server,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
+                    "warning" => {
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Warning,
+                            HeaderValue::text($custom_value)
+                        ));
+                    },
                     _ => {
                         // For other headers, capitalize the first letter of each word
                         let mut name = stringify!($custom_header).to_string();
                         if !name.is_empty() {
                             let first_char = name.remove(0).to_uppercase().to_string();
                             name = first_char + &name;
-                            // Replace underscores with hyphens
-                            name = name.replace('_', "-");
+                            
+                            // Replace underscores with hyphens and capitalize each word
+                            let parts: Vec<&str> = name.split('_').collect();
+                            if parts.len() > 1 {
+                                name = parts.iter().map(|part| {
+                                    if !part.is_empty() {
+                                        let mut p = part.to_string();
+                                        let first = p.remove(0).to_uppercase().to_string();
+                                        first + &p
+                                    } else {
+                                        String::new()
+                                    }
+                                }).collect::<Vec<_>>().join("-");
+                            }
                         }
-                        HeaderName::Other(name)
+                        
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Other(name),
+                            HeaderValue::text($custom_value)
+                        ));
                     }
-                };
-                
-                response.headers.push(TypedHeader::Other(
-                    header_name,
-                    HeaderValue::text($custom_value)
-                ));
+                }
             )*
-            
-            response
+            builder
         }
     };
 }
@@ -1265,7 +1232,7 @@ mod tests {
         assert!(server.to_string().contains("Test Server/1.0"));
     }
 
-    // Helper function to extract parameter value from a header
+    // Helper function to extract parameter value from a header - now returns String to avoid lifetime issues
     fn find_header_value(headers: &[TypedHeader], header_name: &str, param_name: &str) -> Option<String> {
         for header in headers {
             if header.to_string().starts_with(&format!("{}:", header_name)) {
