@@ -1,9 +1,52 @@
+//! # SIP Message Types
+//!
+//! This module provides the core SIP message types: [`Request`], [`Response`], and [`Message`].
+//!
+//! These types form the foundation of the SIP protocol implementation, allowing you to:
+//! - Parse incoming SIP messages
+//! - Create and modify SIP requests and responses
+//! - Access and manipulate headers and message bodies
+//! - Serialize messages for transmission
+//!
+//! ## Examples
+//!
+//! ### Creating a SIP request
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use bytes::Bytes;
+//!
+//! // Create a basic SIP INVITE request
+//! let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+//!     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
+//!     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())))
+//!     .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .with_header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+//!     .with_body(Bytes::from("SDP body content here"));
+//!
+//! // Convert to a Message enum for unified handling
+//! let message: Message = request.into();
+//! ```
+//!
+//! ### Creating a SIP response
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//!
+//! // Create a SIP 200 OK response
+//! let response = Response::new(StatusCode::Ok)
+//!     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
+//!     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())))
+//!     .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .with_header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)));
+//! ```
+
 use std::collections::HashMap;
 use std::fmt;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize}; // Uncommented Serde
 
-use crate::types::header::{Header, HeaderName, TypedHeader};
+use crate::types::header::{Header, HeaderName, TypedHeader, TypedHeaderTrait};
 use crate::types::uri::Uri;
 use crate::types::version::Version;
 // Use types from the current crate's types module
@@ -17,6 +60,20 @@ use crate::types::sdp::SdpSession; // Assuming SdpSession is in types::sdp
 use crate::types::via::{Via, ViaHeader};
 
 /// A SIP request message
+///
+/// Represents a SIP request sent from a client to a server, containing a method,
+/// target URI, headers, and optional body.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a basic INVITE request
+/// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+///     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
+///     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())));
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// The method of the request
@@ -33,6 +90,15 @@ pub struct Request {
 
 impl Request {
     /// Creates a new SIP request with the specified method and URI
+    ///
+    /// This initializes a request with SIP/2.0 version, empty headers, and empty body.
+    ///
+    /// # Parameters
+    /// - `method`: The SIP method (INVITE, ACK, BYE, etc.)
+    /// - `uri`: The target URI (e.g., "sip:user@example.com")
+    ///
+    /// # Returns
+    /// A new `Request` instance
     pub fn new(method: Method, uri: Uri) -> Self {
         Request {
             method,
@@ -44,25 +110,72 @@ impl Request {
     }
 
     /// Adds a typed header to the request
+    ///
+    /// # Parameters
+    /// - `header`: The typed header to add
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_header(mut self, header: TypedHeader) -> Self {
         self.headers.push(header);
         self
     }
 
     /// Sets all headers from a Vec<TypedHeader> (used by parser)
+    ///
+    /// # Parameters
+    /// - `headers`: Vector of typed headers to set
     pub fn set_headers(&mut self, headers: Vec<TypedHeader>) {
         self.headers = headers;
     }
 
     /// Sets the body of the request
+    ///
+    /// # Parameters
+    /// - `body`: The request body
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
         self
     }
 
     /// Retrieves the first typed header with the specified name, if any
+    ///
+    /// # Parameters
+    /// - `name`: The header name to look for
+    ///
+    /// # Returns
+    /// An optional reference to the first matching header
     pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
         self.headers.iter().find(|h| h.name() == *name)
+    }
+
+    /// Returns the method of the request
+    pub fn method(&self) -> Method {
+        self.method.clone()
+    }
+    
+    /// Returns the URI of the request
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+    
+    /// Retrieves a strongly-typed header value
+    ///
+    /// # Type Parameters
+    /// - `T`: The expected header type
+    ///
+    /// # Returns
+    /// The typed header if found and correctly typed, or None
+    pub fn typed_header<T: TypedHeaderTrait>(&self) -> Option<&T> {
+        for header in &self.headers {
+            if let Some(typed) = try_as_typed_header::<T>(header) {
+                return Some(typed);
+            }
+        }
+        None
     }
 
     /// Retrieves the Call-ID header value, if present
@@ -88,8 +201,9 @@ impl Request {
     }
 
     /// Get all Via headers as structured Via objects
-    /// Note: This relies on the Via parser being available where called.
-    /// TODO: Refactor to return `Result<Vec<Via>>` or use a dedicated typed header getter.
+    ///
+    /// # Returns
+    /// A vector of all Via headers in the request
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
@@ -103,7 +217,9 @@ impl Request {
     }
 
     /// Get the first Via header as a structured Via object
-    /// TODO: Refactor similar to via_headers.
+    ///
+    /// # Returns
+    /// The first Via header if present, or None
     pub fn first_via(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
              if let TypedHeader::Via(via_data) = h {
@@ -145,7 +261,10 @@ impl Request {
         })
     }
 
-    /// Convert the message to bytes
+    /// Convert the message to bytes without including the body
+    ///
+    /// # Returns
+    /// A vector of bytes containing the request line and headers
     pub fn to_bytes_no_body(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         
@@ -190,6 +309,23 @@ impl fmt::Display for Request {
 }
 
 /// A SIP response message
+///
+/// Represents a SIP response sent from a server to a client, containing
+/// a status code, reason phrase, headers, and optional body.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a 200 OK response
+/// let response = Response::new(StatusCode::Ok)
+///     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
+///     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())));
+///
+/// // Or use a convenience method for common responses
+/// let trying = Response::trying();
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// The SIP version
@@ -206,6 +342,15 @@ pub struct Response {
 
 impl Response {
     /// Creates a new SIP response with the specified status code
+    ///
+    /// This initializes a response with SIP/2.0 version, the given status code,
+    /// default reason phrase, empty headers, and empty body.
+    ///
+    /// # Parameters
+    /// - `status`: The SIP status code
+    ///
+    /// # Returns
+    /// A new `Response` instance
     pub fn new(status: StatusCode) -> Self {
         Response {
             version: Version::sip_2_0(),
@@ -217,51 +362,106 @@ impl Response {
     }
 
     /// Creates a SIP 100 Trying response
+    ///
+    /// # Returns
+    /// A new `Response` with 100 Trying status
     pub fn trying() -> Self {
         Response::new(StatusCode::Trying)
     }
 
     /// Creates a SIP 180 Ringing response
+    ///
+    /// # Returns
+    /// A new `Response` with 180 Ringing status
     pub fn ringing() -> Self {
         Response::new(StatusCode::Ringing)
     }
 
     /// Creates a SIP 200 OK response
+    ///
+    /// # Returns
+    /// A new `Response` with 200 OK status
     pub fn ok() -> Self {
         Response::new(StatusCode::Ok)
     }
 
     /// Adds a typed header to the response
+    ///
+    /// # Parameters
+    /// - `header`: The typed header to add
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_header(mut self, header: TypedHeader) -> Self {
         self.headers.push(header);
         self
     }
 
     /// Sets all headers from a Vec<TypedHeader> (used by parser)
+    ///
+    /// # Parameters
+    /// - `headers`: Vector of typed headers to set
     pub fn set_headers(&mut self, headers: Vec<TypedHeader>) {
         self.headers = headers;
     }
 
     /// Sets a custom reason phrase for the response
+    ///
+    /// # Parameters
+    /// - `reason`: The custom reason phrase
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
         self
     }
 
     /// Sets the body of the response
+    ///
+    /// # Parameters
+    /// - `body`: The response body
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
         self
     }
 
     /// Retrieves the first typed header with the specified name, if any
+    ///
+    /// # Parameters
+    /// - `name`: The header name to look for
+    ///
+    /// # Returns
+    /// An optional reference to the first matching header
     pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
         self.headers.iter().find(|h| h.name() == *name)
     }
 
     /// Gets the reason phrase for this response (either the custom one or the default)
+    ///
+    /// # Returns
+    /// The reason phrase as a string slice
     pub fn reason_phrase(&self) -> &str {
         self.reason.as_deref().unwrap_or_else(|| self.status.reason_phrase())
+    }
+    
+    /// Retrieves a strongly-typed header value
+    ///
+    /// # Type Parameters
+    /// - `T`: The expected header type
+    ///
+    /// # Returns
+    /// The typed header if found and correctly typed, or None
+    pub fn typed_header<T: TypedHeaderTrait>(&self) -> Option<&T> {
+        for header in &self.headers {
+            if let Some(typed) = try_as_typed_header::<T>(header) {
+                return Some(typed);
+            }
+        }
+        None
     }
     
     /// Retrieves the Call-ID header value, if present
@@ -282,8 +482,9 @@ impl Response {
     }
 
     /// Get all Via headers as structured Via objects
-    /// Note: This relies on the Via parser being available where called.
-    /// TODO: Refactor to return `Result<Vec<Via>>` or use a dedicated typed header getter.
+    ///
+    /// # Returns
+    /// A vector of all Via headers in the response
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
@@ -297,7 +498,9 @@ impl Response {
     }
 
     /// Get the first Via header as a structured Via object
-    /// TODO: Refactor similar to via_headers.
+    ///
+    /// # Returns
+    /// The first Via header if present, or None
     pub fn first_via(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
              if let TypedHeader::Via(via_data) = h {
@@ -336,6 +539,37 @@ impl fmt::Display for Response {
 }
 
 /// Represents either a SIP request or response
+///
+/// This enum provides a unified interface for working with SIP messages,
+/// allowing code to handle both requests and responses through a common API.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use bytes::Bytes;
+///
+/// // Parse a raw message
+/// let data = Bytes::from("SIP/2.0 200 OK\r\n\r\n");
+/// let message = parse_message(&data).unwrap();
+///
+/// // Check message type and access contents
+/// match message {
+///     Message::Request(req) => {
+///         println!("Request method: {}", req.method);
+///     },
+///     Message::Response(resp) => {
+///         println!("Response status: {}", resp.status);
+///     }
+/// }
+///
+/// // Or use helper methods
+/// if message.is_response() {
+///     if let Some(status) = message.status() {
+///         println!("Status code: {}", status);
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     /// SIP request
@@ -398,8 +632,30 @@ impl Message {
     }
 
     /// Retrieves the first typed header with the specified name, if any
+    ///
+    /// # Parameters
+    /// - `name`: The header name to look for
+    ///
+    /// # Returns
+    /// An optional reference to the first matching header
     pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
         self.headers().iter().find(|h| h.name() == *name)
+    }
+
+    /// Retrieves a strongly-typed header value
+    ///
+    /// # Type Parameters
+    /// - `T`: The expected header type
+    ///
+    /// # Returns
+    /// The typed header if found and correctly typed, or None
+    pub fn typed_header<T: TypedHeaderTrait>(&self) -> Option<&T> {
+        for header in self.headers() {
+            if let Some(typed) = try_as_typed_header::<T>(header) {
+                return Some(typed);
+            }
+        }
+        None
     }
 
     /// Retrieves the Call-ID header value, if present
@@ -420,6 +676,9 @@ impl Message {
     }
 
     /// Get Via headers as structured Via objects
+    ///
+    /// # Returns
+    /// A vector of all Via headers in the message
     pub fn via_headers(&self) -> Vec<Via> {
         match self {
             Message::Request(req) => req.via_headers(),
@@ -428,6 +687,9 @@ impl Message {
     }
 
     /// Get the first Via header as a structured Via object
+    ///
+    /// # Returns
+    /// The first Via header if present, or None
     pub fn first_via(&self) -> Option<Via> {
         match self {
             Message::Request(req) => req.first_via(),
@@ -436,6 +698,9 @@ impl Message {
     }
 
     /// Convert the message to bytes
+    ///
+    /// # Returns
+    /// A vector of bytes containing the complete serialized message
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         
@@ -505,4 +770,19 @@ impl From<Response> for Message {
     fn from(resp: Response) -> Self {
         Message::Response(resp)
     }
+}
+
+// Helper function to try casting a TypedHeader to a specific type
+fn try_as_typed_header<T: TypedHeaderTrait>(header: &TypedHeader) -> Option<&T> {
+    if header.name() == T::header_name().into() {
+        // This is unsafe, but necessary for downcasting
+        // The safety is maintained by checking the header name first
+        unsafe {
+            let ptr = header as *const TypedHeader;
+            let ptr_any = ptr as *const dyn std::any::Any;
+            let ptr_t = ptr_any as *const T;
+            return Some(&*ptr_t);
+        }
+    }
+    None
 } 

@@ -1,3 +1,53 @@
+//! # SIP URI Implementation
+//!
+//! This module provides a comprehensive implementation of SIP Uniform Resource Identifiers (URIs) 
+//! as defined in [RFC 3261](https://tools.ietf.org/html/rfc3261).
+//!
+//! SIP URIs are used to identify users, servers, and services in a SIP network.
+//! They have a similar structure to email addresses, with additional parameters 
+//! and headers for SIP-specific functionality.
+//!
+//! ## URI Structure
+//!
+//! A SIP URI has the following general form:
+//!
+//! ```text
+//! sip:user:password@host:port;uri-parameters?headers
+//! ```
+//!
+//! Where:
+//! - `sip:` is the scheme (can also be `sips:` for secure SIP)
+//! - `user:password` is the optional userinfo component (password is deprecated)
+//! - `host` is the required domain name or IP address
+//! - `port` is the optional port number
+//! - `uri-parameters` are optional parameters (`;key=value` or `;key`)
+//! - `headers` are optional headers (`?key=value&key=value`)
+//!
+//! ## Usage Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Parse a URI from a string
+//! let uri = Uri::from_str("sip:alice@example.com:5060;transport=udp?subject=meeting").unwrap();
+//!
+//! // Access URI components
+//! assert_eq!(uri.scheme, Scheme::Sip);
+//! assert_eq!(uri.username(), Some("alice"));
+//! assert_eq!(uri.host.to_string(), "example.com");
+//! assert_eq!(uri.port, Some(5060));
+//! assert_eq!(uri.transport(), Some("udp"));
+//!
+//! // Create a URI programmatically
+//! let uri = Uri::sip("example.com")
+//!     .with_user("bob")
+//!     .with_port(5060)
+//!     .with_parameter(Param::transport("tcp"));
+//!
+//! assert_eq!(uri.to_string(), "sip:bob@example.com:5060;transport=tcp");
+//! ```
+
 // URI implementation moved from root directory
 // Implements URI types according to RFC 3261
 
@@ -21,7 +71,17 @@ use crate::error::{Error, Result};
 use crate::types::param::Param; // Updated import path
 use crate::parser::uri::parse_uri; // Import the nom parser
 
-/// SIP URI schema types
+/// SIP URI scheme types
+///
+/// Represents the scheme component of a URI, which indicates the protocol
+/// or addressing scheme being used.
+///
+/// The most common schemes in SIP are:
+/// - `sip`: Standard SIP (typically over UDP or TCP)
+/// - `sips`: Secure SIP (typically over TLS)
+/// - `tel`: Telephone number
+///
+/// The implementation also supports `http`, `https`, and custom schemes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scheme {
     /// SIP URI (non-secure)
@@ -40,6 +100,16 @@ pub enum Scheme {
 
 impl Scheme {
     /// Returns the string representation of the scheme
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::types::uri::Scheme;
+    ///
+    /// assert_eq!(Scheme::Sip.as_str(), "sip");
+    /// assert_eq!(Scheme::Sips.as_str(), "sips");
+    /// assert_eq!(Scheme::Custom("xmpp".to_string()).as_str(), "xmpp");
+    /// ```
     pub fn as_str(&self) -> &str {
         match self {
             Scheme::Sip => "sip",
@@ -77,7 +147,29 @@ impl FromStr for Scheme {
 }
 
 /// Represents the host part of a URI.
-/// Can be a domain name or an IP address.
+///
+/// The host can be either a domain name or an IP address (v4 or v6).
+/// In SIP URIs, the host is the mandatory component that identifies the target
+/// server or endpoint.
+///
+/// # Examples
+///
+/// ```
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Domain name
+/// let host = Host::domain("example.com");
+/// assert_eq!(host.to_string(), "example.com");
+///
+/// // IPv4 address
+/// let host = Host::from_str("192.168.1.1").unwrap();
+/// assert!(matches!(host, Host::Address(_)));
+///
+/// // IPv6 address
+/// let host = Host::from_str("[2001:db8::1]").unwrap();
+/// assert!(matches!(host, Host::Address(_)));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Host {
     /// A domain name (e.g., "example.com").
@@ -88,22 +180,49 @@ pub enum Host {
 
 impl Host {
     /// Create a new host from a domain name
+    ///
+    /// # Parameters
+    /// - `domain`: The domain name string
+    ///
+    /// # Returns
+    /// A new Host instance with the Domain variant
     pub fn domain(domain: impl Into<String>) -> Self {
         Host::Domain(domain.into())
     }
 
     /// Create a new host from an IPv4 address
+    ///
+    /// # Parameters
+    /// - `ip`: The IPv4 address as a string
+    ///
+    /// # Returns
+    /// A new Host instance with the Address variant
+    ///
+    /// # Panics
+    /// Panics if the input string is not a valid IPv4 address
     pub fn ipv4(ip: impl Into<String>) -> Self {
         Host::Address(IpAddr::V4(Ipv4Addr::from_str(ip.into().as_str()).unwrap()))
     }
 
     /// Create a new host from an IPv6 address
+    ///
+    /// # Parameters
+    /// - `ip`: The IPv6 address as a string
+    ///
+    /// # Returns
+    /// A new Host instance with the Address variant
+    ///
+    /// # Panics
+    /// Panics if the input string is not a valid IPv6 address
     pub fn ipv6(ip: impl Into<String>) -> Self {
         Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip.into().as_str()).unwrap()))
     }
 
     /// Get the host as a string slice (only works for domain names).
     /// For addresses, it converts to String.
+    ///
+    /// # Returns
+    /// The host as a string
     pub fn as_str(&self) -> String {
         match self {
             Host::Domain(domain) => domain.clone(),
@@ -171,6 +290,37 @@ impl From<Ipv6Addr> for Host {
 }
 
 /// SIP URI components as defined in RFC 3261
+///
+/// Represents a complete SIP URI with all its components. URIs are used throughout
+/// the SIP protocol to identify endpoints, proxy servers, redirect servers, and
+/// other network elements.
+///
+/// # Structure
+///
+/// A complete SIP URI has the following format:
+/// `sip:user:password@host:port;uri-parameters?headers`
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Parse a URI from a string
+/// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+///
+/// // Create a URI programmatically
+/// let uri = Uri::sip("example.com")
+///     .with_user("bob")
+///     .with_port(5060)
+///     .with_parameter(Param::transport("tcp"));
+///
+/// // Get components
+/// assert_eq!(uri.scheme.as_str(), "sip");
+/// assert_eq!(uri.username(), Some("bob"));
+/// assert_eq!(uri.port, Some(5060));
+/// assert_eq!(uri.transport(), Some("tcp"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uri {
     /// URI scheme (sip, sips, tel)
@@ -193,6 +343,13 @@ pub struct Uri {
 
 impl Uri {
     /// Create a new URI with the minimum required fields
+    ///
+    /// # Parameters
+    /// - `scheme`: The URI scheme
+    /// - `host`: The host part
+    ///
+    /// # Returns
+    /// A new URI instance with the given scheme and host
     pub fn new(scheme: Scheme, host: Host) -> Self {
         Uri {
             scheme,
@@ -207,26 +364,83 @@ impl Uri {
     }
 
     /// Create a new SIP URI with a domain host
+    ///
+    /// # Parameters
+    /// - `host`: The domain name
+    ///
+    /// # Returns
+    /// A new URI with SIP scheme and the given domain host
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip("example.com");
+    /// assert_eq!(uri.to_string(), "sip:example.com");
+    /// ```
     pub fn sip(host: impl Into<String>) -> Self {
         Self::new(Scheme::Sip, Host::domain(host))
     }
 
     /// Create a new SIP URI with an IPv4 host
+    ///
+    /// # Parameters
+    /// - `host`: The IPv4 address as a string
+    ///
+    /// # Returns
+    /// A new URI with SIP scheme and the given IPv4 host
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip_ipv4("192.168.1.1");
+    /// assert_eq!(uri.to_string(), "sip:192.168.1.1");
+    /// ```
     pub fn sip_ipv4(host: impl Into<String>) -> Self {
         Self::new(Scheme::Sip, Host::ipv4(host))
     }
 
     /// Create a new SIP URI with an IPv6 host
+    ///
+    /// # Parameters
+    /// - `host`: The IPv6 address as a string
+    ///
+    /// # Returns
+    /// A new URI with SIP scheme and the given IPv6 host
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip_ipv6("2001:db8::1");
+    /// assert_eq!(uri.to_string(), "sip:[2001:db8::1]");
+    /// ```
     pub fn sip_ipv6(host: impl Into<String>) -> Self {
         Self::new(Scheme::Sip, Host::ipv6(host))
     }
 
     /// Create a new SIPS URI
+    ///
+    /// # Parameters
+    /// - `host`: The domain name
+    ///
+    /// # Returns
+    /// A new URI with SIPS scheme and the given domain host
     pub fn sips(host: impl Into<String>) -> Self {
         Self::new(Scheme::Sips, Host::domain(host))
     }
 
     /// Create a new TEL URI
+    ///
+    /// # Parameters
+    /// - `number`: The telephone number
+    ///
+    /// # Returns
+    /// A new URI with TEL scheme and the given number as host
     pub fn tel(number: impl Into<String>) -> Self {
         Self::new(Scheme::Tel, Host::domain(number))
     }
@@ -234,6 +448,12 @@ impl Uri {
     /// Create a new URI with a custom scheme by storing the entire URI string
     /// This is used for schemes that are not explicitly supported (like http, https)
     /// but need to be preserved in the Call-Info header
+    ///
+    /// # Parameters
+    /// - `uri_string`: The full URI string
+    ///
+    /// # Returns
+    /// A new URI with the appropriate scheme and preserved raw string
     pub fn custom(uri_string: impl Into<String>) -> Self {
         let uri_string = uri_string.into();
         
@@ -266,51 +486,133 @@ impl Uri {
     }
 
     /// Check if this URI has a custom scheme (non-SIP)
+    ///
+    /// # Returns
+    /// `true` if this is a custom URI, `false` otherwise
     pub fn is_custom(&self) -> bool {
         self.raw_uri.is_some()
     }
 
     /// Get the raw URI string if this is a custom URI
+    ///
+    /// # Returns
+    /// The raw URI string if this is a custom URI, `None` otherwise
     pub fn as_raw_uri(&self) -> Option<&str> {
         self.raw_uri.as_deref()
     }
 
     /// Get the username part of the URI, if present
+    ///
+    /// # Returns
+    /// The username as a string slice, or `None` if not set
     pub fn username(&self) -> Option<&str> {
         self.user.as_deref()
     }
 
     /// Set the user part of the URI
+    ///
+    /// # Parameters
+    /// - `user`: The user part to set
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
     /// Set the password part of the URI (deprecated in SIP)
+    ///
+    /// # Parameters
+    /// - `password`: The password to set
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Note
+    /// Passwords in SIP URIs are deprecated for security reasons,
+    /// but supported for compatibility.
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
     }
 
     /// Set the port part of the URI
+    ///
+    /// # Parameters
+    /// - `port`: The port number
+    ///
+    /// # Returns
+    /// Self for method chaining
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
     }
 
     /// Add a parameter to the URI
+    ///
+    /// # Parameters
+    /// - `param`: The parameter to add
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Examples
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip("example.com")
+    ///     .with_parameter(Param::transport("tcp"))
+    ///     .with_parameter(Param::ttl(60));
+    ///
+    /// assert_eq!(uri.to_string(), "sip:example.com;transport=tcp;ttl=60");
+    /// ```
     pub fn with_parameter(mut self, param: Param) -> Self {
         self.parameters.push(param);
         self
     }
 
     /// Add a header to the URI
+    ///
+    /// # Parameters
+    /// - `key`: The header name
+    /// - `value`: The header value
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Examples
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip("example.com")
+    ///     .with_header("subject", "Meeting")
+    ///     .with_header("priority", "urgent");
+    ///
+    /// // Note: headers may be serialized in any order
+    /// let uri_str = uri.to_string();
+    /// assert!(uri_str.contains("?subject=Meeting"));
+    /// assert!(uri_str.contains("priority=urgent"));
+    /// ```
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
         self
     }
 
     /// Returns the transport parameter if present
+    ///
+    /// # Returns
+    /// The transport value as a string slice, or `None` if not set
+    ///
+    /// # Examples
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::sip("example.com")
+    ///     .with_parameter(Param::transport("tcp"));
+    ///
+    /// assert_eq!(uri.transport(), Some("tcp"));
+    /// ```
     pub fn transport(&self) -> Option<&str> {
         self.parameters.iter().find_map(|p| match p {
             Param::Transport(val) => Some(val.as_str()),
@@ -319,6 +621,21 @@ impl Uri {
     }
 
     /// Returns the user=phone parameter if present
+    ///
+    /// # Returns
+    /// `true` if the URI has the user=phone parameter, `false` otherwise
+    ///
+    /// # Examples
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:+12125551212@example.com;user=phone").unwrap();
+    /// assert!(uri.is_phone_number());
+    ///
+    /// let uri = Uri::sip("example.com").with_user("alice");
+    /// assert!(!uri.is_phone_number());
+    /// ```
     pub fn is_phone_number(&self) -> bool {
         self.parameters.iter().any(|p| match p {
             Param::User(val) if val == "phone" => true,
@@ -420,6 +737,15 @@ impl<'a> From<&'a str> for Uri {
 // --- Helper functions (escape/unescape, validation) ---
 
 /// Escape URI user info component according to RFC 3261
+///
+/// This escapes characters in the user info component (username/password)
+/// using percent-encoding as specified in the RFC.
+///
+/// # Parameters
+/// - `s`: The string to escape
+///
+/// # Returns
+/// The escaped string
 fn escape_user_info(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3); // Worst case: all chars need escaping (×3)
 
