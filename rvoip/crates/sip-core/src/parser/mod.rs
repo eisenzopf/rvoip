@@ -306,7 +306,7 @@ mod tests {
             let via = &vias[0];
             assert_eq!(via.branch(), Some("z9hG4bK776asdhds"));
             assert!(via.has_param("hidden"), "Should have hidden parameter");
-            assert_eq!(via.param_value("hidden"), None, "Hidden parameter should have no value");
+            assert_eq!(via.param_value("hidden"), Some(None), "Hidden parameter should have no value");
         }
         
         // Test multiple Via headers in one go
