@@ -706,6 +706,7 @@ mod tests {
         types::{
             Method, StatusCode, uri::Uri, uri::Scheme,
             TypedHeader, header::{HeaderName, HeaderValue},
+            sip_message::{Request, Response},
         },
     };
 
@@ -1099,6 +1100,169 @@ mod tests {
         
         assert_eq!(to_tag1, Some("as83kd9bs".to_string()));
         assert_eq!(to_tag2, Some("as83kd9bs".to_string()));
+    }
+
+    #[test]
+    fn test_headers_in_different_order() {
+        // Test that headers can be specified in any order in request macros
+        // RFC 3261 does not require specific header ordering except for Via
+
+        // Standard order
+        let request1 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: 1,
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            max_forwards: 70,
+            contact: "sip:alice@alice.example.com",
+            content_type: "application/sdp",
+            body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
+        };
+
+        // Different order
+        let request2 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            to: ("Bob", "sip:bob@example.com"),
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            contact: "sip:alice@alice.example.com",
+            max_forwards: 70,
+            content_type: "application/sdp",
+            cseq: 1,
+            body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
+        };
+        
+        // Another order with custom headers
+        let request3 = sip_request! {
+            method: Method::Invite,
+            uri: "sip:bob@example.com",
+            cseq: 1,
+            max_forwards: 70,
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            to: ("Bob", "sip:bob@example.com"),
+            contact: "sip:alice@alice.example.com",
+            content_type: "application/sdp",
+            body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n",
+            accept: "application/sdp"
+        };
+
+        // Verify all requests have the same content
+        let verify_request = |req: &Request| {
+            assert_eq!(req.method, Method::Invite);
+            assert_eq!(req.uri.to_string(), "sip:bob@example.com");
+            
+            // Check header presence
+            let from = req.headers.iter().find(|h| h.to_string().starts_with("From:"))
+                .expect("From header missing");
+            let to = req.headers.iter().find(|h| h.to_string().starts_with("To:"))
+                .expect("To header missing");
+            let call_id = req.headers.iter().find(|h| h.to_string().starts_with("Call-ID:"))
+                .expect("Call-ID header missing");
+            let cseq = req.headers.iter().find(|h| h.to_string().starts_with("CSeq:"))
+                .expect("CSeq header missing");
+            let via = req.headers.iter().find(|h| h.to_string().starts_with("Via:"))
+                .expect("Via header missing");
+            
+            // Check header content
+            assert!(from.to_string().contains("Alice <sip:alice@example.com>"));
+            assert!(from.to_string().contains("tag=1928301774"));
+            assert!(to.to_string().contains("Bob <sip:bob@example.com>"));
+            assert!(call_id.to_string().contains("a84b4c76e66710@pc33.atlanta.example.com"));
+            assert!(cseq.to_string().contains("1 INVITE"));
+            assert!(via.to_string().contains("SIP/2.0/UDP alice.example.com:5060"));
+            assert!(via.to_string().contains("branch=z9hG4bK776asdhds"));
+            
+            // Check body
+            assert_eq!(req.body.len(), 56);
+        };
+        
+        verify_request(&request1);
+        verify_request(&request2);
+        verify_request(&request3);
+        
+        // Check custom header in request3
+        let accept = request3.headers.iter().find(|h| h.to_string().starts_with("Accept:"))
+            .expect("Accept header missing");
+        assert!(accept.to_string().contains("application/sdp"));
+        
+        // Now test with responses in different order
+        let response1 = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: (1, Method::Invite),
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            contact: "sip:bob@192.168.1.2"
+        };
+        
+        let response2 = sip_response! {
+            status: StatusCode::Ok,
+            reason: "OK",
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            cseq: (1, Method::Invite),
+            contact: "sip:bob@192.168.1.2"
+        };
+        
+        let response3 = sip_response! {
+            status: StatusCode::Ok,
+            via: ("alice.example.com:5060", "UDP", branch = "z9hG4bK776asdhds"),
+            to: ("Bob", "sip:bob@example.com", tag = "as83kd9bs"),
+            from: ("Alice", "sip:alice@example.com", tag = "1928301774"),
+            call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+            cseq: (1, Method::Invite),
+            reason: "OK",
+            contact: "sip:bob@192.168.1.2",
+            server: "Test Server/1.0"
+        };
+        
+        // Verify all responses have the same content
+        let verify_response = |resp: &Response| {
+            assert_eq!(resp.status, StatusCode::Ok);
+            assert_eq!(resp.reason, Some("OK".to_string()));
+            
+            // Check header presence
+            let from = resp.headers.iter().find(|h| h.to_string().starts_with("From:"))
+                .expect("From header missing");
+            let to = resp.headers.iter().find(|h| h.to_string().starts_with("To:"))
+                .expect("To header missing");
+            let call_id = resp.headers.iter().find(|h| h.to_string().starts_with("Call-ID:"))
+                .expect("Call-ID header missing");
+            let cseq = resp.headers.iter().find(|h| h.to_string().starts_with("CSeq:"))
+                .expect("CSeq header missing");
+            let via = resp.headers.iter().find(|h| h.to_string().starts_with("Via:"))
+                .expect("Via header missing");
+            
+            // Check header content
+            assert!(from.to_string().contains("Alice <sip:alice@example.com>"));
+            assert!(from.to_string().contains("tag=1928301774"));
+            assert!(to.to_string().contains("Bob <sip:bob@example.com>"));
+            assert!(to.to_string().contains("tag=as83kd9bs"));
+            assert!(call_id.to_string().contains("a84b4c76e66710@pc33.atlanta.example.com"));
+            assert!(cseq.to_string().contains("1 INVITE"));
+            assert!(via.to_string().contains("SIP/2.0/UDP alice.example.com:5060"));
+            assert!(via.to_string().contains("branch=z9hG4bK776asdhds"));
+        };
+        
+        verify_response(&response1);
+        verify_response(&response2);
+        verify_response(&response3);
+        
+        // Check custom header in response3
+        let server = response3.headers.iter().find(|h| h.to_string().starts_with("Server:"))
+            .expect("Server header missing");
+        assert!(server.to_string().contains("Test Server/1.0"));
     }
 
     // Helper function to extract parameter value from a header
