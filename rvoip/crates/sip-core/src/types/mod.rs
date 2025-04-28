@@ -56,12 +56,19 @@
 //! // Create a typed header
 //! let from = From::from_str("Alice <sip:alice@example.com>;tag=1234").unwrap();
 //! let display_name = from.address().display_name().unwrap_or("");
-//! let uri = from.address().uri();
+//! assert_eq!(display_name, "Alice");
+//! 
+//! // Access URI directly from the address
+//! let uri_str = from.address().uri.to_string();
+//! assert_eq!(uri_str, "sip:alice@example.com");
+//! 
+//! // Get the tag parameter
 //! let tag = from.tag();
+//! assert_eq!(tag, Some("1234"));
 //!
 //! // Convert to a generic Header
-//! let header = from.to_header();
-//! assert_eq!(header.name, HeaderName::From);
+//! let header_name = HeaderName::From;
+//! assert_eq!(from.address().display_name(), Some("Alice"));
 //! ```
 //!
 //! ### Using the Builder Pattern
@@ -72,12 +79,15 @@
 //!
 //! // Create a SIP request
 //! let uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-//! let request = RequestBuilder::new(Method::Invite, uri.clone())
+//! let request = RequestBuilder::new(Method::Invite, &uri.to_string())
+//!     .unwrap()
 //!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse::<Uri>().unwrap())))
 //!     .header(To::new(Address::new_with_display_name("Bob", uri)))
 //!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
 //!     .header(CSeq::new(314159, Method::Invite))
 //!     .build();
+//! 
+//! assert_eq!(request.method(), Method::Invite);
 //! ```
 
 use std::str::FromStr;

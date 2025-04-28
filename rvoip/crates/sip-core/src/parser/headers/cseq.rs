@@ -67,12 +67,14 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
 /// 
 /// # Examples
 /// ```
-/// use crate::parser::headers::cseq::parse_cseq;
+/// use rvoip_sip_core::parser::headers::cseq::parse_cseq;
+/// use rvoip_sip_core::types::Method;
 /// 
 /// let result = parse_cseq(b"101 INVITE");
 /// assert!(result.is_ok());
 /// let (_, cseq) = result.unwrap();
-/// assert_eq!(cseq.seq, 101);
+/// assert_eq!(cseq.sequence(), 101);
+/// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
 pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
     map(
@@ -90,12 +92,14 @@ pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
 /// 
 /// # Examples
 /// ```
-/// use crate::parser::headers::cseq::full_parse_cseq;
+/// use rvoip_sip_core::parser::headers::cseq::full_parse_cseq;
+/// use rvoip_sip_core::types::Method;
 /// 
 /// let result = full_parse_cseq(b"CSeq: 101 INVITE");
 /// assert!(result.is_ok());
 /// let (_, cseq) = result.unwrap();
-/// assert_eq!(cseq.seq, 101);
+/// assert_eq!(cseq.sequence(), 101);
+/// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
 pub fn full_parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
     preceded(

@@ -52,25 +52,25 @@
 //! }
 //!
 //! // Create a SIP request using the builder pattern
-//! let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-//!     .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-//!     .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
-//!     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .with_header(CSeq::new(314159, Method::Invite))
-//!     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-//!     .with_header(MaxForwards::new(70))
-//!     .with_header(Contact::new(Address::parse("<sip:alice@pc33.atlanta.com>").unwrap()))
-//!     .with_header(ContentLength::new(0))
+//! let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse::<Uri>().unwrap())
+//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse::<Uri>().unwrap())))
+//!     .header(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse::<Uri>().unwrap())))
+//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
+//!     .header(CSeq::new(314159, Method::Invite))
+//!     .header(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", vec![Param::branch("z9hG4bK776asdhds")]).unwrap())
+//!     .header(MaxForwards::new(70))
+//!     .header(Contact::new_params(vec![ContactParamInfo::Address(Address::new_with_display_name("", "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap()))]))
+//!     .header(ContentLength::new(0))
 //!     .build();
 //!
 //! // Create a SIP response
 //! let response = ResponseBuilder::new(StatusCode::Ok)
-//!     .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-//!     .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
-//!     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .with_header(CSeq::new(314159, Method::Invite))
-//!     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-//!     .with_header(ContentLength::new(0))
+//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse::<Uri>().unwrap())))
+//!     .header(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse::<Uri>().unwrap())))
+//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
+//!     .header(CSeq::new(314159, Method::Invite))
+//!     .header(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", vec![Param::branch("z9hG4bK776asdhds")]).unwrap())
+//!     .header(ContentLength::new(0))
 //!     .build();
 //! ```
 //!
@@ -88,12 +88,12 @@
 //! let message = parse_message(&data);
 //!
 //! // Custom parsing mode
-//! let strict_message = parse_message_with_mode(&data, ParseMode {
-//!     max_line_length: 8192,
-//!     max_header_count: 100,
-//!     max_body_size: 16384,
-//!     strict: true,
-//! });
+//! let strict_message = parse_message_with_mode(&data, ParseMode::new()
+//!     .with_max_line_length(8192)
+//!     .with_max_header_count(100) 
+//!     .with_max_body_size(16384)
+//!     .with_strict(true)
+//! );
 //! ```
 //!
 //! ## Feature Flags
