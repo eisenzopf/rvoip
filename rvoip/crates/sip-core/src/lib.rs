@@ -186,8 +186,10 @@ pub mod prelude {
     pub use crate::types::content_length::ContentLength;
     pub use crate::types::max_forwards::MaxForwards;
     pub use crate::types::contact::Contact;
+    pub use crate::types::contact::{ContactParamInfo, ContactValue}; // Add Contact-related types
     pub use crate::types::supported::Supported;
     pub use crate::types::unsupported::Unsupported;
+    pub use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Add ContentDisposition-related types
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{

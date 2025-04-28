@@ -17,37 +17,37 @@
 //!
 //! 1. A list of name-address or address specs with parameters:
 //!
-//! ```
+//! ```text
 //! Contact: "John Doe" <sip:john@example.com>;expires=3600;q=0.7,
 //!          <sip:jane@example.com>;q=0.5
 //! ```
 //!
 //! 2. A wildcard (*), typically used in REGISTER requests to remove all registrations:
 //!
-//! ```
+//! ```text
 //! Contact: *
 //! ```
 //!
 //! ## Examples
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
-//! use std::str::FromStr;
-//!
-//! // Create a Contact with an address
-//! let uri = Uri::from_str("sip:john@example.com").unwrap();
-//! let address = Address::new(Some("John Doe"), uri);
-//! let contact_info = ContactParamInfo { address };
-//! let contact = Contact::new_params(vec![contact_info]);
-//!
-//! // Create a wildcard Contact
-//! let wildcard = Contact::new_star();
-//! assert!(wildcard.is_star());
-//!
-//! // Parse a Contact from a string
-//! let contact = Contact::from_str("\"Alice\" <sip:alice@example.com>;expires=3600").unwrap();
-//! assert_eq!(contact.expires(), Some(3600));
-//! ```
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create a Contact with an address
+/// let uri = Uri::from_str("sip:john@example.com").unwrap();
+/// let address = Address::new(Some("John Doe"), uri);
+/// let contact_info = ContactParamInfo { address };
+/// let contact = Contact::new_params(vec![contact_info]);
+///
+/// // Create a wildcard Contact
+/// let wildcard = Contact::new_star();
+/// assert!(wildcard.is_star());
+///
+/// // Parse a Contact from a string
+/// let contact = Contact::from_str("\"Alice\" <sip:alice@example.com>;expires=3600").unwrap();
+/// assert_eq!(contact.expires(), Some(3600));
+/// ```
 
 use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
@@ -167,7 +167,7 @@ impl Contact {
     /// use rvoip_sip_core::prelude::*;
     /// use std::str::FromStr;
     ///
-    /// // Create a Contact with a single address
+    /// // Create a Contact with an address
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
     /// let address = Address::new(Some("John Doe"), uri);
     /// let contact_info = ContactParamInfo { address };
@@ -406,7 +406,7 @@ impl Contact {
     ///
     /// // Create a Contact and set expires
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
@@ -480,7 +480,7 @@ impl Contact {
     ///
     /// // Create a Contact and set q value
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
@@ -550,7 +550,7 @@ impl Contact {
     ///
     /// // Create a Contact and set tag
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
