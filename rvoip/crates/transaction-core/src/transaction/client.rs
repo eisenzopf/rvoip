@@ -204,21 +204,12 @@ impl ClientInviteTransaction {
             }
             TransactionState::Completed => {
                  if let Some(resp) = &self.data.last_response {
-                      // Use status check methods
+                      // Only start Timer D for non-2xx responses
                       if !resp.status().is_success() {
                             self.start_timer_d();
-                      } else {
-                           let events_tx = self.data.events_tx.clone();
-                           let id = self.data.id.clone();
-                           // Spawn task directly, store JoinHandle
-                            self.timer_d_task = Some(tokio::spawn(async move {
-                                // Use a very short delay for testing to ensure the timer completes
-                                tokio::time::sleep(Duration::from_millis(5)).await;
-                                debug!(id=%id, "Short delay after 2xx completed, transitioning to Terminated");
-                                // Send TimerTriggered event to manager to handle state change
-                                let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "QuickTerminate".to_string() }).await;
-                            }));
                       }
+                      // We removed the QuickTerminate timer since 2xx responses 
+                      // now transition directly to Terminated state
                  }
             }
             _ => {} // No timers needed for Initial, Proceeding, Terminated
@@ -308,13 +299,6 @@ impl ClientInviteTransaction {
                     self.transition_to(TransactionState::Terminated).await?;
                 } else {
                     trace!(id=%self.data.id, state=?self.data.state, "Timer D fired in invalid state, ignoring.");
-                }
-            }
-            "QuickTerminate" => {
-                // Special timer for terminating quickly after 2xx
-                if self.data.state == TransactionState::Completed {
-                    debug!(id=%self.data.id, "QuickTerminate timer fired, terminating");
-                     self.transition_to(TransactionState::Terminated).await?;
                 }
             }
             _ => warn!(id=%self.data.id, timer=timer, "Unknown timer triggered"),
@@ -501,8 +485,8 @@ impl ClientTransaction for ClientInviteTransaction {
                     }).await?;
                 }
                 else if is_success { 
-                    // 2xx responses go directly to Completed
-                    self.transition_to(TransactionState::Completed).await?;
+                    // 2xx responses should go directly to Terminated (RFC 3261 17.1.1.2)
+                    self.transition_to(TransactionState::Terminated).await?;
                     
                     // Notify TU of success response
                     self.data.events_tx.send(TransactionEvent::SuccessResponse {
@@ -537,8 +521,8 @@ impl ClientTransaction for ClientInviteTransaction {
                     }).await?;
                 }
                 else if is_success { 
-                    // 2xx responses transition to Completed
-                    self.transition_to(TransactionState::Completed).await?;
+                    // 2xx responses should transition directly to Terminated (RFC 3261 17.1.1.2)
+                    self.transition_to(TransactionState::Terminated).await?;
                     
                     // Notify TU of success response
                     self.data.events_tx.send(TransactionEvent::SuccessResponse {
