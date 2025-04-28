@@ -327,7 +327,9 @@ fn test_parse_allow() {
 fn test_parse_from_header_manual() {
     // Create a From header manually
     let uri = Uri::from_str("sip:alice@atlanta.com").unwrap();
-    let addr = Address::new_with_display_name("Alice", uri);
+    let mut addr = Address::new_with_display_name("Alice", uri);
+    // Add the tag parameter
+    addr.set_tag("1928301774");
     let from = From(addr);
     
     assert_eq!(from.0.display_name, Some("Alice".to_string()));
