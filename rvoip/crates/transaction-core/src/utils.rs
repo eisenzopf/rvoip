@@ -196,28 +196,28 @@ pub fn create_test_request(method: Method) -> Request {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsip_core::common::uri::Uri;
-    use rsip_core::common::Method;
-    use rsip_core::header::HeaderName;
-    use rsip_core::header::typed::{TypedHeader, From, To, Via, CallId, CSeq, ContentLength};
-    use rsip_core::header::ViaProtocol;
-    use rsip_core::message::{Request, Response};
-    use rsip_core::common::StatusCode;
+    use rvoip_sip_core::types::Contact;
+    use rvoip_sip_core::types::uri::Uri;
+    use rvoip_sip_core::types::Scheme;
+    use rvoip_sip_core::types::Host;
+    use rvoip_sip_core::types::address::Address;
 
     #[test]
     fn test_create_response() {
         let request = create_test_request(Method::Invite);
-        let response = create_response(&request, StatusCode::OK);
+        let response = create_response(&request, StatusCode::Ok);
 
         // Check status code
-        assert_eq!(response.status_code(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::Ok);
         
-        // Check version
-        assert_eq!(response.version(), Version::V2);
+        // Check version (as string instead of enum constant)
+        assert_eq!(response.version.to_string(), "SIP/2.0");
         
         // Check headers were copied correctly
         if let Some(TypedHeader::Via(via)) = response.header(&HeaderName::Via) {
-            assert_eq!(via.sent_by_host(), "example.com");
+            // Use proper accessors for Via
+            let via_header = via.headers().first().unwrap();
+            assert_eq!(via_header.sent_by_host, Host::Domain("example.com".to_string()));
             // Branch should exist but we don't check its exact value since it's generated
             assert!(via.branch().is_some());
         } else {
@@ -225,13 +225,13 @@ mod tests {
         }
         
         if let Some(TypedHeader::From(from)) = response.header(&HeaderName::From) {
-            assert_eq!(from.uri().host().unwrap(), "example.com");
+            assert_eq!(from.address().uri.host, Host::Domain("example.com".to_string()));
         } else {
             panic!("Missing From header in response");
         }
         
         if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
-            assert_eq!(to.uri().host().unwrap(), "example.net");
+            assert_eq!(to.address().uri.host, Host::Domain("example.net".to_string()));
             assert!(to.tag().is_none(), "To tag should not be present");
         } else {
             panic!("Missing To header in response");
@@ -244,14 +244,14 @@ mod tests {
         }
         
         if let Some(TypedHeader::CSeq(cseq)) = response.header(&HeaderName::CSeq) {
-            assert_eq!(cseq.method(), Method::Invite);
+            assert_eq!(*cseq.method(), Method::Invite);
             assert_eq!(cseq.sequence(), 1);
         } else {
             panic!("Missing CSeq header in response");
         }
         
         if let Some(TypedHeader::ContentLength(content_length)) = response.header(&HeaderName::ContentLength) {
-            assert_eq!(content_length.value(), 0);
+            assert_eq!(content_length.0, 0);
         } else {
             panic!("Missing Content-Length header in response");
         }
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_create_response_with_to_tag() {
         let request = create_test_request(Method::Invite);
-        let mut response = create_response(&request, StatusCode::OK);
+        let mut response = create_response(&request, StatusCode::Ok);
 
         // Add a tag to the To header
         if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
@@ -268,16 +268,18 @@ mod tests {
             let new_to = to.clone().with_tag("totag");
             
             // Replace the To header
-            response.remove_header(&HeaderName::To);
-            response.push_header(new_to);
+            response.headers.retain(|h| !matches!(h, TypedHeader::To(_)));
+            response.headers.push(TypedHeader::To(new_to));
         }
 
         // Check status code is correct
-        assert_eq!(response.status_code(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::Ok);
         
         // Check Via header was copied correctly
         if let Some(TypedHeader::Via(via)) = response.header(&HeaderName::Via) {
-            assert_eq!(via.sent_by_host(), "example.com");
+            // Use proper accessors for Via
+            let via_header = via.headers().first().unwrap();
+            assert_eq!(via_header.sent_by_host, Host::Domain("example.com".to_string()));
             // We only check that a branch exists, not its specific value
             assert!(via.branch().is_some());
         } else {
@@ -296,10 +298,10 @@ mod tests {
     fn test_create_trying_response() {
         let request = create_test_request(Method::Invite);
         let response = create_response(&request, StatusCode::Trying);
-        assert_eq!(response.status_code(), StatusCode::Trying);
+        assert_eq!(response.status(), StatusCode::Trying);
         
         if let Some(TypedHeader::CSeq(cseq)) = response.header(&HeaderName::CSeq) {
-            assert_eq!(cseq.method(), Method::Invite);
+            assert_eq!(*cseq.method(), Method::Invite);
         } else {
             panic!("Missing CSeq header in response");
         }
@@ -309,10 +311,10 @@ mod tests {
     fn test_create_ringing_response() {
         let request = create_test_request(Method::Invite);
         let response = create_response(&request, StatusCode::Ringing);
-        assert_eq!(response.status_code(), StatusCode::Ringing);
+        assert_eq!(response.status(), StatusCode::Ringing);
         
         if let Some(TypedHeader::CSeq(cseq)) = response.header(&HeaderName::CSeq) {
-            assert_eq!(cseq.method(), Method::Invite);
+            assert_eq!(*cseq.method(), Method::Invite);
         } else {
             panic!("Missing CSeq header in response");
         }
@@ -321,11 +323,11 @@ mod tests {
     #[test]
     fn test_create_ok_response() {
         let request = create_test_request(Method::Invite);
-        let response = create_response(&request, StatusCode::OK);
-        assert_eq!(response.status_code(), StatusCode::OK);
+        let response = create_response(&request, StatusCode::Ok);
+        assert_eq!(response.status(), StatusCode::Ok);
         
         if let Some(TypedHeader::CSeq(cseq)) = response.header(&HeaderName::CSeq) {
-            assert_eq!(cseq.method(), Method::Invite);
+            assert_eq!(*cseq.method(), Method::Invite);
         } else {
             panic!("Missing CSeq header in response");
         }
@@ -334,27 +336,48 @@ mod tests {
     #[test]
     fn test_create_response_with_contact() {
         let request = create_test_request(Method::Invite);
-        let mut response = create_response(&request, StatusCode::OK);
+        let mut response = create_response(&request, StatusCode::Ok);
 
-        // Add a Contact header
-        let contact = Contact::new(Uri::new().with_host("example.org").with_scheme("sip"));
-        response.push_header(contact);
+        // Create a Contact with proper API according to documentation example:
+        // 1. Create a URI
+        let uri = Uri::new(Scheme::Sip, Host::Domain("example.org".to_string()));
+        
+        // 2. Create an Address with the URI
+        let address = Address::new_with_display_name("Test User", uri);
+        
+        // 3. Create a ContactParamInfo with the Address
+        let contact_info = ContactParamInfo { address };
+        
+        // 4. Create a Contact with the params
+        let contact = Contact::new_params(vec![contact_info]);
+        
+        // Add the contact header
+        response.headers.push(TypedHeader::Contact(contact.clone()));
 
         // Check status code is correct
-        assert_eq!(response.status_code(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::Ok);
         
         // Check Via header was copied correctly
         if let Some(TypedHeader::Via(via)) = response.header(&HeaderName::Via) {
-            assert_eq!(via.sent_by_host(), "example.com");
+            // Use proper accessors for Via
+            let via_header = via.headers().first().unwrap();
+            assert_eq!(via_header.sent_by_host, Host::Domain("example.com".to_string()));
             // We only check that a branch exists, not its specific value
             assert!(via.branch().is_some());
         } else {
             panic!("Missing Via header in response");
         }
         
-        // Check the Contact header was added
+        // Check the Contact header was added and has the correct address
         if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
-            assert_eq!(contact.uri().host().unwrap(), "example.org");
+            // Get the first address and verify its properties
+            if let Some(addr) = contact.address() {
+                assert_eq!(addr.uri.host, Host::Domain("example.org".to_string()));
+                // Verify display name
+                assert_eq!(addr.display_name, Some("Test User".to_string()));
+            } else {
+                panic!("Contact has no address");
+            }
         } else {
             panic!("Missing Contact header in response");
         }
