@@ -147,7 +147,7 @@ impl MimePart {
             .find(|h| h.name == HeaderName::ContentType)
             .map(|h| match &h.value {
                 HeaderValue::Raw(bytes) => std::str::from_utf8(bytes)
-                    .map(|s| s.to_string())
+            .map(|s| s.to_string())
                     .unwrap_or_default(),
                 HeaderValue::ContentType(ct) => ct.to_string(),
                 _ => String::new(),

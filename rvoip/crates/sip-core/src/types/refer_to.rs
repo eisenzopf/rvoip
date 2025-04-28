@@ -292,7 +292,7 @@ impl ReferTo {
     /// // Create URI and address, then add the tag parameter
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
     /// let mut address = Address::new(None::<&str>, uri);
-    /// 
+    ///
     /// // Add tag parameter to Address (not URI)
     /// address.set_tag("1234");
     /// 
@@ -401,4 +401,4 @@ impl FromStr for ReferTo {
             .map(|(_rem, refer_to)| refer_to)
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
-}
+} 

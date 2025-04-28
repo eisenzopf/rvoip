@@ -1,3 +1,15 @@
+/// SDP (Session Description Protocol) module implements RFC 4566 for creating, parsing,
+/// and manipulating SDP messages used in SIP (Session Initiation Protocol) communications.
+/// 
+/// This module provides a complete implementation for working with SDP, including:
+/// - Parsing SDP text into structured data
+/// - Representing SDP sessions, media descriptions, and attributes
+/// - Serializing SDP data back to standard format
+///
+/// # References
+/// - [RFC 4566: Session Description Protocol](https://tools.ietf.org/html/rfc4566)
+/// - [RFC 5245: ICE](https://tools.ietf.org/html/rfc5245) (for ICE candidates)
+/// - [RFC 5576: Source-Specific Media Attributes](https://tools.ietf.org/html/rfc5576) (for SSRC)
 use std::collections::HashMap;
 use std::fmt;
 use bytes::Bytes;
@@ -13,54 +25,93 @@ use crate::sdp::attributes::MediaDirection; // Keep this
 // Remove other potential imports from crate::sdp if they were added erroneously
 
 // --- Placeholder Attribute Structs --- 
+/// Represents an RTP Map attribute (a=rtpmap)
+/// 
+/// Maps RTP payload types to media encoding names, clock rates, and encoding parameters.
+/// Format: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RtpMapAttribute {
+    /// RTP payload type (numeric)
     pub payload_type: u8,
+    /// Encoding name (e.g., "PCMU", "H264")
     pub encoding_name: String,
+    /// Clock rate in Hertz
     pub clock_rate: u32,
+    /// Optional encoding parameters (e.g., number of channels)
     pub encoding_params: Option<String>,
 }
 
+/// Represents a Format Parameters attribute (a=fmtp)
+///
+/// Provides additional parameters for a specified format.
+/// Format: `a=fmtp:<format> <parameters>`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FmtpAttribute {
+    /// Format identifier (typically the payload type from rtpmap)
     pub format: String,
+    /// Format-specific parameters as a raw string
     pub parameters: String, 
 }
 
 /// Represents a parsed ICE Candidate attribute (RFC 5245 / 8445 / 8839).
-/// Structure: foundation component-id transport priority conn-addr port type [related-addr related-port] *(extensions)
+///
+/// Format: `a=candidate:<foundation> <component-id> <transport> <priority> 
+/// <connection-address> <port> typ <candidate-type> 
+/// [raddr <related-address>] [rport <related-port>] [...]`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateAttribute {
+    /// Unique identifier for this candidate
     pub foundation: String,
+    /// Component ID (1 for RTP, 2 for RTCP)
     pub component_id: u32,
-    pub transport: String, // e.g., "UDP", "TCP"
+    /// Transport protocol (e.g., "UDP", "TCP")
+    pub transport: String,
+    /// Candidate priority
     pub priority: u32,
-    pub connection_address: String, // IP address or FQDN
+    /// Connection address (IP or FQDN)
+    pub connection_address: String,
+    /// Port number
     pub port: u16,
-    pub candidate_type: String, // e.g., "host", "srflx", "prflx", "relay"
+    /// Candidate type (e.g., "host", "srflx", "prflx", "relay")
+    pub candidate_type: String,
+    /// Related address for reflexive/relay candidates
     pub related_address: Option<String>,
+    /// Related port for reflexive/relay candidates
     pub related_port: Option<u16>,
-    // Store extensions as key-value pairs for flexibility
+    /// Additional extension attributes as key-value pairs
     pub extensions: Vec<(String, Option<String>)>, 
 }
 
 /// Represents a parsed SSRC attribute (RFC 5576).
-/// Structure: ssrc-id attribute[:value]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // Eq because value is Option<String>
+///
+/// Format: `a=ssrc:<ssrc-id> <attribute>[:<value>]`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrcAttribute {
+    /// SSRC identifier
     pub ssrc_id: u32,
+    /// Attribute name
     pub attribute: String,
+    /// Optional attribute value
     pub value: Option<String>,
 }
 
 /// Enum representing a parsed SDP attribute.
+///
+/// SDP attributes provide detailed information about the session or media.
+/// All attributes follow the format `a=<attribute>` or `a=<attribute>:<value>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParsedAttribute {
+    /// RTP mapping attribute (a=rtpmap)
     RtpMap(RtpMapAttribute),
+    /// Format parameters attribute (a=fmtp)
     Fmtp(FmtpAttribute),
+    /// Media direction attribute (a=sendrecv, a=sendonly, a=recvonly, a=inactive)
     Direction(MediaDirection),
+    /// Packetization time attribute (a=ptime)
     Ptime(u32),
+    /// ICE candidate attribute (a=candidate)
     Candidate(CandidateAttribute),
+    /// SSRC attribute (a=ssrc)
     Ssrc(SsrcAttribute),
     
     /// A simple flag attribute (e.g., a=msid-semantic)
@@ -71,48 +122,93 @@ pub enum ParsedAttribute {
     Other(String, Option<String>),
 }
 
-/// Represents the Origin (o=) field.
+/// Represents the Origin (o=) field in an SDP message.
+///
+/// Format: `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
+    /// Username of the originator (often "-")
     pub username: String,
+    /// Session ID (unique identifier for this session)
     pub sess_id: String, // Often u64, but spec allows more flexibility
+    /// Session version (increments when session is modified)
     pub sess_version: String, // Often u64
-    pub net_type: String, // IN
-    pub addr_type: String, // IP4 / IP6
-    pub unicast_address: String, // Hostname or IP address
+    /// Network type (typically "IN" for Internet)
+    pub net_type: String,
+    /// Address type ("IP4" or "IP6")
+    pub addr_type: String,
+    /// Unicast address (hostname or IP address)
+    pub unicast_address: String,
 }
 
-/// Represents the Connection Data (c=) field.
+/// Represents the Connection Data (c=) field in an SDP message.
+///
+/// Format: `c=<nettype> <addrtype> <connection-address>`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionData {
-    pub net_type: String, // IN
-    pub addr_type: String, // IP4 / IP6
-    pub connection_address: String, // IP address or FQDN, potentially with TTL/count
+    /// Network type (typically "IN" for Internet)
+    pub net_type: String,
+    /// Address type ("IP4" or "IP6")
+    pub addr_type: String,
+    /// Connection address (IP address or FQDN, potentially with TTL/count)
+    pub connection_address: String,
 }
 
-/// Represents a Time Description (t=) field.
+/// Represents a Time Description (t=) field in an SDP message.
+///
+/// Format: `t=<start-time> <stop-time>`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeDescription {
-    pub start_time: String, // u64 NTP timestamp
-    pub stop_time: String, // u64 NTP timestamp
+    /// Start time (NTP timestamp, 0 means session is permanent)
+    pub start_time: String,
+    /// Stop time (NTP timestamp, 0 means open-ended)
+    pub stop_time: String,
 }
 
-/// Represents a parsed SDP Session.
+/// Represents a complete SDP session with all its components.
+///
+/// An SDP session defines a multimedia session including connection information,
+/// timing, and media descriptions for audio, video, and other streams.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
 pub struct SdpSession {
+    /// SDP protocol version (v=)
     pub version: String, 
-    pub origin: Origin, // Changed from String
+    /// Session origin information (o=)
+    pub origin: Origin,
+    /// Session name (s=)
     pub session_name: String, 
-    pub connection_info: Option<ConnectionData>, // Changed from Option<String>
-    pub time_descriptions: Vec<TimeDescription>, // Changed from Vec<String>
+    /// Optional connection information (c=)
+    pub connection_info: Option<ConnectionData>,
+    /// Time descriptions (t=)
+    pub time_descriptions: Vec<TimeDescription>,
+    /// Media descriptions (m=)
     pub media_descriptions: Vec<MediaDescription>,
+    /// Session-level media direction
     pub direction: Option<MediaDirection>,
+    /// Session-level attributes (a=)
     pub generic_attributes: Vec<ParsedAttribute>,
 }
 
 impl SdpSession {
     /// Creates a new SdpSession with mandatory origin and session name.
-    /// Version defaults to 0, TimeDescription defaults to t=0 0.
+    ///
+    /// Version defaults to 0, TimeDescription defaults to t=0 0 (permanent session).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin};
+    /// let origin = Origin {
+    ///     username: "-".to_string(),
+    ///     sess_id: "1234567890".to_string(),
+    ///     sess_version: "2".to_string(),
+    ///     net_type: "IN".to_string(),
+    ///     addr_type: "IP4".to_string(),
+    ///     unicast_address: "192.168.1.100".to_string(),
+    /// };
+    ///
+    /// let session = SdpSession::new(origin, "SIP Call");
+    /// ```
     pub fn new(origin: Origin, session_name: impl Into<String>) -> Self {
         Self {
             version: "0".to_string(),
@@ -126,30 +222,86 @@ impl SdpSession {
         }
     }
 
-    /// Adds a media description.
+    /// Adds a media description to the session.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin, MediaDescription};
+    /// # let origin = Origin {
+    /// #    username: "-".to_string(),
+    /// #    sess_id: "1234567890".to_string(),
+    /// #    sess_version: "2".to_string(),
+    /// #    net_type: "IN".to_string(),
+    /// #    addr_type: "IP4".to_string(),
+    /// #    unicast_address: "192.168.1.100".to_string(),
+    /// # };
+    /// # let mut session = SdpSession::new(origin, "SIP Call");
+    /// let audio_media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string(), "8".to_string()]);
+    /// session.add_media(audio_media);
+    /// ```
     pub fn add_media(&mut self, media: MediaDescription) {
         self.media_descriptions.push(media);
     }
     
-    /// Builder method to set session-level connection data.
+    /// Sets session-level connection data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin, ConnectionData};
+    /// # let origin = Origin {
+    /// #    username: "-".to_string(),
+    /// #    sess_id: "1234567890".to_string(),
+    /// #    sess_version: "2".to_string(),
+    /// #    net_type: "IN".to_string(),
+    /// #    addr_type: "IP4".to_string(),
+    /// #    unicast_address: "192.168.1.100".to_string(),
+    /// # };
+    /// # let session = SdpSession::new(origin, "SIP Call");
+    /// let conn = ConnectionData {
+    ///     net_type: "IN".to_string(),
+    ///     addr_type: "IP4".to_string(),
+    ///     connection_address: "192.168.1.100".to_string(),
+    /// };
+    /// let session = session.with_connection_data(conn);
+    /// ```
     pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
         self.connection_info = Some(conn);
         self
     }
     
-    /// Builder method to add a session-level attribute.
+    /// Adds a session-level attribute.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin, ParsedAttribute};
+    /// # let origin = Origin {
+    /// #    username: "-".to_string(),
+    /// #    sess_id: "1234567890".to_string(),
+    /// #    sess_version: "2".to_string(),
+    /// #    net_type: "IN".to_string(),
+    /// #    addr_type: "IP4".to_string(),
+    /// #    unicast_address: "192.168.1.100".to_string(),
+    /// # };
+    /// # let session = SdpSession::new(origin, "SIP Call");
+    /// let session = session.with_attribute(ParsedAttribute::Flag("ice-lite".to_string()));
+    /// ```
      pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
         // TODO: Handle setting dedicated fields vs adding to generic?
         self.generic_attributes.push(attr);
         self
     }
 
-    /// Gets the session-level direction attribute, if set.
+    /// Gets the session-level media direction attribute, if set.
     pub fn get_direction(&self) -> Option<MediaDirection> {
         self.direction
     }
 
     /// Finds all session-level rtpmap attributes.
+    ///
+    /// Returns an iterator over references to all RtpMapAttribute values.
     pub fn rtpmaps(&self) -> impl Iterator<Item = &RtpMapAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::RtpMap(rtpmap) => Some(rtpmap),
@@ -158,11 +310,34 @@ impl SdpSession {
     }
 
     /// Finds the first session-level rtpmap attribute for a given payload type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin};
+    /// # let session = SdpSession::new(
+    /// #    Origin {
+    /// #        username: "-".to_string(),
+    /// #        sess_id: "1234567890".to_string(),
+    /// #        sess_version: "2".to_string(),
+    /// #        net_type: "IN".to_string(),
+    /// #        addr_type: "IP4".to_string(),
+    /// #        unicast_address: "192.168.1.100".to_string(),
+    /// #    }, 
+    /// #    "SIP Call"
+    /// # );
+    /// // Get the rtpmap for PCMU (payload type 0)
+    /// if let Some(rtpmap) = session.get_rtpmap(0) {
+    ///     println!("Encoding: {}, Clock rate: {}", rtpmap.encoding_name, rtpmap.clock_rate);
+    /// }
+    /// ```
     pub fn get_rtpmap(&self, payload_type: u8) -> Option<&RtpMapAttribute> {
         self.rtpmaps().find(|r| r.payload_type == payload_type)
     }
     
     /// Finds all session-level fmtp attributes.
+    ///
+    /// Returns an iterator over references to all FmtpAttribute values.
     pub fn fmtps(&self) -> impl Iterator<Item = &FmtpAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::Fmtp(fmtp) => Some(fmtp),
@@ -170,12 +345,59 @@ impl SdpSession {
         })
     }
 
-     /// Finds the first session-level fmtp attribute for a given format.
+    /// Finds the first session-level fmtp attribute for a given format.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin};
+    /// # let session = SdpSession::new(
+    /// #    Origin {
+    /// #        username: "-".to_string(),
+    /// #        sess_id: "1234567890".to_string(),
+    /// #        sess_version: "2".to_string(),
+    /// #        net_type: "IN".to_string(),
+    /// #        addr_type: "IP4".to_string(),
+    /// #        unicast_address: "192.168.1.100".to_string(),
+    /// #    }, 
+    /// #    "SIP Call"
+    /// # );
+    /// // Get fmtp parameters for payload type 96
+    /// if let Some(fmtp) = session.get_fmtp("96") {
+    ///     println!("Parameters: {}", fmtp.parameters);
+    /// }
+    /// ```
     pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
         self.fmtps().find(|f| f.format == format)
     }
     
     /// Gets the value of a generic session-level attribute by key.
+    ///
+    /// Returns:
+    /// - `Some(Some(value))` for attributes with values
+    /// - `Some(None)` for flag attributes
+    /// - `None` if the attribute doesn't exist
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{SdpSession, Origin, ParsedAttribute};
+    /// # let mut session = SdpSession::new(
+    /// #    Origin {
+    /// #        username: "-".to_string(),
+    /// #        sess_id: "1234567890".to_string(),
+    /// #        sess_version: "2".to_string(),
+    /// #        net_type: "IN".to_string(),
+    /// #        addr_type: "IP4".to_string(),
+    /// #        unicast_address: "192.168.1.100".to_string(),
+    /// #    }, 
+    /// #    "SIP Call"
+    /// # );
+    /// # session = session.with_attribute(ParsedAttribute::Value("group".to_string(), "BUNDLE audio video".to_string()));
+    /// if let Some(Some(value)) = session.get_generic_attribute_value("group") {
+    ///     println!("Group attribute: {}", value);
+    /// }
+    /// ```
     pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
         self.generic_attributes.iter().find_map(|a| match a {
             ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
@@ -189,26 +411,56 @@ impl SdpSession {
 }
 
 /// Represents an SDP Media Description section (m=...)
+///
+/// A media description defines a single media stream (audio, video, etc.)
+/// with its transport information and attributes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
 pub struct MediaDescription {
+    /// Media type (e.g., "audio", "video", "application")
     pub media: String, 
+    /// Transport port number
     pub port: u16,
+    /// Transport protocol (e.g., "RTP/AVP", "RTP/SAVP", "UDP/TLS/RTP/SAVP")
     pub protocol: String, 
+    /// Media format descriptions (payload types or format identifiers)
     pub formats: Vec<String>, 
-    pub connection_info: Option<ConnectionData>, // Changed from Option<String>
+    /// Media-specific connection information (overrides session-level)
+    pub connection_info: Option<ConnectionData>,
 
     // --- Media-level Attributes ---
-    // Dedicated fields for common single-value attributes
+    /// Packetization time in milliseconds (a=ptime)
     pub ptime: Option<u32>,
+    /// Media direction attribute
     pub direction: Option<MediaDirection>,
     // Add others like: pub rtcp_port: Option<u16>, pub mid: Option<String>, etc.
     
-    // Vector for repeatable or less common/generic attributes
+    /// Other media-level attributes
     pub generic_attributes: Vec<ParsedAttribute>,
 }
 
 impl MediaDescription {
     /// Creates a new MediaDescription.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::MediaDescription;
+    /// // Create an audio media section for RTP/AVP with PCMU (0) and PCMA (8)
+    /// let audio = MediaDescription::new(
+    ///     "audio", 
+    ///     49170, 
+    ///     "RTP/AVP", 
+    ///     vec!["0".to_string(), "8".to_string()]
+    /// );
+    ///
+    /// // Create a video media section for RTP/AVP with H264 (96)
+    /// let video = MediaDescription::new(
+    ///     "video",
+    ///     49174,
+    ///     "RTP/AVP",
+    ///     vec!["96".to_string()]
+    /// );
+    /// ```
     pub fn new(
         media: impl Into<String>, 
         port: u16, 
@@ -227,16 +479,46 @@ impl MediaDescription {
         }
     }
 
-     /// Builder method to set media-level connection data.
+    /// Sets media-level connection data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{MediaDescription, ConnectionData};
+    /// # let media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
+    /// let conn = ConnectionData {
+    ///     net_type: "IN".to_string(),
+    ///     addr_type: "IP4".to_string(),
+    ///     connection_address: "192.168.1.100".to_string(),
+    /// };
+    /// let media = media.with_connection_data(conn);
+    /// ```
     pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
         self.connection_info = Some(conn);
         self
     }
     
-    /// Builder method to add a media-level attribute.
-     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
-        // TODO: Handle setting dedicated fields vs adding to generic?
-         match attr {
+    /// Adds a media-level attribute.
+    ///
+    /// Certain attribute types (ptime, direction) will be stored in dedicated fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{MediaDescription, ParsedAttribute, RtpMapAttribute};
+    /// # let media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
+    /// // Add an rtpmap attribute
+    /// let rtpmap = RtpMapAttribute {
+    ///     payload_type: 0,
+    ///     encoding_name: "PCMU".to_string(),
+    ///     clock_rate: 8000,
+    ///     encoding_params: None,
+    /// };
+    /// let media = media.with_attribute(ParsedAttribute::RtpMap(rtpmap));
+    /// ```
+    pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
+        // Handle setting dedicated fields vs adding to generic collection
+        match attr {
             ParsedAttribute::Ptime(v) => { self.ptime = Some(v); }
             ParsedAttribute::Direction(d) => { self.direction = Some(d); }
             _ => self.generic_attributes.push(attr),
@@ -255,6 +537,8 @@ impl MediaDescription {
     }
 
     /// Finds all media-level rtpmap attributes.
+    ///
+    /// Returns an iterator over references to all RtpMapAttribute values.
     pub fn rtpmaps(&self) -> impl Iterator<Item = &RtpMapAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::RtpMap(rtpmap) => Some(rtpmap),
@@ -263,11 +547,24 @@ impl MediaDescription {
     }
     
     /// Finds the first media-level rtpmap attribute for a given payload type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::MediaDescription;
+    /// # let media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
+    /// // Get the rtpmap for payload type 0 (PCMU)
+    /// if let Some(rtpmap) = media.get_rtpmap(0) {
+    ///     println!("Encoding: {}, Clock rate: {}", rtpmap.encoding_name, rtpmap.clock_rate);
+    /// }
+    /// ```
     pub fn get_rtpmap(&self, payload_type: u8) -> Option<&RtpMapAttribute> {
         self.rtpmaps().find(|r| r.payload_type == payload_type)
     }
 
     /// Finds all media-level fmtp attributes.
+    ///
+    /// Returns an iterator over references to all FmtpAttribute values.
     pub fn fmtps(&self) -> impl Iterator<Item = &FmtpAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::Fmtp(fmtp) => Some(fmtp),
@@ -275,12 +572,25 @@ impl MediaDescription {
         })
     }
 
-     /// Finds the first media-level fmtp attribute for a given format.
+    /// Finds the first media-level fmtp attribute for a given format.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::MediaDescription;
+    /// # let media = MediaDescription::new("video", 49174, "RTP/AVP", vec!["96".to_string()]);
+    /// // Get format parameters for payload type 96 (often H.264)
+    /// if let Some(fmtp) = media.get_fmtp("96") {
+    ///     println!("H.264 parameters: {}", fmtp.parameters);
+    /// }
+    /// ```
     pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
         self.fmtps().find(|f| f.format == format)
     }
     
-    /// Finds all media-level candidate attributes.
+    /// Finds all media-level ICE candidate attributes.
+    ///
+    /// Returns an iterator over references to all CandidateAttribute values.
     pub fn candidates(&self) -> impl Iterator<Item = &CandidateAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::Candidate(candidate) => Some(candidate),
@@ -288,7 +598,9 @@ impl MediaDescription {
         })
     }
     
-    /// Finds all media-level ssrc attributes.
+    /// Finds all media-level SSRC attributes.
+    ///
+    /// Returns an iterator over references to all SsrcAttribute values.
     pub fn ssrcs(&self) -> impl Iterator<Item = &SsrcAttribute> {
         self.generic_attributes.iter().filter_map(|a| match a {
             ParsedAttribute::Ssrc(ssrc) => Some(ssrc),
@@ -296,7 +608,23 @@ impl MediaDescription {
         })
     }
     
-     /// Gets the value of a generic media-level attribute by key.
+    /// Gets the value of a generic media-level attribute by key.
+    ///
+    /// Returns:
+    /// - `Some(Some(value))` for attributes with values
+    /// - `Some(None)` for flag attributes
+    /// - `None` if the attribute doesn't exist
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip_core::types::sdp::{MediaDescription, ParsedAttribute};
+    /// # let mut media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
+    /// # media = media.with_attribute(ParsedAttribute::Value("mid".to_string(), "audio".to_string()));
+    /// if let Some(Some(value)) = media.get_generic_attribute_value("mid") {
+    ///     println!("Media ID: {}", value);
+    /// }
+    /// ```
     pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
         self.generic_attributes.iter().find_map(|a| match a {
             ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
@@ -313,6 +641,25 @@ impl MediaDescription {
 impl FromStr for SdpSession {
     type Err = crate::error::Error;
 
+    /// Parses an SDP string into an SdpSession.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::str::FromStr;
+    /// # use rvoip_sip_core::types::sdp::SdpSession;
+    /// let sdp_str = "v=0\r\n\
+    ///     o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n\
+    ///     s=SDP Seminar\r\n\
+    ///     t=0 0\r\n\
+    ///     m=audio 49170 RTP/AVP 0\r\n\
+    ///     a=rtpmap:0 PCMU/8000\r\n";
+    ///
+    /// match SdpSession::from_str(sdp_str) {
+    ///     Ok(session) => println!("Parsed SDP with {} media sections", session.media_descriptions.len()),
+    ///     Err(e) => println!("Failed to parse SDP: {}", e),
+    /// }
+    /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Convert string to owned Bytes and parse
         parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
