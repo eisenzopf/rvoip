@@ -319,35 +319,32 @@ impl ClientInviteTransaction {
 
     /// Create an ACK request for a non-2xx final response received in Calling or Proceeding state.
     fn create_internal_ack(&self, response: &Response) -> Result<Request> {
-        let mut ack_builder = RequestBuilder::new(Method::Ack, &self.data.request.uri().to_string())?;
+        // Get request URI from the original INVITE's Request-URI
+        let request_uri = self.data.request.uri().to_string();
+        let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri)?;
 
-        if let Some(via) = self.data.request.first_via() {
-            ack_builder = ack_builder.header(TypedHeader::Via(via.clone()));
-        } else {
-            return Err(Error::Other("Original INVITE request missing Via header".into()));
-        }
-        // Route headers from original request
+        // Copy Route headers from original INVITE (if present)
         for header in self.data.request.headers.iter() {
              if let TypedHeader::Route(route) = header {
                  ack_builder = ack_builder.header(TypedHeader::Route(route.clone()));
              }
         }
-        if let Some(from) = self.data.request.from() {
+        if let Some(from) = self.data.request.header::<From>() {
              ack_builder = ack_builder.header(TypedHeader::From(from.clone()));
          } else {
              return Err(Error::Other("Original INVITE request missing From header".into()));
          }
-        if let Some(to) = response.to() {
+        if let Some(to) = response.header::<To>() {
             ack_builder = ack_builder.header(TypedHeader::To(to.clone()));
         } else {
             return Err(Error::Other("Response missing To header".into()));
         }
-         if let Some(call_id) = self.data.request.call_id() {
+         if let Some(call_id) = self.data.request.header::<CallId>() {
              ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone()));
          } else {
              return Err(Error::Other("Original INVITE request missing Call-ID".into()));
          }
-        if let Some(cseq) = self.data.request.cseq() {
+        if let Some(cseq) = self.data.request.header::<CSeq>() {
              ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
          } else {
              return Err(Error::Other("Original INVITE request missing CSeq".into()));

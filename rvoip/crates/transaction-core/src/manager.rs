@@ -434,15 +434,9 @@ impl TransactionManager {
 
         let local_addr = self.transport.local_addr()
             .map_err(|e| Error::TransportError(e.to_string()))?;
-        // Use Via::parse
-        let via_string = format!(
-            "SIP/2.0/{} {}:{};branch={}",
-            "UDP", // TODO: Get transport dynamically
-            local_addr.ip(),
-            local_addr.port(),
-            branch
-        );
-        let via = Via::parse(&via_string).map_err(Error::SipCoreError)?;
+        // Use Via::new
+        let via = Via::new("SIP", "2.0", "UDP", &local_addr.ip().to_string(), Some(local_addr.port()),
+            vec![Param::branch(&branch)]).map_err(Error::SipCoreError)?;
 
         request.headers.insert(0, TypedHeader::Via(via));
 
@@ -627,10 +621,10 @@ impl TransactionManager {
     ) -> Result<()> {
 
          // Get Request-URI from Contact or To
-         let request_uri = match final_response.contact() { // Use .contact()
+         let request_uri = match final_response.header::<Contact>() { 
              Some(contact) => contact.addresses().next().map(|a| a.uri.clone()),
              None => None,
-         }.or_else(|| final_response.to().map(|t| t.address().uri.clone())) // Use .to(), access field
+         }.or_else(|| final_response.header::<To>().map(|t| t.address().uri.clone())) 
           .ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
 
          let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?;
@@ -681,7 +675,7 @@ impl TransactionManager {
 
      // Helper to determine ACK destination
      async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
-         if let Some(contact) = response.contact() {
+         if let Some(contact) = response.header::<Contact>() {
              if let Some(addr) = contact.addresses().next() {
                   if let Some(dest) = Self::resolve_uri_to_socketaddr(&addr.uri).await {
                       return Some(dest);
@@ -704,9 +698,16 @@ impl TransactionManager {
                   }
               }
               // Fallback to Via host/port
-              // Assuming sip-core Via provides host() and port() that return Host and Option<u16>
-              let host = via.host();
-              let port = via.port().unwrap_or(5060);
+              let host_str = via.sent_by_host().unwrap_or("localhost");
+              let port = via.sent_by_port().unwrap_or(5060);
+              
+              // Create a proper Host enum
+              let host = if let Ok(ip) = IpAddr::from_str(host_str) {
+                  Host::Address(ip)
+              } else {
+                  Host::Domain(host_str.to_string())
+              };
+              
               if let Some(dest) = Self::resolve_host_to_socketaddr(&host, port).await {
                   return Some(dest);
               }
@@ -751,16 +752,16 @@ impl ResponseBuilderExt for ResponseBuilder {
         if let Some(via) = request.first_via() {
              self = self.header(TypedHeader::Via(via.clone()));
          }
-         if let Some(to) = request.to() {
+         if let Some(to) = request.header::<To>() {
              self = self.header(TypedHeader::To(to.clone()));
          }
-         if let Some(from) = request.from() {
+         if let Some(from) = request.header::<From>() {
              self = self.header(TypedHeader::From(from.clone()));
          }
-         if let Some(call_id) = request.call_id() {
+         if let Some(call_id) = request.header::<CallId>() {
              self = self.header(TypedHeader::CallId(call_id.clone()));
          }
-         if let Some(cseq) = request.cseq() {
+         if let Some(cseq) = request.header::<CSeq>() {
              self = self.header(TypedHeader::CSeq(cseq.clone()));
          }
          self = self.header(TypedHeader::ContentLength(ContentLength::new(0)));

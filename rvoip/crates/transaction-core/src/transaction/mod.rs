@@ -20,10 +20,19 @@ pub enum TransactionKind {
 
 /// Uniquely identifies a transaction based on RFC 3261 rules.
 /// Typically derived from the top Via branch, CSeq method, and potentially To/From tags.
-// TODO: Define the actual structure and implementation for TransactionKey.
-// It needs to be derivable from a Message and comparable.
-// For now, using a simple String alias, but this should be a proper struct.
 pub type TransactionKey = String;
+
+/// Utility functions for working with TransactionKeys
+pub mod transaction_key {
+    use crate::utils;
+    use rvoip_sip_core::prelude::*;
+    use crate::error::Result;
+
+    /// Generate a transaction key from a SIP message based on RFC 3261 rules.
+    pub fn from_message(message: &Message) -> Option<super::TransactionKey> {
+        utils::transaction_key_from_message(message).ok()
+    }
+}
 
 // TODO: Define `TransactionId` if it's distinct from `TransactionKey`. Often they are the same.
 pub type TransactionId = TransactionKey;

@@ -26,15 +26,15 @@ pub fn extract_branch(message: &Message) -> Option<String> {
 /// Extract the Call-ID value from a message
 pub fn extract_call_id(message: &Message) -> Option<String> {
     message
-        .call_id() // Use the dedicated helper method
-        .map(|call_id| call_id.to_string()) // CallId implements Display
+        .header::<CallId>() 
+        .map(|call_id| call_id.value().to_string()) 
 }
 
 /// Extract the CSeq sequence number and method from a message
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     message
-        .cseq() // Use the dedicated helper method
-        .map(|cseq| (cseq.sequence(), cseq.method().clone())) // Access sequence and method directly
+        .header::<CSeq>() 
+        .map(|cseq| (cseq.sequence(), cseq.method().clone())) 
 }
 
 /// Create a general response to a request, copying essential headers
@@ -44,16 +44,16 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     if let Some(via) = request.first_via() {
         builder = builder.header(TypedHeader::Via(via.clone()));
     }
-    if let Some(from) = request.from() {
+    if let Some(from) = request.header::<From>() {
         builder = builder.header(TypedHeader::From(from.clone()));
     }
-    if let Some(to) = request.to() {
+    if let Some(to) = request.header::<To>() {
         builder = builder.header(TypedHeader::To(to.clone()));
     }
-    if let Some(call_id) = request.call_id() {
+    if let Some(call_id) = request.header::<CallId>() {
         builder = builder.header(TypedHeader::CallId(call_id.clone()));
     }
-    if let Some(cseq) = request.cseq() {
+    if let Some(cseq) = request.header::<CSeq>() {
         builder = builder.header(TypedHeader::CSeq(cseq.clone()));
     }
 
