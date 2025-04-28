@@ -208,6 +208,9 @@ pub mod prelude {
     pub use crate::parser::headers::route::RouteEntry as ParserRouteValue; // Add ParserRouteValue for doctests
     pub use crate::types::route::Route; // Add Route type for doctests
     
+    // Server-related types needed for doc tests
+    pub use crate::types::server::{ServerInfo, ServerProduct, Product, ServerVal};
+    
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{
         AuthParam, AuthenticationInfo, AuthenticationInfoParam, Authorization,

@@ -13,29 +13,29 @@
 //!
 //! ## Format
 //!
-//! ```rust
-//! // To: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
-//! // t: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
+//! ```text
+//! To: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
+//! t: "Bob" <sip:bob@biloxi.com>;tag=a6c85cf
 //! ```
 //!
 //! ## Examples
 //!
 //! ```rust
-/// use rvoip_sip_core::prelude::*;
-/// use std::str::FromStr;
-///
-/// // Create a To header with a URI
-/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-/// let address = Address::new(None::<String>, uri);
-/// let to = To::new(address);
-///
-/// // Create a To header with a tag
-/// let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
-/// let mut address = Address::new(Some("Bob"), uri);
-/// address.set_tag("1928301774");
-/// let to = To::new(address);
-/// assert_eq!(to.tag(), Some("1928301774"));
-/// ```
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create a To header with a URI
+//! let uri = Uri::from_str("sip:bob@example.com").unwrap();
+//! let address = Address::new(uri);
+//! let to = To::new(address);
+//!
+//! // Create a To header with a tag
+//! let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
+//! let mut address = Address::new_with_display_name("Bob", uri);
+//! address.set_tag("1928301774");
+//! let to = To::new(address);
+//! assert_eq!(to.tag(), Some("1928301774"));
+//! ```
 
 use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
 use crate::types::address::Address;
@@ -75,18 +75,19 @@ use nom::combinator;
 /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
 /// 
 /// // Simple To header
-/// let address = Address::new(None::<String>, uri.clone());
+/// let address = Address::new(uri.clone());
 /// let to = To::new(address);
 /// assert_eq!(to.0.uri.host.to_string(), "example.com");
 ///
 /// // To header with display name
-/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-/// let address = Address::new(Some("Bob Smith"), uri);
+/// let uri2 = Uri::from_str("sip:bob@example.com").unwrap();
+/// let address = Address::new_with_display_name("Bob Smith", uri2);
 /// let to = To::new(address);
-/// assert_eq!(to.0.display_name, Some("Bob Smith".to_string()));
+/// assert_eq!(to.address().display_name(), Some("Bob Smith"));
 ///
 /// // To header with tag parameter
-/// let mut address = Address::new(None::<String>, uri);
+/// let uri3 = Uri::from_str("sip:bob@example.com").unwrap();
+/// let mut address = Address::new(uri3);
 /// address.set_tag("1928301774");
 /// let to = To::new(address);
 /// assert_eq!(to.tag(), Some("1928301774"));
@@ -116,7 +117,7 @@ impl To {
     ///
     /// // Simple To header with just a URI
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(None::<String>, uri);
+    /// let address = Address::new(uri);
     /// let to = To::new(address);
     ///
     /// // To header with display name
@@ -126,6 +127,34 @@ impl To {
     /// ```
     pub fn new(address: Address) -> Self {
         Self(address)
+    }
+
+    /// Returns a reference to the inner Address.
+    ///
+    /// This method provides access to the wrapped Address instance
+    /// for cases where you need to work with it directly.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the inner Address
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a To header
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let address = Address::new_with_display_name("Bob", uri);
+    /// let to = To::new(address);
+    ///
+    /// // Access the inner Address
+    /// assert_eq!(to.address().display_name(), Some("Bob"));
+    /// assert_eq!(to.address().uri.host.to_string(), "example.com");
+    /// ```
+    pub fn address(&self) -> &Address {
+        &self.0
     }
 
     /// Gets the tag parameter value.
@@ -147,13 +176,13 @@ impl To {
     ///
     /// // To header without a tag (typical in initial requests)
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(None::<String>, uri.clone());
+    /// let address = Address::new(uri.clone());
     /// let to = To::new(address);
     /// assert_eq!(to.tag(), None);
     ///
     /// // To header with a tag (typical in responses or in-dialog requests)
     /// let uri2 = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut to = To::new(Address::new(None::<String>, uri2));
+    /// let mut to = To::new(Address::new(uri2));
     /// to.set_tag("1928301774");
     /// assert_eq!(to.tag(), Some("1928301774"));
     /// ```
@@ -245,19 +274,19 @@ impl fmt::Display for To {
     ///
     /// // Basic To header
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(None::<String>, uri);
+    /// let address = Address::new(uri);
     /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "<sip:bob@example.com>");
     ///
     /// // To header with display name
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(Some("Bob Smith"), uri);
+    /// let address = Address::new_with_display_name("Bob Smith", uri);
     /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "\"Bob Smith\" <sip:bob@example.com>");
     ///
     /// // To header with tag parameter
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(None::<String>, uri);
+    /// let mut address = Address::new(uri);
     /// address.set_tag("1928301774");
     /// let to = To::new(address);
     /// assert_eq!(to.to_string(), "<sip:bob@example.com>;tag=1928301774");
@@ -300,7 +329,7 @@ impl FromStr for To {
     ///
     /// // Create a To header with a tag parameter
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(None::<String>, uri);
+    /// let mut address = Address::new(uri);
     /// address.set_tag("1928301774");
     /// let to = To::new(address);
     /// assert_eq!(to.tag(), Some("1928301774"));
@@ -331,12 +360,12 @@ impl Deref for To {
     ///
     /// // Create a To header directly
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::with_display_name("Bob", uri);
+    /// let mut address = Address::new_with_display_name("Bob", uri);
     /// address.set_tag("1928301774");
     /// let to = To::new(address);
     ///
     /// // Can directly call Address methods on a To instance
-    /// assert_eq!(to.0.display_name, Some("Bob".to_string()));
+    /// assert_eq!(to.address().display_name(), Some("Bob"));
     /// assert_eq!(to.0.uri.host.to_string(), "example.com");
     /// assert!(to.has_param("tag"));
     /// ```
@@ -361,7 +390,7 @@ impl Deref for To {
 ///
 /// // Create programmatically
 /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-/// let address = Address::with_display_name("Bob", uri);
+/// let address = Address::new_with_display_name("Bob", uri);
 /// let to = To::new(address);
 /// assert_eq!(to.address().display_name(), Some("Bob"));
 /// ```

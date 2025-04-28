@@ -17,7 +17,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Server: ProductName/1.0
 //! Server: ProductName/1.0 (Comment)
 //! Server: ProductName/1.0 (Comment) AnotherProduct/2.0

@@ -18,8 +18,8 @@
 //!
 //! // Create a basic SIP INVITE request
 //! let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-//!     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
-//!     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())))
+//!     .with_header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse().unwrap()))))
+//!     .with_header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()))))
 //!     .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
 //!     .with_header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
 //!     .with_body(Bytes::from("SDP body content here"));
@@ -35,8 +35,8 @@
 //!
 //! // Create a SIP 200 OK response
 //! let response = Response::new(StatusCode::Ok)
-//!     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
-//!     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())))
+//!     .with_header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse().unwrap()))))
+//!     .with_header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()))))
 //!     .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
 //!     .with_header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)));
 //! ```
@@ -71,8 +71,8 @@ use crate::types::via::{Via, ViaHeader};
 ///
 /// // Create a basic INVITE request
 /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-///     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
-///     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())));
+///     .with_header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse().unwrap()))))
+///     .with_header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()))));
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -320,8 +320,8 @@ impl fmt::Display for Request {
 ///
 /// // Create a 200 OK response
 /// let response = Response::new(StatusCode::Ok)
-///     .with_header(TypedHeader::From(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap())))
-///     .with_header(TypedHeader::To(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap())));
+///     .with_header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse().unwrap()))))
+///     .with_header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()))));
 ///
 /// // Or use a convenience method for common responses
 /// let trying = Response::trying();
@@ -554,7 +554,7 @@ impl fmt::Display for Response {
 /// let message = parse_message(&data).unwrap();
 ///
 /// // Check message type and access contents
-/// match message {
+/// match &message {
 ///     Message::Request(req) => {
 ///         println!("Request method: {}", req.method);
 ///     },
