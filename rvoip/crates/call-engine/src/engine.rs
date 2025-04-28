@@ -375,23 +375,30 @@ impl CallEngine {
     async fn handle_in_dialog_request(&self, request: Request) -> Result<Response, Error> {
         // Find the session for this dialog
         let call_id = request.header(&HeaderName::CallId)
-            .ok_or_else(|| Error::other("Missing Call-ID header"))?
-            .value.as_text()
-            .ok_or_else(|| Error::other("Invalid Call-ID header format"))?;
+            .ok_or_else(|| Error::other("Missing Call-ID header"))?;
+        
+        let call_id_str = match call_id {
+            TypedHeader::CallId(call_id) => call_id.to_string(),
+            _ => return Err(Error::other("Invalid Call-ID header format"))
+        };
         
         let to_tag = request.header(&HeaderName::To)
-            .and_then(|h| h.value.as_text())
-            .and_then(|t| extract_tag(t))
+            .and_then(|h| match h {
+                TypedHeader::To(to) => to.tag(),
+                _ => None
+            })
             .ok_or_else(|| Error::other("Missing or invalid To tag"))?;
         
         let from_tag = request.header(&HeaderName::From)
-            .and_then(|h| h.value.as_text())
-            .and_then(|t| extract_tag(t))
+            .and_then(|h| match h {
+                TypedHeader::From(from) => from.tag(),
+                _ => None
+            })
             .ok_or_else(|| Error::other("Missing or invalid From tag"))?;
         
         // No matching dialog found
         warn!("No session found for request {} with dialog ID: {}.{}.{}", 
-                request.method, call_id, to_tag, from_tag);
+                request.method, call_id_str, to_tag, from_tag);
         return Ok(Response::new(StatusCode::NotFound));
     }
     

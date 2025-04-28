@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use uuid::Uuid;
 use tokio::sync::{RwLock, Mutex};
 use anyhow::Result;
@@ -12,11 +13,21 @@ use std::time::Duration;
 
 use rvoip_sip_core::{
     Request, Response, Method, StatusCode,
-    Uri, Header, HeaderName,
+    Uri, Header, HeaderName, TypedHeader,
+};
+use rvoip_sip_core::types::{
+    call_id::CallId,
+    from::From as FromHeader,
+    to::To as ToHeader,
+    cseq::CSeq,
+    address::Address,
+    param::Param,
+    allow::Allow,
 };
 use rvoip_transaction_core::TransactionManager;
 
-use crate::dialog::{Dialog, DialogId, DialogState};
+use crate::dialog::{Dialog, DialogId};
+use crate::dialog_state::DialogState;
 use crate::media::{MediaStream, MediaConfig, MediaType, AudioCodecType};
 use crate::events::{EventBus, SessionEvent};
 use crate::errors::Error;
@@ -209,12 +220,18 @@ impl Session {
         // Update state
         *self.state.write().await = new_state.clone();
         
+        // Keep copies for logging
+        let old_state_str = old_state.to_string();
+        let new_state_str = new_state.to_string();
+        
         // Publish state change event
         self.event_bus.publish(SessionEvent::StateChanged {
             session_id: self.id.clone(),
             old_state,
             new_state,
         });
+        
+        debug!("Session {} state changed: {} -> {}", self.id, old_state_str, new_state_str);
         
         Ok(())
     }
@@ -268,8 +285,7 @@ impl Session {
     
     /// Set the dialog for this session
     pub async fn set_dialog(&self, dialog: Dialog) -> Result<()> {
-        let mut dlg = self.dialog.write().await;
-        *dlg = Some(dialog);
+        *self.dialog.write().await = Some(dialog);
         Ok(())
     }
     
@@ -288,6 +304,9 @@ impl Session {
     /// Remove a related dialog
     pub async fn remove_related_dialog(&self, dialog_id: &DialogId) -> Result<()> {
         let mut dialogs = self.related_dialogs.write().await;
+        if !dialogs.contains_key(dialog_id) {
+            return Err(Error::DialogNotFoundWithId(dialog_id.to_string()).into());
+        }
         dialogs.remove(dialog_id);
         Ok(())
     }
@@ -311,18 +330,25 @@ impl Session {
     
     /// Handle an incoming INVITE request
     async fn handle_invite(&self, request: Request) -> Result<Response> {
-        // For now, just return a simple 200 OK
-        let mut response = Response::new(StatusCode::Ok);
+        // Get the current state to decide how to handle this INVITE
+        let current_state = self.state.read().await.clone();
         
         // If this is a re-INVITE, need to handle it differently
-        if self.state.read().await.clone() == SessionState::Connected {
+        if current_state == SessionState::Connected {
             // Handle re-INVITE (media update, etc.)
             debug!("Received re-INVITE for session {}", self.id);
+            self.handle_reinvite(request).await
         } else {
             // New call
             debug!("Received new INVITE for session {}", self.id);
-            self.set_state(SessionState::Ringing).await?;
+            self.handle_new_invite(request).await
         }
+    }
+    
+    /// Handle a new incoming INVITE request
+    async fn handle_new_invite(&self, request: Request) -> Result<Response> {
+        // Update session state
+        self.set_state(SessionState::Ringing).await?;
         
         // For a real implementation, would need to:
         // 1. Parse SDP to get media info
@@ -330,14 +356,31 @@ impl Session {
         // 3. Generate SDP answer
         // 4. Add SDP to response body
         
+        // Create a 200 OK response
+        let mut response = Response::new(StatusCode::Ok);
+        
+        // TODO: Add headers and body based on the request
+        
+        Ok(response)
+    }
+    
+    /// Handle a re-INVITE request
+    async fn handle_reinvite(&self, request: Request) -> Result<Response> {
+        // TODO: Process media updates
+        
+        // Create a 200 OK response
+        let mut response = Response::new(StatusCode::Ok);
+        
+        // TODO: Add headers and body based on the request
+        
         Ok(response)
     }
     
     /// Handle an incoming ACK request
     async fn handle_ack(&self, request: Request) -> Result<Response> {
-        // ACK doesn't have a response, but we can use it to finalize dialog setup
         debug!("Received ACK for session {}", self.id);
         
+        // Update dialog state if needed
         if let Some(dialog) = self.dialog.read().await.clone() {
             if dialog.state == DialogState::Early {
                 let mut dialog = dialog.clone();
@@ -451,8 +494,19 @@ impl Session {
         let mut response = Response::new(StatusCode::Ok);
         
         // Add Allow header
-        let allow_value = "INVITE, ACK, BYE, CANCEL, OPTIONS, UPDATE, INFO, MESSAGE, REFER, NOTIFY";
-        response.headers.push(Header::text(HeaderName::Allow, allow_value));
+        let mut allow = Allow::new();
+        allow.add_method(Method::Invite);
+        allow.add_method(Method::Ack);
+        allow.add_method(Method::Bye);
+        allow.add_method(Method::Cancel);
+        allow.add_method(Method::Options);
+        allow.add_method(Method::Update);
+        allow.add_method(Method::Info);
+        allow.add_method(Method::Message);
+        allow.add_method(Method::Refer);
+        allow.add_method(Method::Notify);
+        
+        response.headers.push(TypedHeader::Allow(allow));
         
         Ok(response)
     }
@@ -467,30 +521,8 @@ impl Session {
         // Create INVITE request
         let mut request = Request::new(Method::Invite, target_uri);
         
-        // Add basic headers
-        // In a real implementation, would need to:
-        // 1. Add From header with local URI and tag
-        // 2. Add To header with target URI
-        // 3. Add Call-ID
-        // 4. Add CSeq
-        // 5. Add Contact
-        // 6. Add Via
-        // 7. Generate SDP for media offer
-        // 8. Add SDP to request body
-        
-        // Add some basic headers for our simplified example
-        let random_call_id = format!("{}@{}", Uuid::new_v4(), self.config.local_signaling_addr);
-        request.headers.push(Header::text(HeaderName::CallId, random_call_id));
-        
-        let local_tag = Uuid::new_v4().to_string();
-        let from_value = format!("<sip:user@{};tag={}>", self.config.local_signaling_addr, local_tag);
-        request.headers.push(Header::text(HeaderName::From, from_value));
-        
-        let to_value = format!("<{}>", target_uri_str);
-        request.headers.push(Header::text(HeaderName::To, to_value));
-        
-        let cseq_value = "1 INVITE";
-        request.headers.push(Header::text(HeaderName::CSeq, cseq_value));
+        // Add required headers for an INVITE
+        self.add_invite_headers(&mut request, &target_uri_str)?;
         
         // Send the request through the transaction layer
         // In a real implementation, we would extract the host/port from target_uri
@@ -534,6 +566,45 @@ impl Session {
         Ok(())
     }
     
+    /// Add required headers for an INVITE request
+    fn add_invite_headers(&self, request: &mut Request, target_uri_str: &str) -> Result<()> {
+        // Create Call-ID header
+        let random_call_id = format!("{}@{}", Uuid::new_v4(), self.config.local_signaling_addr);
+        let call_id = CallId::new(&random_call_id);
+        request.headers.push(TypedHeader::CallId(call_id));
+        
+        // Create From header
+        let local_tag = Uuid::new_v4().to_string();
+        let from_host = format!("user@{}", self.config.local_signaling_addr);
+        let from_uri = Uri::sip(from_host);
+        let mut from_params = Vec::new();
+        from_params.push(Param::new("tag".to_string(), Some(local_tag)));
+        
+        let from_address = Address {
+            display_name: None,
+            uri: from_uri,
+            params: from_params,
+        };
+        request.headers.push(TypedHeader::From(FromHeader(from_address)));
+        
+        // Create To header
+        let to_uri = Uri::sip(target_uri_str.trim_start_matches("sip:"));
+        let to_address = Address {
+            display_name: None,
+            uri: to_uri,
+            params: Vec::new(),
+        };
+        request.headers.push(TypedHeader::To(ToHeader(to_address)));
+        
+        // Create CSeq header
+        let cseq = CSeq::new(1, Method::Invite);
+        request.headers.push(TypedHeader::CSeq(cseq));
+        
+        // Add additional headers (would include Contact, Via, etc.)
+        
+        Ok(())
+    }
+    
     /// Send a BYE request to terminate the session
     pub async fn send_bye(&self) -> Result<()> {
         debug!("Sending BYE for session {}", self.id);
@@ -541,14 +612,15 @@ impl Session {
         // Need an established dialog to send BYE
         let dialog = match self.dialog.read().await.clone() {
             Some(dialog) => dialog,
-            None => return Err(Error::DialogNotFound(self.id.to_string()).into()),
+            None => return Err(Error::DialogNotFoundWithId(self.id.to_string()).into()),
         };
         
+        // Check dialog state
         if dialog.state != DialogState::Confirmed {
-            return Err(Error::InvalidStateTransition(
-                dialog.state.to_string(),
-                "terminated".to_string(),
-            ).into());
+            return Err(Error::InvalidDialogState(format!(
+                "Cannot send BYE in dialog state: {}",
+                dialog.state
+            )).into());
         }
         
         // Set state to terminating
@@ -559,12 +631,7 @@ impl Session {
         let request = dialog.create_request(Method::Bye);
         
         // Send the request through the transaction layer
-        // In a real implementation, we would extract the host/port from request.uri
-        // For this example, assume it's a simple host:port format
-        let destination = format!("{}:{}", 
-            request.uri.host, 
-            request.uri.port.unwrap_or(5060)
-        ).parse()?;
+        let destination = self.resolve_request_destination(&request)?;
         
         let tx_id = self.transaction_manager.create_client_transaction(
             request, 
@@ -585,8 +652,7 @@ impl Session {
         let session_id = self.id.clone();
         let event_bus = self.event_bus.clone();
         
-        // For our simple example, we'll just transition to the terminated state directly
-        // because we can't directly access the TransactionEvent stream
+        // For our simple example, we'll just transition to terminated state after a delay
         tokio::spawn(async move {
             // Allow some time for the BYE to be processed
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -605,14 +671,27 @@ impl Session {
         Ok(())
     }
     
+    /// Resolve request destination from URI
+    fn resolve_request_destination(&self, request: &Request) -> Result<SocketAddr> {
+        let destination = format!("{}:{}", 
+            request.uri.host, 
+            request.uri.port.unwrap_or(5060)
+        ).parse()?;
+        
+        Ok(destination)
+    }
+    
     /// Start media for this session
     pub async fn start_media(&self) -> Result<()> {
         debug!("Starting media for session {}", self.id);
         
         // Check if media is already started
-        if let Some(media) = self.media.read().await.as_ref() {
-            if media.is_active().await {
-                return Ok(());
+        {
+            let media_guard = self.media.read().await;
+            if let Some(media) = media_guard.as_ref() {
+                if media.is_active().await {
+                    return Ok(());
+                }
             }
         }
         
@@ -636,8 +715,10 @@ impl Session {
         media_stream.start().await?;
         
         // Store the media stream
-        let mut media = self.media.write().await;
-        *media = Some(media_stream);
+        {
+            let mut media_guard = self.media.write().await;
+            *media_guard = Some(media_stream);
+        }
         
         // Publish media started event
         self.event_bus.publish(SessionEvent::MediaStarted {
@@ -652,15 +733,23 @@ impl Session {
         debug!("Stopping media for session {}", self.id);
         
         // Stop media if active
-        if let Some(media) = self.media.read().await.as_ref() {
-            if media.is_active().await {
-                media.stop().await?;
-                
-                // Publish media stopped event
-                self.event_bus.publish(SessionEvent::MediaStopped {
-                    session_id: self.id.clone(),
-                });
+        let mut should_publish = false;
+        
+        {
+            let media_guard = self.media.read().await;
+            if let Some(media) = media_guard.as_ref() {
+                if media.is_active().await {
+                    media.stop().await?;
+                    should_publish = true;
+                }
             }
+        }
+        
+        // Publish media stopped event if needed
+        if should_publish {
+            self.event_bus.publish(SessionEvent::MediaStopped {
+                session_id: self.id.clone(),
+            });
         }
         
         Ok(())
