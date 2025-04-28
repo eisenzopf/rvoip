@@ -545,7 +545,7 @@ async fn test_server_invite_transaction_failure_states() {
     
     // Send 404 Not Found response
     let not_found_response = create_test_response(&invite_request, StatusCode::NotFound);
-    manager.send_response(&server_tx_id, not_found_response).await.unwrap();
+    manager.send_response(&server_tx_id, not_found_response.clone()).await.unwrap();
     
     // Get event for 404 Not Found
     let event = events_rx.recv().await.unwrap();
@@ -582,9 +582,8 @@ async fn test_server_invite_transaction_failure_states() {
     }
     // Create CSeq with same sequence number but ACK method
     if let Some(TypedHeader::CSeq(cseq)) = invite_request.header(&HeaderName::CSeq) {
-        if let Some(seq_num) = cseq.seq_no() {
-            ack_request.headers.push(TypedHeader::CSeq(CSeq::new(seq_num, Method::Ack)));
-        }
+        let seq_num = cseq.sequence();
+        ack_request.headers.push(TypedHeader::CSeq(CSeq::new(seq_num, Method::Ack)));
     }
     
     // Deliver ACK via transport event channel
