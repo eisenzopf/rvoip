@@ -51,6 +51,7 @@
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
 //!
 //! // Create a typed header
 //! let from = From::from_str("Alice <sip:alice@example.com>;tag=1234").unwrap();
@@ -67,16 +68,19 @@
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
 //!
 //! // Create a SIP request
-//! let uri = Uri::from_str("sip:bob@example.com").unwrap();
+//! let uri = "sip:bob@example.com".parse::<Uri>().unwrap();
 //! let request = RequestBuilder::new(Method::Invite, uri.clone())
-//!     .header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@example.com").unwrap())))
+//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse::<Uri>().unwrap())))
 //!     .header(To::new(Address::new_with_display_name("Bob", uri)))
 //!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
 //!     .header(CSeq::new(314159, Method::Invite))
 //!     .build();
 //! ```
+
+use std::str::FromStr;
 
 pub mod via;
 pub use via::Via;
