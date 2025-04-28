@@ -426,9 +426,13 @@ impl TransactionManager {
     ) -> Result<TransactionKey> {
         debug!(method = %request.method(), %destination, "Creating client transaction");
 
-        let branch = match request.first_via().and_then(|v| v.branch()) {
-            Some(b) if !b.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => utils::generate_branch(),
-            Some(b) => b.to_string(),
+        let branch = match request.first_via() {
+            Some(via) => {
+                match via.branch() {
+                    Some(b) if b.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => b.to_string(),
+                    _ => utils::generate_branch(),
+                }
+            },
             None => utils::generate_branch(),
         };
 
@@ -621,11 +625,19 @@ impl TransactionManager {
     ) -> Result<()> {
 
          // Get Request-URI from Contact or To
-         let request_uri = match final_response.typed_header::<Contact>() { 
-             Some(contact) => contact.addresses().next().map(|a| a.uri.clone()),
+         let request_uri = match final_response.header(&HeaderName::Contact) { 
+             Some(contact) => {
+                 if let TypedHeader::Contact(contact_val) = contact {
+                     contact_val.addresses().next().map(|a| a.uri.clone())
+                 } else { None }
+             },
              None => None,
-         }.or_else(|| final_response.typed_header::<To>().map(|t| t.address().uri.clone())) 
-          .ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
+         }.or_else(|| {
+             final_response.header(&HeaderName::To)
+                .and_then(|to| if let TypedHeader::To(to_val) = to { 
+                    Some(to_val.address().uri.clone()) 
+                } else { None })
+         }).ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
 
          let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?;
 
@@ -634,21 +646,37 @@ impl TransactionManager {
          } else {
              return Err(Error::Other("Cannot determine Via header for ACK from response".into()));
          }
-         if let Some(from) = final_response.typed_header::<From>() {
-            ack_builder = ack_builder.header(TypedHeader::From(from.clone())); // Wrap
+         
+         if let Some(from) = final_response.header(&HeaderName::From) {
+            if let TypedHeader::From(from_val) = from {
+                ack_builder = ack_builder.header(TypedHeader::From(from_val.clone())); // Wrap
+            } else {
+                return Err(Error::Other("Missing or invalid From header in response for ACK".into()));
+            }
          } else {
              return Err(Error::Other("Missing From header in response for ACK".into()));
          }
-         if let Some(to) = final_response.typed_header::<To>() {
-             ack_builder = ack_builder.header(TypedHeader::To(to.clone())); // Wrap
+         
+         if let Some(to) = final_response.header(&HeaderName::To) {
+             if let TypedHeader::To(to_val) = to {
+                 ack_builder = ack_builder.header(TypedHeader::To(to_val.clone())); // Wrap
+             } else {
+                 return Err(Error::Other("Missing or invalid To header in response for ACK".into()));
+             }
          } else {
              return Err(Error::Other("Missing To header in response for ACK".into()));
          }
-         if let Some(call_id) = final_response.typed_header::<CallId>() {
-             ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone())); // Wrap
+         
+         if let Some(call_id) = final_response.header(&HeaderName::CallId) {
+             if let TypedHeader::CallId(call_id_val) = call_id {
+                 ack_builder = ack_builder.header(TypedHeader::CallId(call_id_val.clone())); // Wrap
+             } else {
+                 return Err(Error::Other("Missing or invalid Call-ID header in response for ACK".into()));
+             }
          } else {
              return Err(Error::Other("Missing Call-ID header in response for ACK".into()));
          }
+         
          // Use utils::extract_cseq on the message
          if let Some((seq, _)) = utils::extract_cseq(&Message::Response(final_response.clone())) {
              ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(seq, Method::Ack))); // Wrap
@@ -675,11 +703,13 @@ impl TransactionManager {
 
      // Helper to determine ACK destination
      async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
-         if let Some(contact) = response.typed_header::<Contact>() {
-             if let Some(addr) = contact.addresses().next() {
-                  if let Some(dest) = Self::resolve_uri_to_socketaddr(&addr.uri).await {
-                      return Some(dest);
-                  }
+         if let Some(contact_header) = response.header(&HeaderName::Contact) {
+             if let TypedHeader::Contact(contact) = contact_header {
+                 if let Some(addr) = contact.addresses().next() {
+                      if let Some(dest) = Self::resolve_uri_to_socketaddr(&addr.uri).await {
+                          return Some(dest);
+                      }
+                 }
              }
          }
          
@@ -745,17 +775,25 @@ impl ResponseBuilderExt for ResponseBuilder {
         if let Some(via) = request.first_via() {
              self = self.header(TypedHeader::Via(via.clone()));
          }
-         if let Some(to) = request.typed_header::<To>() {
-             self = self.header(TypedHeader::To(to.clone()));
+         if let Some(to) = request.header(&HeaderName::To) {
+             if let TypedHeader::To(to_val) = to {
+                 self = self.header(TypedHeader::To(to_val.clone()));
+             }
          }
-         if let Some(from) = request.typed_header::<From>() {
-             self = self.header(TypedHeader::From(from.clone()));
+         if let Some(from) = request.header(&HeaderName::From) {
+             if let TypedHeader::From(from_val) = from {
+                 self = self.header(TypedHeader::From(from_val.clone()));
+             }
          }
-         if let Some(call_id) = request.typed_header::<CallId>() {
-             self = self.header(TypedHeader::CallId(call_id.clone()));
+         if let Some(call_id) = request.header(&HeaderName::CallId) {
+             if let TypedHeader::CallId(call_id_val) = call_id {
+                 self = self.header(TypedHeader::CallId(call_id_val.clone()));
+             }
          }
-         if let Some(cseq) = request.typed_header::<CSeq>() {
-             self = self.header(TypedHeader::CSeq(cseq.clone()));
+         if let Some(cseq) = request.header(&HeaderName::CSeq) {
+             if let TypedHeader::CSeq(cseq_val) = cseq {
+                 self = self.header(TypedHeader::CSeq(cseq_val.clone()));
+             }
          }
          self = self.header(TypedHeader::ContentLength(ContentLength::new(0)));
          Ok(self) // Return Result

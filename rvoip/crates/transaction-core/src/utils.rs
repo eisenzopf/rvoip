@@ -26,15 +26,15 @@ pub fn extract_branch(message: &Message) -> Option<String> {
 /// Extract the Call-ID value from a message
 pub fn extract_call_id(message: &Message) -> Option<String> {
     message
-        .typed_header::<CallId>()
-        .map(|call_id| call_id.value().to_string()) 
+        .header(&HeaderName::CallId)
+        .and_then(|h| if let TypedHeader::CallId(cid) = h { Some(cid.to_string()) } else { None })
 }
 
 /// Extract the CSeq sequence number and method from a message
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     message
-        .typed_header::<CSeq>()
-        .map(|cseq| (cseq.sequence(), cseq.method().clone())) 
+        .header(&HeaderName::CSeq)
+        .and_then(|h| if let TypedHeader::CSeq(cseq) = h { Some((cseq.sequence(), cseq.method().clone())) } else { None })
 }
 
 /// Create a general response to a request, copying essential headers
@@ -44,17 +44,25 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     if let Some(via) = request.first_via() {
         builder = builder.header(TypedHeader::Via(via.clone()));
     }
-    if let Some(from) = request.typed_header::<From>() {
-        builder = builder.header(TypedHeader::From(from.clone()));
+    if let Some(from) = request.header(&HeaderName::From) {
+        if let TypedHeader::From(from_val) = from {
+            builder = builder.header(TypedHeader::From(from_val.clone()));
+        }
     }
-    if let Some(to) = request.typed_header::<To>() {
-        builder = builder.header(TypedHeader::To(to.clone()));
+    if let Some(to) = request.header(&HeaderName::To) {
+        if let TypedHeader::To(to_val) = to {
+            builder = builder.header(TypedHeader::To(to_val.clone()));
+        }
     }
-    if let Some(call_id) = request.typed_header::<CallId>() {
-        builder = builder.header(TypedHeader::CallId(call_id.clone()));
+    if let Some(call_id) = request.header(&HeaderName::CallId) {
+        if let TypedHeader::CallId(call_id_val) = call_id {
+            builder = builder.header(TypedHeader::CallId(call_id_val.clone()));
+        }
     }
-    if let Some(cseq) = request.typed_header::<CSeq>() {
-        builder = builder.header(TypedHeader::CSeq(cseq.clone()));
+    if let Some(cseq) = request.header(&HeaderName::CSeq) {
+        if let TypedHeader::CSeq(cseq_val) = cseq {
+            builder = builder.header(TypedHeader::CSeq(cseq_val.clone()));
+        }
     }
 
     builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));

@@ -329,23 +329,39 @@ impl ClientInviteTransaction {
                  ack_builder = ack_builder.header(TypedHeader::Route(route.clone()));
              }
         }
-        if let Some(from) = self.data.request.typed_header::<From>() {
-             ack_builder = ack_builder.header(TypedHeader::From(from.clone()));
+        if let Some(from_header) = self.data.request.header(&HeaderName::From) {
+             if let TypedHeader::From(from) = from_header {
+                 ack_builder = ack_builder.header(TypedHeader::From(from.clone()));
+             } else {
+                 return Err(Error::Other("Original INVITE request has invalid From header".into()));
+             }
          } else {
              return Err(Error::Other("Original INVITE request missing From header".into()));
          }
-        if let Some(to) = response.typed_header::<To>() {
-            ack_builder = ack_builder.header(TypedHeader::To(to.clone()));
+        if let Some(to_header) = response.header(&HeaderName::To) {
+            if let TypedHeader::To(to) = to_header {
+                ack_builder = ack_builder.header(TypedHeader::To(to.clone()));
+            } else {
+                return Err(Error::Other("Response has invalid To header".into()));
+            }
         } else {
             return Err(Error::Other("Response missing To header".into()));
         }
-         if let Some(call_id) = self.data.request.typed_header::<CallId>() {
-             ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone()));
+         if let Some(call_id_header) = self.data.request.header(&HeaderName::CallId) {
+             if let TypedHeader::CallId(call_id) = call_id_header {
+                 ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone()));
+             } else {
+                 return Err(Error::Other("Original INVITE request has invalid Call-ID header".into()));
+             }
          } else {
              return Err(Error::Other("Original INVITE request missing Call-ID".into()));
          }
-        if let Some(cseq) = self.data.request.typed_header::<CSeq>() {
-             ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
+        if let Some(cseq_header) = self.data.request.header(&HeaderName::CSeq) {
+             if let TypedHeader::CSeq(cseq) = cseq_header {
+                 ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
+             } else {
+                 return Err(Error::Other("Original INVITE request has invalid CSeq header".into()));
+             }
          } else {
              return Err(Error::Other("Original INVITE request missing CSeq".into()));
          }
