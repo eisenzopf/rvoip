@@ -26,14 +26,14 @@ pub fn extract_branch(message: &Message) -> Option<String> {
 /// Extract the Call-ID value from a message
 pub fn extract_call_id(message: &Message) -> Option<String> {
     message
-        .header::<CallId>() 
+        .typed_header::<CallId>()
         .map(|call_id| call_id.value().to_string()) 
 }
 
 /// Extract the CSeq sequence number and method from a message
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     message
-        .header::<CSeq>() 
+        .typed_header::<CSeq>()
         .map(|cseq| (cseq.sequence(), cseq.method().clone())) 
 }
 
