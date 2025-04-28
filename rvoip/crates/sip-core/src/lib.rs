@@ -197,6 +197,10 @@ pub mod prelude {
     pub use crate::types::expires::Expires; // Add Expires type
     pub use crate::types::in_reply_to::InReplyTo; // Add In-Reply-To type
     pub use crate::types::MediaType; // Add MediaType for MIME content types
+    pub use crate::types::organization::Organization; // Add Organization type
+    pub use crate::types::priority::Priority; // Add Priority type
+    pub use crate::types::record_route::RecordRoute; // Add RecordRoute type
+    pub use crate::types::record_route::RecordRouteEntry; // Add RecordRouteEntry type
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{

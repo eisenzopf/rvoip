@@ -65,7 +65,7 @@ use crate::types::to::To as ToHeaderValue; // Rename To to avoid conflict
 use crate::types::route::Route;
 use crate::parser::headers::route::RouteEntry; // Import RouteEntry from parser
 use crate::types::record_route::RecordRoute;
-use crate::parser::headers::record_route::RecordRouteEntry; // Import RecordRouteEntry from parser
+use crate::types::record_route::RecordRouteEntry; // Import RecordRouteEntry from types module
 use crate::types::via::{Via, ViaHeader}; // Import both Via and ViaHeader
 use crate::types::cseq::CSeq;
 use crate::types::call_id::CallId;

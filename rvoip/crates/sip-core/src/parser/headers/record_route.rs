@@ -28,20 +28,9 @@ use crate::parser::uri::params::uri_parameters;
 use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::address::Address;
-use crate::types::record_route::RecordRoute as RecordRouteHeader;
+use crate::types::record_route::{RecordRoute as RecordRouteHeader, RecordRouteEntry};
 use serde::{Serialize, Deserialize};
 use std::str::{self, FromStr};
-
-/// Represents a single record-route entry (name-addr with optional parameters)
-/// According to RFC 3261 Section 20.31, a rec-route is a name-addr with optional parameters
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordRouteEntry(pub Address);
-
-impl std::fmt::Display for RecordRouteEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 // Helper to parse an optional display name
 fn parse_display_name(input: &[u8]) -> ParseResult<Option<String>> {

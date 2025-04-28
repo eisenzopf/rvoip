@@ -24,7 +24,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Record-Route: <sip:p1.example.com;lr>
 //! Record-Route: <sip:p2.domain.com;lr>,<sip:p3.example.net;lr>
 //! ```
@@ -40,7 +40,7 @@
 //!
 //! // Access entries
 //! assert_eq!(record_route.len(), 2);
-//! assert!(record_route[0].uri.to_string().contains("proxy1"));
+//! assert!(record_route[0].uri().to_string().contains("proxy1"));
 //!
 //! // Create a Record-Route header
 //! let mut entries = Vec::new();
@@ -55,8 +55,70 @@ use std::str::FromStr;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
 use crate::types::Address;
-use crate::parser::headers::record_route::RecordRouteEntry;
+use crate::types::uri::Uri;
 use serde::{Deserialize, Serialize};
+
+/// Represents a single record-route entry (name-addr with optional parameters)
+/// According to RFC 3261 Section 20.31, a rec-route is a name-addr with optional parameters
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRouteEntry(pub Address);
+
+impl std::fmt::Display for RecordRouteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for RecordRouteEntry {
+    type Err = Error;
+
+    /// Parses a string into a RecordRouteEntry.
+    ///
+    /// # Parameters
+    ///
+    /// - `s`: The string to parse, which should be a SIP URI with optional parameters
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed RecordRouteEntry, or an error if parsing fails
+    fn from_str(s: &str) -> Result<Self> {
+        // Parse as an Address
+        let addr = Address::from_str(s)?;
+        Ok(Self(addr))
+    }
+}
+
+impl RecordRouteEntry {
+    /// Create a new RecordRouteEntry from an Address
+    pub fn new(address: Address) -> Self {
+        Self(address)
+    }
+
+    /// Get the URI of this record-route entry
+    pub fn uri(&self) -> &Uri {
+        &self.0.uri
+    }
+
+    /// Get the display name of this record-route entry, if any
+    pub fn display_name(&self) -> Option<&str> {
+        self.0.display_name.as_deref()
+    }
+
+    /// Check if this record-route entry has a specific parameter
+    pub fn has_param(&self, name: &str) -> bool {
+        self.0.has_param(name)
+    }
+
+    /// Get the inner Address
+    pub fn address(&self) -> &Address {
+        &self.0
+    }
+
+    /// Checks if this record route entry uses loose routing (has 'lr' parameter)
+    pub fn is_loose_routing(&self) -> bool {
+        self.has_param("lr")
+    }
+}
 
 /// Typed Record-Route header.
 ///
@@ -84,9 +146,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// // Iterate through entries
 /// for entry in &record_route {
-///     println!("Proxy: {}", entry.uri);
+///     println!("Proxy: {}", entry.uri());
 ///     // Check for loose routing parameter
-///     if entry.has_param("lr") {
+///     if entry.is_loose_routing() {
 ///         println!("Using loose routing");
 ///     }
 /// }
@@ -133,6 +195,41 @@ impl RecordRoute {
     /// ```
     pub fn new(list: Vec<RecordRouteEntry>) -> Self {
         Self(list)
+    }
+
+    /// Returns the first record-route entry, if any
+    pub fn first(&self) -> Option<&RecordRouteEntry> {
+        self.0.first()
+    }
+    
+    /// Returns the last record-route entry, if any
+    pub fn last(&self) -> Option<&RecordRouteEntry> {
+        self.0.last()
+    }
+    
+    /// Returns true if there are no record-route entries
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    
+    /// Returns the number of record-route entries
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    
+    /// Get iterator over entries
+    pub fn iter(&self) -> impl Iterator<Item = &RecordRouteEntry> {
+        self.0.iter()
+    }
+    
+    /// Adds a new record-route entry to the end of the list
+    pub fn add(&mut self, entry: RecordRouteEntry) {
+        self.0.push(entry);
+    }
+    
+    /// Gets entries in reverse order (useful for response routing)
+    pub fn reversed(&self) -> Vec<&RecordRouteEntry> {
+        self.0.iter().rev().collect()
     }
 }
 
@@ -238,11 +335,11 @@ impl Deref for RecordRoute {
     ///
     /// // Access by index
     /// let first_entry = &record_route[0];
-    /// assert!(first_entry.uri.to_string().contains("p1.example.com"));
+    /// assert!(first_entry.uri().to_string().contains("p1.example.com"));
     ///
     /// // Iterate through entries
     /// for entry in record_route.iter() {
-    ///     assert!(entry.uri.to_string().contains("example"));
+    ///     assert!(entry.uri().to_string().contains("example"));
     /// }
     /// ```
     fn deref(&self) -> &Self::Target {
@@ -250,4 +347,13 @@ impl Deref for RecordRoute {
     }
 }
 
-// TODO: Implement helper methods (e.g., first(), is_empty()) 
+impl<'a> IntoIterator for &'a RecordRoute {
+    type Item = &'a RecordRouteEntry;
+    type IntoIter = std::slice::Iter<'a, RecordRouteEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+// TODO: Implement helper methods (e.g., first(), is_empty())
