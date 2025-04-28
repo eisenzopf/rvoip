@@ -80,7 +80,7 @@ use crate::parser::headers::accept::AcceptValue; // Import directly from parser
 use crate::types::auth::{Authorization, WwwAuthenticate, ProxyAuthenticate, ProxyAuthorization, AuthenticationInfo};
 use crate::types::reply_to::ReplyTo;
 use crate::parser::headers::reply_to::ReplyToValue; // Import from parser
-use crate::types::warning::Warning;
+use crate::types::warning::{Warning, WarnAgent}; // Add WarnAgent import
 use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
 use crate::types::priority::Priority; // Import Priority type
@@ -790,7 +790,7 @@ impl TypedHeader {
             TypedHeader::Accept(_) => HeaderName::Accept,
             TypedHeader::Allow(_) => HeaderName::Allow,
             TypedHeader::ReplyTo(_) => HeaderName::ReplyTo,
-            TypedHeader::ReferTo(_) => HeaderName::ReferTo, // Add ReferTo variant
+            TypedHeader::ReferTo(_) => HeaderName::ReferTo,
             TypedHeader::Warning(_) => HeaderName::Warning,
             TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
@@ -1178,10 +1178,10 @@ impl TryFrom<Header> for TypedHeader {
                          let mut typed_warnings = Vec::new();
                          for parsed_value in parsed_values {
                              let agent_uri = match parsed_value.agent {
-                                 parser::headers::warning::WarnAgent::HostPort(host, port_opt) => {
+                                 WarnAgent::HostPort(host, port_opt) => {
                                      Uri::new(Scheme::Sip, host)
                                  },
-                                 parser::headers::warning::WarnAgent::Pseudonym(pseudonym_str) => {
+                                 WarnAgent::Pseudonym(pseudonym_str) => {
                                      match types::uri::Host::from_str(&pseudonym_str) {
                                           Ok(host) => Uri::new(Scheme::Sip, host),
                                           Err(_) => {
@@ -1324,6 +1324,27 @@ pub trait TypedHeaderTrait: Sized {
     
     /// Try to convert from an untyped Header
     fn from_header(header: &Header) -> Result<Self>;
+}
+
+impl From<&TypedHeader> for HeaderName {
+    fn from(header: &TypedHeader) -> HeaderName {
+        match header {
+            TypedHeader::MinExpires(_) => HeaderName::MinExpires,
+            TypedHeader::MimeVersion(_) => HeaderName::MimeVersion,
+            TypedHeader::Require(_) => HeaderName::Require,
+            TypedHeader::Supported(_) => HeaderName::Supported,
+            TypedHeader::Unsupported(_) => HeaderName::Unsupported,
+            TypedHeader::ProxyRequire(_) => HeaderName::ProxyRequire,
+            TypedHeader::Date(_) => HeaderName::Date,
+            TypedHeader::Timestamp(_) => HeaderName::Timestamp,
+            TypedHeader::Organization(_) => HeaderName::Organization,
+            TypedHeader::Priority(_) => HeaderName::Priority,
+            TypedHeader::Server(_) => HeaderName::Server,
+            TypedHeader::UserAgent(_) => HeaderName::UserAgent,
+            TypedHeader::InReplyTo(_) => HeaderName::InReplyTo,
+            _ => header.name(),
+        }
+    }
 }
 
 #[cfg(test)]

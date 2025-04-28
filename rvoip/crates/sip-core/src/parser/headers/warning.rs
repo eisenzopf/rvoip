@@ -26,27 +26,14 @@ use crate::parser::uri::host::hostport;
 use crate::parser::ParseResult;
 
 use crate::types::uri::Host;
-use crate::types::warning::Warning as WarningHeader; // Specific header type
+use crate::types::warning::{Warning as WarningHeader, WarnAgent, WarningValue}; // Import types
 use crate::types::uri::Uri;
 
 use std::str::FromStr;
 use crate::parser::values::delta_seconds; // Use delta_seconds for duration
 use crate::parser::whitespace::sws;
 
-// Define struct for parsed Warning value components
-#[derive(Debug, PartialEq, Clone)]
-pub struct WarningValue {
-    pub code: u16,
-    pub agent: WarnAgent,
-    pub text: Vec<u8>, // Store raw text bytes
-}
-
-// Define enum for WarnAgent locally
-#[derive(Debug, PartialEq, Clone)]
-pub enum WarnAgent {
-    HostPort(Host, Option<u16>),
-    Pseudonym(String),
-}
+// WarningValue struct is now imported from types/warning.rs
 
 // warn-code = 3DIGIT
 fn warn_code(input: &[u8]) -> ParseResult<u16> { // Return u16 directly

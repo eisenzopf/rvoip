@@ -144,6 +144,7 @@ pub use types::{
     TypedHeaderTrait,
     via::Via,
     Warning,
+    warning::{WarnAgent, WarningValue},
     sdp::MediaDescription, 
     sdp::Origin,
     sdp::ConnectionData, 
@@ -179,6 +180,7 @@ pub mod prelude {
     pub use crate::types::param::Param;
     pub use crate::types::param::GenericValue;
     pub use crate::types::warning::Warning;
+    pub use crate::types::warning::{WarnAgent, WarningValue};
     pub use crate::types::address::Address;
     pub use crate::types::from::From;
     pub use crate::types::to::To;

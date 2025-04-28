@@ -52,6 +52,31 @@ use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Serialize, Deserialize};
+use std::str::from_utf8;
+use crate::types::uri::Host;
+
+/// Represents the agent in a Warning header
+/// 
+/// The warn-agent can be either a host:port combination
+/// or a pseudonym (token).
+#[derive(Debug, PartialEq, Clone)]
+pub enum WarnAgent {
+    /// A host with an optional port number
+    HostPort(Host, Option<u16>),
+    /// A simple token/name string
+    Pseudonym(String),
+}
+
+/// Internal structure for parsed Warning value components
+#[derive(Debug, PartialEq, Clone)]
+pub struct WarningValue {
+    /// The warning code (300-399)
+    pub code: u16,
+    /// The warning agent (hostname or pseudonym)
+    pub agent: WarnAgent,
+    /// The warning text (raw bytes)
+    pub text: Vec<u8>,
+}
 
 /// Typed Warning header value.
 ///
@@ -182,30 +207,61 @@ impl FromStr for Warning {
     /// - `Ok(Warning)`: If parsing succeeds
     /// - `Err`: If parsing fails
     ///
-    /// # Note
-    ///
-    /// Currently, this implementation is a placeholder and will return an error
-    /// as it's not fully implemented yet.
-    ///
     /// # Examples
     ///
-    /// ```rust,ignore
+    /// ```rust
     /// use rvoip_sip_core::prelude::*;
     /// use std::str::FromStr;
     ///
-    /// // This would parse a warning header when implemented
-    /// let warning = Warning::from_str("370 example.com \"Insufficient bandwidth\"");
+    /// // Parse a warning header
+    /// let warning = Warning::from_str("370 example.com \"Insufficient bandwidth\"").unwrap();
+    /// 
+    /// // Verify the parsed values
+    /// assert_eq!(warning.code, 370);
+    /// assert_eq!(warning.agent.host.to_string(), "example.com");
+    /// assert_eq!(warning.text, "Insufficient bandwidth");
     /// ```
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         use crate::error::Error; // Ensure Error is in scope
 
         match all_consuming(parse_warning_value_list)(s.as_bytes()) {
-            // TODO: Fix this logic. parse_warning_value_list returns Vec<WarningValue>
-            //       We need to map that result to a single Warning struct.
-            //       Placeholder: return error for now.
-            Ok((_, _value)) => Err(Error::ParseError(
-                "FromStr<Warning> not fully implemented yet".to_string()
-            )),
+            Ok((_, values)) => {
+                // Get the first warning value from the list
+                if let Some(value) = values.first() {
+                    // Convert the agent to a URI
+                    let agent = match &value.agent {
+                        // Use the imported WarnAgent enum
+                        WarnAgent::HostPort(host, port) => {
+                            // Create a SIP URI with the host
+                            let mut uri = Uri::sip(host.to_string());
+                            // Add port if present
+                            if let Some(p) = port {
+                                uri.port = Some(*p);
+                            }
+                            uri
+                        },
+                        WarnAgent::Pseudonym(name) => {
+                            // For pseudonyms, just create a simple SIP URI
+                            Uri::sip(name)
+                        }
+                    };
+                    
+                    // Convert text from Vec<u8> to String
+                    let text = match from_utf8(&value.text) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return Err(Error::ParseError("Invalid UTF-8 in warning text".to_string()))
+                    };
+                    
+                    // Create and return the Warning struct
+                    Ok(Warning {
+                        code: value.code,
+                        agent,
+                        text
+                    })
+                } else {
+                    Err(Error::ParseError("No warning values found".to_string()))
+                }
+            },
             Err(e) => Err(Error::ParseError(
                 format!("Failed to parse Warning header: {:?}", e)
             ))
