@@ -43,34 +43,42 @@
 //!     assert_eq!(request.method(), Method::Invite);
 //!     assert_eq!(request.uri().to_string(), "sip:bob@example.com");
 //!     
-//!     // Get headers
-//!     let from = request.typed_header::<From>().expect("From header");
-//!     let to = request.typed_header::<To>().expect("To header");
-//!     
-//!     println!("From: {}", from.address().display_name().unwrap_or(""));
-//!     println!("To: {}", to.address().display_name().unwrap_or(""));
+//!     // Get headers and display them
+//!     if let Some(from_header) = request.header(&HeaderName::From) {
+//!         println!("From: {}", from_header);
+//!     }
+//!     if let Some(to_header) = request.header(&HeaderName::To) {
+//!         println!("To: {}", to_header);
+//!     }
 //! }
 //!
-//! // Create a SIP request using the builder pattern
-//! let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse::<Uri>().unwrap())
-//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse::<Uri>().unwrap())))
-//!     .header(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse::<Uri>().unwrap())))
-//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .header(CSeq::new(314159, Method::Invite))
-//!     .header(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", vec![Param::branch("z9hG4bK776asdhds")]).unwrap())
-//!     .header(MaxForwards::new(70))
-//!     .header(Contact::new_params(vec![ContactParamInfo::Address(Address::new_with_display_name("", "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap()))]))
-//!     .header(ContentLength::new(0))
+//! // Create a SIP request
+//! let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
+//! let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
+//! let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
+//! 
+//! let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
+//!     .unwrap()
+//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri.clone()))))
+//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
+//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
+//!     .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+//!     .header(TypedHeader::Contact(Contact::new_params(vec![ContactParamInfo { 
+//!         address: Address::new(contact_uri)
+//!     }])))
+//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
 //!     .build();
 //!
 //! // Create a SIP response
 //! let response = ResponseBuilder::new(StatusCode::Ok)
-//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse::<Uri>().unwrap())))
-//!     .header(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse::<Uri>().unwrap())))
-//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .header(CSeq::new(314159, Method::Invite))
-//!     .header(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", vec![Param::branch("z9hG4bK776asdhds")]).unwrap())
-//!     .header(ContentLength::new(0))
+//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri))))
+//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri))))
+//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
+//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
 //!     .build();
 //! ```
 //!
@@ -88,12 +96,7 @@
 //! let message = parse_message(&data);
 //!
 //! // Custom parsing mode
-//! let strict_message = parse_message_with_mode(&data, ParseMode::new()
-//!     .with_max_line_length(8192)
-//!     .with_max_header_count(100) 
-//!     .with_max_body_size(16384)
-//!     .with_strict(true)
-//! );
+//! let strict_message = parse_message_with_mode(&data, ParseMode::Strict);
 //! ```
 //!
 //! ## Feature Flags
@@ -229,4 +232,4 @@ mod tests {
         let result = 2 + 2;
         assert_eq!(result, 4);
     }
-} 
+}

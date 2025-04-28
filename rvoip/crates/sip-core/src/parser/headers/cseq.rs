@@ -68,7 +68,7 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
 /// # Examples
 /// ```
 /// use rvoip_sip_core::parser::headers::cseq::parse_cseq;
-/// use rvoip_sip_core::types::Method;
+/// use rvoip_sip_core::types::method::Method;
 /// 
 /// let result = parse_cseq(b"101 INVITE");
 /// assert!(result.is_ok());
@@ -93,7 +93,7 @@ pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
 /// # Examples
 /// ```
 /// use rvoip_sip_core::parser::headers::cseq::full_parse_cseq;
-/// use rvoip_sip_core::types::Method;
+/// use rvoip_sip_core::types::method::Method;
 /// 
 /// let result = full_parse_cseq(b"CSeq: 101 INVITE");
 /// assert!(result.is_ok());

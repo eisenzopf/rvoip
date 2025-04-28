@@ -53,22 +53,22 @@
 //! use rvoip_sip_core::prelude::*;
 //! use std::str::FromStr;
 //!
-//! // Create a typed header
-//! let from = From::from_str("Alice <sip:alice@example.com>;tag=1234").unwrap();
-//! let display_name = from.address().display_name().unwrap_or("");
-//! assert_eq!(display_name, "Alice");
+//! // Create a From header directly without parsing
+//! let uri = Uri::from_str("sip:alice@example.com").unwrap();
+//! let mut address = Address::new_with_display_name("Alice", uri);
+//! address.set_tag("1234");
+//! let from = From::new(address);
 //! 
-//! // Access URI directly from the address
-//! let uri_str = from.address().uri.to_string();
-//! assert_eq!(uri_str, "sip:alice@example.com");
+//! // Access the address data
+//! let addr = from.address();
+//! assert_eq!(addr.display_name(), Some("Alice"));
 //! 
-//! // Get the tag parameter
-//! let tag = from.tag();
-//! assert_eq!(tag, Some("1234"));
-//!
-//! // Convert to a generic Header
-//! let header_name = HeaderName::From;
-//! assert_eq!(from.address().display_name(), Some("Alice"));
+//! // Access URI data
+//! assert_eq!(addr.uri.scheme, Scheme::Sip);
+//! assert_eq!(addr.uri.user, Some("alice".to_string()));
+//! 
+//! // Access parameters
+//! assert_eq!(from.tag(), Some("1234"));
 //! ```
 //!
 //! ### Using the Builder Pattern
@@ -81,10 +81,10 @@
 //! let uri = "sip:bob@example.com".parse::<Uri>().unwrap();
 //! let request = RequestBuilder::new(Method::Invite, &uri.to_string())
 //!     .unwrap()
-//!     .header(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse::<Uri>().unwrap())))
-//!     .header(To::new(Address::new_with_display_name("Bob", uri)))
-//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .header(CSeq::new(314159, Method::Invite))
+//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse::<Uri>().unwrap()))))
+//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", uri))))
+//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
 //!     .build();
 //! 
 //! assert_eq!(request.method(), Method::Invite);
