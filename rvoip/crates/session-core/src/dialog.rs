@@ -176,8 +176,17 @@ impl Dialog {
             return None;
         }
         
-        let remote_tag = if is_initiator { to_tag.clone() } else { from_tag.clone() };
-        let local_tag = if is_initiator { from_tag.clone() } else { to_tag.clone() };
+        let remote_tag = if is_initiator { 
+            to_tag.map(|s| s.to_string()) 
+        } else { 
+            from_tag.map(|s| s.to_string()) 
+        };
+        
+        let local_tag = if is_initiator { 
+            from_tag.map(|s| s.to_string()) 
+        } else { 
+            to_tag.map(|s| s.to_string()) 
+        };
         
         let local_uri_result = extract_uri(if is_initiator { &from_value } else { &to_value });
         if local_uri_result.is_none() {
@@ -201,7 +210,7 @@ impl Dialog {
                 // Contact may have multiple values, use the first one
                 match contact.0.first() {
                     Some(address) => {
-                        let uri = address.uri().clone();
+                        let uri = address.uri.clone();
                         debug!("Using contact URI: {}", uri);
                         uri
                     },
@@ -225,7 +234,16 @@ impl Dialog {
                 for entry in rr.0.iter().rev() {
                     route_set.push(entry.uri().clone());
                 }
-            } else if let Some(rr_text) = record_route.value.as_text() {
+            } else if let Some(rr_text) = match record_route {
+                TypedHeader::RecordRoute(_) => None,
+                _ => {
+                    if let HeaderValue::Raw(bytes) = &record_route.value() {
+                        std::str::from_utf8(bytes).ok()
+                    } else {
+                        None
+                    }
+                }
+            } {
                 if let Some(uri) = extract_uri(rr_text) {
                     route_set.push(uri);
                 }
@@ -295,8 +313,17 @@ impl Dialog {
             _ => return None,
         };
         
-        let remote_tag = if is_initiator { to_tag.clone() } else { from_tag.clone() };
-        let local_tag = if is_initiator { from_tag.clone() } else { to_tag.clone() };
+        let remote_tag = if is_initiator { 
+            to_tag.map(|s| s.to_string()) 
+        } else { 
+            from_tag.map(|s| s.to_string()) 
+        };
+        
+        let local_tag = if is_initiator { 
+            from_tag.map(|s| s.to_string()) 
+        } else { 
+            to_tag.map(|s| s.to_string()) 
+        };
         
         let local_uri = extract_uri(if is_initiator { &from_value } else { &to_value })?;
         let remote_uri = extract_uri(if is_initiator { &to_value } else { &from_value })?;
@@ -306,7 +333,7 @@ impl Dialog {
             Some(TypedHeader::Contact(contact)) => {
                 // Contact may have multiple values, use the first one
                 match contact.0.first() {
-                    Some(address) => address.uri().clone(),
+                    Some(address) => address.uri.clone(),
                     None => return None,
                 }
             },
@@ -320,7 +347,16 @@ impl Dialog {
                 for entry in rr.0.iter().rev() {
                     route_set.push(entry.uri().clone());
                 }
-            } else if let Some(rr_text) = record_route.value.as_text() {
+            } else if let Some(rr_text) = match record_route {
+                TypedHeader::RecordRoute(_) => None,
+                _ => {
+                    if let HeaderValue::Raw(bytes) = &record_route.value() {
+                        std::str::from_utf8(bytes).ok()
+                    } else {
+                        None
+                    }
+                }
+            } {
                 if let Some(uri) = extract_uri(rr_text) {
                     route_set.push(uri);
                 }
@@ -355,16 +391,20 @@ impl Dialog {
         
         // Update the remote target URI if a contact header is present
         if let Some(contact) = response.header(&HeaderName::Contact) {
-            if let Some(contact_uri) = contact.value.as_text().and_then(extract_uri) {
-                self.remote_target = contact_uri;
+            if let TypedHeader::Contact(contact_header) = contact {
+                if let Some(address) = contact_header.address() {
+                    let contact_uri = address.uri.clone();
+                    self.remote_target = contact_uri;
+                }
             }
         }
         
         // Update remote tag if needed
         if let Some(to) = response.header(&HeaderName::To) {
-            if let Some(to_value) = to.value.as_text() {
+            if let TypedHeader::To(to_header) = to {
+                let to_value = to_header.to_string();
                 if self.is_initiator {
-                    self.remote_tag = extract_tag(to_value);
+                    self.remote_tag = extract_tag(&to_value);
                 }
             }
         }
@@ -403,7 +443,7 @@ impl Dialog {
         let from = TypedHeader::From(
             FromHeader::from_str(&from_value).unwrap_or_else(|_| {
                 debug!("Error parsing From header: {}", from_value);
-                FromHeader::default()
+                FromHeader::new(Address::new(Uri::sip("unknown")))
             })
         );
         
@@ -417,7 +457,7 @@ impl Dialog {
         let to = TypedHeader::To(
             ToHeader::from_str(&to_value).unwrap_or_else(|_| {
                 debug!("Error parsing To header: {}", to_value);
-                ToHeader::default()
+                ToHeader::new(Address::new(Uri::sip("unknown")))
             })
         );
         
@@ -434,22 +474,13 @@ impl Dialog {
         
         // Add route set if present
         if !self.route_set.is_empty() {
-            debug!("Adding {} route headers", self.route_set.len());
-            
-            let mut route_headers = Vec::new();
             for uri in &self.route_set {
-                let route_value = format!("<{}>", uri);
-                match Route::from_str(&route_value) {
-                    Ok(route) => {
-                        route_headers.push(route);
-                    },
-                    Err(e) => {
-                        debug!("Error parsing Route header: {}: {}", route_value, e);
-                    }
-                }
+                // For each URI, create a standalone Route header
+                let address = Address::new(uri.clone());
+                let route_entry = RouteEntry::new(address);
+                let single_route = Route::new(vec![route_entry]);
+                headers.push(TypedHeader::Route(single_route));
             }
-            
-            headers.push(TypedHeader::Route(Route(route_headers)));
         }
         
         // Replace the headers in the request with our new ones
