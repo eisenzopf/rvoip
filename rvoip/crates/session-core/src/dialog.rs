@@ -23,6 +23,7 @@ use rvoip_sip_core::types::address::Address;
 use rvoip_sip_core::types::from::From as FromHeader;
 use rvoip_sip_core::types::to::To as ToHeader;
 use rvoip_sip_core::types::param::Param;
+use rvoip_sip_core::parser::headers::route::RouteEntry;
 
 // Import transaction types
 use rvoip_transaction_core::{
@@ -228,7 +229,7 @@ impl Dialog {
         // Record-Route headers may not exist, so this part is optional
         if let Some(record_route) = response.header(&HeaderName::RecordRoute) {
             if let TypedHeader::RecordRoute(rr) = record_route {
-                for entry in rr.entries().iter().rev() {
+                for entry in rr.reversed() {
                     route_set.push(entry.uri().clone());
                 }
             }
@@ -329,7 +330,7 @@ impl Dialog {
         let mut route_set = Vec::new();
         if let Some(record_route) = response.header(&HeaderName::RecordRoute) {
             if let TypedHeader::RecordRoute(rr) = record_route {
-                for entry in rr.entries().iter().rev() {
+                for entry in rr.reversed() {
                     route_set.push(entry.uri().clone());
                 }
             }
@@ -450,7 +451,7 @@ impl Dialog {
             let mut route_entries = Vec::new();
             for uri in &self.route_set {
                 let address = Address::new(uri.clone());
-                let route_entry = RouteEntry::new(address);
+                let route_entry = RouteEntry(address);
                 route_entries.push(route_entry);
             }
             
@@ -1375,7 +1376,7 @@ impl DialogManager {
             
             // Save dialog tuple mapping if available
             if let Some(tuple) = dialog.dialog_id_tuple() {
-                debug!("Mapping dialog tuple to dialog ID: {:?} -> {}", tuple, dialog_id);
+                debug!("Mapping dialog tuple to dialog ID: {:?} -> {}", tuple, dialog_id.to_string());
                 self.dialog_lookup.insert(tuple, dialog_id.clone());
             }
             
