@@ -53,14 +53,14 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a typed header
-//! let from = From::parse("Alice <sip:alice@example.com>;tag=1234").unwrap();
+//! let from = From::from_str("Alice <sip:alice@example.com>;tag=1234").unwrap();
 //! let display_name = from.address().display_name().unwrap_or("");
 //! let uri = from.address().uri();
-//! let tag = from.address().parameter("tag").unwrap();
+//! let tag = from.tag();
 //!
 //! // Convert to a generic Header
-//! let header: Header = from.into();
-//! assert_eq!(header.name(), HeaderName::From);
+//! let header = from.to_header();
+//! assert_eq!(header.name, HeaderName::From);
 //! ```
 //!
 //! ### Using the Builder Pattern
@@ -69,11 +69,12 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a SIP request
-//! let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-//!     .with_header(From::new(Address::parse("Alice <sip:alice@example.com>").unwrap()))
-//!     .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
-//!     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-//!     .with_header(CSeq::new(314159, Method::Invite))
+//! let uri = Uri::from_str("sip:bob@example.com").unwrap();
+//! let request = RequestBuilder::new(Method::Invite, uri.clone())
+//!     .header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@example.com").unwrap())))
+//!     .header(To::new(Address::new_with_display_name("Bob", uri)))
+//!     .header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
+//!     .header(CSeq::new(314159, Method::Invite))
 //!     .build();
 //! ```
 

@@ -39,7 +39,7 @@
 //!
 //! // Create a Refer-To header
 //! let uri = Uri::from_str("sip:alice@example.com").unwrap();
-//! let address = Address::new(Some("Alice"), uri);
+//! let address = Address::new_with_display_name("Alice", uri);
 //! let refer_to = ReferTo::new(address);
 //!
 //! // Parse a Refer-To header from a string
@@ -77,14 +77,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// // Create a simple Refer-To with just a URI
 /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-/// let address = Address::new(None::<&str>, uri);
+/// let address = Address::new(uri);
 /// let refer_to = ReferTo::new(address);
 /// assert_eq!(refer_to.to_string(), "<sip:alice@example.com>");
 ///
 /// // Parse a Refer-To header with parameters from a URI's parameters
 /// // Note: params in the URI are attached to the URI, not the Address
 /// let uri_with_param = Uri::from_str("sip:bob@example.com;method=INVITE").unwrap();
-/// let addr = Address::new(None::<&str>, uri_with_param);
+/// let addr = Address::new(uri_with_param);
 /// let refer_to = ReferTo::new(addr);
 /// assert_eq!(refer_to.uri().to_string(), "sip:bob@example.com;method=INVITE");
 ///
@@ -118,12 +118,12 @@ impl ReferTo {
     ///
     /// // Create a simple Refer-To with just a URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let refer_to = ReferTo::new(address);
     ///
     /// // Create a Refer-To with display name
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(Some("Bob"), uri);
+    /// let address = Address::new_with_display_name("Bob", uri);
     /// let refer_to = ReferTo::new(address);
     /// // Depending on the implementation, display names may be quoted or not
     /// assert!(refer_to.to_string() == "Bob <sip:bob@example.com>" ||
@@ -131,7 +131,7 @@ impl ReferTo {
     ///
     /// // Create a Refer-To with parameters
     /// let uri = Uri::from_str("sip:carol@example.com").unwrap();
-    /// let mut address = Address::new(None::<&str>, uri);
+    /// let mut address = Address::new(uri);
     /// // We'll skip adding the parameter in this example as the API has changed
     /// let refer_to = ReferTo::new(address);
     /// ```
@@ -216,7 +216,7 @@ impl ReferTo {
     ///
     /// // Add a param to the Address
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(None::<&str>, uri);
+    /// let mut address = Address::new(uri);
     /// address.params.push(Param::Lr);
     /// let refer_to = ReferTo::new(address);
     /// assert_eq!(refer_to.params().len(), 1);
@@ -246,7 +246,7 @@ impl ReferTo {
     ///
     /// // Create URI and address, then add parameter
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(None::<&str>, uri);
+    /// let mut address = Address::new(uri);
     /// address.params.push(Param::Lr);
     /// let refer_to = ReferTo::new(address);
     ///
@@ -257,7 +257,7 @@ impl ReferTo {
     ///
     /// // URI parameters are not part of Address parameters
     /// let uri_with_param = Uri::from_str("sip:alice@example.com;transport=tcp").unwrap();
-    /// let addr = Address::new(None::<&str>, uri_with_param);
+    /// let addr = Address::new(uri_with_param);
     /// let refer_to = ReferTo::new(addr);
     /// 
     /// // The transport parameter is in the URI, not in the Address params
@@ -291,7 +291,7 @@ impl ReferTo {
     ///
     /// // Create URI and address, then add the tag parameter
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(None::<&str>, uri);
+    /// let mut address = Address::new(uri);
     ///
     /// // Add tag parameter to Address (not URI)
     /// address.set_tag("1234");
@@ -324,13 +324,13 @@ impl fmt::Display for ReferTo {
     ///
     /// // Simple URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let refer_to = ReferTo::new(address);
     /// assert_eq!(refer_to.to_string(), "<sip:alice@example.com>");
     ///
     /// // With display name
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let address = Address::new(Some("Bob"), uri);
+    /// let address = Address::new_with_display_name("Bob", uri);
     /// let refer_to = ReferTo::new(address);
     /// // Depending on the implementation, display names may be quoted or not
     /// assert!(refer_to.to_string() == "Bob <sip:bob@example.com>" ||
@@ -338,7 +338,7 @@ impl fmt::Display for ReferTo {
     ///
     /// // With URI parameters
     /// let uri = Uri::from_str("sip:carol@example.com;transport=tcp").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let refer_to = ReferTo::new(address);
     /// assert_eq!(refer_to.to_string(), "<sip:carol@example.com;transport=tcp>");
     ///

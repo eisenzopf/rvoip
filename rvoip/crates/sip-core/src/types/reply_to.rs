@@ -274,7 +274,7 @@ impl ReplyTo {
     ///
     /// // Create an invalid header (with an HTTP URI)
     /// let uri = Uri::from_str("http://example.com").unwrap(); // HTTP not allowed
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let invalid_reply_to = ReplyTo::new(address);
     /// assert!(invalid_reply_to.validate().is_err());
     /// ```

@@ -31,9 +31,9 @@
 //! use rvoip_sip_core::prelude::*;
 //! use std::str::FromStr;
 //!
-//! // Create a From header from an Address
+//! // Create a From header from an Address with a display name
 //! let uri = Uri::from_str("sip:alice@example.com").unwrap();
-//! let address = Address::new(Some("Alice Smith"), uri);
+//! let address = Address::new_with_display_name("Alice Smith", uri);
 //! let from = From::new(address);
 //!
 //! // Display the From header
@@ -74,9 +74,9 @@ use nom::combinator;
 /// use rvoip_sip_core::prelude::*;
 /// use std::str::FromStr;
 ///
-/// // Create a From header from an Address
+/// // Create a From header with a display name
 /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-/// let address = Address::new(Some("Alice Smith"), uri);
+/// let address = Address::new_with_display_name("Alice Smith", uri);
 /// let from = From::new(address);
 ///
 /// // Display the From header
@@ -109,13 +109,13 @@ impl From {
     ///
     /// // Create a From header with just a URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "<sip:alice@example.com>");
     ///
     /// // Create a From header with a display name and URI
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
-    /// let address = Address::new(Some("Bob"), uri);
+    /// let address = Address::new_with_display_name("Bob", uri);
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "Bob <sip:bob@example.org>");
     /// ```
@@ -140,7 +140,7 @@ impl From {
     ///
     /// // Create a From header
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(Some("Alice"), uri);
+    /// let address = Address::new_with_display_name("Alice", uri);
     /// let from = From::new(address);
     ///
     /// // Access the inner Address
@@ -167,7 +167,7 @@ impl From {
     ///
     /// // Create a From header with a tag
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut address = Address::new(None::<&str>, uri);
+    /// let mut address = Address::new(uri);
     /// address.set_tag("1928301774");
     /// let from = From::new(address);
     ///
@@ -176,7 +176,7 @@ impl From {
     ///
     /// // From header without a tag
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let from = From::new(address);
     /// assert_eq!(from.tag(), None);
     /// ```
@@ -201,7 +201,7 @@ impl From {
     ///
     /// // Create a From header without a tag
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let mut from = From::new(address);
     ///
     /// // Add a tag
@@ -232,13 +232,13 @@ impl fmt::Display for From {
     ///
     /// // From header with just a URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "<sip:alice@example.com>");
     ///
     /// // From header with display name, URI, and tag
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
-    /// let mut address = Address::new(Some("Bob"), uri);
+    /// let mut address = Address::new_with_display_name("Bob", uri);
     /// address.set_tag("abc123");
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "Bob <sip:bob@example.org>;tag=abc123");
@@ -308,7 +308,7 @@ impl Deref for From {
     ///
     /// // Create a From header
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(Some("Alice"), uri);
+    /// let address = Address::new_with_display_name("Alice", uri);
     /// let from = From::new(address);
     ///
     /// // Access Address methods directly through the deref implementation

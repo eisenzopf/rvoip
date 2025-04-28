@@ -36,7 +36,7 @@
 ///
 /// // Create a Contact with an address
 /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-/// let address = Address::new(Some("John Doe"), uri);
+/// let address = Address::new_with_display_name("John Doe", uri);
 /// let contact_info = ContactParamInfo { address };
 /// let contact = Contact::new_params(vec![contact_info]);
 ///
@@ -74,7 +74,7 @@ use serde::{Serialize, Deserialize};
 ///
 /// // Create a ContactParamInfo with an Address
 /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-/// let address = Address::new(Some("John Doe"), uri);
+/// let address = Address::new_with_display_name("John Doe", uri);
 /// let contact_info = ContactParamInfo { address };
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,7 @@ pub struct ContactParamInfo {
 ///
 /// // Create a Params contact value
 /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-/// let address = Address::new(Some("John Doe"), uri);
+/// let address = Address::new_with_display_name("John Doe", uri);
 /// let contact_info = ContactParamInfo { address };
 /// let params = ContactValue::Params(vec![contact_info]);
 /// ```
@@ -130,7 +130,7 @@ pub enum ContactValue {
 ///
 /// // Create a Contact with an address
 /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-/// let address = Address::new(Some("John Doe"), uri);
+/// let address = Address::new_with_display_name("John Doe", uri);
 /// let contact_info = ContactParamInfo { address };
 /// let contact = Contact::new_params(vec![contact_info]);
 ///
@@ -169,15 +169,15 @@ impl Contact {
     ///
     /// // Create a Contact with an address
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(Some("John Doe"), uri);
+    /// let address = Address::new_with_display_name("John Doe", uri);
     /// let contact_info = ContactParamInfo { address };
     /// let contact = Contact::new_params(vec![contact_info]);
     ///
     /// // Create a Contact with multiple addresses
     /// let uri1 = Uri::from_str("sip:john@example.com").unwrap();
     /// let uri2 = Uri::from_str("sip:john@mobile.example.com").unwrap();
-    /// let address1 = Address::new(Some("John Doe"), uri1);
-    /// let address2 = Address::new(Some("John Doe Mobile"), uri2);
+    /// let address1 = Address::new_with_display_name("John Doe", uri1);
+    /// let address2 = Address::new_with_display_name("John Doe Mobile", uri2);
     /// let contact_info1 = ContactParamInfo { address: address1 };
     /// let contact_info2 = ContactParamInfo { address: address2 };
     /// let contact = Contact::new_params(vec![contact_info1, contact_info2]);
@@ -232,7 +232,7 @@ impl Contact {
     ///
     /// // Create a Contact with an address
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(Some("John Doe"), uri);
+    /// let address = Address::new_with_display_name("John Doe", uri);
     /// let contact_info = ContactParamInfo { address };
     /// let contact = Contact::new_params(vec![contact_info]);
     ///
@@ -268,7 +268,7 @@ impl Contact {
     ///
     /// // Create a Contact with an address
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(Some("John Doe"), uri);
+    /// let address = Address::new_with_display_name("John Doe", uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
@@ -300,8 +300,8 @@ impl Contact {
     /// // Create a Contact with multiple addresses
     /// let uri1 = Uri::from_str("sip:john@example.com").unwrap();
     /// let uri2 = Uri::from_str("sip:john@mobile.example.com").unwrap();
-    /// let address1 = Address::new(Some("John Doe"), uri1);
-    /// let address2 = Address::new(Some("John Doe Mobile"), uri2);
+    /// let address1 = Address::new_with_display_name("John Doe", uri1);
+    /// let address2 = Address::new_with_display_name("John Doe Mobile", uri2);
     /// let contact_info1 = ContactParamInfo { address: address1 };
     /// let contact_info2 = ContactParamInfo { address: address2 };
     /// let contact = Contact::new_params(vec![contact_info1, contact_info2]);
@@ -336,8 +336,8 @@ impl Contact {
     /// // Create a Contact with multiple addresses
     /// let uri1 = Uri::from_str("sip:john@example.com").unwrap();
     /// let uri2 = Uri::from_str("sip:john@mobile.example.com").unwrap();
-    /// let address1 = Address::new(Some("John Doe"), uri1);
-    /// let address2 = Address::new(Some("John Doe Mobile"), uri2);
+    /// let address1 = Address::new_with_display_name("John Doe", uri1);
+    /// let address2 = Address::new_with_display_name("John Doe Mobile", uri2);
     /// let contact_info1 = ContactParamInfo { address: address1 };
     /// let contact_info2 = ContactParamInfo { address: address2 };
     /// let mut contact = Contact::new_params(vec![contact_info1, contact_info2]);
@@ -406,7 +406,7 @@ impl Contact {
     ///
     /// // Create a Contact and set expires
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
@@ -480,7 +480,7 @@ impl Contact {
     ///
     /// // Create a Contact and set q value
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
@@ -550,7 +550,7 @@ impl Contact {
     ///
     /// // Create a Contact and set tag
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let contact_info = ContactParamInfo { address };
     /// let mut contact = Contact::new_params(vec![contact_info]);
     ///
