@@ -17,7 +17,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Route: <sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>
 //! Route: "Proxy 1" <sip:proxy1.example.com;lr>, "Proxy 2" <sip:proxy2.example.com;lr>
 //! ```
@@ -115,8 +115,8 @@ impl Route {
     /// // Create route entries
     /// let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
     /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-    /// let addr1 = Address::new(None, uri1);
-    /// let addr2 = Address::new(None, uri2);
+    /// let addr1 = Address::new(None::<&str>, uri1);
+    /// let addr2 = Address::new(None::<&str>, uri2);
     /// 
     /// // Use parser route value type
     /// let entries = vec![
@@ -334,7 +334,7 @@ impl Route {
     ///
     /// // Create and add a route entry
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let entry = ParserRouteValue(address);
     ///
     /// route.add(entry);
@@ -534,7 +534,9 @@ impl Deref for Route {
     ///
     /// // Use Vec methods directly on Route
     /// assert_eq!(route.len(), 2);
-    /// for entry in &route {
+    /// 
+    /// // Use the iter() method instead of direct iteration
+    /// for entry in route.iter() {
     ///     // Access each entry
     ///     let uri = &entry.0.uri;
     /// }
@@ -556,8 +558,8 @@ impl From<Vec<ParserRouteValue>> for Route {
     /// // Create route entries
     /// let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
     /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-    /// let addr1 = Address::new(None, uri1);
-    /// let addr2 = Address::new(None, uri2);
+    /// let addr1 = Address::new(None::<&str>, uri1);
+    /// let addr2 = Address::new(None::<&str>, uri2);
     ///
     /// let entries = vec![
     ///     ParserRouteValue(addr1),
@@ -584,7 +586,7 @@ impl From<ParserRouteValue> for Route {
     ///
     /// // Create a route entry
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let addr = Address::new(None, uri);
+    /// let addr = Address::new(None::<&str>, uri);
     /// let entry = ParserRouteValue(addr);
     ///
     /// // Create Route using From trait
@@ -692,22 +694,22 @@ mod tests {
         // From Vec<ParserRouteValue>
         let uri1 = Uri::sip("proxy1.example.com");
         let uri2 = Uri::sip("proxy2.example.com");
-        let addr1 = Address::new(None::<String>, uri1);
-        let addr2 = Address::new(None::<String>, uri2);
+        let addr1 = Address::new(None::<&str>, uri1);
+        let addr2 = Address::new(None::<&str>, uri2);
         let entries = vec![ParserRouteValue(addr1), ParserRouteValue(addr2)];
         let route = Route::from(entries);
         assert_eq!(route.len(), 2);
         
         // From ParserRouteValue
         let uri = Uri::sip("proxy.example.com");
-        let addr = Address::new(None::<String>, uri);
+        let addr = Address::new(None::<&str>, uri);
         let entry = ParserRouteValue(addr);
         let route = Route::from(entry);
         assert_eq!(route.len(), 1);
         
         // From Address
         let uri = Uri::sip("proxy.example.com");
-        let addr = Address::new(None::<String>, uri);
+        let addr = Address::new(None::<&str>, uri);
         let route = Route::from(addr);
         assert_eq!(route.len(), 1);
     }

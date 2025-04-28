@@ -205,6 +205,8 @@ pub mod prelude {
     pub use crate::types::reply_to::ReplyTo; // Add ReplyTo type for doctests
     pub use crate::types::require::Require; // Add Require type for doctests
     pub use crate::types::retry_after::RetryAfter; // Add RetryAfter type for doctests
+    pub use crate::parser::headers::route::RouteEntry as ParserRouteValue; // Add ParserRouteValue for doctests
+    pub use crate::types::route::Route; // Add Route type for doctests
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{
