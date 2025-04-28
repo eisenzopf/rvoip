@@ -15,6 +15,7 @@ Core SIP protocol implementation for the rvoip VoIP stack.
 - SDP (Session Description Protocol) integration
 - Multipart MIME body handling
 - IPv6 support
+- Strict and lenient parsing modes to handle both compliant and real-world SIP messages
 - Extensive test suite with RFC torture tests
 
 ## Installation
@@ -31,6 +32,7 @@ rvoip-sip-core = "0.1.0"
 ```rust
 use rvoip_sip_core::prelude::*;
 use bytes::Bytes;
+use std::str::FromStr;
 
 // Parse a SIP message
 let data = Bytes::from(
@@ -58,21 +60,21 @@ if let Message::Request(request) = message {
 }
 
 // Create a SIP request
-let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
+    .with_header(To::new(Address::new_with_display_name("Bob", Uri::from_str("sip:bob@example.com").unwrap())))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
     .with_header(MaxForwards::new(70))
-    .with_header(Contact::new(Address::parse("<sip:alice@pc33.atlanta.com>").unwrap()))
+    .with_header(Contact::new(Address::new(Uri::from_str("sip:alice@pc33.atlanta.com").unwrap())))
     .with_header(ContentLength::new(0))
     .build();
 
 // Create a SIP response
 let response = ResponseBuilder::new(StatusCode::Ok)
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
+    .with_header(To::new(Address::new_with_display_name("Bob", Uri::from_str("sip:bob@example.com").unwrap())))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
@@ -118,27 +120,30 @@ For handling multimedia session information:
 
 ## Advanced Usage
 
-### Parsing with Custom Options
+### Parsing with Different Modes
 
 ```rust
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::parser::message::ParseMode;
 use bytes::Bytes;
 
 let data = Bytes::from("SIP message data...");
 
-// Custom parsing mode for specialized needs
-let message = parse_message_with_mode(&data, ParseMode {
-    max_line_length: 8192,
-    max_header_count: 100,
-    max_body_size: 16384,
-    strict: true,
-}).expect("Valid SIP message");
+// Default parsing is lenient for robustness
+let message = parse_message(&data).expect("Valid SIP message");
+
+// Use strict mode for RFC compliance validation
+let strict_message = parse_message_with_mode(&data, ParseMode::Strict);
+
+// Use lenient mode explicitly to handle non-compliant messages
+let lenient_message = parse_message_with_mode(&data, ParseMode::Lenient);
 ```
 
 ### Working with Multipart Bodies
 
 ```rust
 use rvoip_sip_core::prelude::*;
+use bytes::Bytes;
 
 // Create a multipart body
 let mut multipart = MultipartBody::new("mixed");
@@ -152,7 +157,7 @@ multipart.add_part(MimePart::new(
 ));
 
 // Add to a request
-let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
     // Add headers...
     .with_body(multipart.to_bytes())
     .build();
@@ -162,6 +167,7 @@ let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().
 
 ```rust
 use rvoip_sip_core::prelude::*;
+use std::str::FromStr;
 
 // Create an Authorization header
 let auth = Authorization::new_digest(
@@ -174,7 +180,7 @@ let auth = Authorization::new_digest(
     "cnonce-value"
 );
 
-let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
     .with_header(auth)
     // Add other headers...
     .build();

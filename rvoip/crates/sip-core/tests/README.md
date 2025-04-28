@@ -6,10 +6,12 @@ This directory contains a comprehensive test suite for the `rvoip-sip-core` libr
 
 The test suite is organized into several modules:
 
-- `torture_tests.rs`: Main test harness with helper functions and basic SIP message tests
-- `rfc4475.rs`: Tests based on [RFC 4475](https://tools.ietf.org/html/rfc4475) - SIP Torture Test Messages
-- `rfc5118.rs`: Tests based on [RFC 5118](https://tools.ietf.org/html/rfc5118) - SIP IPv6 Torture Tests
-- `custom_torture.rs`: Additional custom tests for edge cases not covered by the RFCs
+- `torture_tests.rs`: Main test harness with helper functions for RFC compliance testing
+- `rfc_compliance/`: Directory containing test files based on RFC standards
+  - `wellformed/`: Well-formed SIP messages that should parse successfully
+  - `malformed/`: Malformed SIP messages that should be rejected
+- `debug_parser.rs`: Utilities for debugging parser issues
+- `parser_tests.rs`: Additional parser tests
 
 ## Running the Tests
 
@@ -22,21 +24,31 @@ cargo test -p rvoip-sip-core
 To run specific test modules:
 
 ```bash
-cargo test -p rvoip-sip-core --test torture_tests
-cargo test -p rvoip-sip-core --test rfc4475
-cargo test -p rvoip-sip-core --test rfc5118
-cargo test -p rvoip-sip-core --test custom_torture
+# Run RFC compliance tests
+cargo test --test torture_tests --features="lenient_parsing"
+
+# Run specific test case
+cargo test --test torture_tests test_wellformed_messages --features="lenient_parsing"
+cargo test --test torture_tests test_malformed_messages --features="lenient_parsing"
 ```
 
-## Current Status
+## Parsing Modes
 
-As of the initial implementation, many tests are failing due to specific differences between the expected behavior in the tests and the actual implementation of the SIP parser. These failures highlight areas where:
+The test suite validates both strict and lenient parsing modes:
 
-1. The parser may be too lenient or too strict compared to the RFC requirements
-2. The parser normalizes header values differently than expected in the tests
-3. The error handling differs from what the tests expect
+### Strict Mode
 
-These failures serve as a valuable guide for improving the SIP parser's compliance with the RFCs.
+- Enforces RFC 3261 compliance strictly
+- Rejects messages with Content-Length mismatches
+- Requires all mandatory headers to be present
+- Used primarily for `test_malformed_messages` to ensure that invalid messages are properly rejected
+
+### Lenient Mode
+
+- More forgiving of minor deviations from the RFC
+- Handles Content-Length mismatches (both too large and too small)
+- Preserves unparseable headers as raw headers instead of failing
+- Used primarily for `test_wellformed_messages` to handle edge cases in real-world SIP traffic
 
 ## Test Categories
 
@@ -71,18 +83,27 @@ Additional test cases not covered by the RFCs:
 - Multiple headers with the same name
 - And more
 
-## Future Improvements
+## Excluded Tests
 
-1. Fix the implementation of the SIP parser to handle the failing test cases
-2. Make the test validation more robust and more in line with the actual parser behavior
-3. Add more test cases for scenarios not covered by the RFCs
-4. Add property-based testing for randomly generated SIP messages
+Some tests are intentionally excluded from validation:
 
-## Contribution
+1. In `is_excluded_wellformed_test()`: Messages that are technically valid according to RFC 4475 but which we explicitly don't support for security or implementation reasons
 
-When contributing to the test suite:
+2. In `skip_content_length_validation()`: Messages with known Content-Length issues that are part of torture testing
 
-1. Make sure your tests are well-documented with references to relevant RFC sections
-2. Include both valid and invalid test cases
-3. Test edge cases and unusual situations
-4. Consider adding custom tests for scenarios not covered by the RFCs 
+## Troubleshooting
+
+If a test is failing, you can use the `debug_parser.rs` utilities to investigate:
+
+```bash
+cargo test --test debug_parser debug_parse_longreq
+```
+
+## Contributing New Tests
+
+When adding new tests:
+
+1. Place well-formed test files in `rfc_compliance/wellformed/`
+2. Place malformed test files in `rfc_compliance/malformed/`
+3. Follow the naming convention: `<section>_<description>.sip`
+4. If needed, add an exclusion entry for special cases 

@@ -30,6 +30,7 @@ Import the prelude to get access to all common types:
 ```rust
 use rvoip_sip_core::prelude::*;
 use bytes::Bytes;
+use std::str::FromStr;
 ```
 
 ## Parsing SIP Messages
@@ -74,35 +75,53 @@ match parse_message(&data) {
 
 ### Advanced Parsing Options
 
-For specialized parsing needs, you can use the `parse_message_with_mode` function:
+For specialized parsing needs, you can use the `parse_message_with_mode` function with different parsing modes:
 
 ```rust
-// Configure parsing behavior
-let mode = ParseMode {
-    max_line_length: 8192,    // Maximum length of a line
-    max_header_count: 100,    // Maximum number of headers
-    max_body_size: 64 * 1024, // Maximum body size (64 KB)
-    strict: false,            // Strict parsing mode
-};
+use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::parser::message::ParseMode;
+use bytes::Bytes;
 
-// Parse with custom mode
-let message = parse_message_with_mode(&data, mode).expect("Valid SIP message");
+let data = Bytes::from("SIP message data...");
+
+// Use strict mode for RFC compliance validation
+let strict_result = parse_message_with_mode(&data, ParseMode::Strict);
+
+// Use lenient mode for handling real-world SIP messages with minor issues
+let lenient_result = parse_message_with_mode(&data, ParseMode::Lenient);
 ```
+
+#### Lenient vs. Strict Parsing
+
+- **Lenient Mode (Default):**
+  - Handles Content-Length mismatches gracefully
+  - Accepts messages with missing or extra body data
+  - Processes malformed headers as raw headers instead of failing
+  - Suitable for real-world SIP traffic
+
+- **Strict Mode:**
+  - Enforces RFC 3261 compliance
+  - Rejects messages with Content-Length mismatches
+  - Validates all required headers
+  - Useful for testing and validation
 
 ## Creating SIP Messages
 
 ### Creating SIP Requests
 
 ```rust
+use rvoip_sip_core::prelude::*;
+use std::str::FromStr;
+
 // Create a basic INVITE request
-let invite = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+let invite = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
+    .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap())))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(MaxForwards::new(70))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-    .with_header(Contact::new(Address::parse("<sip:alice@pc33.atlanta.com>").unwrap()))
+    .with_header(Contact::new(Address::new(Uri::from_str("sip:alice@pc33.atlanta.com").unwrap())))
     .with_header(ContentLength::new(0))
     .build();
 
@@ -113,21 +132,24 @@ let bytes = invite.to_bytes();
 ### Creating SIP Responses
 
 ```rust
+use rvoip_sip_core::prelude::*;
+use std::str::FromStr;
+
 // Create a 200 OK response
 let ok_response = ResponseBuilder::new(StatusCode::Ok)
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>;tag=1928301774").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>;tag=a6c85cf").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap()).with_tag("1928301774")))
+    .with_header(To::new(Address::new_with_display_name("Bob", Uri::from_str("sip:bob@example.com").unwrap()).with_tag("a6c85cf")))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-    .with_header(Contact::new(Address::parse("<sip:bob@192.168.1.2>").unwrap()))
+    .with_header(Contact::new(Address::new(Uri::from_str("sip:bob@192.168.1.2").unwrap())))
     .with_header(ContentLength::new(0))
     .build();
 
 // Create a 404 Not Found response
 let not_found = ResponseBuilder::new(StatusCode::NotFound)
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>;tag=1928301774").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap()).with_tag("1928301774")))
+    .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap())))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
@@ -138,24 +160,27 @@ let not_found = ResponseBuilder::new(StatusCode::NotFound)
 ### Common Response Shortcuts
 
 ```rust
+use rvoip_sip_core::prelude::*;
+use std::str::FromStr;
+
 // Use convenience methods for common responses
 let trying = Response::trying()
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>;tag=1928301774").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap()).with_tag("1928301774")))
+    .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap())))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap());
 
 let ringing = Response::ringing()
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>;tag=1928301774").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>;tag=a6c85cf").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap()).with_tag("1928301774")))
+    .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap()).with_tag("a6c85cf")))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap());
 
 let ok = Response::ok()
-    .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>;tag=1928301774").unwrap()))
-    .with_header(To::new(Address::parse("Bob <sip:bob@example.com>;tag=a6c85cf").unwrap()))
+    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap()).with_tag("1928301774")))
+    .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap()).with_tag("a6c85cf")))
     .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
     .with_header(CSeq::new(314159, Method::Invite))
     .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap());
@@ -171,7 +196,7 @@ if let Some(from) = request.typed_header::<From>() {
     println!("From: {}", from.address());
     
     // Check for a tag parameter
-    if let Some(tag) = from.address().parameter("tag") {
+    if let Some(tag) = from.address().tag() {
         println!("Tag: {}", tag);
     }
 }
@@ -194,13 +219,21 @@ println!("Via headers: {}", via_headers.len());
 ### Creating Headers
 
 ```rust
+use rvoip_sip_core::prelude::*;
+use std::str::FromStr;
+
 // Create a From header
-let from = From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap());
+let from = From::new(Address::new(Uri::from_str("sip:alice@atlanta.com").unwrap()));
+
+// Create a From header with display name
+let from_with_name = From::new(
+    Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())
+);
 
 // Add a tag parameter
 let from_with_tag = From::new(
-    Address::parse("Alice <sip:alice@atlanta.com>").unwrap()
-        .with_parameter("tag", "1928301774")
+    Address::new(Uri::from_str("sip:alice@atlanta.com").unwrap())
+        .with_tag("1928301774")
 );
 
 // Create a Call-ID header
@@ -219,6 +252,7 @@ let via = Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unw
 
 ```rust
 use std::str::FromStr;
+use rvoip_sip_core::prelude::*;
 
 // Parse a URI from a string
 let uri = Uri::from_str("sip:alice@atlanta.com:5060;transport=tcp").unwrap();
@@ -300,7 +334,7 @@ let sdp = SdpSession::new(
 let sdp_string = sdp.to_string();
 
 // Add as a body to a SIP request
-let invite = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+let invite = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
     // Add headers...
     .with_header(ContentType::new(MediaType::parse("application/sdp").unwrap()))
     .with_header(ContentLength::new(sdp_string.len() as u32))
@@ -377,7 +411,7 @@ let auth = Authorization::new_digest(
 .with_nc(1);
 
 // Add to a request
-let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
     .with_header(auth)
     // Add other headers...
     .build();
@@ -418,8 +452,8 @@ fn create_dialog(invite: &Request, ok: &Response) -> Dialog {
     let from = ok.typed_header::<From>().unwrap();
     let to = ok.typed_header::<To>().unwrap();
     
-    let local_tag = from.address().parameter("tag").unwrap().to_string();
-    let remote_tag = to.address().parameter("tag").map(|s| s.to_string());
+    let local_tag = from.address().tag().unwrap().to_string();
+    let remote_tag = to.address().tag().map(|s| s.to_string());
     
     let cseq = ok.typed_header::<CSeq>().unwrap();
     
@@ -443,12 +477,12 @@ fn create_dialog(invite: &Request, ok: &Response) -> Dialog {
 fn create_bye(dialog: &Dialog, local_contact: &Contact) -> Request {
     RequestBuilder::new(Method::Bye, dialog.remote_uri.clone())
         .with_header(From::new(
-            Address::parse(&format!("<{}>;tag={}", dialog.local_uri, dialog.local_tag)).unwrap()
+            Address::new(dialog.local_uri.clone()).with_tag(&dialog.local_tag)
         ))
         .with_header(To::new(
             match &dialog.remote_tag {
-                Some(tag) => Address::parse(&format!("<{}>;tag={}", dialog.remote_uri, tag)).unwrap(),
-                None => Address::parse(&format!("<{}>", dialog.remote_uri)).unwrap(),
+                Some(tag) => Address::new(dialog.remote_uri.clone()).with_tag(tag),
+                None => Address::new(dialog.remote_uri.clone()),
             }
         ))
         .with_header(CallId::new(&dialog.call_id))
@@ -491,13 +525,23 @@ match parse_message(&data) {
 
 The library comes with a comprehensive test suite that you can use to validate your SIP implementation:
 
-```rust
-// Run all tests
+```bash
+# Run all tests
 cargo test -p rvoip-sip-core
 
-// Run specific test suites
+# Run specific test suites
 cargo test -p rvoip-sip-core --test torture_tests
 cargo test -p rvoip-sip-core --test parser_tests
+```
+
+The test suite includes special tests for RFC compliance:
+
+```bash
+# Run with lenient parsing for real-world compatibility
+cargo test -p rvoip-sip-core --features="lenient_parsing"
+
+# Run strict RFC compliance tests 
+cargo test -p rvoip-sip-core --test torture_tests::test_malformed_messages --features="lenient_parsing"
 ```
 
 ### Writing Your Own Tests
@@ -508,12 +552,13 @@ mod tests {
     use super::*;
     use rvoip_sip_core::prelude::*;
     use bytes::Bytes;
+    use std::str::FromStr;
     
     #[test]
     fn test_invite_creation() {
-        let invite = RequestBuilder::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-            .with_header(From::new(Address::parse("Alice <sip:alice@atlanta.com>").unwrap()))
-            .with_header(To::new(Address::parse("Bob <sip:bob@example.com>").unwrap()))
+        let invite = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
+            .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
+            .with_header(To::new(Address::new(Uri::from_str("sip:bob@example.com").unwrap())))
             .with_header(CallId::new("test-call-id"))
             .with_header(CSeq::new(1, Method::Invite))
             .build();
@@ -523,6 +568,7 @@ mod tests {
         
         let from = invite.typed_header::<From>().unwrap();
         assert_eq!(from.address().uri().to_string(), "sip:alice@atlanta.com");
+        assert_eq!(from.address().display_name(), Some("Alice"));
     }
     
     #[test]
@@ -546,10 +592,9 @@ mod tests {
             
             let to = response.typed_header::<To>().unwrap();
             assert_eq!(to.address().uri().to_string(), "sip:bob@example.com");
-            assert_eq!(to.address().parameter("tag").unwrap(), "a6c85cf");
+            assert_eq!(to.address().tag(), Some("a6c85cf"));
         } else {
             panic!("Expected Response, got Request");
         }
     }
-}
-``` 
+} 
