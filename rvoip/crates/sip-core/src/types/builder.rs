@@ -24,6 +24,33 @@ use crate::types::{
 use crate::parser::uri::parse_uri_lenient;
 
 /// Builder for SIP request messages
+///
+/// The `RequestBuilder` provides a fluent API for constructing SIP requests with
+/// proper headers and parameters according to RFC 3261. Each builder method returns
+/// either the builder itself or a specialized builder for constructing complex headers.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create a basic INVITE request
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.com")
+///         .with_tag("1928301774")
+///         .done()
+///     .to("Bob", "sip:bob@example.com")
+///         .done()
+///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+///     .cseq(314159)
+///     .max_forwards(70)
+///     .via("pc33.atlanta.com", "UDP")
+///         .with_branch("z9hG4bK776asdhds")
+///         .done()
+///     .contact("sip:alice@pc33.atlanta.com").unwrap()
+///     .build();
+/// ```
 pub struct RequestBuilder {
     request: Request,
 }
@@ -360,11 +387,11 @@ impl RequestBuilder {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
     /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-    ///     .header(TypedHeader::UserAgent("MyAgent/1.0".parse().unwrap()))
+    ///     .header(TypedHeader::UserAgent(vec!["MyAgent/1.0".to_string()]))
     ///     .build();
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
@@ -389,8 +416,10 @@ impl RequestBuilder {
 /// Builder for SIP response messages
 ///
 /// Provides a fluent API for creating SIP responses with proper headers and parameters.
+/// The builder takes care of setting appropriate defaults and simplifies constructing
+/// complex messages that comply with RFC 3261.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
@@ -421,7 +450,7 @@ impl ResponseBuilder {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
     /// let builder = ResponseBuilder::new(StatusCode::Ok);
@@ -689,7 +718,7 @@ impl ResponseBuilder {
 /// The Via header provides information about the path taken by the SIP request
 /// and the path that should be followed for responses.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
@@ -887,6 +916,139 @@ impl ViaBuilder<ResponseBuilder> {
 }
 
 // Marker traits for From/To header types
+
+/// Builder for address-based headers like From and To
+///
+/// The `AddressBuilder` provides a fluent API for constructing address-based headers
+/// such as From and To, with support for parameters like tags.
+///
+/// # Type Parameters
+/// - `P`: Parent builder type (RequestBuilder or ResponseBuilder)
+/// - `T`: Header type marker (FromHeader or ToHeader)
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.com")
+///         .with_tag("1928301774")
+///         .done()
+///     .build();
+/// ```
+pub struct AddressBuilder<P, T> {
+    parent: P,
+    address: Address,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<P, T> AddressBuilder<P, T> {
+    /// Creates a new AddressBuilder
+    ///
+    /// # Parameters
+    /// - `parent`: The parent builder
+    /// - `display_name`: The display name for the address
+    /// - `uri`: The URI string
+    /// - `_marker`: Type marker for the header type
+    ///
+    /// # Returns
+    /// A new AddressBuilder
+    fn new(parent: P, display_name: &str, uri: &str, _marker: T) -> Self {
+        // Parse URI (using lenient approach for examples)
+        let uri = match Uri::from_str(uri) {
+            Ok(uri) => uri,
+            Err(_) => {
+                // If standard parsing fails, try the lenient parser
+                match parse_uri_lenient(uri.as_bytes()) {
+                    Ok((_, uri)) => uri,
+                    Err(_) => {
+                        // For examples, create a simple SIP URI
+                        Uri::sip("example.com")
+                    }
+                }
+            }
+        };
+        
+        let address = Address::new(Some(display_name), uri);
+        
+        Self {
+            parent,
+            address,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Adds a tag parameter
+    ///
+    /// The tag parameter is used to identify dialogs.
+    ///
+    /// # Parameters
+    /// - `tag`: The tag value
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn with_tag(mut self, tag: &str) -> Self {
+        self.address.params.push(Param::Tag(tag.to_string()));
+        self
+    }
+
+    /// Adds a generic parameter
+    ///
+    /// # Parameters
+    /// - `name`: The parameter name
+    /// - `value`: The optional parameter value
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
+        let param = match value {
+            Some(val) => Param::Other(name.to_string(), Some(val.into())),
+            None => Param::Other(name.to_string(), None),
+        };
+        self.address.params.push(param);
+        self
+    }
+}
+
+// Implementation for RequestBuilder
+impl AddressBuilder<RequestBuilder, FromHeader> {
+    /// Completes the From header and returns to the RequestBuilder
+    pub fn done(self) -> RequestBuilder {
+        let mut parent = self.parent;
+        parent.request = parent.request.with_header(TypedHeader::From(From(self.address)));
+        parent
+    }
+}
+
+impl AddressBuilder<RequestBuilder, ToHeader> {
+    /// Completes the To header and returns to the RequestBuilder
+    pub fn done(self) -> RequestBuilder {
+        let mut parent = self.parent;
+        parent.request = parent.request.with_header(TypedHeader::To(To(self.address)));
+        parent
+    }
+}
+
+// Implementation for ResponseBuilder
+impl AddressBuilder<ResponseBuilder, FromHeader> {
+    /// Completes the From header and returns to the ResponseBuilder
+    pub fn done(self) -> ResponseBuilder {
+        let mut parent = self.parent;
+        parent.response = parent.response.with_header(TypedHeader::From(From(self.address)));
+        parent
+    }
+}
+
+impl AddressBuilder<ResponseBuilder, ToHeader> {
+    /// Completes the To header and returns to the ResponseBuilder
+    pub fn done(self) -> ResponseBuilder {
+        let mut parent = self.parent;
+        parent.response = parent.response.with_header(TypedHeader::To(To(self.address)));
+        parent
+    }
+}
+
 /// Marker trait for From header in AddressBuilder
 ///
 /// This is used as a type parameter in the AddressBuilder to indicate
@@ -898,137 +1060,3 @@ pub struct FromHeader;
 /// This is used as a type parameter in the AddressBuilder to indicate
 /// that it's building a To header.
 pub struct ToHeader;
-
-// Builder for address-based headers (From, To)
-/// Builder for address headers (From, To)
-///
-/// This builder creates headers like From and To that contain a SIP address
-/// with possible parameters including tags for dialog identification.
-///
-/// # Example
-///
-/// ```rust
-/// use rvoip_sip_core::prelude::*;
-///
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-///     .from("Alice", "sip:alice@example.com")
-///         .with_tag("1928301774")
-///         .done()
-///     .build();
-/// ```
-pub struct AddressBuilder<P, T> {
-    parent: P,
-    address: Address,
-    _marker: T,
-}
-
-impl<P, T> AddressBuilder<P, T> {
-    /// Creates a new AddressBuilder with the given display name and URI
-    ///
-    /// # Parameters
-    /// - `parent`: The parent builder to return to when done
-    /// - `display_name`: The display name for the address (empty string for none)
-    /// - `uri`: The SIP URI as a string
-    /// - `_marker`: Type marker to determine the header type (FromHeader or ToHeader)
-    ///
-    /// # Returns
-    /// A new AddressBuilder with the specified address
-    fn new(parent: P, display_name: &str, uri: &str, _marker: T) -> Self {
-        let uri = match Uri::from_str(uri) {
-            Ok(uri) => uri,
-            Err(_) => Uri::sip("invalid.example.com"), // Default URI for invalid inputs
-        };
-        let address = Address::new(Some(display_name), uri);
-        
-        Self {
-            parent,
-            address,
-            _marker,
-        }
-    }
-
-    /// Adds a tag parameter to the address
-    ///
-    /// Tags are used to uniquely identify dialogs. UAs must generate
-    /// unique tags for From headers, and copy To tags from requests
-    /// when creating responses within a dialog.
-    ///
-    /// # Parameters
-    /// - `tag`: The tag value
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.address.set_tag(tag);
-        self
-    }
-
-    /// Adds a custom parameter to the address
-    ///
-    /// # Parameters
-    /// - `name`: The parameter name
-    /// - `value`: The optional parameter value
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
-        self.address.set_param(name, value);
-        self
-    }
-}
-
-// AddressBuilder for From header in Request
-impl AddressBuilder<RequestBuilder, FromHeader> {
-    /// Finishes building the From header and returns to the RequestBuilder
-    ///
-    /// # Returns
-    /// The parent RequestBuilder with the From header added
-    pub fn done(self) -> RequestBuilder {
-        let mut parent = self.parent;
-        let from_header = TypedHeader::From(From(self.address));
-        parent.request = parent.request.with_header(from_header);
-        parent
-    }
-}
-
-// AddressBuilder for To header in Request
-impl AddressBuilder<RequestBuilder, ToHeader> {
-    /// Finishes building the To header and returns to the RequestBuilder
-    ///
-    /// # Returns
-    /// The parent RequestBuilder with the To header added
-    pub fn done(self) -> RequestBuilder {
-        let mut parent = self.parent;
-        let to_header = TypedHeader::To(To(self.address));
-        parent.request = parent.request.with_header(to_header);
-        parent
-    }
-}
-
-// AddressBuilder for From header in Response
-impl AddressBuilder<ResponseBuilder, FromHeader> {
-    /// Finishes building the From header and returns to the ResponseBuilder
-    ///
-    /// # Returns
-    /// The parent ResponseBuilder with the From header added
-    pub fn done(self) -> ResponseBuilder {
-        let mut parent = self.parent;
-        let from_header = TypedHeader::From(From(self.address));
-        parent.response = parent.response.with_header(from_header);
-        parent
-    }
-}
-
-// AddressBuilder for To header in Response
-impl AddressBuilder<ResponseBuilder, ToHeader> {
-    /// Finishes building the To header and returns to the ResponseBuilder
-    ///
-    /// # Returns
-    /// The parent ResponseBuilder with the To header added
-    pub fn done(self) -> ResponseBuilder {
-        let mut parent = self.parent;
-        let to_header = TypedHeader::To(To(self.address));
-        parent.response = parent.response.with_header(to_header);
-        parent
-    }
-} 
