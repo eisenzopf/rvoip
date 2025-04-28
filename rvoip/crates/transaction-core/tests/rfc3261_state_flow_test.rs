@@ -202,8 +202,21 @@ async fn test_rfc3261_invite_transaction_state_flow() {
         server_addr
     ).await.unwrap();
     
+    // Record initial state right after creation
+    if let Ok(state) = client_manager.transaction_state(&client_tx_id).await {
+        client_tracker.record_state(&client_tx_id, state);
+        println!("Error flow - client initial state: {:?}", state);
+    }
+    
     // Send request
     client_manager.send_request(&client_tx_id).await.unwrap();
+    
+    // Record state after sending (should be Calling)
+    if let Ok(state) = client_manager.transaction_state(&client_tx_id).await {
+        client_tracker.record_state(&client_tx_id, state);
+        println!("Error flow - client state after sending: {:?}", state);
+    }
+    
     sleep(Duration::from_millis(50)).await;
     
     // Process events to get the server transaction
@@ -490,20 +503,35 @@ fn validate_state_sequence(
             0
         };
         
+        // Create a deduped version of actual states by removing consecutive duplicates
+        let mut deduped_states = Vec::new();
+        for (i, state) in actual_states.iter().enumerate() {
+            if i == 0 || actual_states[i-1] != *state {
+                deduped_states.push(*state);
+            }
+        }
+        
+        // Use deduped states for validation, starting from start_idx
+        let deduped_to_validate = if start_idx > 0 {
+            deduped_states.iter().skip(start_idx).copied().collect::<Vec<_>>()
+        } else {
+            deduped_states
+        };
+        
         // Ensure we have enough states
-        if actual_states.len() - start_idx < expected_states.len() {
+        if deduped_to_validate.len() < expected_states.len() {
             panic!(
-                "Transaction {} did not go through all expected states.\nExpected: {:?}\nActual: {:?}", 
-                tx_id, expected_states, actual_states
+                "Transaction {} did not go through all expected states.\nExpected: {:?}\nActual (deduped): {:?}\nOriginal: {:?}", 
+                tx_id, expected_states, deduped_to_validate, actual_states
             );
         }
         
         // Check each expected state
         for (i, expected) in expected_states.iter().enumerate() {
-            if i + start_idx >= actual_states.len() || &actual_states[i + start_idx] != expected {
+            if i >= deduped_to_validate.len() || &deduped_to_validate[i] != expected {
                 panic!(
-                    "Transaction {} did not follow expected state sequence at position {}.\nExpected: {:?}\nActual: {:?}", 
-                    tx_id, i, expected_states, actual_states
+                    "Transaction {} did not follow expected state sequence at position {}.\nExpected: {:?}\nActual (deduped): {:?}\nOriginal: {:?}", 
+                    tx_id, i, expected_states, deduped_to_validate, actual_states
                 );
             }
         }
