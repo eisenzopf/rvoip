@@ -6,7 +6,7 @@ fn main() {
     
     // Create URI and address, then add the tag parameter
     let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    let mut address = Address::new(None::<&str>, uri);
+    let mut address = Address::new(uri);
     
     // Add tag parameter to Address (not URI)
     address.set_tag("1234");
@@ -26,7 +26,7 @@ fn main() {
     
     // Create an address with URI parameters
     let uri_with_param = Uri::from_str("sip:alice@example.com;transport=tcp").unwrap();
-    let addr2 = Address::new(None::<&str>, uri_with_param);
+    let addr2 = Address::new(uri_with_param);
     
     println!("\nAddress with URI param: {}", addr2);
     println!("has_param(\"transport\"): {}", addr2.has_param("transport"));

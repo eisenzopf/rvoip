@@ -4,7 +4,7 @@ use rvoip_sip_core::{parse_message, error::Error};
 // Single file testing for debugging
 #[test]
 fn debug_parse_longreq() {
-    let filepath = "tests/rfc_compliance/wellformed/3.1.1.7_longreq.sip";
+    let filepath = "tests/rfc_compliance/malformed/3.1.1.7_longreq.sip";
     let content = fs::read_to_string(filepath).expect("Failed to read file");
     
     println!("File content:\n{}", content);
