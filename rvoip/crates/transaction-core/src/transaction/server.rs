@@ -1,22 +1,27 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::Sleep;
-use std::pin::Pin;
-use std::future::Future;
 use std::fmt;
-use tracing::{debug, error, info, trace, warn};
-use tokio::task::JoinHandle;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-// Use prelude and specific types
+use async_trait::async_trait;
+use tracing::{debug, trace, warn, error};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::error::{Error as TransportError};
+use rvoip_sip_transport::TransportEvent;
 
 use crate::error::{Error, Result};
-use crate::transaction::{Transaction, TransactionState, TransactionKind, TransactionKey, TransactionEvent};
+use crate::transaction::{Transaction, TransactionState, TransactionKind, TransactionKey};
 use crate::utils;
+use crate::TransactionManager;
+use crate::TransactionEvent;
 
 // Standard RFC values in prod code, shorter for tests
 
@@ -324,7 +329,7 @@ impl Transaction for ServerInviteTransaction {
               _ => {
                    warn!(id=%self.data.id, event=event_type, "Unhandled transaction event type");
                    Ok(())
-              }
+               }
           }
       }
 
@@ -360,12 +365,14 @@ impl ServerTransaction for ServerInviteTransaction {
                 if self.data.state == TransactionState::Completed {
                     debug!(id=%self.data.id, "Received ACK for non-2xx response, transitioning to Confirmed");
                     
-                    // Cancel Timer G (response retransmission)
-                    // This will stop retransmissions since we've received the ACK
+                    // Cancel Timer G (response retransmission) and Timer H (timeout)
                     self.cancel_timers();
                     
                     // Transit to Confirmed state
-                    self.transition_to(TransactionState::Confirmed).await?;
+                    if let Err(e) = self.transition_to(TransactionState::Confirmed).await {
+                        error!(id=%self.data.id, error=%e, "Failed to transition to Confirmed state");
+                        return Err(e);
+                    }
                     
                     // Notify TU about the ACK
                     self.data.events_tx.send(TransactionEvent::AckReceived {
@@ -591,11 +598,14 @@ impl ServerNonInviteTransaction {
              "J" => {
                  // Timer J logic (terminate after waiting for request retransmissions)
                  if self.data.state == TransactionState::Completed {
-                      debug!(id=%self.data.id, "Timer J fired, terminating transaction");
-                      self.transition_to(TransactionState::Terminated).await?;
-                  } else {
-                      trace!(id=%self.data.id, state=?self.data.state, "Timer J fired in invalid state, ignoring.");
-                  }
+                     debug!(id=%self.data.id, "Timer J fired, terminating transaction");
+                     if let Err(e) = self.transition_to(TransactionState::Terminated).await {
+                         error!(id=%self.data.id, error=%e, "Failed to transition to Terminated state after Timer J");
+                         return Err(e);
+                     }
+                 } else {
+                     trace!(id=%self.data.id, state=?self.data.state, "Timer J fired in invalid state, ignoring.");
+                 }
              }
              _ => warn!(id=%self.data.id, timer=timer, "Unknown timer triggered"),
          }
@@ -796,12 +806,24 @@ impl ServerTransaction for ServerNonInviteTransaction {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
-    use rvoip_sip_transport::Error as TransportError;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::sleep;
+    use tracing::{debug, warn};
+
+    use rvoip_sip_core::prelude::*;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use rvoip_sip_transport::error::{Error as TransportError};
+
+    use crate::TransactionManager;
+    use crate::transaction::{Transaction, TransactionState, TransactionKind, TransactionKey};
+    use crate::TransactionEvent;
     
+    use super::*;
+
     // Mock transport implementation
     #[derive(Debug, Clone)]
     struct MockTransport {

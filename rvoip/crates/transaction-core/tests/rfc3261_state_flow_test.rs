@@ -17,6 +17,7 @@ use rvoip_sip_core::prelude::*;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState, utils};
 use integration_utils::*;
 use test_utils::*;
+use test_utils::{StateTracker, print_transaction_history, validate_state_sequence};
 
 /// Structure to define the expected state sequence for a transaction
 struct StateSequence {
@@ -48,10 +49,12 @@ async fn test_rfc3261_invite_transaction_state_flow() {
         client_addr,
         server_addr,
         _client_transport,
-        _server_transport,
-        client_tracker,
-        server_tracker
+        _server_transport
     ) = integration_utils::setup_test_environment().await;
+    
+    // Create state trackers
+    let client_tracker = Arc::new(StateTracker::new());
+    let server_tracker = Arc::new(StateTracker::new());
     
     println!("--- Testing successful INVITE flow with 2xx response ---");
     
@@ -182,10 +185,12 @@ async fn test_rfc3261_invite_transaction_state_flow() {
         client_addr,
         server_addr,
         _client_transport,
-        _server_transport,
-        client_tracker,
-        server_tracker
+        _server_transport
     ) = integration_utils::setup_test_environment().await;
+    
+    // Create state trackers
+    let client_tracker = Arc::new(StateTracker::new());
+    let server_tracker = Arc::new(StateTracker::new());
     
     // Create and send INVITE
     let mut invite_request = create_test_invite();
@@ -280,10 +285,12 @@ async fn test_rfc3261_non_invite_transaction_state_flow() {
         client_addr,
         server_addr,
         _client_transport,
-        _server_transport,
-        client_tracker,
-        server_tracker
+        _server_transport
     ) = integration_utils::setup_test_environment().await;
+    
+    // Create state trackers
+    let client_tracker = Arc::new(StateTracker::new());
+    let server_tracker = Arc::new(StateTracker::new());
     
     // Create and send REGISTER (a non-INVITE request)
     let mut register_request = create_test_register();
