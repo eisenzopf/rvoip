@@ -13,7 +13,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::Accept;
 //! use std::str::FromStr;
 //! use std::collections::HashMap;
 //!
@@ -68,7 +68,7 @@ use crate::types::param::Param;
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::Accept;
 /// use std::str::FromStr;
 ///
 /// // Create from a header string
@@ -106,8 +106,8 @@ impl Accept {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
     ///
     /// let header = Accept::new();
     /// // Empty Accept header indicates all media types are acceptable
@@ -127,8 +127,8 @@ impl Accept {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
     ///
     /// let mut header = Accept::with_capacity(3);
     /// // Can now add up to 3 media types without reallocation
@@ -145,8 +145,8 @@ impl Accept {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
     /// use rvoip_sip_core::parser::headers::accept::AcceptValue;
     /// use ordered_float::NotNan;
     /// use std::collections::HashMap;
@@ -175,8 +175,8 @@ impl Accept {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
     /// use rvoip_sip_core::parser::headers::accept::AcceptValue;
     /// use std::collections::HashMap;
     ///
@@ -208,8 +208,8 @@ impl Accept {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
     /// use rvoip_sip_core::parser::headers::accept::AcceptValue;
     /// use std::str::FromStr;
     /// use std::collections::HashMap;

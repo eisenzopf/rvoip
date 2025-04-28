@@ -45,7 +45,7 @@
 //! // Create an Authorization header in response
 //! let uri = Uri::from_str("sip:example.com").unwrap();
 //! let auth = Authorization::new(
-//!     Scheme::Digest,
+//!     AuthScheme::Digest,
 //!     "user",
 //!     "example.com",
 //!     "dcd98b7102dd2f0e8b11d0f600bfb0c093",
@@ -74,17 +74,17 @@ use crate::types::method::Method;
 /// use rvoip_sip_core::prelude::*;
 /// use std::str::FromStr;
 ///
-/// let digest = Scheme::from_str("Digest").unwrap();
-/// assert_eq!(digest, Scheme::Digest);
+/// let digest = AuthScheme::from_str("Digest").unwrap();
+/// assert_eq!(digest, AuthScheme::Digest);
 ///
-/// let basic = Scheme::from_str("Basic").unwrap();
-/// assert_eq!(basic, Scheme::Basic);
+/// let basic = AuthScheme::from_str("Basic").unwrap();
+/// assert_eq!(basic, AuthScheme::Basic);
 ///
-/// let other = Scheme::from_str("NTLM").unwrap();
-/// assert_eq!(other, Scheme::Other("NTLM".to_string()));
+/// let other = AuthScheme::from_str("NTLM").unwrap();
+/// assert_eq!(other, AuthScheme::Other("NTLM".to_string()));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Scheme {
+pub enum AuthScheme {
     /// Digest authentication (RFC 3261 and RFC 7616)
     Digest,
     /// Basic authentication (username:password encoded in Base64)
@@ -93,24 +93,24 @@ pub enum Scheme {
     Other(String),
 }
 
-impl fmt::Display for Scheme {
+impl fmt::Display for AuthScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Scheme::Digest => write!(f, "Digest"),
-            Scheme::Basic => write!(f, "Basic"),
-            Scheme::Other(s) => write!(f, "{}", s),
+            AuthScheme::Digest => write!(f, "Digest"),
+            AuthScheme::Basic => write!(f, "Basic"),
+            AuthScheme::Other(s) => write!(f, "{}", s),
         }
     }
 }
 
-impl FromStr for Scheme {
+impl FromStr for AuthScheme {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
-            "digest" => Ok(Scheme::Digest),
-            "basic" => Ok(Scheme::Basic),
-            _ if !s.is_empty() => Ok(Scheme::Other(s.to_string())),
+            "digest" => Ok(AuthScheme::Digest),
+            "basic" => Ok(AuthScheme::Basic),
+            _ if !s.is_empty() => Ok(AuthScheme::Other(s.to_string())),
             _ => Err(crate::error::Error::InvalidInput("Empty scheme name".to_string())),
         }
     }
@@ -914,7 +914,7 @@ impl FromStr for WwwAuthenticate {
 /// // Create an Authorization header with Digest credentials
 /// let uri = Uri::from_str("sip:example.com").unwrap();
 /// let auth = Authorization::new(
-///     Scheme::Digest,
+///     AuthScheme::Digest,
 ///     "bob",
 ///     "example.com",
 ///     "1234abcd",
@@ -963,7 +963,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",
@@ -972,7 +972,7 @@ impl Authorization {
     /// );
     /// ```
     pub fn new(
-        scheme: Scheme,
+        scheme: AuthScheme,
         username: impl Into<String>,
         realm: impl Into<String>,
         nonce: impl Into<String>,
@@ -1005,7 +1005,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",
@@ -1041,7 +1041,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",
@@ -1076,7 +1076,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",
@@ -1112,7 +1112,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",
@@ -1148,7 +1148,7 @@ impl Authorization {
     ///
     /// let uri = Uri::from_str("sip:example.com").unwrap();
     /// let auth = Authorization::new(
-    ///     Scheme::Digest,
+    ///     AuthScheme::Digest,
     ///     "bob",
     ///     "example.com",
     ///     "1234abcd",

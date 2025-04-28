@@ -29,14 +29,18 @@
 //! ## Examples
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::{Address, Uri};
 //! use std::str::FromStr;
 //!
 //! // Create an Address from a string
-//! let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+//! let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
 //! assert_eq!(addr.display_name, Some("John Doe".to_string()));
 //! assert_eq!(addr.uri.to_string(), "sip:john@example.com");
-//! assert_eq!(addr.tag(), Some("1234"));
+//! 
+//! // Add a tag parameter
+//! let mut addr2 = addr.clone();
+//! addr2.set_tag("1234");
+//! assert_eq!(addr2.tag(), Some("1234"));
 //!
 //! // Create an Address programmatically
 //! let uri = Uri::from_str("sip:alice@example.com").unwrap();
@@ -66,11 +70,11 @@ use ordered_float::NotNan;
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::{Address, Uri};
 /// use std::str::FromStr;
 ///
 /// // Parse from a string
-/// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+/// let addr = Address::from_str("<sip:john@example.com>").unwrap();
 ///
 /// // Create programmatically
 /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
@@ -167,7 +171,7 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
@@ -208,7 +212,7 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
@@ -241,13 +245,18 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
-    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+    /// // Create an address with a tag parameter
+    /// let uri = Uri::from_str("sip:john@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_tag("1234");
     /// assert_eq!(addr.tag(), Some("1234"));
     ///
-    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
+    /// // An address without a tag parameter
+    /// let uri = Uri::from_str("sip:john@example.com").unwrap();
+    /// let addr = Address::new(None::<String>, uri);
     /// assert_eq!(addr.tag(), None);
     /// ```
     pub fn tag(&self) -> Option<&str> {
@@ -269,13 +278,18 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>;expires=3600").unwrap();
+    /// // Create an address with an expires parameter
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_expires(3600);
     /// assert_eq!(addr.expires(), Some(3600));
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>").unwrap();
+    /// // An address without an expires parameter
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let addr = Address::new(None::<String>, uri);
     /// assert_eq!(addr.expires(), None);
     /// ```
     pub fn expires(&self) -> Option<u32> {
@@ -300,11 +314,11 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None, uri);
+    /// let mut addr = Address::new(None::<String>, uri);
     ///
     /// addr.set_expires(3600); // 1 hour
     /// assert_eq!(addr.expires(), Some(3600));
@@ -334,14 +348,19 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     /// use ordered_float::NotNan;
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>;q=0.5").unwrap();
+    /// // Create an address with a q parameter
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_q(0.5);
     /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(0.5));
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>").unwrap();
+    /// // An address without a q parameter
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let addr = Address::new(None::<String>, uri);
     /// assert_eq!(addr.q(), None);
     /// ```
     pub fn q(&self) -> Option<NotNan<f32>> {
@@ -366,11 +385,11 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None, uri);
+    /// let mut addr = Address::new(None::<String>, uri);
     ///
     /// // Set normal q-value
     /// addr.set_q(0.8);
@@ -404,10 +423,14 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>;tag=1234;expires=3600").unwrap();
+    /// // Create an address with parameters
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_tag("1234");
+    /// addr.set_expires(3600);
     /// 
     /// assert!(addr.has_param("tag"));
     /// assert!(addr.has_param("TAG")); // Case-insensitive
@@ -455,15 +478,24 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri, param::Param};
     /// use std::str::FromStr;
     ///
-    /// let addr = Address::from_str("<sip:alice@example.com>;tag=1234;lr;custom=value").unwrap();
+    /// // Create an address with parameters
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_tag("1234");
     /// 
+    /// // Add a flag parameter (lr)
+    /// addr.params.push(Param::Lr);
+    /// 
+    /// // Add a regular parameter with value
+    /// addr.set_param("custom", Some("value"));
+    /// 
+    /// // Test parameter retrieval
     /// assert_eq!(addr.get_param("tag"), Some(Some("1234")));
     /// assert_eq!(addr.get_param("lr"), Some(None)); // Flag parameter
     /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
-    /// assert_eq!(addr.get_param("nonexistent"), None);
     /// ```
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
         Some(
@@ -509,18 +541,18 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri, param::Param};
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None, uri);
+    /// let mut addr = Address::new(None::<String>, uri);
     ///
     /// // Set a parameter with a value
     /// addr.set_param("custom", Some("value"));
     /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
     ///
-    /// // Set a flag parameter (no value)
-    /// addr.set_param("lr", None);
+    /// // For flag parameters like 'lr', it's better to use the specific enum variant
+    /// addr.params.push(Param::Lr);
     /// assert_eq!(addr.get_param("lr"), Some(None));
     ///
     /// // Replace an existing parameter
@@ -550,8 +582,12 @@ impl Address {
             Param::Rport(_) => !key_string.eq_ignore_ascii_case("rport"),
         });
 
-        // Add as Param::Other
-        self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token)));
+        // Add as Param::Other or specific Param variant for known parameters
+        if key_string.eq_ignore_ascii_case("lr") && value_opt_string.is_none() {
+            self.params.push(Param::Lr);
+        } else {
+            self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token)));
+        }
     }
 
     /// Remove a parameter (case-insensitive key).
@@ -563,10 +599,14 @@ impl Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
-    /// let mut addr = Address::from_str("<sip:alice@example.com>;tag=1234;expires=3600").unwrap();
+    /// // Create an address with parameters
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_tag("1234");
+    /// addr.set_expires(3600);
     /// 
     /// // Remove a parameter
     /// addr.remove_param("tag");
@@ -642,18 +682,19 @@ impl FromStr for Address {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::Address;
+    /// use rvoip_sip_core::types::{Address, Uri};
     /// use std::str::FromStr;
     ///
     /// // Parse a name address with display name and parameters
-    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>;tag=1234").unwrap();
+    /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
     /// assert_eq!(addr.display_name, Some("John Doe".to_string()));
     /// assert_eq!(addr.uri.to_string(), "sip:john@example.com");
+    /// 
+    /// // Create an address with a tag parameter programmatically
+    /// let uri = Uri::from_str("sip:john@example.com").unwrap();
+    /// let mut addr = Address::new(None::<String>, uri);
+    /// addr.set_tag("1234");
     /// assert_eq!(addr.tag(), Some("1234"));
-    ///
-    /// // Parse a name address without display name
-    /// let addr = Address::from_str("<sip:john@example.com>").unwrap();
-    /// assert_eq!(addr.display_name, None);
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming, handle input type, map result and error

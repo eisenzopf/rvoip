@@ -152,7 +152,7 @@ pub use types::{
     sdp::ParsedAttribute,
     Version,
 };
-pub use types::uri::{Uri, Host, Scheme}; // Updated path
+pub use types::uri::{Uri, Host};
 pub use sdp::attributes::MediaDirection;
 pub use types::builder::{RequestBuilder, ResponseBuilder};
 pub use macros::*;
@@ -161,7 +161,7 @@ pub use macros::*;
 pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
-    pub use crate::types::uri::{Uri, Host, Scheme}; // Updated path
+    pub use crate::types::uri::{Uri, Host, Scheme}; // Use the original URI Scheme
     pub use crate::types::Method;
     pub use crate::types::StatusCode;
     pub use crate::types::sip_message::{Request, Response, Message};
@@ -188,6 +188,14 @@ pub mod prelude {
     pub use crate::types::contact::Contact;
     pub use crate::types::supported::Supported;
     pub use crate::types::unsupported::Unsupported;
+    
+    // Authentication-related types needed for doc tests
+    pub use crate::types::auth::{
+        AuthParam, AuthenticationInfo, AuthenticationInfoParam, Authorization,
+        Challenge, Credentials, DigestParam, ProxyAuthenticate, ProxyAuthorization,
+        WwwAuthenticate, AuthScheme
+    };
+    pub use crate::types::{Algorithm, Qop};
 }
 
 #[cfg(test)]

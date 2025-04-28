@@ -7,7 +7,7 @@ use crate::parser::common::comma_separated_list1;
 use crate::parser::whitespace::{lws, owsp};
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth
-use crate::types::auth::{AuthParam, Challenge, DigestParam, Scheme};
+use crate::types::auth::{AuthParam, Challenge, DigestParam, AuthScheme};
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while},
@@ -29,8 +29,8 @@ pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
     let (rem, _) = lws(rem)?;
 
     // Process the scheme
-    match Scheme::from_str(&scheme_str) {
-        Ok(Scheme::Digest) => {
+    match AuthScheme::from_str(&scheme_str) {
+        Ok(AuthScheme::Digest) => {
             // Parse comma-separated list of digest params
             let (rem, params) = comma_separated_list1(digest_param)(rem)?;
             
@@ -39,7 +39,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
             
             Ok((rem, Challenge::Digest { params }))
         }
-        Ok(Scheme::Basic) => {
+        Ok(AuthScheme::Basic) => {
              // Basic challenge usually just has realm, maybe others?
              // Parse as generic auth params for now.
             let (rem, params) = comma_separated_list1(auth_param)(rem)?;
@@ -49,7 +49,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
             
             Ok((rem, Challenge::Basic { params }))
         }
-        Ok(Scheme::Other(scheme)) => {
+        Ok(AuthScheme::Other(scheme)) => {
             // Parse comma-separated list of generic auth params
             let (rem, params) = comma_separated_list1(auth_param)(rem)?;
             
@@ -59,7 +59,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
             Ok((rem, Challenge::Other { scheme, params }))
         }
         Err(_) => {
-            // If Scheme::from_str fails, it's likely an invalid scheme token
+            // If AuthScheme::from_str fails, it's likely an invalid scheme token
              Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))) // Or some other appropriate error
         }
     }
@@ -70,7 +70,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{DigestParam, Algorithm, Qop, Scheme};
+    use crate::types::auth::{DigestParam, Algorithm, Qop, AuthScheme};
 
     #[test]
     fn test_digest_challenge() {

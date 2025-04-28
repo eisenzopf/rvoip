@@ -38,7 +38,7 @@ use std::str;
 use crate::types::uri::{Host, Uri};
 use crate::types::param::Param;
 use crate::parser::ParseResult;
-use crate::Scheme;
+use crate::types::uri::Scheme;
 use crate::error::Error;
 
 use authority::parse_authority;

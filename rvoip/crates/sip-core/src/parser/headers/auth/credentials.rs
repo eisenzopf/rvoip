@@ -8,7 +8,7 @@ use crate::parser::token::token;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth
-use crate::types::auth::{AuthParam, Credentials, DigestParam, Scheme, Algorithm, Qop};
+use crate::types::auth::{AuthParam, Credentials, DigestParam, AuthScheme, Algorithm, Qop};
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_till1},
@@ -99,13 +99,13 @@ pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
     let (rem, scheme_str) = auth_scheme(input)?;
     let (rem, _) = lws(rem)?;
 
-    match Scheme::from_str(&scheme_str) {
-        Ok(Scheme::Digest) => {
+    match AuthScheme::from_str(&scheme_str) {
+        Ok(AuthScheme::Digest) => {
             // We shouldn't get here because we already handled Digest above
             let (rem, params) = digest_credential(rem)?;
             Ok((rem, Credentials::Digest { params }))
         }
-        Ok(Scheme::Basic) => {
+        Ok(AuthScheme::Basic) => {
             // We shouldn't get here because we already handled Basic above
             let (rem, token_bytes) = basic_credentials_token(rem)?;
             let token = std::str::from_utf8(token_bytes)
@@ -113,13 +113,13 @@ pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
                             .to_string();
             Ok((rem, Credentials::Basic { token }))
         }
-        Ok(Scheme::Other(scheme)) => {
+        Ok(AuthScheme::Other(scheme)) => {
             // Parse comma-separated list of generic auth params
             let (rem, params) = comma_separated_list1(auth_param)(rem)?;
             Ok((rem, Credentials::Other { scheme, params }))
         }
         Err(_) => {
-            // If Scheme::from_str fails, it's likely an invalid scheme token
+            // If AuthScheme::from_str fails, it's likely an invalid scheme token
              Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))) // Or some other appropriate error
         }
     }

@@ -14,7 +14,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::AcceptLanguage;
 //! use std::str::FromStr;
 //!
 //! // Parse an Accept-Language header
@@ -26,10 +26,10 @@
 //!
 //! // Find the best match from available languages
 //! let available = vec!["es", "de", "en-us"];
-//! assert_eq!(header.best_match(available), Some("fr"));
+//! assert_eq!(header.best_match(available), Some("en-us"));
 //!
 //! // Format as a string (ordered by q-value)
-//! assert_eq!(header.to_string(), "fr, en-us;q=0.800, de;q=0.700");
+//! assert_eq!(header.to_string(), "fr;q=1.000, en-us;q=0.800, de;q=0.700");
 //! ```
 
 use crate::parser::headers::accept_language::{LanguageInfo, parse_accept_language};
@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::AcceptLanguage;
 /// use std::str::FromStr;
 ///
 /// // Create from a header string
@@ -98,8 +98,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     ///
     /// let header = AcceptLanguage::new();
     /// assert!(header.accepts("any-language"));
@@ -119,8 +119,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     ///
     /// let mut header = AcceptLanguage::with_capacity(3);
     /// // Can now add up to 3 languages without reallocation
@@ -137,8 +137,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     /// use rvoip_sip_core::parser::headers::accept_language::LanguageInfo;
     /// use ordered_float::NotNan;
     ///
@@ -172,8 +172,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     /// use rvoip_sip_core::parser::headers::accept_language::LanguageInfo;
     ///
     /// let mut header = AcceptLanguage::new();
@@ -197,8 +197,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     /// use std::str::FromStr;
     ///
     /// let header = AcceptLanguage::from_str("en;q=0.8, fr").unwrap();
@@ -226,8 +226,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     /// use std::str::FromStr;
     ///
     /// let header = AcceptLanguage::from_str("en-US;q=0.8, fr, *;q=0.1").unwrap();
@@ -271,8 +271,8 @@ impl AcceptLanguage {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
+    /// ```rust
+    /// use rvoip_sip_core::types::AcceptLanguage;
     /// use std::str::FromStr;
     ///
     /// let header = AcceptLanguage::from_str("en-US;q=0.8, fr;q=1.0, de;q=0.5").unwrap();

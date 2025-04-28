@@ -16,25 +16,26 @@
 //! The Allow header takes the form of a comma-separated list of SIP methods:
 //!
 //! ```
-//! Allow: INVITE, ACK, CANCEL, OPTIONS, BYE
+//! // Allow: INVITE, ACK, CANCEL, OPTIONS, BYE
 //! ```
 //!
 //! ## Examples
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::Allow;
 //! use std::str::FromStr;
 //!
 //! // Create an Allow header from a string
 //! let allow = Allow::from_str("INVITE, ACK, BYE, CANCEL, OPTIONS").unwrap();
-//! assert!(allow.allows(&Method::INVITE));
-//! assert!(!allow.allows(&Method::REFER));
+//! assert!(allow.allows(&Method::Invite));
+//! assert!(!allow.allows(&Method::Refer));
 //!
 //! // Create an Allow header programmatically
 //! let mut allow = Allow::new();
-//! allow.add_method(Method::INVITE);
-//! allow.add_method(Method::ACK);
-//! allow.add_method(Method::BYE);
+//! allow.add_method(Method::Invite);
+//! allow.add_method(Method::Ack);
+//! allow.add_method(Method::Bye);
 //! ```
 
 use crate::types::Method;
@@ -55,14 +56,15 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::Allow;
 /// use std::str::FromStr;
 ///
 /// // Create an Allow header from a string
 /// let allow = Allow::from_str("INVITE, ACK, BYE, CANCEL, OPTIONS").unwrap();
 /// 
 /// // Check if a method is allowed
-/// assert!(allow.allows(&Method::INVITE));
-/// assert!(!allow.allows(&Method::REFER));
+/// assert!(allow.allows(&Method::Invite));
+/// assert!(!allow.allows(&Method::Refer));
 ///
 /// // Iterate through allowed methods
 /// for method in &allow {
@@ -83,10 +85,11 @@ impl Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     ///
     /// let mut allow = Allow::new();
-    /// allow.add_method(Method::INVITE);
-    /// allow.add_method(Method::ACK);
+    /// allow.add_method(Method::Invite);
+    /// allow.add_method(Method::Ack);
     /// ```
     pub fn new() -> Self {
         Self(Vec::new())
@@ -109,12 +112,13 @@ impl Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     ///
     /// // Create an Allow header with space for 5 methods
     /// let mut allow = Allow::with_capacity(5);
-    /// allow.add_method(Method::INVITE);
-    /// allow.add_method(Method::ACK);
-    /// allow.add_method(Method::BYE);
+    /// allow.add_method(Method::Invite);
+    /// allow.add_method(Method::Ack);
+    /// allow.add_method(Method::Bye);
     /// // ... can add 2 more methods without reallocation
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
@@ -135,16 +139,17 @@ impl Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     ///
     /// // Create from an array
-    /// let methods = [Method::INVITE, Method::ACK, Method::BYE];
+    /// let methods = [Method::Invite, Method::Ack, Method::Bye];
     /// let allow = Allow::from_methods(methods);
-    /// assert!(allow.allows(&Method::INVITE));
+    /// assert!(allow.allows(&Method::Invite));
     ///
     /// // Create from a Vec
-    /// let methods = vec![Method::REGISTER, Method::OPTIONS];
+    /// let methods = vec![Method::Register, Method::Options];
     /// let allow = Allow::from_methods(methods);
-    /// assert!(allow.allows(&Method::REGISTER));
+    /// assert!(allow.allows(&Method::Register));
     /// ```
     pub fn from_methods<I>(methods: I) -> Self
     where
@@ -167,12 +172,13 @@ impl Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     /// use std::str::FromStr;
     ///
     /// let allow = Allow::from_str("INVITE, ACK, BYE").unwrap();
-    /// assert!(allow.allows(&Method::INVITE));
-    /// assert!(allow.allows(&Method::ACK));
-    /// assert!(!allow.allows(&Method::REGISTER));
+    /// assert!(allow.allows(&Method::Invite));
+    /// assert!(allow.allows(&Method::Ack));
+    /// assert!(!allow.allows(&Method::Register));
     /// ```
     pub fn allows(&self, method: &Method) -> bool {
         self.0.contains(method)
@@ -191,16 +197,17 @@ impl Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     ///
     /// let mut allow = Allow::new();
     /// 
     /// // Add methods
-    /// allow.add_method(Method::INVITE);
-    /// allow.add_method(Method::ACK);
-    /// assert!(allow.allows(&Method::INVITE));
+    /// allow.add_method(Method::Invite);
+    /// allow.add_method(Method::Ack);
+    /// assert!(allow.allows(&Method::Invite));
     ///
     /// // Adding the same method twice has no effect
-    /// allow.add_method(Method::INVITE);
+    /// allow.add_method(Method::Invite);
     /// 
     /// // The string representation shows each method only once
     /// assert_eq!(allow.to_string(), "INVITE, ACK");
@@ -238,24 +245,23 @@ impl FromStr for Allow {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::Allow;
     /// use std::str::FromStr;
     ///
     /// // Parse a simple list
     /// let allow = Allow::from_str("INVITE, ACK, BYE").unwrap();
-    /// assert!(allow.allows(&Method::INVITE));
+    /// assert!(allow.allows(&Method::Invite));
     ///
     /// // Parse with extra whitespace
     /// let allow = Allow::from_str(" INVITE,ACK ,  BYE ").unwrap();
-    /// assert!(allow.allows(&Method::BYE));
+    /// assert!(allow.allows(&Method::Bye));
     ///
     /// // Parse with extended methods (e.g., methods not defined in the standard)
     /// let allow = Allow::from_str("INVITE, MEETING").unwrap();
-    /// assert!(allow.allows(&Method::INVITE));
+    /// assert!(allow.allows(&Method::Invite));
     /// assert!(allow.allows(&Method::Extension("MEETING".into())));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::allow::parse_allow;
-
         let (_, methods_bytes) = all_consuming(parse_allow)(s.as_bytes()).map_err(Error::from)?;
         Ok(methods_bytes)
     }

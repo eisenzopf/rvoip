@@ -16,7 +16,7 @@ use std::str;
 use crate::parser::common_chars::{alpha, digit};
 use crate::parser::ParseResult;
 use crate::error::Error;
-use crate::Scheme;
+use crate::types::uri::Scheme;
 
 // Check if a byte is allowed in a scheme after the first character
 // RFC 2396: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
