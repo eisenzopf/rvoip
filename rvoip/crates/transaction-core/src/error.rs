@@ -1,3 +1,4 @@
+use crate::transaction::TransactionKey;
 use std::io;
 use thiserror::Error;
 
@@ -7,41 +8,48 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors that can occur in SIP transaction handling
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Error in SIP message processing
-    #[error("SIP message error: {0}")]
-    SipMessageError(#[from] rvoip_sip_core::Error),
+    /// Error originating from the sip-core crate (parsing, building messages, etc.)
+    #[error("SIP core error: {0}")]
+    SipCoreError(#[from] rvoip_sip_core::Error),
 
-    /// Error in SIP transport
+    /// Error originating from the sip-transport crate.
     #[error("SIP transport error: {0}")]
-    TransportError(#[from] rvoip_sip_transport::Error),
+    TransportError(String), // Transport errors might not be easily cloneable/static
 
-    /// Transaction not found
-    #[error("Transaction not found: {0}")]
-    TransactionNotFound(String),
+    /// Transaction not found for the given key.
+    #[error("Transaction not found: {0:?}")]
+    TransactionNotFound(TransactionKey),
 
-    /// Transaction already exists
-    #[error("Transaction already exists: {0}")]
-    TransactionExists(String),
+    /// Transaction with the given key already exists.
+    #[error("Transaction already exists: {0:?}")]
+    TransactionExists(TransactionKey),
 
-    /// Invalid transaction state transition
+    /// Invalid transaction state transition attempted.
     #[error("Invalid transaction state transition: {0}")]
     InvalidStateTransition(String),
 
-    /// Transaction timeout
+    /// Transaction timed out (specific timers T_B, T_F, T_H).
     #[error("Transaction timed out: {0}")]
-    TransactionTimeout(String),
+    TransactionTimeout(TransactionKey),
 
-    /// I/O error
+    /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    /// Channel error (receiver dropped)
-    #[error("Channel closed")]
+    /// Internal channel error (e.g., receiver dropped).
+    #[error("Internal channel closed")]
     ChannelClosed,
 
-    /// Other error
-    #[error("{0}")]
+    /// Other miscellaneous errors.
+    #[error("Other error: {0}")]
     Other(String),
+}
+
+// Manual From impl for transport errors if needed
+impl From<rvoip_sip_transport::Error> for Error {
+    fn from(e: rvoip_sip_transport::Error) -> Self {
+        Error::TransportError(e.to_string()) // Convert to String
+    }
 }
 
 impl From<&str> for Error {
@@ -56,6 +64,8 @@ impl From<String> for Error {
     }
 }
 
+// Blanket implementation for SendError might be too broad,
+// be specific if possible, or handle where the send error occurs.
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::ChannelClosed

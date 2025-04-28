@@ -1,634 +1,706 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use async_trait::async_trait;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Sleep;
+use std::pin::Pin;
+use std::future::Future;
+use tracing::{debug, error, info, trace, warn};
 
-use tracing::{debug, trace, warn};
-
-use rvoip_sip_core::{Message, Method, Request, Response, StatusCode, HeaderName, Header, HeaderValue};
+// Use prelude and specific types
+use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
 
 use crate::error::{Error, Result};
-use crate::transaction::{Transaction, TransactionState, TransactionType};
+use crate::transaction::{Transaction, TransactionState, TransactionKind, TransactionKey, TransactionEvent};
 use crate::utils;
 
+// Constants for timers (RFC 3261)
+const T1: Duration = Duration::from_millis(500);
+const TIMER_G_INVITE_RETRANSMIT: Duration = T1;         // Starts at T1
+const TIMER_H_WAIT_ACK: Duration = Duration::from_secs(32); // 64 * T1
+const TIMER_I_ACK_RETRANSMIT: Duration = Duration::from_secs(5); // T4 for unreliable
+const TIMER_J_NON_INVITE_WAIT: Duration = Duration::from_secs(32); // 64 * T1 for unreliable
+
 /// Server transaction trait
-#[async_trait::async_trait]
+#[async_trait]
 pub trait ServerTransaction: Transaction {
-    /// Send a response for this transaction
+    /// Process an incoming request associated with this transaction (e.g., retransmission, ACK, CANCEL).
+    async fn process_request(&mut self, request: Request) -> Result<()>;
+
+    /// Send a response for this transaction. Initiates state transitions and timers.
     async fn send_response(&mut self, response: Response) -> Result<()>;
 }
 
-/// Server INVITE transaction
+/// Shared data for server transactions
+#[derive(Debug)]
+struct ServerTxData {
+    id: TransactionKey,
+    state: TransactionState,
+    request: Request, // The original request that created the transaction
+    last_response: Option<Response>,
+    remote_addr: SocketAddr, // Source address of the original request
+    transport: Arc<dyn Transport>,
+    /// Channel to send events (like final responses, errors) back to the manager/TU
+    events_tx: mpsc::Sender<TransactionEvent>,
+    /// Optional sender to signal termination completion
+    terminate_signal: Option<oneshot::Sender<()>>,
+}
+
+/// Server INVITE transaction (RFC 3261 Section 17.2.1)
 #[derive(Debug)]
 pub struct ServerInviteTransaction {
-    /// Transaction ID
-    id: String,
-    /// Current state
-    state: TransactionState,
-    /// Original request
-    request: Request,
-    /// Last response sent
-    last_response: Option<Response>,
-    /// Remote address (where to send responses)
-    remote_addr: SocketAddr,
-    /// Transport to use for sending responses
-    transport: Arc<dyn Transport>,
-    /// Timer G duration (INVITE retransmission interval)
-    timer_g: Duration,
-    /// Timer H duration (wait time for ACK)
-    timer_h: Duration,
-    /// Timer I duration (wait time in CONFIRMED state)
-    timer_i: Duration,
-    /// Retransmission count
-    retransmit_count: u32,
+    data: ServerTxData,
+    timer_g_interval: Duration, // Current retransmission interval
+    timer_g_task: Option<Pin<Box<dyn Future<Output = ()> + Send>>>, // Response retransmission timer (Completed state)
+    timer_h_task: Option<Pin<Box<dyn Future<Output = ()> + Send>>>, // Timeout waiting for ACK (Completed state)
+    timer_i_task: Option<Pin<Box<dyn Future<Output = ()> + Send>>>, // Wait after ACK retransmit (Confirmed state)
 }
 
 impl ServerInviteTransaction {
-    /// Create a new server INVITE transaction
+    /// Create a new server INVITE transaction.
+    /// Assumes manager verified the request and created the key.
     pub fn new(
-        mut request: Request,
+        id: TransactionKey,
+        request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
     ) -> Result<Self> {
-        // Extract branch to generate ID, or generate a new one if missing
-        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
-            Some(branch) => branch,
-            None => {
-                // No branch parameter found, add one
-                debug!("Adding missing branch parameter to Via header");
-                
-                // Generate a branch parameter
-                let new_branch = utils::generate_branch();
-                
-                // Check if there's an existing Via header we can modify
-                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
-                
-                if let Some(via_header) = found_via {
-                    // Modify existing Via header to add branch
-                    let current_value = via_header.value.to_string();
-                    let new_value = if current_value.contains("branch=") {
-                        current_value // Already has branch, don't modify (shouldn't happen)
-                    } else {
-                        format!("{};branch={}", current_value, new_branch)
-                    };
-                    
-                    // Update header value
-                    via_header.value = HeaderValue::text(new_value);
-                    new_branch // Return the branch we just added
-                } else {
-                    // No Via header found, add a new one with branch
-                    debug!("No Via header found, adding one with branch parameter");
-                    
-                    // Use localhost as placeholder
-                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
-                    request.headers.push(Header::text(HeaderName::Via, via_value));
-                    
-                    new_branch // Return the branch we just added
-                }
-            }
-        };
-        
-        let id = format!("ist_{}", branch);
-        
-        Ok(ServerInviteTransaction {
-            id,
-            state: TransactionState::Initial,
-            request,
-            last_response: None,
-            remote_addr,
-            transport,
-            timer_g: Duration::from_millis(500),  // RFC 3261 recommends T1 (500ms)
-            timer_h: Duration::from_secs(32),     // 64*T1 seconds
-            timer_i: Duration::from_secs(5),      // T4 seconds
-            retransmit_count: 0,
-        })
+        if request.method() != Method::Invite {
+            return Err(Error::Other("Request must be INVITE for INVITE server transaction".to_string()));
+        }
+
+        // Send 100 Trying immediately (RFC requirement)
+        // This is done reliably by the transport, transaction doesn't manage this response.
+        // However, the manager should probably trigger this upon creating the transaction.
+        // Let's assume manager/TU handles the initial 100 Trying.
+
+        let (terminate_tx, terminate_rx) = oneshot::channel();
+
+         let mut tx = Self {
+            data: ServerTxData {
+                id,
+                // Initial state is Proceeding because 100 Trying is assumed sent
+                state: TransactionState::Proceeding,
+                request,
+                last_response: None,
+                remote_addr,
+                transport,
+                events_tx,
+                terminate_signal: Some(terminate_tx),
+            },
+             timer_g_interval: TIMER_G_INVITE_RETRANSMIT,
+             timer_g_task: None,
+             timer_h_task: None,
+             timer_i_task: None,
+         };
+
+        tx.spawn_termination_listener(terminate_rx);
+        Ok(tx)
     }
-    
-    /// Transition to a new state
-    fn transition_to(&mut self, new_state: TransactionState) -> Result<()> {
-        debug!("[{}] State transition: {:?} -> {:?}", self.id, self.state, new_state);
-        
+
+     /// Spawns a task that cleans up when termination is signaled.
+     fn spawn_termination_listener(&mut self, terminate_rx: oneshot::Receiver<()>) {
+         let id = self.data.id.clone();
+         tokio::spawn(async move {
+             let _ = terminate_rx.await;
+             debug!(id=%id, "Termination signal received or channel dropped. Invite server transaction cleanup.");
+         });
+     }
+
+    /// Transition to a new state, handling timer logic.
+    async fn transition_to(&mut self, new_state: TransactionState) -> Result<()> {
+        if self.data.state == new_state { return Ok(()); }
+        debug!(id=%self.data.id, "State transition: {:?} -> {:?}", self.data.state, new_state);
+
+        self.cancel_timers();
+
         // Validate state transition
-        match (self.state, new_state) {
-            // Valid transitions
-            (TransactionState::Initial, TransactionState::ServerProceeding) => {},
-            (TransactionState::ServerProceeding, TransactionState::Completed) => {},
-            (TransactionState::Completed, TransactionState::Confirmed) => {},
-            (TransactionState::Completed, TransactionState::Terminated) => {},
-            (TransactionState::Confirmed, TransactionState::Terminated) => {},
-            
-            // Invalid transitions
-            _ => return Err(Error::InvalidStateTransition(
-                format!("Invalid state transition: {:?} -> {:?}", self.state, new_state)
-            )),
+        match (self.data.state, new_state) {
+            (_, TransactionState::Terminated) => {
+                 if let Some(sender) = self.data.terminate_signal.take() {
+                     let _ = sender.send(());
+                 }
+             }
+            (TransactionState::Proceeding, TransactionState::Completed) => {} // Sent non-2xx final
+            (TransactionState::Proceeding, TransactionState::Terminated) => {} // Sent 2xx final
+            (TransactionState::Completed, TransactionState::Confirmed) => {} // Received ACK
+            (TransactionState::Completed, TransactionState::Terminated) => {} // Timer H fired
+            (TransactionState::Confirmed, TransactionState::Terminated) => {} // Timer I fired
+             _ => return Err(Error::InvalidStateTransition(
+                 format!("[{}] Invalid state transition: {:?} -> {:?}", self.data.id, self.data.state, new_state)
+             )),
         }
-        
-        self.state = new_state;
+
+        self.data.state = new_state;
+        self.start_timers_for_state(new_state);
         Ok(())
     }
-}
 
-#[async_trait::async_trait]
-impl Transaction for ServerInviteTransaction {
-    fn id(&self) -> &str {
-        &self.id
+    /// Cancel all active timers.
+    fn cancel_timers(&mut self) {
+        self.timer_g_task = None;
+        self.timer_h_task = None;
+        self.timer_i_task = None;
+         trace!(id=%self.data.id, "Cancelled active server timers");
     }
-    
-    fn transaction_type(&self) -> TransactionType {
-        TransactionType::Server
-    }
-    
-    fn state(&self) -> TransactionState {
-        self.state
-    }
-    
-    fn original_request(&self) -> &Request {
-        &self.request
-    }
-    
-    fn last_response(&self) -> Option<&Response> {
-        self.last_response.as_ref()
-    }
-    
-    async fn process_message(&mut self, message: Message) -> Result<Option<Message>> {
-        match message {
-            Message::Request(request) => {
-                // We only expect ACK in server INVITE transaction
-                if request.method != Method::Ack {
-                    warn!("[{}] Received non-ACK request in server INVITE transaction: {:?}", self.id, request.method);
-                    return Ok(None);
-                }
-                
-                match self.state {
-                    TransactionState::Initial => {
-                        // In some cases, ACK might arrive before the state has been properly updated
-                        // This is not ideal but should be handled gracefully
-                        debug!("[{}] Received ACK in INITIAL state, handling it anyway", self.id);
-                        // We won't transition state here as this is an abnormal case
-                        // The dialog layer should handle this appropriately
-                        Ok(None)
-                    },
-                    TransactionState::ServerProceeding => {
-                        // ACK received prematurely, but we'll be tolerant
-                        debug!("[{}] Received ACK in PROCEEDING state, transitioning to CONFIRMED", self.id);
-                        self.transition_to(TransactionState::Confirmed)?;
-                        Ok(None)
-                    },
-                    TransactionState::Completed => {
-                        debug!("[{}] Received ACK in COMPLETED state, transitioning to CONFIRMED", self.id);
-                        self.transition_to(TransactionState::Confirmed)?;
-                        
-                        // Start timer I
-                        // In a real implementation, we'd start a timer here
-                        
-                        Ok(None)
-                    },
-                    TransactionState::Confirmed => {
-                        // Already received ACK, ignore
-                        trace!("[{}] Ignoring duplicate ACK in CONFIRMED state", self.id);
-                        Ok(None)
-                    },
-                    _ => {
-                        warn!("[{}] Received ACK in invalid state: {:?}", self.id, self.state);
-                        Ok(None)
-                    }
-                }
-            },
-            Message::Response(_) => {
-                warn!("[{}] Received response in server transaction", self.id);
-                // Server transactions don't process responses
-                Ok(None)
-            }
-        }
-    }
-    
-    fn matches(&self, message: &Message) -> bool {
-        if let Message::Request(request) = message {
-            // Only match ACK requests for INVITE transactions
-            if request.method != Method::Ack {
-                return false;
-            }
-            
-            // Check if branch matches
-            if let (Some(incoming_branch), Some(our_branch)) = (
-                message.first_via().and_then(|via| via.get("branch").flatten().map(|s| s.to_string())),
-                utils::extract_branch(&Message::Request(self.request.clone()))
-            ) {
-                // Match transaction by branch
-                return incoming_branch == our_branch;
-            }
-        }
-        
-        false
-    }
-    
-    fn timeout_duration(&self) -> Option<Duration> {
-        match self.state {
-            TransactionState::Completed => Some(self.timer_g),
-            TransactionState::Confirmed => Some(self.timer_i),
-            _ => None,
-        }
-    }
-    
-    async fn on_timeout(&mut self) -> Result<Option<Message>> {
-        match self.state {
+
+    /// Start timers based on the current state.
+    fn start_timers_for_state(&mut self, state: TransactionState) {
+        match state {
             TransactionState::Completed => {
-                // Timer G fired - retransmit response
-                if let Some(response) = &self.last_response {
-                    debug!("[{}] Timer G fired, retransmitting response", self.id);
-                    
-                    let cloned_response = response.clone();
-                    self.transport.send_message(cloned_response.into(), self.remote_addr).await?;
-                    
-                    // Double retransmission interval (exponential backoff)
-                    self.timer_g = Duration::min(
-                        self.timer_g * 2,
-                        Duration::from_secs(4)
-                    );
-                    
-                    self.retransmit_count += 1;
-                    
-                    // Check if we've hit timer H
-                    if self.retransmit_count > 10 { // Arbitrary limit for now, would use actual timer in production
-                        debug!("[{}] Timer H fired, no ACK received, terminating transaction", self.id);
-                        self.transition_to(TransactionState::Terminated)?;
-                    }
-                    
-                    Ok(None)
-                } else {
-                    warn!("[{}] Timer G fired but no response to retransmit", self.id);
-                    Ok(None)
-                }
-            },
+                // Started upon sending a non-2xx final response
+                self.start_timer_g();
+                self.start_timer_h();
+            }
             TransactionState::Confirmed => {
-                // Timer I fired - terminate transaction
-                debug!("[{}] Timer I fired, terminating transaction", self.id);
-                self.transition_to(TransactionState::Terminated)?;
-                Ok(None)
-            },
-            _ => {
-                warn!("[{}] Timeout in unexpected state: {:?}", self.id, self.state);
-                Ok(None)
+                // Started upon receiving ACK
+                self.start_timer_i();
             }
+            _ => {} // No timers for Proceeding, Terminated
         }
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+     /// Start Timer G (response retransmission timer)
+    fn start_timer_g(&mut self) {
+        let interval = self.timer_g_interval;
+        let events_tx = self.data.events_tx.clone();
+        let id = self.data.id.clone();
+        self.timer_g_task = Some(Box::pin(async move {
+            tokio::time::sleep(interval).await;
+            debug!(id=%id, "Timer G fired");
+            let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "G".to_string() }).await;
+        }));
+         trace!(id=%self.data.id, interval = ?interval, "Started Timer G");
+     }
+
+     /// Start Timer H (timeout waiting for ACK)
+    fn start_timer_h(&mut self) {
+        let interval = TIMER_H_WAIT_ACK;
+        let events_tx = self.data.events_tx.clone();
+        let id = self.data.id.clone();
+        self.timer_h_task = Some(Box::pin(async move {
+            tokio::time::sleep(interval).await;
+            debug!(id=%id, "Timer H fired");
+             let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "H".to_string() }).await;
+         }));
+          trace!(id=%self.data.id, interval = ?interval, "Started Timer H");
+      }
+
+     /// Start Timer I (wait after ACK received)
+    fn start_timer_i(&mut self) {
+        let interval = TIMER_I_ACK_RETRANSMIT;
+         let events_tx = self.data.events_tx.clone();
+         let id = self.data.id.clone();
+         self.timer_i_task = Some(Box::pin(async move {
+             tokio::time::sleep(interval).await;
+             debug!(id=%id, "Timer I fired");
+             let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "I".to_string() }).await;
+         }));
+         trace!(id=%self.data.id, interval = ?interval, "Started Timer I");
+     }
+
+     /// Handle internal timer events.
+     async fn on_timer(&mut self, timer: &str) -> Result<()> {
+         match timer {
+             "G" => {
+                 // Timer G logic (retransmit last response, double interval, restart G)
+                 if self.data.state == TransactionState::Completed {
+                     if let Some(response) = &self.data.last_response {
+                         debug!(id=%self.data.id, "Timer G triggered, retransmitting response");
+                         self.data.transport.send_message(
+                             Message::Response(response.clone()),
+                             self.data.remote_addr
+                         ).await?;
+                         // Double interval, capped by T2
+                         self.timer_g_interval = std::cmp::min(self.timer_g_interval * 2, T2);
+                         self.start_timer_g(); // Restart timer G
+                     } else {
+                         warn!(id=%self.data.id, "Timer G fired but no response to retransmit?");
+                     }
+                 } else {
+                     trace!(id=%self.data.id, state=?self.data.state, "Timer G fired in invalid state, ignoring.");
+                 }
+             }
+             "H" => {
+                 // Timer H logic (timeout waiting for ACK) -> Terminate
+                 if self.data.state == TransactionState::Completed {
+                     warn!(id=%self.data.id, "Timer H (Timeout waiting for ACK) fired");
+                     self.transition_to(TransactionState::Terminated).await?;
+                     // Inform TU? Typically just means the client likely didn't get the response.
+                     self.data.events_tx.send(TransactionEvent::AckTimeout {
+                        transaction_id: self.data.id.clone(),
+                     }).await?;
+                 } else {
+                     trace!(id=%self.data.id, state=?self.data.state, "Timer H fired in invalid state, ignoring.");
+                 }
+             }
+             "I" => {
+                 // Timer I logic (linger after ACK) -> Terminate
+                  if self.data.state == TransactionState::Confirmed {
+                      debug!(id=%self.data.id, "Timer I fired, terminating transaction");
+                      self.transition_to(TransactionState::Terminated).await?;
+                  } else {
+                      trace!(id=%self.data.id, state=?self.data.state, "Timer I fired in invalid state, ignoring.");
+                  }
+             }
+             _ => warn!(id=%self.data.id, timer=timer, "Unknown timer triggered"),
+         }
+         Ok(())
+     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
+impl Transaction for ServerInviteTransaction {
+     fn id(&self) -> &TransactionKey { &self.data.id }
+     fn kind(&self) -> TransactionKind { TransactionKind::InviteServer }
+     fn state(&self) -> TransactionState { self.data.state }
+     fn transport(&self) -> Arc<dyn Transport> { self.data.transport.clone() }
+     fn remote_addr(&self) -> SocketAddr { self.data.remote_addr }
+     fn original_request(&self) -> &Request { &self.data.request }
+     fn last_response(&self) -> Option<&Response> { self.data.last_response.as_ref() }
+
+      async fn process_event(&mut self, event_type: &str, message: Option<Message>) -> Result<()> {
+          match event_type {
+              "request" => {
+                  if let Some(Message::Request(req)) = message {
+                      self.process_request(req).await
+                  } else {
+                      warn!(id=%self.data.id, "Received non-request message event");
+                      Ok(())
+                  }
+              }
+              "timer" => {
+                   error!(id=%self.data.id, "Timer processing needs specific timer name");
+                   Ok(())
+              }
+              "transport_err" => {
+                   error!(id=%self.data.id, "Transport error occurred, terminating transaction");
+                   self.transition_to(TransactionState::Terminated).await?;
+                   // Notify TU
+                   self.data.events_tx.send(TransactionEvent::TransportError {
+                      transaction_id: self.data.id.clone(),
+                   }).await?;
+                   Ok(())
+              }
+              _ => {
+                   warn!(id=%self.data.id, event=event_type, "Unhandled transaction event type");
+                   Ok(())
+              }
+          }
+      }
+
+      async fn handle_timer(&mut self, timer_name: String) -> Result<()> {
+          self.on_timer(&timer_name).await
+      }
+
+     fn matches(&self, message: &Message) -> bool {
+          match TransactionKey::from_message(message) {
+             Ok(key) => key == self.data.id,
+             Err(_) => false,
+          }
+     }
+}
+
+#[async_trait]
 impl ServerTransaction for ServerInviteTransaction {
+    /// Process INVITE retransmission or ACK.
+    async fn process_request(&mut self, request: Request) -> Result<()> {
+         let id = self.data.id.clone();
+
+         match self.data.state {
+             TransactionState::Proceeding => {
+                  // Retransmission of INVITE
+                  if request.method() == Method::Invite {
+                      debug!(id=%id, "Received INVITE retransmission in Proceeding state");
+                      // Retransmit last provisional response
+                      if let Some(resp) = &self.data.last_response {
+                           if resp.status().is_provisional() {
+                                self.data.transport.send_message(
+                                     Message::Response(resp.clone()),
+                                     self.data.remote_addr
+                                 ).await?;
+                           }
+                      }
+                  } else {
+                       warn!(id=%id, method=%request.method(), "Received unexpected request in Proceeding state");
+                  }
+             }
+             TransactionState::Completed => {
+                 // Retransmission of INVITE or ACK
+                 if request.method() == Method::Invite {
+                      debug!(id=%id, "Received INVITE retransmission in Completed state");
+                     // Retransmit last final (non-2xx) response
+                     if let Some(resp) = &self.data.last_response {
+                         if !resp.status().is_success() {
+                              self.data.transport.send_message(
+                                   Message::Response(resp.clone()),
+                                   self.data.remote_addr
+                               ).await?;
+                         }
+                     }
+                 } else if request.method() == Method::Ack {
+                     debug!(id=%id, "Received ACK in Completed state");
+                     self.transition_to(TransactionState::Confirmed).await?; // Resets timers G/H, starts I
+                     // Inform TU about ACK
+                      self.data.events_tx.send(TransactionEvent::AckReceived {
+                         transaction_id: id,
+                         ack_request: request,
+                     }).await?;
+                 } else {
+                      warn!(id=%id, method=%request.method(), "Received unexpected request in Completed state");
+                 }
+             }
+             TransactionState::Confirmed => {
+                  // Retransmission of ACK - absorb it
+                  if request.method() == Method::Ack {
+                      trace!(id=%id, "Absorbing retransmitted ACK in Confirmed state");
+                  } else {
+                       warn!(id=%id, method=%request.method(), "Received unexpected request in Confirmed state");
+                  }
+             }
+             TransactionState::Terminated | TransactionState::Initial => {
+                  warn!(id=%id, state=?self.data.state, method=%request.method(), "Received request in unexpected state");
+             }
+         }
+         Ok(())
+     }
+
+    /// Send a response (1xx, 2xx, 3xx-6xx).
     async fn send_response(&mut self, response: Response) -> Result<()> {
-        let status = response.status;
-        
-        match self.state {
-            TransactionState::Initial => {
-                if status.is_provisional() {
-                    debug!("[{}] Sending provisional response: {}", self.id, status);
-                    self.transition_to(TransactionState::ServerProceeding)?;
-                } else if status.is_success() || status.is_error() {
-                    debug!("[{}] Sending final response: {}", self.id, status);
-                    self.transition_to(TransactionState::ServerProceeding)?;
-                    self.transition_to(TransactionState::Completed)?;
-                    
-                    // Start timer G (response retransmission) for unreliable transports
-                    // We'll handle this in the transaction manager with on_timeout
-                    
-                    // Start timer H (wait for ACK)
-                    // We'll handle this in the transaction manager with on_timeout
-                } else {
-                    return Err(Error::InvalidStateTransition(
-                        format!("Cannot send response with status {} in INITIAL state", status)
-                    ));
-                }
-            },
-            TransactionState::ServerProceeding => {
-                if status.is_provisional() {
-                    debug!("[{}] Sending provisional response: {}", self.id, status);
-                } else if status.is_success() || status.is_error() {
-                    debug!("[{}] Sending final response: {}", self.id, status);
-                    self.transition_to(TransactionState::Completed)?;
-                    
-                    // Start timer G (response retransmission) for unreliable transports
-                    // We'll handle this in the transaction manager with on_timeout
-                    
-                    // Start timer H (wait for ACK)
-                    // We'll handle this in the transaction manager with on_timeout
-                } else {
-                    return Err(Error::InvalidStateTransition(
-                        format!("Cannot send response with status {} in PROCEEDING state", status)
-                    ));
-                }
-            },
-            TransactionState::Completed | TransactionState::Confirmed | TransactionState::Terminated => {
-                return Err(Error::InvalidStateTransition(
-                    format!("Cannot send response in {:?} state", self.state)
-                ));
-            },
-            _ => {
-                return Err(Error::InvalidStateTransition(
-                    format!("Invalid state for server INVITE transaction: {:?}", self.state)
-                ));
-            }
-        }
-        
-        // Store response for potential retransmissions
-        self.last_response = Some(response.clone());
-        
-        // Send response
-        self.transport.send_message(response.into(), self.remote_addr).await?;
-        
-        Ok(())
-    }
+         let status_code = response.status().code();
+         let status_kind = response.status().kind();
+         let id = self.data.id.clone();
+
+         match self.data.state {
+              TransactionState::Proceeding => {
+                  self.data.last_response = Some(response.clone()); // Store for retransmissions
+                  self.data.transport.send_message(
+                      Message::Response(response.clone()), // Send the actual response
+                      self.data.remote_addr
+                  ).await?;
+
+                  if status_kind.is_final() {
+                      if status_kind.is_success() { // 2xx
+                          debug!(id=%id, status=%status_code, "Sent 2xx final response, terminating transaction");
+                          self.transition_to(TransactionState::Terminated).await?; // 2xx terminates immediately
+                           // Inform TU
+                          self.data.events_tx.send(TransactionEvent::FinalResponseSent {
+                             transaction_id: id,
+                             response,
+                         }).await?;
+                      } else { // 3xx-6xx
+                           debug!(id=%id, status=%status_code, "Sent non-2xx final response, moving to Completed");
+                           self.transition_to(TransactionState::Completed).await?; // Starts Timer G/H
+                            // Inform TU
+                            self.data.events_tx.send(TransactionEvent::FinalResponseSent {
+                               transaction_id: id,
+                               response,
+                           }).await?;
+                      }
+                  } else {
+                       // Sending another 1xx
+                        debug!(id=%id, status=%status_code, "Sent another provisional response");
+                        // State remains Proceeding, TU already notified of first 1xx
+                  }
+              }
+              TransactionState::Completed | TransactionState::Confirmed | TransactionState::Terminated | TransactionState::Initial => {
+                   error!(id=%id, state=?self.data.state, status=%status_code, "Cannot send response in this state");
+                   return Err(Error::InvalidStateTransition(
+                       format!("Cannot send response in {:?} state", self.data.state)
+                   ));
+               }
+         }
+         Ok(())
+     }
 }
 
-/// Server non-INVITE transaction
+/// Server non-INVITE transaction (RFC 3261 Section 17.2.2)
 #[derive(Debug)]
 pub struct ServerNonInviteTransaction {
-    /// Transaction ID
-    id: String,
-    /// Current state
-    state: TransactionState,
-    /// Original request
-    request: Request,
-    /// Last response sent
-    last_response: Option<Response>,
-    /// Remote address (where to send responses)
-    remote_addr: SocketAddr,
-    /// Transport to use for sending responses
-    transport: Arc<dyn Transport>,
-    /// Timer J duration (wait time for retransmissions)
-    timer_j: Duration,
+    data: ServerTxData,
+    timer_j_task: Option<Pin<Box<dyn Future<Output = ()> + Send>>>, // Wait retransmit timer
 }
 
 impl ServerNonInviteTransaction {
-    /// Create a new server non-INVITE transaction
+    /// Create a new server non-INVITE transaction.
     pub fn new(
-        mut request: Request,
+        id: TransactionKey,
+        request: Request,
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
     ) -> Result<Self> {
-        // Extract branch to generate ID, or generate a new one if missing
-        let branch = match utils::extract_branch(&Message::Request(request.clone())) {
-            Some(branch) => branch,
-            None => {
-                // No branch parameter found, add one
-                debug!("Adding missing branch parameter to Via header");
-                
-                // Generate a branch parameter
-                let new_branch = utils::generate_branch();
-                
-                // Check if there's an existing Via header we can modify
-                let found_via = request.headers.iter_mut().find(|h| h.name == HeaderName::Via);
-                
-                if let Some(via_header) = found_via {
-                    // Modify existing Via header to add branch
-                    let current_value = via_header.value.to_string();
-                    let new_value = if current_value.contains("branch=") {
-                        current_value // Already has branch, don't modify (shouldn't happen)
-                    } else {
-                        format!("{};branch={}", current_value, new_branch)
-                    };
-                    
-                    // Update header value
-                    via_header.value = HeaderValue::text(new_value);
-                    new_branch // Return the branch we just added
-                } else {
-                    // No Via header found, add a new one with branch
-                    debug!("No Via header found, adding one with branch parameter");
-                    
-                    // Use localhost as placeholder
-                    let via_value = format!("SIP/2.0/UDP 127.0.0.1:5060;branch={}", new_branch);
-                    request.headers.push(Header::text(HeaderName::Via, via_value));
-                    
-                    new_branch // Return the branch we just added
-                }
-            }
-        };
-        
-        let id = format!("nist_{}", branch);
-        
-        Ok(ServerNonInviteTransaction {
-            id,
-            state: TransactionState::Initial,
-            request,
-            last_response: None,
-            remote_addr,
-            transport,
-            timer_j: Duration::from_secs(32),   // 64*T1 seconds
-        })
+         if request.method() == Method::Invite || request.method() == Method::Ack {
+             return Err(Error::Other("Request must be non-INVITE/ACK for non-INVITE server transaction".to_string()));
+         }
+         // Send 100 Trying immediately? Usually yes for INVITE, maybe optional for others?
+         // Let's assume TU handles 100 Trying if needed.
+
+         let (terminate_tx, terminate_rx) = oneshot::channel();
+
+          let mut tx = Self {
+             data: ServerTxData {
+                 id,
+                 state: TransactionState::Trying, // Starts in Trying
+                 request,
+                 last_response: None,
+                 remote_addr,
+                 transport,
+                 events_tx,
+                 terminate_signal: Some(terminate_tx),
+             },
+             timer_j_task: None,
+          };
+         tx.spawn_termination_listener(terminate_rx);
+         Ok(tx)
     }
-    
-    /// Transition to a new state
-    fn transition_to(&mut self, new_state: TransactionState) -> Result<()> {
-        debug!("[{}] State transition: {:?} -> {:?}", self.id, self.state, new_state);
-        
+
+      /// Spawns a task that cleans up when termination is signaled.
+      fn spawn_termination_listener(&mut self, terminate_rx: oneshot::Receiver<()>) {
+          let id = self.data.id.clone();
+          tokio::spawn(async move {
+              let _ = terminate_rx.await;
+              debug!(id=%id, "Termination signal received or channel dropped. Non-invite server transaction cleanup.");
+          });
+      }
+
+
+    /// Transition to a new state, handling timer logic.
+    async fn transition_to(&mut self, new_state: TransactionState) -> Result<()> {
+        if self.data.state == new_state { return Ok(()); }
+        debug!(id = %self.data.id, "State transition: {:?} -> {:?}", self.data.state, new_state);
+
+        self.cancel_timers();
+
         // Validate state transition
-        match (self.state, new_state) {
-            // Valid transitions
-            (TransactionState::Initial, TransactionState::Trying) => {},
-            (TransactionState::Initial, TransactionState::Proceeding) => {},
-            (TransactionState::Initial, TransactionState::Completed) => {},
-            (TransactionState::Trying, TransactionState::Proceeding) => {},
-            (TransactionState::Trying, TransactionState::Completed) => {},
-            (TransactionState::Proceeding, TransactionState::Completed) => {},
-            (TransactionState::Completed, TransactionState::Terminated) => {},
-            
-            // Invalid transitions
-            _ => return Err(Error::InvalidStateTransition(
-                format!("Invalid state transition: {:?} -> {:?}", self.state, new_state)
-            )),
-        }
-        
-        self.state = new_state;
+         match (self.data.state, new_state) {
+              (_, TransactionState::Terminated) => {
+                  if let Some(sender) = self.data.terminate_signal.take() {
+                      let _ = sender.send(());
+                  }
+              }
+              (TransactionState::Trying, TransactionState::Proceeding) => {}
+              (TransactionState::Trying, TransactionState::Completed) => {}
+              (TransactionState::Proceeding, TransactionState::Completed) => {}
+              (TransactionState::Completed, TransactionState::Terminated) => {} // Timer J fires
+              _ => return Err(Error::InvalidStateTransition(
+                  format!("[{}] Invalid state transition: {:?} -> {:?}", self.data.id, self.data.state, new_state)
+              )),
+         }
+
+        self.data.state = new_state;
+        self.start_timers_for_state(new_state);
         Ok(())
     }
+
+     /// Cancel all active timers.
+     fn cancel_timers(&mut self) {
+         self.timer_j_task = None;
+         trace!(id=%self.data.id, "Cancelled active server timers");
+     }
+
+     /// Start timers based on the current state.
+     fn start_timers_for_state(&mut self, state: TransactionState) {
+         match state {
+             TransactionState::Completed => {
+                  self.start_timer_j();
+             }
+             _ => {} // No timers for Trying, Proceeding, Terminated
+         }
+     }
+
+     /// Start Timer J (wait for retransmissions)
+     fn start_timer_j(&mut self) {
+         let interval = TIMER_J_NON_INVITE_WAIT;
+         let events_tx = self.data.events_tx.clone();
+         let id = self.data.id.clone();
+         self.timer_j_task = Some(Box::pin(async move {
+             tokio::time::sleep(interval).await;
+              debug!(id=%id, "Timer J fired");
+              let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "J".to_string() }).await;
+          }));
+          trace!(id=%self.data.id, interval = ?interval, "Started Timer J");
+      }
+
+     /// Handle internal timer events.
+     async fn on_timer(&mut self, timer: &str) -> Result<()> {
+         match timer {
+             "J" => {
+                 // Timer J logic (terminate after waiting for request retransmissions)
+                 if self.data.state == TransactionState::Completed {
+                      debug!(id=%self.data.id, "Timer J fired, terminating transaction");
+                      self.transition_to(TransactionState::Terminated).await?;
+                  } else {
+                      trace!(id=%self.data.id, state=?self.data.state, "Timer J fired in invalid state, ignoring.");
+                  }
+             }
+             _ => warn!(id=%self.data.id, timer=timer, "Unknown timer triggered"),
+         }
+         Ok(())
+     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Transaction for ServerNonInviteTransaction {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    
-    fn transaction_type(&self) -> TransactionType {
-        TransactionType::Server
-    }
-    
-    fn state(&self) -> TransactionState {
-        self.state
-    }
-    
-    fn original_request(&self) -> &Request {
-        &self.request
-    }
-    
-    fn last_response(&self) -> Option<&Response> {
-        self.last_response.as_ref()
-    }
-    
-    async fn process_message(&mut self, message: Message) -> Result<Option<Message>> {
-        match message {
-            Message::Request(request) => {
-                // For non-INVITE, we might receive retransmission of the original request
-                if request.method != self.request.method {
-                    warn!("[{}] Received request with different method: {:?} vs {:?}", 
-                        self.id, request.method, self.request.method);
-                    return Ok(None);
-                }
-                
-                match self.state {
-                    TransactionState::Trying | TransactionState::Proceeding => {
-                        debug!("[{}] Received retransmission in {:?} state", self.id, self.state);
-                        
-                        // Retransmit last response if we have one
-                        if let Some(response) = &self.last_response {
-                            let cloned_response = response.clone();
-                            self.transport.send_message(cloned_response.into(), self.remote_addr).await?;
-                        }
-                        
-                        Ok(None)
-                    },
-                    TransactionState::Completed => {
-                        // Retransmit final response
-                        if let Some(response) = &self.last_response {
-                            debug!("[{}] Retransmitting final response", self.id);
-                            let cloned_response = response.clone();
-                            self.transport.send_message(cloned_response.into(), self.remote_addr).await?;
-                        }
-                        
-                        Ok(None)
-                    },
-                    _ => {
-                        warn!("[{}] Received request in invalid state: {:?}", self.id, self.state);
-                        Ok(None)
-                    }
-                }
-            },
-            Message::Response(_) => {
-                warn!("[{}] Received response in server transaction", self.id);
-                // Server transactions don't process responses
-                Ok(None)
-            }
-        }
-    }
-    
-    fn matches(&self, message: &Message) -> bool {
-        if let Message::Request(request) = message {
-            // Check method
-            if request.method != self.request.method {
-                return false;
-            }
-            
-            // Skip ACK matching, handled by INVITE transactions
-            if request.method == Method::Ack {
-                return false;
-            }
-            
-            // Check if branch matches
-            if let (Some(incoming_branch), Some(our_branch)) = (
-                message.first_via().and_then(|via| via.get("branch").flatten().map(|s| s.to_string())),
-                utils::extract_branch(&Message::Request(self.request.clone()))
-            ) {
-                // Match transaction by branch
-                return incoming_branch == our_branch;
-            }
-        }
-        
-        false
-    }
-    
-    fn timeout_duration(&self) -> Option<Duration> {
-        match self.state {
-            TransactionState::Completed => Some(self.timer_j),
-            _ => None,
-        }
-    }
-    
-    async fn on_timeout(&mut self) -> Result<Option<Message>> {
-        match self.state {
-            TransactionState::Completed => {
-                // Timer J fired - terminate transaction
-                debug!("[{}] Timer J fired, terminating transaction", self.id);
-                self.transition_to(TransactionState::Terminated)?;
-                Ok(None)
-            },
-            _ => {
-                warn!("[{}] Timeout in unexpected state: {:?}", self.id, self.state);
-                Ok(None)
-            }
-        }
-    }
+      fn id(&self) -> &TransactionKey { &self.data.id }
+      fn kind(&self) -> TransactionKind { TransactionKind::NonInviteServer }
+      fn state(&self) -> TransactionState { self.data.state }
+      fn transport(&self) -> Arc<dyn Transport> { self.data.transport.clone() }
+      fn remote_addr(&self) -> SocketAddr { self.data.remote_addr }
+      fn original_request(&self) -> &Request { &self.data.request }
+      fn last_response(&self) -> Option<&Response> { self.data.last_response.as_ref() }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+       async fn process_event(&mut self, event_type: &str, message: Option<Message>) -> Result<()> {
+           match event_type {
+               "request" => {
+                   if let Some(Message::Request(req)) = message {
+                       self.process_request(req).await
+                   } else {
+                       warn!(id=%self.data.id, "Received non-request message event");
+                       Ok(())
+                   }
+               }
+               "timer" => {
+                   error!(id=%self.data.id, "Timer processing needs specific timer name");
+                   Ok(())
+               }
+               "transport_err" => {
+                    error!(id=%self.data.id, "Transport error occurred, terminating transaction");
+                    self.transition_to(TransactionState::Terminated).await?;
+                    // Notify TU
+                    self.data.events_tx.send(TransactionEvent::TransportError {
+                       transaction_id: self.data.id.clone(),
+                    }).await?;
+                    Ok(())
+               }
+               _ => {
+                    warn!(id=%self.data.id, event=event_type, "Unhandled transaction event type");
+                    Ok(())
+               }
+           }
+       }
+
+        async fn handle_timer(&mut self, timer_name: String) -> Result<()> {
+            self.on_timer(&timer_name).await
+        }
+
+      fn matches(&self, message: &Message) -> bool {
+           match TransactionKey::from_message(message) {
+              Ok(key) => key == self.data.id,
+              Err(_) => false,
+           }
+      }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl ServerTransaction for ServerNonInviteTransaction {
+    /// Process a retransmitted request.
+    async fn process_request(&mut self, request: Request) -> Result<()> {
+         let id = self.data.id.clone();
+         // Basic check if it's the same method
+         if request.method() != self.data.request.method() {
+              warn!(id=%id, incoming_method=%request.method(), original_method=%self.data.request.method(), "Received request with different method");
+              return Ok(()); // Ignore
+         }
+
+         match self.data.state {
+              TransactionState::Trying | TransactionState::Proceeding => {
+                   debug!(id=%id, state=?self.data.state, "Received request retransmission");
+                  // Retransmit the last provisional response sent
+                  if let Some(resp) = &self.data.last_response {
+                      if resp.status().is_provisional() {
+                           self.data.transport.send_message(
+                               Message::Response(resp.clone()),
+                               self.data.remote_addr
+                           ).await?;
+                      }
+                  }
+              }
+              TransactionState::Completed => {
+                   debug!(id=%id, "Received request retransmission in Completed state");
+                   // Retransmit the final response
+                   if let Some(resp) = &self.data.last_response {
+                       if resp.status().is_final() {
+                           self.data.transport.send_message(
+                                Message::Response(resp.clone()),
+                                self.data.remote_addr
+                            ).await?;
+                       }
+                   }
+              }
+              TransactionState::Terminated | TransactionState::Initial => {
+                   trace!(id=%id, state=?self.data.state, "Ignoring request retransmission in this state");
+               }
+         }
+         Ok(())
+     }
+
+    /// Send a response (1xx, 2xx-6xx).
     async fn send_response(&mut self, response: Response) -> Result<()> {
-        let status = response.status;
-        
-        match self.state {
-            TransactionState::Initial => {
-                if status == StatusCode::Trying {
-                    debug!("[{}] Sending 100 Trying response", self.id);
-                    self.transition_to(TransactionState::Trying)?;
-                } else if status.is_provisional() {
-                    debug!("[{}] Sending provisional response: {}", self.id, status);
-                    self.transition_to(TransactionState::Proceeding)?;
-                } else {
-                    debug!("[{}] Sending final response: {}", self.id, status);
-                    self.transition_to(TransactionState::Completed)?;
-                    
-                    // Start timer J
-                    // We'll handle this in the transaction manager with on_timeout
+         let status_code = response.status().code();
+         let status_kind = response.status().kind();
+         let id = self.data.id.clone();
+
+         match self.data.state {
+              TransactionState::Trying => {
+                   self.data.last_response = Some(response.clone());
+                   self.data.transport.send_message(
+                       Message::Response(response.clone()),
+                       self.data.remote_addr
+                   ).await?;
+
+                   if status_kind == StatusKind::Provisional {
+                        debug!(id=%id, status=%status_code, "Sent provisional response, moving to Proceeding");
+                        self.transition_to(TransactionState::Proceeding).await?;
+                         // Inform TU only once for first provisional? Or always? Let's send always.
+                         self.data.events_tx.send(TransactionEvent::ProvisionalResponseSent {
+                            transaction_id: id,
+                            response,
+                         }).await?;
+                   } else { // Final response
+                        debug!(id=%id, status=%status_code, "Sent final response, moving to Completed");
+                        self.transition_to(TransactionState::Completed).await?; // Starts Timer J
+                         // Inform TU
+                          self.data.events_tx.send(TransactionEvent::FinalResponseSent {
+                             transaction_id: id,
+                             response,
+                         }).await?;
+                   }
+              }
+              TransactionState::Proceeding => {
+                   self.data.last_response = Some(response.clone());
+                   self.data.transport.send_message(
+                       Message::Response(response.clone()),
+                       self.data.remote_addr
+                   ).await?;
+
+                    if status_kind == StatusKind::Provisional {
+                         debug!(id=%id, status=%status_code, "Sent another provisional response");
+                          // Inform TU
+                         self.data.events_tx.send(TransactionEvent::ProvisionalResponseSent {
+                            transaction_id: id,
+                            response,
+                         }).await?;
+                    } else { // Final response
+                         debug!(id=%id, status=%status_code, "Sent final response, moving to Completed");
+                         self.transition_to(TransactionState::Completed).await?; // Starts Timer J
+                          // Inform TU
+                          self.data.events_tx.send(TransactionEvent::FinalResponseSent {
+                             transaction_id: id,
+                             response,
+                         }).await?;
+                    }
+              }
+              TransactionState::Completed | TransactionState::Terminated | TransactionState::Initial => {
+                    error!(id=%id, state=?self.data.state, status=%status_code, "Cannot send response in this state");
+                    return Err(Error::InvalidStateTransition(
+                        format!("Cannot send response in {:?} state", self.data.state)
+                    ));
                 }
-            },
-            TransactionState::Trying => {
-                if status.is_provisional() && status != StatusCode::Trying {
-                    debug!("[{}] Sending provisional response: {}", self.id, status);
-                    self.transition_to(TransactionState::Proceeding)?;
-                } else if !status.is_provisional() {
-                    debug!("[{}] Sending final response: {}", self.id, status);
-                    self.transition_to(TransactionState::Completed)?;
-                    
-                    // Start timer J
-                    // We'll handle this in the transaction manager with on_timeout
-                }
-            },
-            TransactionState::Proceeding => {
-                if status.is_provisional() {
-                    debug!("[{}] Sending provisional response: {}", self.id, status);
-                } else {
-                    debug!("[{}] Sending final response: {}", self.id, status);
-                    self.transition_to(TransactionState::Completed)?;
-                    
-                    // Start timer J
-                    // We'll handle this in the transaction manager with on_timeout
-                }
-            },
-            TransactionState::Completed | TransactionState::Terminated => {
-                return Err(Error::InvalidStateTransition(
-                    format!("Cannot send response in {:?} state", self.state)
-                ));
-            },
-            _ => {
-                return Err(Error::InvalidStateTransition(
-                    format!("Invalid state for server non-INVITE transaction: {:?}", self.state)
-                ));
-            }
-        }
-        
-        // Store response for potential retransmissions
-        self.last_response = Some(response.clone());
-        
-        // Send response
-        self.transport.send_message(response.into(), self.remote_addr).await?;
-        
-        Ok(())
-    }
+         }
+         Ok(())
+     }
 } 

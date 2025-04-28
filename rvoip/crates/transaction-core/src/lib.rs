@@ -3,129 +3,92 @@
 //! This crate provides the transaction layer for SIP message handling,
 //! implementing the state machines defined in RFC 3261.
 
+// Declare modules
 mod error;
-pub mod transaction;
-#[doc(hidden)]
-pub mod transaction_manager {
-    // Re-export from manager
-}
-pub mod utils;
 mod manager;
+pub mod transaction;
+pub mod utils;
 
-use std::net::SocketAddr;
-use rvoip_sip_core::{Request, Response, StatusCode};
-use rvoip_sip_transport::Transport;
-use async_trait::async_trait;
-
+// Re-export core types
 pub use error::{Error, Result};
+pub use manager::TransactionManager;
 pub use transaction::{
     client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction},
     server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction},
-    Transaction, TransactionState, TransactionType,
+    Transaction, TransactionEvent, TransactionKey, TransactionKind, TransactionState,
+    // TransactionType is now TransactionKind
 };
-pub use manager::{TransactionManager, TransactionEvent};
 
-/// Error type alias to match what's imported in the example
-pub type TransactionError = Error;
+// --- Optional Simplified API (Keep or remove based on design) ---
 
-/// Options for transaction manager
-#[derive(Debug, Clone, Copy)]
-pub struct TransactionOptions {
-    /// SIP Timer T1 (RTT estimate)
+use rvoip_sip_core::prelude::{Request, Response, StatusCode};
+use rvoip_sip_transport::Transport;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use async_trait::async_trait;
+
+/// Error type alias (consider removing if `Error` is clear enough)
+// pub type TransactionError = Error;
+
+/// Options for transaction manager (if needed at this level)
+#[derive(Debug, Clone)]
+pub struct TransactionConfig {
+    /// SIP Timer T1 (RTT estimate) - RFC 3261 default 500ms
     pub t1: std::time::Duration,
-    /// SIP Timer T4 (maximum message lifetime)
-    pub t4: std::time::Duration,
+    // Other timers can be derived or configured within specific transactions if needed.
+    // e.g., T2 = 4s, T4 = 5s
+    // INVITE Client: Timer_B = 64*T1, Timer_D = >32s (unreliable)
+    // INVITE Server: Timer_H = 64*T1, Timer_I = T4 (unreliable)
+    // Non-INVITE Client: Timer_F = 64*T1, Timer_K = T4 (unreliable)
+    // Non-INVITE Server: Timer_J = 64*T1 (unreliable)
 }
 
-/// A simple handle to a client transaction
+impl Default for TransactionConfig {
+    fn default() -> Self {
+        TransactionConfig {
+            t1: std::time::Duration::from_millis(500),
+        }
+    }
+}
+
+// The simplified API below might be removed in favor of directly using TransactionManager
+
+/// A simple handle to a client transaction (Placeholder)
 pub struct ClientTransactionHandle {
-    response: Response,
+    pub key: TransactionKey,
+    // Potentially hold a way to receive the final response, e.g., a oneshot::Receiver
 }
 
-impl ClientTransactionHandle {
-    /// Wait for a final response from the transaction
-    pub async fn wait_for_final_response(self) -> Result<Response> {
-        // Just return the dummy response
-        Ok(self.response)
-    }
+/// A simple handle to a server transaction (Placeholder)
+pub struct ServerTransactionHandle {
+    pub key: TransactionKey,
+    // Potentially hold a way to send responses, e.g., Arc<TransactionManager>
 }
 
-/// A simple handle to a server transaction
-pub struct ServerTransactionHandle {}
-
-impl ServerTransactionHandle {
-    /// Send a provisional response
-    pub async fn send_provisional_response(&self, _response: Response) -> Result<()> {
-        // Do nothing
-        Ok(())
-    }
-
-    /// Send a final response
-    pub async fn send_final_response(self, _response: Response) -> Result<()> {
-        // Do nothing
-        Ok(())
-    }
-}
-
-/// Helper function to create a new transaction manager
-pub fn new_transaction_manager(_options: TransactionOptions) -> impl TransactionManagerExt {
-    // Return a simple implementation
-    SimpleTransactionManager {}
-}
-
-/// Transaction manager extensions for simplifying the interface
+/// Simplified interface trait (Placeholder)
 #[async_trait]
-pub trait TransactionManagerExt: Clone + Send + Sync {
-    /// Create a client transaction
-    async fn create_client_transaction<T: Transport + Send + Sync + 'static>(
+pub trait TransactionFacade: Clone + Send + Sync + 'static {
+    async fn create_client_transaction(
         &self,
-        _request: Request,
-        _transport: T,
-        _destination: SocketAddr,
+        request: Request,
+        destination: SocketAddr,
     ) -> Result<ClientTransactionHandle>;
 
-    /// Create a server transaction
-    async fn create_server_transaction<T: Transport + Send + Sync + 'static>(
-        &self,
-        _request: Request,
-        _transport: T,
-        _source: SocketAddr,
-    ) -> Result<ServerTransactionHandle>;
+    async fn send_client_request(&self, handle: &ClientTransactionHandle) -> Result<()>;
+
+    // Add methods for server transactions if this facade is kept
 }
 
-/// Simple implementation of TransactionManagerExt
-#[derive(Clone)]
-struct SimpleTransactionManager {}
 
-#[async_trait]
-impl TransactionManagerExt for SimpleTransactionManager {
-    async fn create_client_transaction<T: Transport + Send + Sync + 'static>(
-        &self,
-        _request: Request,
-        _transport: T,
-        _destination: SocketAddr,
-    ) -> Result<ClientTransactionHandle> {
-        Ok(ClientTransactionHandle {
-            response: Response::new(StatusCode::Ok),
-        })
-    }
-
-    async fn create_server_transaction<T: Transport + Send + Sync + 'static>(
-        &self,
-        _request: Request,
-        _transport: T,
-        _source: SocketAddr,
-    ) -> Result<ServerTransactionHandle> {
-        Ok(ServerTransactionHandle {})
-    }
-}
-
-/// Re-export of common types and functions
+/// Re-export of common types and functions for easier use.
 pub mod prelude {
-    pub use crate::{
-        ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
-        ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
-        TransactionManager, TransactionOptions, Transaction, TransactionError,
-        TransactionState, TransactionType, TransactionManagerExt, new_transaction_manager,
+    pub use crate::error::{Error, Result};
+    pub use crate::manager::TransactionManager;
+    pub use crate::transaction::{
+        client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction},
+        server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction},
+        Transaction, TransactionEvent, TransactionKey, TransactionKind, TransactionState,
     };
-} 
+    // pub use crate::TransactionConfig; // Only if config is part of public API
+    // pub use crate::TransactionFacade; // Only if facade pattern is kept
+}
