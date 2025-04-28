@@ -664,7 +664,7 @@ impl DialogManager {
                             // For now we log but don't terminate the dialog - RFC 3261 allows dialog to continue
                             // even if ACK is not received for the final response
                             debug!("Dialog {} associated with transaction that timed out waiting for ACK", 
-                                dialog_id);
+                                dialog_id.value());
                         }
                     },
                     // Handle transport errors that should terminate dialogs
@@ -1243,7 +1243,7 @@ impl DialogManager {
         // Scenario 1: Local is From, Remote is To
         let id_tuple1 = (call_id.clone(), from_tag.clone(), to_tag.clone());
         if let Some(dialog_id_ref) = self.dialog_lookup.get(&id_tuple1) {
-            let dialog_id = dialog_id_ref.clone();
+            let dialog_id = dialog_id_ref.value().clone();
             drop(dialog_id_ref);
             return Some(dialog_id);
         }
@@ -1251,7 +1251,7 @@ impl DialogManager {
         // Scenario 2: Local is To, Remote is From
         let id_tuple2 = (call_id, to_tag, from_tag);
         if let Some(dialog_id_ref) = self.dialog_lookup.get(&id_tuple2) {
-            let dialog_id = dialog_id_ref.clone();
+            let dialog_id = dialog_id_ref.value().clone();
             drop(dialog_id_ref);
             return Some(dialog_id);
         }
@@ -1376,7 +1376,7 @@ impl DialogManager {
             
             // Save dialog tuple mapping if available
             if let Some(tuple) = dialog.dialog_id_tuple() {
-                debug!("Mapping dialog tuple to dialog ID: {:?} -> {}", tuple, dialog_id.to_string());
+                debug!("Mapping dialog tuple to dialog ID: {:?} -> {}", tuple, dialog_id);
                 self.dialog_lookup.insert(tuple, dialog_id.clone());
             }
             
