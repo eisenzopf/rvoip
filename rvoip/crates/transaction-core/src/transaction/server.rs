@@ -800,4 +800,742 @@ impl ServerTransaction for ServerNonInviteTransaction {
          }
          Ok(())
      }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use rvoip_sip_transport::Error as TransportError;
+    
+    // Mock transport implementation
+    #[derive(Debug, Clone)]
+    struct MockTransport {
+        sent_messages: Arc<std::sync::Mutex<Vec<(Message, SocketAddr)>>>,
+        local_addr: SocketAddr,
+        should_fail: bool,
+    }
+    
+    impl MockTransport {
+        fn new(local_addr: SocketAddr) -> Self {
+            Self {
+                sent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+                local_addr,
+                should_fail: false,
+            }
+        }
+        
+        fn with_failure(local_addr: SocketAddr) -> Self {
+            Self {
+                sent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+                local_addr,
+                should_fail: true,
+            }
+        }
+        
+        fn get_sent_messages(&self) -> Vec<(Message, SocketAddr)> {
+            self.sent_messages.lock().unwrap().clone()
+        }
+    }
+    
+    #[async_trait]
+    impl Transport for MockTransport {
+        async fn send_message(&self, message: Message, destination: SocketAddr) -> std::result::Result<(), TransportError> {
+            if self.should_fail {
+                return Err(TransportError::Other("Simulated transport error".to_string()));
+            }
+            
+            self.sent_messages.lock().unwrap().push((message, destination));
+            Ok(())
+        }
+        
+        fn local_addr(&self) -> std::result::Result<SocketAddr, TransportError> {
+            Ok(self.local_addr)
+        }
+        
+        async fn close(&self) -> std::result::Result<(), TransportError> {
+            Ok(()) // Do nothing for test mock
+        }
+        
+        fn is_closed(&self) -> bool {
+            false // Always return false for testing
+        }
+    }
+    
+    // Helper to create a test INVITE request
+    fn create_test_invite() -> Request {
+        let uri = Uri::sip("bob@example.com");
+        let from_uri = Uri::sip("alice@example.com");
+        
+        // Create address and add tag to uri
+        let mut from_uri_with_tag = from_uri.clone();
+        from_uri_with_tag = from_uri_with_tag.with_parameter(Param::tag("fromtag123"));
+        let from_addr = Address::new(from_uri_with_tag);
+        let to_addr = Address::new(uri.clone());
+        
+        RequestBuilder::new(Method::Invite, uri.to_string().as_str()).unwrap()
+            .header(TypedHeader::From(From::new(from_addr)))
+            .header(TypedHeader::To(To::new(to_addr)))
+            .header(TypedHeader::CallId(CallId::new("test-call-id")))
+            .header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
+            .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "192.168.1.1", Some(5060), vec![Param::branch("z9hG4bK1234")]).unwrap()))
+            .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+            .header(TypedHeader::ContentLength(ContentLength::new(0)))
+            .build()
+    }
+    
+    // Helper to create a test ACK request
+    fn create_test_ack(invite_request: &Request) -> Request {
+        let uri = invite_request.uri().to_string();
+        
+        let mut builder = RequestBuilder::new(Method::Ack, &uri).unwrap();
+        
+        // Copy essential headers from the INVITE
+        if let Some(header) = invite_request.header(&HeaderName::From) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = invite_request.header(&HeaderName::To) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = invite_request.header(&HeaderName::CallId) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = invite_request.header(&HeaderName::Via) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Create CSeq header with same sequence but ACK method
+        if let Some(TypedHeader::CSeq(cseq)) = invite_request.header(&HeaderName::CSeq) {
+            builder = builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
+        }
+        
+        builder.header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+               .header(TypedHeader::ContentLength(ContentLength::new(0)))
+               .build()
+    }
+    
+    // Helper to create a test non-INVITE request
+    fn create_test_register() -> Request {
+        let uri = Uri::sip("registrar.example.com");
+        let from_uri = Uri::sip("alice@example.com");
+        
+        // Create address and add tag to uri
+        let mut from_uri_with_tag = from_uri.clone();
+        from_uri_with_tag = from_uri_with_tag.with_parameter(Param::tag("fromtag123"));
+        let from_addr = Address::new(from_uri_with_tag);
+        
+        RequestBuilder::new(Method::Register, uri.to_string().as_str()).unwrap()
+            .header(TypedHeader::From(From::new(from_addr)))
+            .header(TypedHeader::To(To::new(Address::new(from_uri.clone()))))
+            .header(TypedHeader::CallId(CallId::new("test-reg-id")))
+            .header(TypedHeader::CSeq(CSeq::new(1, Method::Register)))
+            .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "192.168.1.1", Some(5060), vec![Param::branch("z9hG4bK1234")]).unwrap()))
+            .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+            .header(TypedHeader::ContentLength(ContentLength::new(0)))
+            .build()
+    }
+    
+    // Helper to create a test response
+    fn create_test_response(request: &Request, status_code: StatusCode) -> Response {
+        let mut builder = ResponseBuilder::new(status_code);
+        
+        // Copy essential headers
+        if let Some(header) = request.header(&HeaderName::Via) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = request.header(&HeaderName::From) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = request.header(&HeaderName::To) {
+            // Add a tag for final (non-100) responses
+            if status_code.as_u16() >= 200 {
+                if let TypedHeader::To(to) = header {
+                    let to_addr = to.address().clone();
+                    if !to_addr.uri.parameters.iter().any(|p| match p {
+                        Param::Tag(_) => true,
+                        _ => false
+                    }) {
+                        let uri_with_tag = to_addr.uri.with_parameter(Param::tag("resp-tag"));
+                        let addr_with_tag = Address::new(uri_with_tag);
+                        builder = builder.header(TypedHeader::To(To::new(addr_with_tag)));
+                    } else {
+                        builder = builder.header(header.clone());
+                    }
+                } else {
+                    builder = builder.header(header.clone());
+                }
+            } else {
+                builder = builder.header(header.clone());
+            }
+        }
+        if let Some(header) = request.header(&HeaderName::CallId) {
+            builder = builder.header(header.clone());
+        }
+        if let Some(header) = request.header(&HeaderName::CSeq) {
+            builder = builder.header(header.clone());
+        }
+        
+        builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));
+        
+        builder.build()
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_creation() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, _events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let result = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request,
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        );
+        
+        assert!(result.is_ok());
+        let transaction = result.unwrap();
+        
+        // Verify initial state - server INVITE starts in Proceeding
+        assert_eq!(transaction.state(), TransactionState::Proceeding);
+        assert_eq!(transaction.kind(), TransactionKind::InviteServer);
+        assert_eq!(transaction.remote_addr(), remote_addr);
+        assert_eq!(transaction.id(), &transaction_id);
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_send_provisional_response() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a provisional response (180 Ringing)
+        let ringing_response = create_test_response(&request, StatusCode::Ringing);
+        
+        // Send the response
+        transaction.send_response(ringing_response.clone()).await.unwrap();
+        
+        // Verify state remains Proceeding
+        assert_eq!(transaction.state(), TransactionState::Proceeding);
+        
+        // Verify message was sent
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Ringing);
+            },
+            _ => panic!("Expected Response message"),
+        }
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::ProvisionalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected ProvisionalResponseSent event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_send_success_response() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a success response (200 OK)
+        let ok_response = create_test_response(&request, StatusCode::Ok);
+        
+        // Send the response
+        transaction.send_response(ok_response.clone()).await.unwrap();
+        
+        // Verify state is now Terminated (for 2xx responses)
+        assert_eq!(transaction.state(), TransactionState::Terminated);
+        
+        // Verify message was sent
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Ok);
+            },
+            _ => panic!("Expected Response message"),
+        }
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::FinalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected FinalResponseSent event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_send_failure_response() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a failure response (404 Not Found)
+        let not_found_response = create_test_response(&request, StatusCode::NotFound);
+        
+        // Send the response
+        transaction.send_response(not_found_response.clone()).await.unwrap();
+        
+        // Verify state is now Completed (for 3xx-6xx responses)
+        assert_eq!(transaction.state(), TransactionState::Completed);
+        
+        // Verify message was sent
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::NotFound);
+            },
+            _ => panic!("Expected Response message"),
+        }
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::FinalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected FinalResponseSent event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_receive_invite_retransmission() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, _events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a provisional response first
+        let ringing_response = create_test_response(&request, StatusCode::Ringing);
+        transaction.send_response(ringing_response).await.unwrap();
+        
+        // Clear sent messages
+        mock_transport.sent_messages.lock().unwrap().clear();
+        
+        // Process a retransmitted INVITE
+        transaction.process_request(request.clone()).await.unwrap();
+        
+        // Verify the last response was retransmitted
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Ringing);
+            },
+            _ => panic!("Expected Response message"),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_receive_ack() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a failure response to get into Completed state
+        let not_found_response = create_test_response(&request, StatusCode::NotFound);
+        transaction.send_response(not_found_response).await.unwrap();
+        
+        // Create ACK
+        let ack_request = create_test_ack(&request);
+        
+        // Process the ACK
+        transaction.process_request(ack_request.clone()).await.unwrap();
+        
+        // Verify state changed to Confirmed
+        assert_eq!(transaction.state(), TransactionState::Confirmed);
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::FinalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected FinalResponseSent event, got {:?}", event),
+        }
+        
+        // Get the ACKReceived event
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::AckReceived { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected AckReceived event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_invite_transaction_timer_i() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_invite();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Invite);
+        
+        let mut transaction = ServerInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a failure response to get into Completed state
+        let not_found_response = create_test_response(&request, StatusCode::NotFound);
+        transaction.send_response(not_found_response).await.unwrap();
+        
+        // Process ACK to move to Confirmed state
+        let ack_request = create_test_ack(&request);
+        transaction.process_request(ack_request).await.unwrap();
+        
+        // Drain events channel
+        while let Ok(_) = events_rx.try_recv() {}
+        
+        // Verify state is Confirmed
+        assert_eq!(transaction.state(), TransactionState::Confirmed);
+        
+        // Manually trigger Timer I to terminate the transaction
+        transaction.handle_timer("I".to_string()).await.unwrap();
+        
+        // Verify state changed to Terminated
+        assert_eq!(transaction.state(), TransactionState::Terminated);
+    }
+    
+    #[tokio::test]
+    async fn test_server_non_invite_transaction_creation() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, _events_rx) = mpsc::channel(10);
+        
+        let request = create_test_register();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Register);
+        
+        let result = ServerNonInviteTransaction::new(
+            transaction_id.clone(),
+            request,
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        );
+        
+        assert!(result.is_ok());
+        let transaction = result.unwrap();
+        
+        // Verify initial state - server non-INVITE starts in Trying
+        assert_eq!(transaction.state(), TransactionState::Trying);
+        assert_eq!(transaction.kind(), TransactionKind::NonInviteServer);
+        assert_eq!(transaction.remote_addr(), remote_addr);
+        assert_eq!(transaction.id(), &transaction_id);
+    }
+    
+    #[tokio::test]
+    async fn test_server_non_invite_transaction_send_provisional_response() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_register();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Register);
+        
+        let mut transaction = ServerNonInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a provisional response (100 Trying)
+        let trying_response = create_test_response(&request, StatusCode::Trying);
+        
+        // Send the response
+        transaction.send_response(trying_response.clone()).await.unwrap();
+        
+        // Verify state changed to Proceeding
+        assert_eq!(transaction.state(), TransactionState::Proceeding);
+        
+        // Verify message was sent
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Trying);
+            },
+            _ => panic!("Expected Response message"),
+        }
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::ProvisionalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected ProvisionalResponseSent event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_non_invite_transaction_send_final_response() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_register();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Register);
+        
+        let mut transaction = ServerNonInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a success response (200 OK)
+        let ok_response = create_test_response(&request, StatusCode::Ok);
+        
+        // Send the response
+        transaction.send_response(ok_response.clone()).await.unwrap();
+        
+        // Verify state changed to Completed
+        assert_eq!(transaction.state(), TransactionState::Completed);
+        
+        // Verify message was sent
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Ok);
+            },
+            _ => panic!("Expected Response message"),
+        }
+        
+        // Verify event was sent
+        let event = events_rx.try_recv().unwrap();
+        match event {
+            TransactionEvent::FinalResponseSent { transaction_id: id, .. } => {
+                assert_eq!(id, transaction_id);
+            },
+            _ => panic!("Expected FinalResponseSent event, got {:?}", event),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_non_invite_transaction_receive_request_retransmission() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, _events_rx) = mpsc::channel(10);
+        
+        let request = create_test_register();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Register);
+        
+        let mut transaction = ServerNonInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a final response to get into Completed state
+        let ok_response = create_test_response(&request, StatusCode::Ok);
+        transaction.send_response(ok_response).await.unwrap();
+        
+        // Clear sent messages
+        mock_transport.sent_messages.lock().unwrap().clear();
+        
+        // Process a retransmitted REGISTER
+        transaction.process_request(request.clone()).await.unwrap();
+        
+        // Verify the last response was retransmitted
+        let sent_messages = mock_transport.get_sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        
+        let (message, dest) = &sent_messages[0];
+        assert_eq!(dest, &remote_addr);
+        
+        match message {
+            Message::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::Ok);
+            },
+            _ => panic!("Expected Response message"),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_server_non_invite_transaction_timer_j() {
+        let remote_addr = SocketAddr::from_str("192.168.1.2:5060").unwrap();
+        let local_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mock_transport = Arc::new(MockTransport::new(local_addr));
+        
+        let (events_tx, mut events_rx) = mpsc::channel(10);
+        
+        let request = create_test_register();
+        let branch = "z9hG4bK1234";
+        
+        let transaction_id = format!("{}-{}", branch, Method::Register);
+        
+        let mut transaction = ServerNonInviteTransaction::new(
+            transaction_id.clone(),
+            request.clone(),
+            remote_addr,
+            mock_transport.clone(),
+            events_tx,
+        ).unwrap();
+        
+        // Send a final response to get into Completed state
+        let ok_response = create_test_response(&request, StatusCode::Ok);
+        transaction.send_response(ok_response).await.unwrap();
+        
+        // Drain events channel
+        while let Ok(_) = events_rx.try_recv() {}
+        
+        // Verify state is Completed
+        assert_eq!(transaction.state(), TransactionState::Completed);
+        
+        // Manually trigger Timer J to terminate the transaction
+        transaction.handle_timer("J".to_string()).await.unwrap();
+        
+        // Verify state changed to Terminated
+        assert_eq!(transaction.state(), TransactionState::Terminated);
+    }
 } 
