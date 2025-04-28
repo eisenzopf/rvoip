@@ -445,6 +445,46 @@ impl Uri {
         Self::new(Scheme::Tel, Host::domain(number))
     }
 
+    /// Create a new HTTP URI
+    ///
+    /// # Parameters
+    /// - `host`: The domain name
+    ///
+    /// # Returns
+    /// A new URI with HTTP scheme and the given domain host
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::http("example.com");
+    /// assert_eq!(uri.to_string(), "http:example.com");
+    /// ```
+    pub fn http(host: impl Into<String>) -> Self {
+        Self::new(Scheme::Http, Host::domain(host))
+    }
+
+    /// Create a new HTTPS URI
+    ///
+    /// # Parameters
+    /// - `host`: The domain name
+    ///
+    /// # Returns
+    /// A new URI with HTTPS scheme and the given domain host
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let uri = Uri::https("example.com");
+    /// assert_eq!(uri.to_string(), "https:example.com");
+    /// ```
+    pub fn https(host: impl Into<String>) -> Self {
+        Self::new(Scheme::Https, Host::domain(host))
+    }
+
     /// Create a new URI with a custom scheme by storing the entire URI string
     /// This is used for schemes that are not explicitly supported (like http, https)
     /// but need to be preserved in the Call-Info header
