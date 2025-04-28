@@ -19,8 +19,9 @@
 //! ## Format
 //!
 //! ```
-//! In-Reply-To: 70710@saturn.bell-tel.com
-//! In-Reply-To: 70710@saturn.bell-tel.com, 17320@venus.bell-tel.com
+//! // Example format:
+//! // In-Reply-To: 70710@saturn.bell-tel.com
+//! // In-Reply-To: 70710@saturn.bell-tel.com, 17320@venus.bell-tel.com
 //! ```
 //!
 //! Multiple Call-IDs are separated by commas.

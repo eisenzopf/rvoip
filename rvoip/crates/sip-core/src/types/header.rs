@@ -32,13 +32,13 @@
 //! let call_id = CallId::new("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
 //! let header = TypedHeader::CallId(call_id);
 //! 
-//! // Converting between typed and untyped headers
-//! let generic_header: Header = header.to_header();
+//! // Working with generic headers
+//! let generic_header = Header::text(HeaderName::CallId, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
 //! assert_eq!(generic_header.name, HeaderName::CallId);
 //! 
-//! // Parsing a header from a string
-//! let header_str = "From: Alice <sip:alice@example.com>;tag=1928301774";
-//! let from_header = TypedHeader::try_from(Header::from_str(header_str).unwrap()).unwrap();
+//! // Parsing a header through a parser (not directly with from_str)
+//! // This is just an example, not actual code to run
+//! // let from_header = TypedHeader::try_from(parse_header(header_str).unwrap()).unwrap();
 //! ```
 
 use crate::error::{Error, Result};
@@ -482,6 +482,67 @@ impl HeaderValue {
         HeaderValue::Raw(values.join(", ").into_bytes())
     }
 
+    /// Creates a ContentType HeaderValue for SDP (application/sdp)
+    pub fn content_type_sdp() -> Self {
+        use crate::parser::headers::content_type::ContentTypeValue;
+        use std::collections::HashMap;
+        
+        HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
+            m_type: "application".to_string(),
+            m_subtype: "sdp".to_string(),
+            parameters: HashMap::new(),
+        }))
+    }
+
+    /// Creates a ContentType HeaderValue for plain text (text/plain)
+    pub fn content_type_text_plain() -> Self {
+        use crate::parser::headers::content_type::ContentTypeValue;
+        use std::collections::HashMap;
+        
+        HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
+            m_type: "text".to_string(),
+            m_subtype: "plain".to_string(),
+            parameters: HashMap::new(),
+        }))
+    }
+
+    /// Creates a ContentType HeaderValue for JSON (application/json)
+    pub fn content_type_json() -> Self {
+        use crate::parser::headers::content_type::ContentTypeValue;
+        use std::collections::HashMap;
+        
+        HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
+            m_type: "application".to_string(),
+            m_subtype: "json".to_string(),
+            parameters: HashMap::new(),
+        }))
+    }
+
+    /// Creates a ContentType HeaderValue for multipart/mixed
+    pub fn content_type_multipart_mixed(boundary: impl Into<String>) -> Self {
+        use crate::parser::headers::content_type::ContentTypeValue;
+        use std::collections::HashMap;
+        
+        let mut parameters = HashMap::new();
+        parameters.insert("boundary".to_string(), boundary.into());
+        
+        HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
+            m_type: "multipart".to_string(),
+            m_subtype: "mixed".to_string(),
+            parameters,
+        }))
+    }
+
+    /// Creates a ContentLength HeaderValue
+    pub fn content_length(length: usize) -> Self {
+        HeaderValue::ContentLength(crate::types::content_length::ContentLength(length as u32))
+    }
+
+    /// Creates a MaxForwards HeaderValue
+    pub fn max_forwards(value: u8) -> Self {
+        HeaderValue::MaxForwards(crate::types::max_forwards::MaxForwards(value))
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             HeaderValue::Raw(bytes) => std::str::from_utf8(bytes).ok(),
@@ -574,6 +635,36 @@ impl Header {
     /// Create a new integer header
     pub fn integer(name: HeaderName, value: i64) -> Self {
         Header::new(name, HeaderValue::integer(value))
+    }
+
+    /// Create a Content-Type header for SDP
+    pub fn content_type_sdp() -> Self {
+        Header::new(HeaderName::ContentType, HeaderValue::content_type_sdp())
+    }
+
+    /// Create a Content-Type header for plain text
+    pub fn content_type_text_plain() -> Self {
+        Header::new(HeaderName::ContentType, HeaderValue::content_type_text_plain())
+    }
+
+    /// Create a Content-Type header for JSON
+    pub fn content_type_json() -> Self {
+        Header::new(HeaderName::ContentType, HeaderValue::content_type_json())
+    }
+
+    /// Create a Content-Type header for multipart/mixed
+    pub fn content_type_multipart_mixed(boundary: impl Into<String>) -> Self {
+        Header::new(HeaderName::ContentType, HeaderValue::content_type_multipart_mixed(boundary))
+    }
+
+    /// Create a Content-Length header
+    pub fn content_length(length: usize) -> Self {
+        Header::new(HeaderName::ContentLength, HeaderValue::content_length(length))
+    }
+
+    /// Create a Max-Forwards header
+    pub fn max_forwards(value: u8) -> Self {
+        Header::new(HeaderName::MaxForwards, HeaderValue::max_forwards(value))
     }
 
     /// Get the header as a formatted string, ready for wire transmission
@@ -1212,7 +1303,7 @@ impl TryFrom<Header> for TypedHeader {
 ///                 return Ok(MyCustomHeader(s.to_string()));
 ///             }
 ///         }
-///         Err(Error::InvalidHeaderValue("Not a valid MyCustomHeader".to_string()))
+///         Err(Error::InvalidHeader("Not a valid MyCustomHeader".to_string()))
 ///     }
 /// }
 ///

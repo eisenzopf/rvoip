@@ -170,7 +170,7 @@ pub mod prelude {
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE, ParseMode};
     pub use crate::parser::parse_message;
     pub use crate::parser::message::parse_message_with_mode;
-    pub use crate::types::multipart::{MultipartBody, MimePart};
+    pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
     pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
     pub use crate::sip_request;
     pub use crate::sip_response;
@@ -195,6 +195,8 @@ pub mod prelude {
     pub use crate::types::content_disposition::{ContentDisposition, DispositionType, DispositionParam, Handling}; // Add ContentDisposition-related types
     pub use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList}; // Add Error-Info related types
     pub use crate::types::expires::Expires; // Add Expires type
+    pub use crate::types::in_reply_to::InReplyTo; // Add In-Reply-To type
+    pub use crate::types::MediaType; // Add MediaType for MIME content types
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{

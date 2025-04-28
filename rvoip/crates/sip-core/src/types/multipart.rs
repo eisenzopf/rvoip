@@ -33,10 +33,7 @@
 //!
 //! // Create a MIME part with headers and content
 //! let mut part = MimePart::new();
-//! part.headers.push(Header::new(
-//!     HeaderName::ContentType,
-//!     "text/plain".into()
-//! ));
+//! part.headers.push(Header::content_type_text_plain());
 //! part.raw_content = Bytes::from("This is the text content");
 //!
 //! // Add the part to the multipart body
@@ -44,7 +41,7 @@
 //! ```
 
 use bytes::Bytes;
-use crate::types::header::{Header, HeaderName};
+use crate::types::header::{Header, HeaderName, HeaderValue};
 use crate::types::content_type::ContentType;
 use crate::error::{Error, Result};
 use crate::parser;
@@ -79,10 +76,7 @@ use serde::{Deserialize, Serialize};
 /// let mut part = MimePart::new();
 ///
 /// // Add headers to describe the content
-/// part.headers.push(Header::new(
-///     HeaderName::ContentType,
-///     "application/sdp".into()
-/// ));
+/// part.headers.push(Header::content_type_sdp());
 ///
 /// // Set the content
 /// part.raw_content = Bytes::from("v=0\r\no=- 1234 1234 IN IP4 127.0.0.1\r\ns=Example\r\n");
@@ -144,18 +138,20 @@ impl MimePart {
     /// assert!(part.content_type().is_none());
     ///
     /// // Add a Content-Type header
-    /// part.headers.push(Header::new(
-    ///     HeaderName::ContentType,
-    ///     "application/sdp".into()
-    /// ));
+    /// part.headers.push(Header::content_type_sdp());
     ///
     /// assert_eq!(part.content_type(), Some("application/sdp".to_string()));
     /// ```
     pub fn content_type(&self) -> Option<String> {
         self.headers.iter()
             .find(|h| h.name == HeaderName::ContentType)
-            .and_then(|h| h.value.as_text())
-            .map(|s| s.to_string())
+            .map(|h| match &h.value {
+                HeaderValue::Raw(bytes) => std::str::from_utf8(bytes)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+                HeaderValue::ContentType(ct) => ct.to_string(),
+                _ => String::new(),
+            })
     }
 }
 
@@ -191,16 +187,24 @@ impl Default for MimePart {
 /// use rvoip_sip_core::prelude::*;
 /// use bytes::Bytes;
 ///
-/// // Creating SDP parsed content
-/// let sdp_session = SdpSession::default(); // In practice, this would be a parsed SDP
-/// let parsed_sdp = ParsedBody::Sdp(sdp_session);
-///
 /// // Creating text parsed content
 /// let parsed_text = ParsedBody::Text("Hello, SIP world!".to_string());
 ///
 /// // Creating other content
 /// let raw_bytes = Bytes::from(&b"Some binary data"[..]);
 /// let parsed_other = ParsedBody::Other(raw_bytes);
+///
+/// // Note: In a real application, you would create an SDP instance like:
+/// // let origin = Origin { 
+/// //     username: "-".to_string(),
+/// //     sess_id: "123456".to_string(),
+/// //     sess_version: "1".to_string(),
+/// //     net_type: "IN".to_string(),
+/// //     addr_type: "IP4".to_string(),
+/// //     unicast_address: "127.0.0.1".to_string() 
+/// // };
+/// // let sdp_session = SdpSession::new(origin, "Example Session");
+/// // let parsed_sdp = ParsedBody::Sdp(sdp_session);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedBody {
@@ -241,17 +245,11 @@ pub enum ParsedBody {
 ///
 /// // Create and add MIME parts
 /// let mut text_part = MimePart::new();
-/// text_part.headers.push(Header::new(
-///     HeaderName::ContentType,
-///     "text/plain".into()
-/// ));
+/// text_part.headers.push(Header::content_type_text_plain());
 /// text_part.raw_content = Bytes::from("This is the text content");
 ///
 /// let mut sdp_part = MimePart::new();
-/// sdp_part.headers.push(Header::new(
-///     HeaderName::ContentType,
-///     "application/sdp".into()
-/// ));
+/// sdp_part.headers.push(Header::content_type_sdp());
 /// sdp_part.raw_content = Bytes::from("v=0\r\no=- 1234 1234 IN IP4 127.0.0.1\r\n");
 ///
 /// // Add the parts to the multipart body
@@ -332,10 +330,7 @@ impl MultipartBody {
     ///
     /// // Create a MIME part
     /// let mut part = MimePart::new();
-    /// part.headers.push(Header::new(
-    ///     HeaderName::ContentType,
-    ///     "text/plain".into()
-    /// ));
+    /// part.headers.push(Header::content_type_text_plain());
     /// part.raw_content = Bytes::from("This is the text content");
     ///
     /// // Add the part to the body

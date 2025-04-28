@@ -8,7 +8,8 @@
 //! A media type consists of a type and subtype, optionally followed by parameters:
 //!
 //! ```
-//! type/subtype;parameter=value;another=parameter
+//! // Example format:
+//! // type/subtype;parameter=value;another=parameter
 //! ```
 //!
 //! ## Common Media Types in SIP

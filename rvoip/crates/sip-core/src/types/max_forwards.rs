@@ -19,7 +19,8 @@
 //! ## Format
 //!
 //! ```
-//! Max-Forwards: 70
+//! // Example format:
+//! // Max-Forwards: 70
 //! ```
 //!
 //! ## Usage
