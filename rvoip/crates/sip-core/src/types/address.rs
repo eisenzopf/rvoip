@@ -113,12 +113,13 @@ pub fn needs_quoting(display_name: &str) -> bool {
         return false; // Empty string should NOT be quoted
     }
     
-    // The space character in "Test User" is causing it to be quoted.
-    // SIP tokens don't include space, so we need to fix the test expectations instead of the function
-    
-    // Check for characters that *require* quoting or are not part of a token
+    // Check for characters that require quoting according to SIP RFC 3261
+    // Space is not part of a token, so names with spaces need quoting
     display_name.chars().any(|c| {
-        !c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\'' | '~')
+        // A space requires quoting
+        c == ' ' || 
+        // Any non-alphanumeric character that's not in the token character set requires quoting
+        (!c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\'' | '~'))
     }) || display_name.contains('"') || display_name.contains('\\')
 }
 

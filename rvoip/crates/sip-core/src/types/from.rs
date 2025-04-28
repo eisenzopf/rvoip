@@ -37,7 +37,7 @@
 //! let from = From::new(address);
 //!
 //! // Display the From header
-//! assert_eq!(from.to_string(), "Alice Smith <sip:alice@example.com>");
+//! assert_eq!(from.to_string(), "\"Alice Smith\" <sip:alice@example.com>");
 //!
 //! // Parse a From header from a string
 //! let from = From::from_str("\"Bob\" <sip:bob@example.org>").unwrap();
@@ -80,7 +80,7 @@ use nom::combinator;
 /// let from = From::new(address);
 ///
 /// // Display the From header
-/// assert_eq!(from.to_string(), "Alice Smith <sip:alice@example.com>");
+/// assert_eq!(from.to_string(), "\"Alice Smith\" <sip:alice@example.com>");
 ///
 /// // Parse a From header from a string
 /// let from = From::from_str("\"Bob\" <sip:bob@example.org>").unwrap();
