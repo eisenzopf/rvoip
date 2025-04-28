@@ -17,7 +17,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Reply-To: "Support Team" <sip:support@example.com>
 //! Reply-To: <sip:help@example.com>;dept=sales
 //! Reply-To: tel:+1-212-555-1234
@@ -104,7 +104,7 @@ impl ReplyTo {
     ///
     /// // Create a simple Reply-To with just a URI
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let reply_to = ReplyTo::new(address);
     ///
     /// // Create with display name
@@ -158,8 +158,8 @@ impl ReplyTo {
     /// let reply_to = ReplyTo::from_str(header).unwrap();
     ///
     /// let uri = reply_to.uri();
-    /// assert_eq!(uri.scheme(), Scheme::Sip);
-    /// assert_eq!(uri.host_port().to_string(), "example.com");
+    /// assert_eq!(uri.scheme(), &Scheme::Sip);
+    /// assert_eq!(uri.host_port(), "example.com");
     /// ```
     pub fn uri(&self) -> &crate::types::uri::Uri {
         &self.0.uri
@@ -272,9 +272,9 @@ impl ReplyTo {
     /// let reply_to = ReplyTo::from_str(header).unwrap();
     /// assert!(reply_to.validate().is_ok());
     ///
-    /// // Create an invalid header (manually, for demonstration)
+    /// // Create an invalid header (with an HTTP URI)
     /// let uri = Uri::from_str("http://example.com").unwrap(); // HTTP not allowed
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let invalid_reply_to = ReplyTo::new(address);
     /// assert!(invalid_reply_to.validate().is_err());
     /// ```
@@ -308,10 +308,10 @@ impl ReplyTo {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let reply_to = ReplyTo::new(address)
-    ///     .with_param(Param::new("dept", Some("sales")))
-    ///     .with_param(Param::new("priority", Some("high")));
+    ///     .with_param(Param::Other("dept".to_string(), Some(GenericValue::Token("sales".to_string()))))
+    ///     .with_param(Param::Other("priority".to_string(), Some(GenericValue::Token("high".to_string()))));
     ///
     /// assert!(reply_to.has_param("dept"));
     /// assert!(reply_to.has_param("priority"));
@@ -338,15 +338,16 @@ impl ReplyTo {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
     ///
     /// // With user part
     /// let reply_to = ReplyTo::sip("example.com", Some("support")).unwrap();
-    /// assert_eq!(reply_to.uri().scheme(), Scheme::Sip);
-    /// assert_eq!(reply_to.uri().user(), Some("support"));
+    /// assert_eq!(reply_to.uri().scheme(), &Scheme::Sip);
+    /// assert_eq!(reply_to.uri().user, Some("support".to_string()));
     ///
     /// // Without user part
     /// let reply_to = ReplyTo::sip("example.com", None::<&str>).unwrap();
-    /// assert_eq!(reply_to.uri().user(), None);
+    /// assert_eq!(reply_to.uri().user, None);
     /// ```
     pub fn sip(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<Self> {
         let mut uri = crate::types::uri::Uri::sip(host);
@@ -376,8 +377,8 @@ impl ReplyTo {
     /// use rvoip_sip_core::prelude::*;
     ///
     /// let reply_to = ReplyTo::sips("secure.example.com", Some("support")).unwrap();
-    /// assert_eq!(reply_to.uri().scheme(), Scheme::Sips);
-    /// assert_eq!(reply_to.uri().host_port().to_string(), "secure.example.com");
+    /// assert_eq!(reply_to.uri().scheme(), &Scheme::Sips);
+    /// assert_eq!(reply_to.uri().host_port(), "secure.example.com");
     /// ```
     pub fn sips(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<Self> {
         let mut uri = crate::types::uri::Uri::sips(host);
@@ -406,7 +407,7 @@ impl ReplyTo {
     /// use rvoip_sip_core::prelude::*;
     ///
     /// let reply_to = ReplyTo::tel("+1-212-555-1234").unwrap();
-    /// assert_eq!(reply_to.uri().scheme(), Scheme::Tel);
+    /// assert_eq!(reply_to.uri().scheme(), &Scheme::Tel);
     /// ```
     pub fn tel(number: impl Into<String>) -> Result<Self> {
         let uri = crate::types::uri::Uri::tel(number);
@@ -458,7 +459,7 @@ impl fmt::Display for ReplyTo {
     ///
     /// // Simple URI
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let reply_to = ReplyTo::new(address);
     /// assert_eq!(reply_to.to_string(), "<sip:support@example.com>");
     ///
@@ -729,14 +730,14 @@ mod tests {
     fn test_reply_to_factory_methods() {
         // Test the factory methods for creating ReplyTo objects
         let reply_to = ReplyTo::sip("example.com", Some("support")).unwrap();
-        assert_eq!(reply_to.uri().scheme, Scheme::Sip);
+        assert_eq!(reply_to.uri().scheme(), &Scheme::Sip);
         assert_eq!(reply_to.uri().user, Some("support".to_string()));
         
         let reply_to = ReplyTo::sips("secure.example.com", Some("secure")).unwrap();
-        assert_eq!(reply_to.uri().scheme, Scheme::Sips);
+        assert_eq!(reply_to.uri().scheme(), &Scheme::Sips);
         
         let reply_to = ReplyTo::tel("+1-212-555-1234").unwrap();
-        assert_eq!(reply_to.uri().scheme, Scheme::Tel);
+        assert_eq!(reply_to.uri().scheme(), &Scheme::Tel);
         
         let reply_to = ReplyTo::sip("example.com", Some("support"))
             .unwrap()

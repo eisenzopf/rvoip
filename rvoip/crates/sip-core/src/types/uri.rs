@@ -363,6 +363,25 @@ impl Uri {
         }
     }
 
+    /// Returns the scheme of this URI
+    ///
+    /// # Returns
+    /// The scheme (e.g., Sip, Sips, Tel)
+    pub fn scheme(&self) -> &Scheme {
+        &self.scheme
+    }
+    
+    /// Returns the host and port (if present) formatted as a string
+    ///
+    /// # Returns
+    /// The host and port as a string (e.g., "example.com:5060")
+    pub fn host_port(&self) -> String {
+        match self.port {
+            Some(port) if port > 0 => format!("{}:{}", self.host, port),
+            _ => self.host.to_string()
+        }
+    }
+
     /// Create a new SIP URI with a domain host
     ///
     /// # Parameters
@@ -753,9 +772,45 @@ impl FromStr for Uri {
 
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
-        all_consuming(parse_uri)(s.as_bytes())
-            .map(|(_rem, uri)| uri)
-            .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
+        match all_consuming(parse_uri)(s.as_bytes()) {
+            Ok((_rem, uri)) => Ok(uri),
+            Err(e) => {
+                // For HTTP and HTTPS URIs, create a special case
+                if s.starts_with("http://") || s.starts_with("https://") {
+                    let scheme = if s.starts_with("https://") { 
+                        Scheme::Https 
+                    } else { 
+                        Scheme::Http 
+                    };
+                    
+                    // Extract host from the URL (simple implementation)
+                    let without_scheme = if s.starts_with("https://") {
+                        &s[8..]
+                    } else {
+                        &s[7..]
+                    };
+                    
+                    let host_part = without_scheme
+                        .split('/')
+                        .next()
+                        .unwrap_or(without_scheme);
+                    
+                    return Ok(Uri {
+                        scheme,
+                        user: None,
+                        password: None,
+                        host: Host::domain(host_part),
+                        port: None,
+                        parameters: Vec::new(),
+                        headers: HashMap::new(),
+                        raw_uri: Some(s.to_string()),
+                    });
+                }
+                
+                // Otherwise return the original error
+                Err(Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
+            }
+        }
     }
 }
 
