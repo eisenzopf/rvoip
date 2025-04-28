@@ -763,6 +763,13 @@ impl TransactionManager {
           }
       }
 
+    // Test-only method to get server transactions for debugging
+    #[cfg(test)]
+    pub async fn get_server_transactions_for_test(&self) -> Vec<String> {
+        let transactions = self.server_transactions.lock().await;
+        transactions.keys().cloned().collect()
+    }
+
 }
 
 // ResponseBuilderExt trait - Use specific accessors and wrap headers

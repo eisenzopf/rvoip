@@ -1453,17 +1453,7 @@ mod tests {
             _ => panic!("Expected SuccessResponse event, got {:?}", event),
         }
         
-        // Verify state changed to Completed
-        assert_eq!(transaction.state(), TransactionState::Completed);
-        
-        // Verify transaction terminates after a short delay
-        // Use a longer sleep to ensure the timer fires and processes the event
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        
-        // Manually trigger the QuickTerminate timer to transition to Terminated
-        transaction.handle_timer("QuickTerminate".to_string()).await.unwrap();
-        
-        // Check the state again
+        // Verify state changed to Terminated (RFC 3261 requires immediate termination for 2xx)
         assert_eq!(transaction.state(), TransactionState::Terminated);
     }
     
