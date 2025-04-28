@@ -200,6 +200,32 @@ impl Address {
         }
     }
 
+    /// Gets the display name, if present.
+    ///
+    /// # Returns
+    ///
+    /// The display name as an Option<&str>, or None if not present
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::{Address, Uri};
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// 
+    /// // With display name
+    /// let addr1 = Address::new(Some("Alice Smith"), uri.clone());
+    /// assert_eq!(addr1.display_name(), Some("Alice Smith"));
+    ///
+    /// // Without display name
+    /// let addr2 = Address::new(None::<String>, uri.clone());
+    /// assert_eq!(addr2.display_name(), None);
+    /// ```
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
     /// Sets or replaces the tag parameter.
     ///
     /// The tag parameter is used in From and To headers to uniquely 

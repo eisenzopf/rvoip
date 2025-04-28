@@ -12,7 +12,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! CSeq: 4711 INVITE
 //! CSeq: 21 BYE
 //! ```
@@ -68,9 +68,8 @@ use serde::{Serialize, Deserialize};
 /// the order of transactions within a dialog.
 /// 
 /// # Examples
-/// ```
-/// use crate::types::cseq::CSeq;
-/// use crate::types::method::Method;
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
 /// 
 /// // Create from sequence number and Method enum
 /// let cseq = CSeq::new(101, Method::Invite);

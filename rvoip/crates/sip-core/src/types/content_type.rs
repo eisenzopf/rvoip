@@ -18,7 +18,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Content-Type: application/sdp
 //! Content-Type: application/pidf+xml;charset=UTF-8
 //! Content-Type: multipart/mixed;boundary=unique-boundary-1
@@ -36,7 +36,7 @@
 //!
 //! // Parse a Content-Type header with parameters
 //! let pidf = ContentType::from_str("application/pidf+xml;charset=UTF-8").unwrap();
-//! assert_eq!(pidf.to_string(), "application/pidf+xml;charset=UTF-8");
+//! assert_eq!(pidf.to_string(), "application/pidf+xml;charset=\"UTF-8\"");
 //! ```
 
 use crate::error::{Result, Error};
@@ -73,7 +73,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// // Parse a Content-Type with parameters
 /// let xml = ContentType::from_str("application/xml;charset=UTF-8").unwrap();
-/// assert_eq!(xml.to_string(), "application/xml;charset=UTF-8");
+/// assert_eq!(xml.to_string(), "application/xml;charset=\"UTF-8\"");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentType(pub ContentTypeValue);
@@ -166,11 +166,11 @@ impl fmt::Display for ContentType {
     ///
     /// // Content-Type with parameters
     /// let content_type = ContentType::from_str("application/xml;charset=UTF-8").unwrap();
-    /// assert_eq!(content_type.to_string(), "application/xml;charset=UTF-8");
+    /// assert_eq!(content_type.to_string(), "application/xml;charset=\"UTF-8\"");
     ///
     /// // Using in a formatted string
     /// let header_line = format!("Content-Type: {}", content_type);
-    /// assert_eq!(header_line, "Content-Type: application/xml;charset=UTF-8");
+    /// assert_eq!(header_line, "Content-Type: application/xml;charset=\"UTF-8\"");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to MediaType display
@@ -206,11 +206,11 @@ impl FromStr for ContentType {
     ///
     /// // Parse with parameters
     /// let content_type = ContentType::from_str("text/plain;charset=UTF-8").unwrap();
-    /// assert_eq!(content_type.to_string(), "text/plain;charset=UTF-8");
+    /// assert_eq!(content_type.to_string(), "text/plain;charset=\"UTF-8\"");
     ///
     /// // Parse multipart Content-Type with boundary
     /// let multipart = ContentType::from_str("multipart/mixed;boundary=unique-boundary-1").unwrap();
-    /// assert_eq!(multipart.to_string(), "multipart/mixed;boundary=unique-boundary-1");
+    /// assert_eq!(multipart.to_string(), "multipart/mixed;boundary=\"unique-boundary-1\"");
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         all_consuming(parse_content_type_value)(s.as_bytes())

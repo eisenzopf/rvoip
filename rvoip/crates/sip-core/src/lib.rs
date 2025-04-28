@@ -185,12 +185,16 @@ pub mod prelude {
     pub use crate::types::call_id::CallId;
     pub use crate::types::cseq::CSeq;
     pub use crate::types::content_length::ContentLength;
+    pub use crate::types::content_type::ContentType;
+    pub use crate::parser::headers::content_type::ContentTypeValue;
     pub use crate::types::max_forwards::MaxForwards;
     pub use crate::types::contact::Contact;
     pub use crate::types::contact::{ContactParamInfo, ContactValue}; // Add Contact-related types
     pub use crate::types::supported::Supported;
     pub use crate::types::unsupported::Unsupported;
     pub use crate::types::content_disposition::{ContentDisposition, DispositionType, DispositionParam, Handling}; // Add ContentDisposition-related types
+    pub use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList}; // Add Error-Info related types
+    pub use crate::types::expires::Expires; // Add Expires type
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{

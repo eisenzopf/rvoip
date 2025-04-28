@@ -18,21 +18,21 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Error-Info: <sip:busy@example.com>;reason=busy
 //! Error-Info: <https://example.com/errors/busy.html>
 //! ```
 //!
 //! Multiple Error-Info headers can be included in a single response:
 //!
-//! ```
+//! ```text
 //! Error-Info: <sip:busy@example.com>;reason=busy
 //! Error-Info: <https://example.com/errors/busy.html>
 //! ```
 //!
 //! Or combined with commas:
 //!
-//! ```
+//! ```text
 //! Error-Info: <sip:busy@example.com>;reason=busy, <https://example.com/errors/busy.html>
 //! ```
 //!

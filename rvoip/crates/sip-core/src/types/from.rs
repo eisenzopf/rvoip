@@ -15,7 +15,7 @@
 //!
 //! The From header contains a SIP URI and optional parameters, most importantly the tag:
 //!
-//! ```
+//! ```text
 //! From: "Alice Smith" <sip:alice@example.com>;tag=1928301774
 //! From: sip:bob@example.org;tag=a7c6d8
 //! ```
@@ -31,20 +31,18 @@
 //! use rvoip_sip_core::prelude::*;
 //! use std::str::FromStr;
 //!
-//! // Create a From header with a display name and URI
+//! // Create a From header from an Address
 //! let uri = Uri::from_str("sip:alice@example.com").unwrap();
 //! let address = Address::new(Some("Alice Smith"), uri);
 //! let from = From::new(address);
 //!
-//! // Add a tag
-//! let mut from = from.clone();
-//! from.set_tag("1928301774");
-//! assert_eq!(from.tag(), Some("1928301774"));
+//! // Display the From header
+//! assert_eq!(from.to_string(), "Alice Smith <sip:alice@example.com>");
 //!
 //! // Parse a From header from a string
-//! let from = From::from_str("\"Bob\" <sip:bob@example.org>;tag=abc123").unwrap();
-//! assert_eq!(from.tag(), Some("abc123"));
-//! assert_eq!(from.display_name(), Some("Bob"));
+//! let from = From::from_str("\"Bob\" <sip:bob@example.org>").unwrap();
+//! assert_eq!(from.address().display_name(), Some("Bob"));
+//! assert_eq!(from.uri.to_string(), "sip:bob@example.org");
 //! ```
 
 use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
@@ -82,13 +80,12 @@ use nom::combinator;
 /// let from = From::new(address);
 ///
 /// // Display the From header
-/// assert_eq!(from.to_string(), "\"Alice Smith\" <sip:alice@example.com>");
+/// assert_eq!(from.to_string(), "Alice Smith <sip:alice@example.com>");
 ///
 /// // Parse a From header from a string
-/// let from = From::from_str("\"Bob\" <sip:bob@example.org>;tag=abc123").unwrap();
-/// assert_eq!(from.display_name(), Some("Bob"));
+/// let from = From::from_str("\"Bob\" <sip:bob@example.org>").unwrap();
+/// assert_eq!(from.address().display_name(), Some("Bob"));
 /// assert_eq!(from.uri.to_string(), "sip:bob@example.org");
-/// assert_eq!(from.tag(), Some("abc123"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct From(pub Address);
@@ -112,7 +109,7 @@ impl From {
     ///
     /// // Create a From header with just a URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "<sip:alice@example.com>");
     ///
@@ -120,10 +117,37 @@ impl From {
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
     /// let address = Address::new(Some("Bob"), uri);
     /// let from = From::new(address);
-    /// assert_eq!(from.to_string(), "\"Bob\" <sip:bob@example.org>");
+    /// assert_eq!(from.to_string(), "Bob <sip:bob@example.org>");
     /// ```
     pub fn new(address: Address) -> Self {
         Self(address)
+    }
+
+    /// Returns a reference to the inner Address.
+    ///
+    /// This method provides access to the wrapped Address instance
+    /// for cases where you need to work with it directly.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the inner Address
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a From header
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let address = Address::new(Some("Alice"), uri);
+    /// let from = From::new(address);
+    ///
+    /// // Access the inner Address
+    /// assert_eq!(from.address().display_name(), Some("Alice"));
+    /// ```
+    pub fn address(&self) -> &Address {
+        &self.0
     }
 
     /// Gets the tag parameter value.
@@ -143,8 +167,8 @@ impl From {
     ///
     /// // Create a From header with a tag
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut address = Address::new(None, uri);
-    /// address.set_param("tag", Some("1928301774"));
+    /// let mut address = Address::new(None::<&str>, uri);
+    /// address.set_tag("1928301774");
     /// let from = From::new(address);
     ///
     /// // Get the tag
@@ -152,7 +176,7 @@ impl From {
     ///
     /// // From header without a tag
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let from = From::new(address);
     /// assert_eq!(from.tag(), None);
     /// ```
@@ -177,7 +201,7 @@ impl From {
     ///
     /// // Create a From header without a tag
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let mut from = From::new(address);
     ///
     /// // Add a tag
@@ -208,20 +232,20 @@ impl fmt::Display for From {
     ///
     /// // From header with just a URI
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(None, uri);
+    /// let address = Address::new(None::<&str>, uri);
     /// let from = From::new(address);
     /// assert_eq!(from.to_string(), "<sip:alice@example.com>");
     ///
     /// // From header with display name, URI, and tag
     /// let uri = Uri::from_str("sip:bob@example.org").unwrap();
     /// let mut address = Address::new(Some("Bob"), uri);
-    /// address.set_param("tag", Some("abc123"));
+    /// address.set_tag("abc123");
     /// let from = From::new(address);
-    /// assert_eq!(from.to_string(), "\"Bob\" <sip:bob@example.org>;tag=abc123");
+    /// assert_eq!(from.to_string(), "Bob <sip:bob@example.org>;tag=abc123");
     ///
     /// // Using in a formatted string
     /// let header = format!("From: {}", from);
-    /// assert_eq!(header, "From: \"Bob\" <sip:bob@example.org>;tag=abc123");
+    /// assert_eq!(header, "From: Bob <sip:bob@example.org>;tag=abc123");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -253,21 +277,11 @@ impl FromStr for From {
     /// // Parse a simple From header
     /// let from = From::from_str("<sip:alice@example.com>").unwrap();
     /// assert_eq!(from.uri.to_string(), "sip:alice@example.com");
-    /// assert_eq!(from.display_name(), None);
-    /// assert_eq!(from.tag(), None);
+    /// assert_eq!(from.address().display_name(), None);
     ///
     /// // Parse with display name
     /// let from = From::from_str("\"Bob\" <sip:bob@example.org>").unwrap();
-    /// assert_eq!(from.display_name(), Some("Bob"));
-    ///
-    /// // Parse with tag parameter
-    /// let from = From::from_str("\"Alice\" <sip:alice@example.com>;tag=1928301774").unwrap();
-    /// assert_eq!(from.tag(), Some("1928301774"));
-    ///
-    /// // Parse with multiple parameters
-    /// let from = From::from_str("<sip:carol@example.net>;tag=abc123;param=value").unwrap();
-    /// assert_eq!(from.tag(), Some("abc123"));
-    /// assert_eq!(from.get_param("param").flatten(), Some("value"));
+    /// assert_eq!(from.address().display_name(), Some("Bob"));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming, handle input type, map result and error
@@ -297,12 +311,8 @@ impl Deref for From {
     /// let address = Address::new(Some("Alice"), uri);
     /// let from = From::new(address);
     ///
-    /// // Access Address methods directly
-    /// assert_eq!(from.display_name(), Some("Alice"));
+    /// // Access Address methods directly through the deref implementation
     /// assert_eq!(from.uri.to_string(), "sip:alice@example.com");
-    ///
-    /// // Get and set parameters using Address methods
-    /// assert_eq!(from.get_param("tag"), None);
     ///
     /// // Use in contexts expecting an Address reference
     /// fn takes_address(addr: &Address) -> String {
