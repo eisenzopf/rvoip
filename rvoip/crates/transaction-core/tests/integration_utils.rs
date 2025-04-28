@@ -1,284 +1,344 @@
+// Integration test utilities for transaction-core tests
+//
+// This module contains shared utilities for the integration tests
+// including memory transport and test message creation functions.
+
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::str::FromStr;
-use std::time::Duration;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
+use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::{Transport, TransportEvent, Error as TransportError};
-use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState};
+use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_transaction_core::{TransactionEvent, TransactionManager, TransactionKey};
+use rvoip_sip_transport::error::{Error as TransportError, Result as TransportResult};
 
-// In-memory transport for local testing without any actual network I/O
-// This allows us to simulate direct client-server communication
-#[derive(Debug, Clone)]
+// Mock memory transport for testing
+#[derive(Debug)]
 pub struct MemoryTransport {
     local_addr: SocketAddr,
-    outgoing_tx: Sender<(Message, SocketAddr)>,
-    transport_tx: Sender<TransportEvent>,
-    sent_messages: Arc<tokio::sync::Mutex<Vec<(Message, SocketAddr)>>>,
-    closed: Arc<tokio::sync::Mutex<bool>>,
+    events_tx: mpsc::Sender<TransportEvent>,
+    received_messages: Mutex<Vec<(Message, SocketAddr)>>,
+    connected_transport: Mutex<Option<Arc<MemoryTransport>>>,
+    closed: AtomicBool,
 }
 
 impl MemoryTransport {
     pub fn new(
         local_addr: SocketAddr,
-        outgoing_tx: Sender<(Message, SocketAddr)>,
-        transport_tx: Sender<TransportEvent>,
+        events_tx: mpsc::Sender<TransportEvent>,
     ) -> Self {
         Self {
             local_addr,
-            outgoing_tx,
-            transport_tx,
-            sent_messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            closed: Arc::new(tokio::sync::Mutex::new(false)),
+            events_tx,
+            received_messages: Mutex::new(Vec::new()),
+            connected_transport: Mutex::new(None),
+            closed: AtomicBool::new(false),
         }
     }
-
-    // Simulate receiving a message from the network
-    pub async fn receive_message(&self, message: Message, source: SocketAddr) -> std::result::Result<(), TransportError> {
-        if *self.closed.lock().await {
-            return Err(TransportError::Other("Transport closed".into()));
+    
+    pub fn connect(&self, other: Arc<MemoryTransport>) {
+        let mut guard = self.connected_transport.lock().unwrap();
+        *guard = Some(other);
+    }
+    
+    // Helper for receiving a message from another transport (internal use)
+    pub async fn receive_message(&self, message: Message, source: SocketAddr) -> TransportResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(TransportError::TransportClosed);
         }
-
-        self.transport_tx.send(TransportEvent::MessageReceived {
+        
+        // Try sending the event to registered event handler
+        self.events_tx.send(TransportEvent::MessageReceived {
             message,
             source,
             destination: self.local_addr,
-        }).await.map_err(|_| TransportError::Other("Failed to send event".into()))
+        }).await.map_err(|_| TransportError::ChannelClosed)?;
+        
+        Ok(())
     }
-
-    pub async fn get_sent_messages(&self) -> Vec<(Message, SocketAddr)> {
-        self.sent_messages.lock().await.clone()
-    }
-
-    pub async fn clear_sent_messages(&self) {
-        self.sent_messages.lock().await.clear();
+    
+    pub fn get_received_messages(&self) -> Vec<(Message, SocketAddr)> {
+        let guard = self.received_messages.lock().unwrap();
+        guard.clone()
     }
 }
 
 #[async_trait]
 impl Transport for MemoryTransport {
-    async fn send_message(&self, message: Message, destination: SocketAddr) -> std::result::Result<(), TransportError> {
-        if *self.closed.lock().await {
-            return Err(TransportError::Other("Transport closed".into()));
-        }
-
-        // Record the message
-        self.sent_messages.lock().await.push((message.clone(), destination));
-        
-        // Forward to the recipient's transport
-        self.outgoing_tx.send((message, destination)).await
-            .map_err(|_| TransportError::Other("Failed to forward message".into()))
-    }
-
-    fn local_addr(&self) -> std::result::Result<SocketAddr, TransportError> {
+    fn local_addr(&self) -> TransportResult<SocketAddr> {
         Ok(self.local_addr)
     }
-
-    async fn close(&self) -> std::result::Result<(), TransportError> {
-        let mut closed = self.closed.lock().await;
-        *closed = true;
+    
+    async fn send_message(&self, message: Message, dest: SocketAddr) -> TransportResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(TransportError::TransportClosed);
+        }
+        
+        let connected = {
+            let guard = self.connected_transport.lock().unwrap();
+            guard.clone()
+        };
+        
+        if let Some(remote) = connected {
+            // Record message
+            {
+                let mut messages = self.received_messages.lock().unwrap();
+                messages.push((message.clone(), dest));
+            }
+            
+            // Deliver to remote
+            remote.receive_message(message, self.local_addr).await?;
+            Ok(())
+        } else {
+            Err(TransportError::Other("Transport not connected".into()))
+        }
+    }
+    
+    async fn close(&self) -> TransportResult<()> {
+        self.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
-
+    
     fn is_closed(&self) -> bool {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                let closed_ref = self.closed.clone();
-                let result = handle.block_on(async move {
-                    *closed_ref.lock().await
-                });
-                result
-            }
-            Err(_) => false,
-        }
+        self.closed.load(Ordering::Relaxed)
     }
 }
 
-// Pair of connected transports for client and server
+// A pair of connected memory transports
 pub struct TransportPair {
     pub client_transport: Arc<MemoryTransport>,
+    pub client_events_rx: mpsc::Receiver<TransportEvent>,
     pub server_transport: Arc<MemoryTransport>,
-    pub client_events_rx: Receiver<TransportEvent>,
-    pub server_events_rx: Receiver<TransportEvent>,
+    pub server_events_rx: mpsc::Receiver<TransportEvent>,
 }
 
 impl TransportPair {
     pub fn new(client_addr: SocketAddr, server_addr: SocketAddr) -> Self {
-        // Channels for relaying messages between transports
-        let (client_to_server_tx, mut client_to_server_rx) = mpsc::channel(100);
-        let (server_to_client_tx, mut server_to_client_rx) = mpsc::channel(100);
-        
-        // Channels for transport events
-        let (client_transport_tx, client_events_rx) = mpsc::channel(100);
-        let (server_transport_tx, server_events_rx) = mpsc::channel(100);
+        // Create channels
+        let (client_events_tx, client_events_rx) = mpsc::channel(100);
+        let (server_events_tx, server_events_rx) = mpsc::channel(100);
         
         // Create transports
         let client_transport = Arc::new(MemoryTransport::new(
             client_addr,
-            client_to_server_tx,
-            client_transport_tx,
+            client_events_tx,
         ));
         
         let server_transport = Arc::new(MemoryTransport::new(
             server_addr,
-            server_to_client_tx,
-            server_transport_tx,
+            server_events_tx,
         ));
         
-        // Set up message forwarding for client -> server
-        let server_transport_for_task = server_transport.clone();
-        tokio::spawn(async move {
-            while let Some((message, destination)) = client_to_server_rx.recv().await {
-                // Only forward if destination matches server address
-                if destination == server_transport_for_task.local_addr().unwrap() {
-                    let _ = server_transport_for_task.receive_message(message, client_addr).await;
-                }
-            }
-        });
-        
-        // Set up message forwarding for server -> client
-        let client_transport_for_task = client_transport.clone();
-        tokio::spawn(async move {
-            while let Some((message, destination)) = server_to_client_rx.recv().await {
-                // Only forward if destination matches client address
-                if destination == client_transport_for_task.local_addr().unwrap() {
-                    let _ = client_transport_for_task.receive_message(message, server_addr).await;
-                }
-            }
-        });
+        // Connect them
+        client_transport.connect(server_transport.clone());
+        server_transport.connect(client_transport.clone());
         
         Self {
             client_transport,
-            server_transport,
             client_events_rx,
+            server_transport,
             server_events_rx,
         }
     }
 }
 
-// Helper functions for creating test messages
-pub fn create_test_invite() -> Request {
-    let uri = Uri::sip("bob@example.com");
-    let from_uri = Uri::sip("alice@example.com");
-    
-    // Create address and add tag to uri
-    let mut from_uri_with_tag = from_uri.clone();
-    from_uri_with_tag = from_uri_with_tag.with_parameter(Param::tag("fromtag123"));
-    let from_addr = Address::new(from_uri_with_tag);
-    let to_addr = Address::new(uri.clone());
-    
-    RequestBuilder::new(Method::Invite, uri.to_string().as_str()).unwrap()
-        .header(TypedHeader::From(From::new(from_addr)))
-        .header(TypedHeader::To(To::new(to_addr)))
-        .header(TypedHeader::CallId(CallId::new("test-call-id")))
-        .header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
-        .build()
-}
-
-pub fn create_test_register() -> Request {
-    let uri = Uri::sip("registrar.example.com");
-    let from_uri = Uri::sip("alice@example.com");
-    
-    // Create address and add tag to uri
-    let mut from_uri_with_tag = from_uri.clone();
-    from_uri_with_tag = from_uri_with_tag.with_parameter(Param::tag("fromtag123"));
-    let from_addr = Address::new(from_uri_with_tag);
-    
-    RequestBuilder::new(Method::Register, uri.to_string().as_str()).unwrap()
-        .header(TypedHeader::From(From::new(from_addr)))
-        .header(TypedHeader::To(To::new(Address::new(from_uri.clone()))))
-        .header(TypedHeader::CallId(CallId::new("test-reg-id")))
-        .header(TypedHeader::CSeq(CSeq::new(1, Method::Register)))
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
-        .build()
-}
-
-// Helper to create an ACK request for a given INVITE and response
-pub fn create_test_ack(invite_request: &Request, response: &Response) -> Request {
-    let uri = invite_request.uri().to_string();
-    
-    let mut builder = RequestBuilder::new(Method::Ack, &uri).unwrap();
-    
-    // Copy essential headers from the INVITE
-    if let Some(header) = invite_request.header(&HeaderName::From) {
-        builder = builder.header(header.clone());
-    }
-
-    // But use the To header from the response (may have a tag)
-    if let Some(header) = response.header(&HeaderName::To) {
-        builder = builder.header(header.clone());
-    }
-
-    if let Some(header) = invite_request.header(&HeaderName::CallId) {
-        builder = builder.header(header.clone());
-    }
-    
-    // Via headers
-    if let Some(header) = invite_request.header(&HeaderName::Via) {
-        builder = builder.header(header.clone());
-    }
-    
-    // Create CSeq header with same sequence but ACK method
-    if let Some(TypedHeader::CSeq(cseq)) = invite_request.header(&HeaderName::CSeq) {
-        builder = builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
-    }
-    
-    builder
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
-        .build()
-}
-
-// Search for specific event types in an event receiver
-pub async fn find_event<F, T>(events_rx: &mut Receiver<TransactionEvent>, predicate: F, timeout_ms: u64) -> Option<T>
+// Helper function to find a specific event in an event stream
+pub async fn find_event<T, F>(
+    events: &mut mpsc::Receiver<TransactionEvent>,
+    predicate: F,
+    timeout_ms: u64,
+) -> Option<T>
 where
     F: Fn(&TransactionEvent) -> Option<T>,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
     
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(
-            deadline - tokio::time::Instant::now(),
-            events_rx.recv()
+    while start.elapsed() < timeout {
+        if let Ok(Some(event)) = tokio::time::timeout(
+            Duration::from_millis(100),
+            events.recv()
         ).await {
-            Ok(Some(event)) => {
-                if let Some(result) = predicate(&event) {
-                    return Some(result);
-                }
+            println!("Event: {:?}", event);
+            if let Some(result) = predicate(&event) {
+                return Some(result);
             }
-            _ => break,
         }
+        
+        sleep(Duration::from_millis(10)).await;
     }
     
     None
 }
 
-// Waits for a particular transaction state
+// Helper to wait for a transaction to reach a specific state
 pub async fn wait_for_transaction_state(
-    manager: &TransactionManager, 
-    transaction_id: &str, 
-    target_state: TransactionState,
-    timeout_ms: u64
+    manager: &TransactionManager,
+    tx_id: &str,
+    expected_state: rvoip_transaction_core::TransactionState,
+    timeout_ms: u64,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    let transaction_id_str = transaction_id.to_string();
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let tx_id_string = tx_id.to_string();  // Convert to owned String
     
-    while tokio::time::Instant::now() < deadline {
-        match manager.transaction_state(&transaction_id_str).await {
-            Ok(state) if state == target_state => return true,
-            Ok(_) => {
-                sleep(Duration::from_millis(10)).await;
-                continue;
+    while start.elapsed() < timeout {
+        if let Ok(state) = manager.transaction_state(&tx_id_string).await {
+            if state == expected_state {
+                return true;
             }
-            Err(_) => return false, // Transaction not found or other error
+        }
+        
+        sleep(Duration::from_millis(50)).await;
+    }
+    
+    false
+}
+
+// Set up test environment with client and server transaction managers
+pub async fn setup_test_environment() -> (
+    TransactionManager,  // Client manager
+    mpsc::Receiver<TransactionEvent>,  // Client events
+    TransactionManager,  // Server manager
+    mpsc::Receiver<TransactionEvent>,  // Server events
+    SocketAddr,  // Client address
+    SocketAddr,  // Server address
+    Arc<MemoryTransport>, // Client transport
+    Arc<MemoryTransport>  // Server transport
+) {
+    let client_addr = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+    let server_addr = SocketAddr::from_str("127.0.0.1:5061").unwrap();
+    
+    // Create connected transport pair
+    let transport_pair = TransportPair::new(client_addr, server_addr);
+    
+    // Create client transaction manager
+    let (client_manager, client_events_rx) = TransactionManager::new(
+        transport_pair.client_transport.clone(),
+        transport_pair.client_events_rx,
+        None
+    ).await.unwrap();
+    
+    // Create server transaction manager
+    let (server_manager, server_events_rx) = TransactionManager::new(
+        transport_pair.server_transport.clone(),
+        transport_pair.server_events_rx,
+        None
+    ).await.unwrap();
+    
+    (
+        client_manager,
+        client_events_rx,
+        server_manager,
+        server_events_rx,
+        client_addr,
+        server_addr,
+        transport_pair.client_transport.clone(),
+        transport_pair.server_transport.clone(),
+    )
+}
+
+// Helper function to add Via header to a request with proper branch parameter
+pub fn add_via_header(request: &mut Request, addr: SocketAddr) {
+    let via = Via::new(
+        "SIP", 
+        "2.0", 
+        "UDP", 
+        &addr.ip().to_string(), 
+        Some(addr.port()),
+        vec![Param::branch("z9hG4bK1234")]
+    ).unwrap();
+    request.headers.insert(0, TypedHeader::Via(via));
+}
+
+// Helper functions to create test messages
+
+pub fn create_test_invite() -> Request {
+    let mut request = Request::new(
+        Method::Invite,
+        Uri::from_str("sip:bob@example.com").unwrap(),
+    );
+    
+    // Add necessary headers
+    request.headers.push(TypedHeader::From(From::new(
+        Address::from_str("sip:alice@example.com;tag=123").unwrap(),
+    )));
+    
+    request.headers.push(TypedHeader::To(To::new(
+        Address::from_str("sip:bob@example.com").unwrap(),
+    )));
+    
+    request.headers.push(TypedHeader::CallId(CallId::new("test-call-id")));
+    
+    request.headers.push(TypedHeader::CSeq(CSeq::new(1, Method::Invite)));
+    
+    request.headers.push(TypedHeader::ContentLength(ContentLength::new(0)));
+    
+    request
+}
+
+pub fn create_test_ack(invite: &Request, response: &Response) -> Request {
+    let mut ack = Request::new(
+        Method::Ack,
+        invite.uri().clone(),
+    );
+    
+    // Copy relevant headers from INVITE
+    for header in &invite.headers {
+        match header {
+            TypedHeader::From(_) | TypedHeader::CallId(_) => {
+                ack.headers.push(header.clone());
+            }
+            _ => {}
         }
     }
     
-    false // Timeout
+    // Copy To header from response (it has tag)
+    if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+        ack.headers.push(TypedHeader::To(to.clone()));
+    }
+    
+    // Copy Via from INVITE
+    if let Some(TypedHeader::Via(via)) = invite.header(&HeaderName::Via) {
+        ack.headers.push(TypedHeader::Via(via.clone()));
+    }
+    
+    // Create CSeq with same number but ACK method
+    if let Some(TypedHeader::CSeq(cseq)) = invite.header(&HeaderName::CSeq) {
+        ack.headers.push(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
+    }
+    
+    ack.headers.push(TypedHeader::ContentLength(ContentLength::new(0)));
+    
+    ack
+}
+
+pub fn create_test_register() -> Request {
+    let mut request = Request::new(
+        Method::Register,
+        Uri::from_str("sip:example.com").unwrap(),
+    );
+    
+    // Add necessary headers
+    request.headers.push(TypedHeader::From(From::new(
+        Address::from_str("sip:alice@example.com;tag=456").unwrap(),
+    )));
+    
+    request.headers.push(TypedHeader::To(To::new(
+        Address::from_str("sip:alice@example.com").unwrap(),
+    )));
+    
+    request.headers.push(TypedHeader::CallId(CallId::new("test-register-id")));
+    
+    request.headers.push(TypedHeader::CSeq(CSeq::new(1, Method::Register)));
+    
+    request.headers.push(TypedHeader::ContentLength(ContentLength::new(0)));
+    
+    request
 } 
