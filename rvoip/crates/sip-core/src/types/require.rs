@@ -17,7 +17,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Require: 100rel
 //! Require: 100rel, precondition, timer
 //! ```
@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Format
 ///
-/// ```
+/// ```text
 /// Require: option-tag1, option-tag2, ...
 /// ```
 ///

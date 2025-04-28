@@ -18,7 +18,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! Retry-After: 180
 //! Retry-After: 3600 (1 hour)
 //! Retry-After: 3600;duration=1800
@@ -57,7 +57,7 @@ use nom::combinator::all_consuming;
 use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
 use crate::parser::headers::retry_after::{parse_retry_after, RetryParam};
-use crate::types::param::Param;
+use crate::types::param::{Param, GenericValue};
 
 /// RetryAfter represents a Retry-After header value
 /// Used to indicate how long a service is expected to be unavailable
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn test_retry_after_with_params() {
         let retry = RetryAfter::new(60)
-            .with_param(Param::Other("reason".to_string(), Some(GenericValue::Token("maintenance".to_string()))));
+            .with_param(Param::new("reason", Some("maintenance")));
         assert_eq!(retry.to_string(), "60;reason=maintenance");
     }
     
@@ -556,7 +556,7 @@ mod tests {
         let retry = RetryAfter::new(3600)
             .with_comment("System upgrade")
             .with_duration(7200)
-            .with_param(Param::Other("reason".to_string(), Some(GenericValue::Token("maintenance".to_string()))));
+            .with_param(Param::new("reason", Some("maintenance")));
         assert_eq!(retry.to_string(), "3600 (System upgrade);duration=7200;reason=maintenance");
     }
     

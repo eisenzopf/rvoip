@@ -172,6 +172,13 @@ impl From<&str> for GenericValue {
     }
 }
 
+// Add From<String> implementation too for convenience
+impl From<String> for GenericValue {
+    fn from(s: String) -> Self {
+        Self::from(s.as_str())
+    }
+}
+
 /// Represents a SIP parameter with its value.
 ///
 /// This enum covers both standard parameters defined in RFC 3261 and custom/extension
@@ -339,6 +346,237 @@ impl Param {
     /// ```
     pub fn ttl(ttl: u8) -> Self {
         Param::Ttl(ttl)
+    }
+
+    /// Creates a new custom parameter with an optional value.
+    ///
+    /// This is a convenience method to create custom parameters without needing
+    /// to manually construct GenericValue types.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The parameter name
+    /// - `value`: The optional parameter value
+    ///
+    /// # Returns
+    ///
+    /// A new custom parameter
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Parameter with a value
+    /// let param = Param::new("custom", Some("value"));
+    /// assert_eq!(param.to_string(), "custom=value");
+    ///
+    /// // Flag parameter (no value)
+    /// let param = Param::new("flag", None::<&str>);
+    /// assert_eq!(param.to_string(), "flag");
+    ///
+    /// // Value with spaces will be automatically quoted
+    /// let param = Param::new("reason", Some("system maintenance"));
+    /// assert_eq!(param.to_string(), "reason=\"system maintenance\"");
+    /// ```
+    pub fn new(key: impl Into<String>, value: Option<impl Into<String>>) -> Self {
+        match value {
+            Some(val) => {
+                // Convert the value into a GenericValue (will be token or quoted)
+                let generic_val = GenericValue::from(val.into());
+                Param::Other(key.into(), Some(generic_val))
+            },
+            None => Param::Other(key.into(), None)
+        }
+    }
+
+    /// Gets the key (name) of the parameter.
+    ///
+    /// # Returns
+    ///
+    /// The parameter name as a string slice
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let tag = Param::tag("1234");
+    /// assert_eq!(tag.key(), "tag");
+    ///
+    /// let custom = Param::new("custom", Some("value"));
+    /// assert_eq!(custom.key(), "custom");
+    /// ```
+    pub fn key(&self) -> &str {
+        match self {
+            Param::Branch(_) => "branch",
+            Param::Tag(_) => "tag",
+            Param::Expires(_) => "expires",
+            Param::Received(_) => "received",
+            Param::Maddr(_) => "maddr",
+            Param::Ttl(_) => "ttl",
+            Param::Lr => "lr",
+            Param::Q(_) => "q",
+            Param::Transport(_) => "transport",
+            Param::User(_) => "user",
+            Param::Method(_) => "method",
+            Param::Handling(_) => "handling",
+            Param::Duration(_) => "duration",
+            Param::Rport(_) => "rport",
+            Param::Other(key, _) => key,
+        }
+    }
+
+    /// Gets the value of the parameter as a string, if available.
+    ///
+    /// For flag parameters like `lr`, this returns `None`.
+    /// For parameters with values, returns `Some(value)`.
+    ///
+    /// Note that certain parameter types (like IpAddr, Q values) are 
+    /// converted to strings.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(value)` if the parameter has a value
+    /// - `None` if the parameter is a flag
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let tag = Param::tag("1234");
+    /// assert_eq!(tag.value(), Some("1234".to_string()));
+    ///
+    /// let lr = Param::Lr;
+    /// assert_eq!(lr.value(), None);
+    ///
+    /// let custom = Param::new("custom", Some("value"));
+    /// assert_eq!(custom.value(), Some("value".to_string()));
+    /// ```
+    pub fn value(&self) -> Option<String> {
+        match self {
+            Param::Branch(val) => Some(val.clone()),
+            Param::Tag(val) => Some(val.clone()),
+            Param::Expires(val) => Some(val.to_string()),
+            Param::Received(val) => Some(val.to_string()),
+            Param::Maddr(val) => Some(val.clone()),
+            Param::Ttl(val) => Some(val.to_string()),
+            Param::Lr => None,
+            Param::Q(val) => Some(format!("{:.3}", val.into_inner())),
+            Param::Transport(val) => Some(val.clone()),
+            Param::User(val) => Some(val.clone()),
+            Param::Method(val) => Some(val.clone()),
+            Param::Handling(val) => Some(val.clone()),
+            Param::Duration(val) => Some(val.to_string()),
+            Param::Rport(Some(val)) => Some(val.to_string()),
+            Param::Rport(None) => None,
+            Param::Other(_, Some(val)) => match val {
+                GenericValue::Token(s) => Some(s.clone()),
+                GenericValue::Host(h) => Some(h.to_string()),
+                GenericValue::Quoted(s) => Some(s.clone()),
+            },
+            Param::Other(_, None) => None,
+        }
+    }
+
+    /// Gets the tag value if this is a tag parameter.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(tag)` if this is a tag parameter
+    /// - `None` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let tag = Param::tag("1234");
+    /// assert_eq!(tag.tag_value(), Some("1234"));
+    ///
+    /// let other = Param::transport("tcp");
+    /// assert_eq!(other.tag_value(), None);
+    /// ```
+    pub fn tag_value(&self) -> Option<&str> {
+        if let Param::Tag(val) = self {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Gets the branch value if this is a branch parameter.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(branch)` if this is a branch parameter
+    /// - `None` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let branch = Param::branch("z9hG4bK776asdhds");
+    /// assert_eq!(branch.branch_value(), Some("z9hG4bK776asdhds"));
+    ///
+    /// let other = Param::transport("tcp");
+    /// assert_eq!(other.branch_value(), None);
+    /// ```
+    pub fn branch_value(&self) -> Option<&str> {
+        if let Param::Branch(val) = self {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Gets the transport value if this is a transport parameter.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(transport)` if this is a transport parameter
+    /// - `None` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let transport = Param::transport("tcp");
+    /// assert_eq!(transport.transport_value(), Some("tcp"));
+    ///
+    /// let other = Param::tag("1234");
+    /// assert_eq!(other.transport_value(), None);
+    /// ```
+    pub fn transport_value(&self) -> Option<&str> {
+        if let Param::Transport(val) = self {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Checks if this parameter is a flag parameter (no value).
+    ///
+    /// # Returns
+    ///
+    /// `true` if this is a flag parameter, `false` otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let lr = Param::Lr;
+    /// assert!(lr.is_flag());
+    ///
+    /// let tag = Param::tag("1234");
+    /// assert!(!tag.is_flag());
+    /// ```
+    pub fn is_flag(&self) -> bool {
+        matches!(self, Param::Lr | Param::Rport(None) | Param::Other(_, None))
     }
 }
 
