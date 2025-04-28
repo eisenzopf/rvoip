@@ -208,16 +208,13 @@ impl Dialog {
         let contact_uri = match response.header(&HeaderName::Contact) {
             Some(TypedHeader::Contact(contact)) => {
                 // Contact may have multiple values, use the first one
-                match contact.0.first() {
-                    Some(address) => {
-                        let uri = address.uri.clone();
-                        debug!("Using contact URI: {}", uri);
-                        uri
-                    },
-                    None => {
-                        debug!("Dialog creation failed: Empty Contact header");
-                        return None;
-                    }
+                if let Some(address) = contact.addresses().next() {
+                    let uri = address.uri.clone();
+                    debug!("Using contact URI: {}", uri);
+                    uri
+                } else {
+                    debug!("Dialog creation failed: Empty Contact header");
+                    return None;
                 }
             },
             _ => {
@@ -231,21 +228,8 @@ impl Dialog {
         // Record-Route headers may not exist, so this part is optional
         if let Some(record_route) = response.header(&HeaderName::RecordRoute) {
             if let TypedHeader::RecordRoute(rr) = record_route {
-                for entry in rr.0.iter().rev() {
+                for entry in rr.entries().iter().rev() {
                     route_set.push(entry.uri().clone());
-                }
-            } else if let Some(rr_text) = match record_route {
-                TypedHeader::RecordRoute(_) => None,
-                _ => {
-                    if let HeaderValue::Raw(bytes) = &record_route.value() {
-                        std::str::from_utf8(bytes).ok()
-                    } else {
-                        None
-                    }
-                }
-            } {
-                if let Some(uri) = extract_uri(rr_text) {
-                    route_set.push(uri);
                 }
             }
         }
@@ -332,9 +316,10 @@ impl Dialog {
         let contact_uri = match response.header(&HeaderName::Contact) {
             Some(TypedHeader::Contact(contact)) => {
                 // Contact may have multiple values, use the first one
-                match contact.0.first() {
-                    Some(address) => address.uri.clone(),
-                    None => return None,
+                if let Some(address) = contact.addresses().next() {
+                    address.uri.clone()
+                } else {
+                    return None;
                 }
             },
             _ => return None,
@@ -344,21 +329,8 @@ impl Dialog {
         let mut route_set = Vec::new();
         if let Some(record_route) = response.header(&HeaderName::RecordRoute) {
             if let TypedHeader::RecordRoute(rr) = record_route {
-                for entry in rr.0.iter().rev() {
+                for entry in rr.entries().iter().rev() {
                     route_set.push(entry.uri().clone());
-                }
-            } else if let Some(rr_text) = match record_route {
-                TypedHeader::RecordRoute(_) => None,
-                _ => {
-                    if let HeaderValue::Raw(bytes) = &record_route.value() {
-                        std::str::from_utf8(bytes).ok()
-                    } else {
-                        None
-                    }
-                }
-            } {
-                if let Some(uri) = extract_uri(rr_text) {
-                    route_set.push(uri);
                 }
             }
         }
@@ -474,13 +446,16 @@ impl Dialog {
         
         // Add route set if present
         if !self.route_set.is_empty() {
+            // Create a single Route header with all URIs
+            let mut route_entries = Vec::new();
             for uri in &self.route_set {
-                // For each URI, create a standalone Route header
                 let address = Address::new(uri.clone());
                 let route_entry = RouteEntry::new(address);
-                let single_route = Route::new(vec![route_entry]);
-                headers.push(TypedHeader::Route(single_route));
+                route_entries.push(route_entry);
             }
+            
+            let route = Route::new(route_entries);
+            headers.push(TypedHeader::Route(route));
         }
         
         // Replace the headers in the request with our new ones
