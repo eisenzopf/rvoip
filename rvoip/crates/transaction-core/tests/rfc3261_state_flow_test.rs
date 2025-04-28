@@ -17,7 +17,7 @@ use rvoip_sip_core::prelude::*;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState, utils};
 use integration_utils::*;
 use test_utils::*;
-use test_utils::{StateTracker, print_transaction_history, validate_state_sequence};
+use test_utils::{StateTracker, print_transaction_history, assert_state_sequence};
 
 /// Structure to define the expected state sequence for a transaction
 struct StateSequence {
@@ -155,7 +155,7 @@ async fn test_rfc3261_invite_transaction_state_flow() {
     
     // Validate complete flow for successful case
     // RFC 3261 section 17.1.1: INVITE client should follow Initial -> Calling -> Proceeding -> Terminated
-    validate_state_sequence(&client_tracker, &client_tx_id, vec![
+    assert_state_sequence(&client_tracker, &client_tx_id, vec![
         TransactionState::Initial,  // Our impl starts here
         TransactionState::Calling,  // RFC3261 starts here
         TransactionState::Proceeding,
@@ -163,7 +163,7 @@ async fn test_rfc3261_invite_transaction_state_flow() {
     ], true);
     
     // RFC 3261 section 17.2.1: INVITE server should follow Proceeding -> Terminated
-    validate_state_sequence(&server_tracker, &server_tx_id, vec![
+    assert_state_sequence(&server_tracker, &server_tx_id, vec![
         TransactionState::Proceeding,
         TransactionState::Terminated,
     ], true);
@@ -250,7 +250,7 @@ async fn test_rfc3261_invite_transaction_state_flow() {
     
     // Validate error flow state sequences
     // RFC 3261 17.1.1.2: INVITE client state sequence for error responses
-    validate_state_sequence(&client_tracker, &client_tx_id, vec![
+    assert_state_sequence(&client_tracker, &client_tx_id, vec![
         TransactionState::Initial,   // Our implementation
         TransactionState::Calling,   // RFC 3261 starts here
         TransactionState::Completed, // After receiving 3xx-6xx
@@ -258,7 +258,7 @@ async fn test_rfc3261_invite_transaction_state_flow() {
     
     // RFC 3261 17.2.1: INVITE server state sequence for error responses
     // Should be Proceeding -> Completed -> Confirmed
-    validate_state_sequence(&server_tracker, &server_tx_id, vec![
+    assert_state_sequence(&server_tracker, &server_tx_id, vec![
         TransactionState::Proceeding, // Initial state
         TransactionState::Completed,  // After sending 3xx-6xx
         TransactionState::Confirmed,  // After receiving ACK
@@ -376,7 +376,7 @@ async fn test_rfc3261_non_invite_transaction_state_flow() {
     
     // Validate complete flow
     // RFC 3261 17.1.2.2: Non-INVITE client should follow Trying -> Proceeding -> Completed -> Terminated
-    validate_state_sequence(&client_tracker, &client_tx_id, vec![
+    assert_state_sequence(&client_tracker, &client_tx_id, vec![
         TransactionState::Initial,  // Our implementation starts here
         TransactionState::Trying,   // RFC3261 starts here
         TransactionState::Proceeding,
@@ -385,7 +385,7 @@ async fn test_rfc3261_non_invite_transaction_state_flow() {
     ], false); // Allow implementation flexibility
     
     // RFC 3261 17.2.2: Non-INVITE server should follow Trying -> Proceeding -> Completed -> Terminated
-    validate_state_sequence(&server_tracker, &server_tx_id, vec![
+    assert_state_sequence(&server_tracker, &server_tx_id, vec![
         TransactionState::Trying,   // RFC 3261 starts here
         TransactionState::Proceeding,
         TransactionState::Completed,
@@ -468,7 +468,7 @@ fn extract_transaction_id(event: &TransactionEvent) -> Option<String> {
 }
 
 /// Validate that a transaction follows the expected state sequence
-fn validate_state_sequence(
+fn assert_state_sequence(
     tracker: &StateTracker,
     tx_id: &str, 
     expected_states: Vec<TransactionState>,

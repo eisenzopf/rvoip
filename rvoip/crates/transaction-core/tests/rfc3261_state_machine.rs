@@ -624,31 +624,33 @@ async fn test_non_invite_client_transaction_states() {
         // Allow time for processing
         sleep(Duration::from_millis(100)).await;
         
-        // Wait for the transaction to reach Completed
-        let mut in_completed = false;
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            let state = manager.transaction_state(&transaction_id).await.unwrap();
-            if state == TransactionState::Completed {
-                in_completed = true;
-                break;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
+        // Verify state is Proceeding after 100 Trying
+        let state = manager.transaction_state(&transaction_id).await.unwrap();
+        assert_eq!(state, TransactionState::Proceeding, "Non-INVITE client transaction should be in Proceeding state after receiving 100 Trying");
         
-        assert!(in_completed, "Transaction should have transitioned to Completed state");
+        // Simulate 200 OK response
+        let ok_response = create_test_response(&register_request, StatusCode::Ok);
+        let transport_event = TransportEvent::MessageReceived {
+            message: Message::Response(ok_response),
+            source: remote_addr,
+            destination: local_addr,
+        };
+        tx.send(transport_event).await.unwrap();
         
-        // Wait for Timer K to expire - use a longer wait time to ensure it expires
-        // Poll the state every 100ms until it's Terminated or we timeout
-        println!("non-INVITE client: Waiting for Timer K to expire and transaction to terminate");
-        // According to RFC 3261 section 17.1.2.2, Timer K determines when the client transaction abandons retransmit attempts
-        // and transitions to the Terminated state. In our implementation, this might not happen within the test timeframe.
+        // Allow time for processing
+        sleep(Duration::from_millis(100)).await;
         
-        // Check the transaction state - both Completed and Terminated are valid per RFC in this context
-        let state = manager.transaction_state(&transaction_id).await.unwrap_or(TransactionState::Terminated);
-        println!("Final non-INVITE client state: {:?}", state);
-        assert!(state == TransactionState::Completed || state == TransactionState::Terminated, 
-                "Non-INVITE client transaction should be in Completed or Terminated state after Timer K");
+        // Wait for Timer K to expire (defined as 200ms in client.rs) plus some buffer
+        println!("non-INVITE client: Waiting for Timer K to expire (should take at least 200ms)");
+        sleep(Duration::from_millis(300)).await;
+        
+        // Check if the transaction has moved to Terminated state
+        let state = manager.transaction_state(&transaction_id).await.unwrap();
+        println!("Final non-INVITE client state after Timer K should expire: {:?}", state);
+        assert!(
+            state == TransactionState::Completed || state == TransactionState::Terminated, 
+            "Non-INVITE client transaction should be in Completed or Terminated state after Timer K expires"
+        );
     }).await;
     
     // Check if we hit the timeout
