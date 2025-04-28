@@ -107,6 +107,57 @@ impl ContentLength {
     pub fn new(length: u32) -> Self {
         Self(length)
     }
+    
+    /// Extracts ContentLength from a Message or similar type.
+    ///
+    /// This helper method simplifies extracting ContentLength from SIP messages.
+    /// Particularly useful in tests and message handling code.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: Any type that can be referenced as a Message
+    ///
+    /// # Returns
+    ///
+    /// The ContentLength value, or 0 if not present
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Extract content length from a Message
+    /// let message = parse_message(raw_data).unwrap();
+    /// let content_length = ContentLength::from_message(&message);
+    /// ```
+    pub fn from_message(message: &impl AsRef<crate::types::Message>) -> u32 {
+        match message.as_ref() {
+            crate::types::Message::Request(req) => {
+                req.header(&crate::types::header::HeaderName::ContentLength)
+                    .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+                    .unwrap_or(0)
+            },
+            crate::types::Message::Response(resp) => {
+                resp.header(&crate::types::header::HeaderName::ContentLength)
+                    .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    /// Overload of from_message that accepts a Request directly
+    pub fn from_request(req: &crate::types::Request) -> u32 {
+        req.header(&crate::types::header::HeaderName::ContentLength)
+            .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+            .unwrap_or(0)
+    }
+
+    /// Overload of from_message that accepts a Response directly
+    pub fn from_response(resp: &crate::types::Response) -> u32 {
+        resp.header(&crate::types::header::HeaderName::ContentLength)
+            .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+            .unwrap_or(0)
+    }
 }
 
 impl Deref for ContentLength {

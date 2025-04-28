@@ -193,3 +193,26 @@ pub use retry_after::*;
 pub use error_info::*;
 pub use supported::Supported;
 pub use unsupported::Unsupported;
+
+// Add AsRef implementations for Message
+impl AsRef<Message> for Message {
+    fn as_ref(&self) -> &Message {
+        self
+    }
+}
+
+// Fix Request and Response implementations to use a different approach
+// Rather than implementing AsRef<Message>, let's modify the ContentLength and MaxForwards methods
+// to accept both the specific types and the generic Message type
+// Removing these problematic implementations
+// impl AsRef<Message> for Request {
+//     fn as_ref(&self) -> &Message {
+//         &Message::Request(self.clone())
+//     }
+// }
+// 
+// impl AsRef<Message> for Response {
+//     fn as_ref(&self) -> &Message {
+//         &Message::Response(self.clone())
+//     }
+// }

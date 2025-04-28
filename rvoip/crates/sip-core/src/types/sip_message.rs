@@ -286,6 +286,11 @@ impl Request {
     // Note: The parse method is intentionally omitted here.
     // Parsing should be handled by the parser module.
     // pub fn parse(data: &[u8]) -> Result<Self> { ... }
+
+    // Add accessor method for body field
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
 }
 
 impl fmt::Display for Request {
@@ -509,6 +514,16 @@ impl Response {
                  None
              }
         })
+    }
+
+    // Add accessor method for status field
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+    
+    // Add accessor method for body field
+    pub fn body(&self) -> &[u8] {
+        &self.body
     }
 }
 

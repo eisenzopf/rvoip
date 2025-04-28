@@ -106,7 +106,7 @@ a=rtpmap:31 LPC";
                 assert!(resp.header(&HeaderName::CSeq).is_some());
                 
                 // Check content-length and body
-                let content_length = rvoip_sip_core::types::ContentLength::from_response(&resp);
+                let content_length = get_content_length(&resp);
                 assert_eq!(content_length, 152);
                 assert!(!resp.body().is_empty());
             },
@@ -194,7 +194,7 @@ Content-Length: {}\r\n\
                 assert!(req.header(&HeaderName::CSeq).is_some());
                 
                 // Check content-length and body
-                let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
+                let content_length = get_content_length(&req);
                 assert_eq!(content_length, body_len as u32);
                 assert!(!req.body().is_empty());
             },
@@ -362,7 +362,7 @@ Contact: <sip:user@host105.example.com>\r\n\
                 assert!(resp.header(&HeaderName::CSeq).is_some());
                 
                 // Check content-length
-                let content_length = rvoip_sip_core::types::ContentLength::from_response(&resp);
+                let content_length = get_content_length(&resp);
                 assert_eq!(content_length, 0);
                 assert!(resp.body().is_empty());
             },
@@ -443,7 +443,7 @@ Content-Length: 0\r\n\
                 assert!(req.header(&HeaderName::CSeq).is_some());
                 
                 // Check content-length
-                let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
+                let content_length = get_content_length(&req);
                 assert_eq!(content_length, 0);
                 assert!(req.body().is_empty());
             },
@@ -521,7 +521,7 @@ l: 0\r\n\
                 }
                 
                 // Check compact header name ('l' for Content-Length)
-                let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
+                let content_length = get_content_length(&req);
                 assert_eq!(content_length, 0, "Content-Length should be 0");
             },
             _ => panic!("Expected Request but got Response")
@@ -582,7 +582,7 @@ Content-Length: 0\r\n\
                 }
                 
                 // Check Max-Forwards
-                let max_forwards = rvoip_sip_core::types::MaxForwards::from_request(&req);
+                let max_forwards = get_max_forwards(&req);
                 assert_eq!(max_forwards, 8, "Max-Forwards should be 8");
             },
             _ => panic!("Expected Request but got Response")
@@ -590,5 +590,22 @@ Content-Length: 0\r\n\
     }
 }
 
-// Note: We've moved the helper functions for ContentLength and MaxForwards extraction
-// to their respective type implementations for better code organization. 
+// Create a helper function for extracting content length that we can reuse in the tests
+fn get_content_length<M>(message: &M) -> u32 
+where 
+    M: { fn typed_header<T: rvoip_sip_core::types::TypedHeaderTrait>(&self) -> Option<&T>; }
+{
+    message.typed_header::<rvoip_sip_core::types::ContentLength>()
+        .map(|cl| **cl)
+        .unwrap_or(0)
+}
+
+// Create a helper function for extracting Max-Forwards
+fn get_max_forwards<M>(message: &M) -> u32 
+where 
+    M: { fn typed_header<T: rvoip_sip_core::types::TypedHeaderTrait>(&self) -> Option<&T>; }
+{
+    message.typed_header::<rvoip_sip_core::types::MaxForwards>()
+        .map(|mf| **mf)
+        .unwrap_or(0)
+} 

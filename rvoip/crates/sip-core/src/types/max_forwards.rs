@@ -193,6 +193,52 @@ impl MaxForwards {
     pub fn is_zero(&self) -> bool {
         self.0 == 0
     }
+    
+    /// Extracts MaxForwards from a Message or similar type.
+    ///
+    /// This helper method simplifies extracting MaxForwards from SIP messages.
+    /// Particularly useful in tests and message handling code.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: Any type that can be referenced as a Message
+    ///
+    /// # Returns
+    ///
+    /// The MaxForwards value, or 0 if not present or if it's a response
+    /// (responses don't have Max-Forwards headers)
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// // Extract Max-Forwards from a Message
+    /// let message = parse_message(raw_data).unwrap();
+    /// let max_forwards = MaxForwards::from_message(&message);
+    /// ```
+    pub fn from_message(message: &impl AsRef<crate::types::Message>) -> u8 {
+        match message.as_ref() {
+            crate::types::Message::Request(req) => {
+                req.header(&crate::types::header::HeaderName::MaxForwards)
+                    .and_then(|h| if let crate::types::TypedHeader::MaxForwards(mf) = h { Some(mf.0) } else { None })
+                    .unwrap_or(0)
+            },
+            crate::types::Message::Response(_) => 0 // Responses don't have Max-Forwards
+        }
+    }
+
+    /// Overload of from_message that accepts a Request directly
+    pub fn from_request(req: &crate::types::Request) -> u8 {
+        req.header(&crate::types::header::HeaderName::MaxForwards)
+            .and_then(|h| if let crate::types::TypedHeader::MaxForwards(mf) = h { Some(mf.0) } else { None })
+            .unwrap_or(0)
+    }
+
+    /// Overload of from_message that accepts a Response directly
+    pub fn from_response(_resp: &crate::types::Response) -> u8 {
+        0 // Responses don't have Max-Forwards
+    }
 }
 
 impl fmt::Display for MaxForwards {
