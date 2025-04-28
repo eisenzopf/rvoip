@@ -201,6 +201,7 @@ pub mod prelude {
     pub use crate::types::priority::Priority; // Add Priority type
     pub use crate::types::record_route::RecordRoute; // Add RecordRoute type
     pub use crate::types::record_route::RecordRouteEntry; // Add RecordRouteEntry type
+    pub use crate::types::refer_to::ReferTo; // Add ReferTo type for doctests
     
     // Authentication-related types needed for doc tests
     pub use crate::types::auth::{
