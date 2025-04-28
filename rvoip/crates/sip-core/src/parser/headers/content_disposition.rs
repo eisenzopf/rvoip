@@ -23,7 +23,7 @@ use crate::parser::ParseResult;
 use crate::parser::whitespace::{lws, owsp, sws};
 
 use crate::types::param::Param;
-use crate::types::content_disposition::{ContentDisposition, DispositionType};
+use crate::types::content_disposition::{ContentDisposition, DispositionType, DispositionParam, Handling};
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token
@@ -51,29 +51,6 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
                 })
         }
     )(input)
-}
-
-// handling-param = "handling" EQUAL ( "optional" / "required" / other-handling )
-// other-handling = token
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Handling {
-    Optional,
-    Required,
-    Other(String),
-}
-
-// disp-param = handling-param / generic-param
-#[derive(Debug, Clone, PartialEq)]
-pub enum DispositionParam {
-    Handling(Handling),
-    Generic(Param),
-}
-
-// Define structure for Content-Disposition value
-#[derive(Debug, PartialEq, Clone)]
-pub struct ContentDispositionValue {
-    pub disp_type: String,
-    pub params: Vec<Param>,
 }
 
 /// Parses the Content-Disposition header value.
@@ -179,8 +156,8 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(dtype, "attachment");
         assert_eq!(params.len(), 2);
-        assert!(params.contains(&DispositionParam::Generic(Param::Other("filename".to_string(), Some(GenericValue::Token("pic.jpg".to_string()))))));
-        assert!(params.contains(&DispositionParam::Handling(Handling::Optional)));
+        assert!(params.iter().any(|p| matches!(p, DispositionParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) if n == "filename" && v == "pic.jpg")));
+        assert!(params.iter().any(|p| matches!(p, DispositionParam::Handling(Handling::Optional))));
     }
     
     #[test]

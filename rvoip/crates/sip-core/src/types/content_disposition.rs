@@ -36,8 +36,7 @@
 //! // Create with parameters
 //! let disposition = ContentDisposition::from_str("render;handling=optional").unwrap();
 //! assert!(matches!(disposition.disposition_type, DispositionType::Render));
-//! // Note: In the current implementation, parameters may not be preserved
-//! // in the parsed result, so we skip checking them
+//! assert_eq!(disposition.params.get("handling"), Some(&"optional".to_string()));
 //! ```
 
 use std::collections::HashMap;
@@ -48,6 +47,71 @@ use std::str::FromStr;
 use nom::combinator::all_consuming;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
+use crate::types::param::GenericValue;
+
+/// Represents the 'handling' parameter values for Content-Disposition
+///
+/// The 'handling' parameter indicates whether understanding the body
+/// part is optional or required.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create different handling values
+/// let optional = Handling::Optional;
+/// let required = Handling::Required;
+/// let custom = Handling::Other("custom-value".to_string());
+///
+/// // Use in a Content-Disposition parameter
+/// let param = DispositionParam::Handling(optional);
+/// assert!(matches!(param, DispositionParam::Handling(Handling::Optional)));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Handling {
+    /// The UAS may ignore the body part if it doesn't understand it
+    Optional,
+    /// The UAS must understand the body part or reject the request
+    Required,
+    /// Custom handling value
+    Other(String),
+}
+
+/// Represents a parameter in a Content-Disposition header
+///
+/// Parameters provide additional information about how to handle the body.
+/// They can be either specific parameters like 'handling' or generic parameters.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a handling parameter
+/// let handling_param = DispositionParam::Handling(Handling::Optional);
+///
+/// // Create a generic parameter
+/// let generic_param = DispositionParam::Generic(
+///     Param::Other("filename".to_string(), Some(GenericValue::Token("document.txt".to_string())))
+/// );
+///
+/// // Match on parameter types
+/// match handling_param {
+///     DispositionParam::Handling(h) => {
+///         assert!(matches!(h, Handling::Optional));
+///     },
+///     _ => panic!("Expected handling parameter"),
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DispositionParam {
+    /// The 'handling' parameter indicates whether understanding 
+    /// the body part is optional or required
+    Handling(Handling),
+    /// Any other parameter represented as key-value pairs
+    Generic(Param),
+}
 
 /// Content Disposition Type (session, render, icon, alert, etc.)
 ///
@@ -188,8 +252,7 @@ impl FromStr for DispositionType {
 /// // Parse with parameters
 /// let disposition = ContentDisposition::from_str("render;handling=optional").unwrap();
 /// assert!(matches!(disposition.disposition_type, DispositionType::Render));
-/// // Note: In the current implementation, parameters may not be preserved
-/// // in the parsed result, so we skip checking them
+/// assert_eq!(disposition.params.get("handling"), Some(&"optional".to_string()));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentDisposition {
@@ -283,14 +346,12 @@ impl FromStr for ContentDisposition {
     /// // Parse with parameters
     /// let disposition = ContentDisposition::from_str("render;handling=optional").unwrap();
     /// assert!(matches!(disposition.disposition_type, DispositionType::Render));
-    /// // Note: In the current implementation, parameters may not be preserved
-    /// // in the parsed result, so we skip checking them
+    /// assert_eq!(disposition.params.get("handling"), Some(&"optional".to_string()));
     ///
     /// // Parse with a quoted parameter value
     /// let disposition = ContentDisposition::from_str("icon;filename=\"icon.png\"").unwrap();
     /// assert!(matches!(disposition.disposition_type, DispositionType::Icon));
-    /// // Note: In the current implementation, parameters may not be preserved
-    /// // in the parsed result, so we skip checking them
+    /// assert_eq!(disposition.params.get("filename"), Some(&"icon.png".to_string()));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::content_disposition::parse_content_disposition;
@@ -311,27 +372,31 @@ impl FromStr for ContentDisposition {
                 // Convert params to HashMap
                 let mut params = HashMap::new();
                 for param in params_vec {
-                    // Use a match statement instead of pattern matching directly
                     match param {
-                        // Skip handling-params for now - consider adding them separately
-                        param => {
-                            // Try to extract generic params
-                            if let Ok(param_str) = std::str::from_utf8(format!("{:?}", param).as_bytes()) {
-                                if param_str.contains("Generic(Param::Other") {
-                                    // Extract key and value from debug output as a fallback
-                                    if let Some(start) = param_str.find("\"") {
-                                        if let Some(end) = param_str[start+1..].find("\"") {
-                                            let key = param_str[start+1..start+1+end].to_lowercase();
-                                            
-                                            // Try to extract value
-                                            if let Some(v_start) = param_str[start+1+end..].find("\"") {
-                                                if let Some(v_end) = param_str[start+1+end+v_start+1..].find("\"") {
-                                                    let value = param_str[start+1+end+v_start+1..start+1+end+v_start+1+v_end].to_string();
-                                                    params.insert(key, value);
-                                                }
-                                            }
-                                        }
-                                    }
+                        DispositionParam::Handling(handling) => {
+                            // Convert Handling enum to string value
+                            let value = match handling {
+                                Handling::Optional => "optional".to_string(),
+                                Handling::Required => "required".to_string(),
+                                Handling::Other(s) => s,
+                            };
+                            params.insert("handling".to_string(), value);
+                        },
+                        DispositionParam::Generic(generic_param) => {
+                            // Extract key and value from generic parameter
+                            match generic_param {
+                                Param::Other(name, Some(GenericValue::Token(value))) => {
+                                    params.insert(name, value);
+                                },
+                                Param::Other(name, Some(GenericValue::Quoted(value))) => {
+                                    params.insert(name, value);
+                                },
+                                Param::Other(name, None) => {
+                                    // Flag parameter without value
+                                    params.insert(name, "".to_string());
+                                },
+                                _ => {
+                                    // Skip other parameter types for now
                                 }
                             }
                         }
