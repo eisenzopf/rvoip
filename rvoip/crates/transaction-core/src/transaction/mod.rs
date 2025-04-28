@@ -158,7 +158,7 @@ pub enum TransactionState {
 
 /// Core SIP transaction trait. Defines common behavior for client and server transactions.
 #[async_trait]
-pub trait Transaction: fmt::Debug + Send + Sync + 'static {
+pub trait Transaction: fmt::Debug + Send + 'static {
     /// Get the transaction's unique key.
     fn id(&self) -> &TransactionKey;
 
