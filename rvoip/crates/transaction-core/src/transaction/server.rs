@@ -327,7 +327,7 @@ impl Transaction for ServerInviteTransaction {
       }
 
      fn matches(&self, message: &Message) -> bool {
-          TransactionKey::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+          crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
      }
 }
 
@@ -656,7 +656,7 @@ impl Transaction for ServerNonInviteTransaction {
         }
 
       fn matches(&self, message: &Message) -> bool {
-           TransactionKey::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+           crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
       }
 }
 

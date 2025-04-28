@@ -44,16 +44,16 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     if let Some(via) = request.first_via() {
         builder = builder.header(TypedHeader::Via(via.clone()));
     }
-    if let Some(from) = request.header::<From>() {
+    if let Some(from) = request.typed_header::<From>() {
         builder = builder.header(TypedHeader::From(from.clone()));
     }
-    if let Some(to) = request.header::<To>() {
+    if let Some(to) = request.typed_header::<To>() {
         builder = builder.header(TypedHeader::To(to.clone()));
     }
-    if let Some(call_id) = request.header::<CallId>() {
+    if let Some(call_id) = request.typed_header::<CallId>() {
         builder = builder.header(TypedHeader::CallId(call_id.clone()));
     }
-    if let Some(cseq) = request.header::<CSeq>() {
+    if let Some(cseq) = request.typed_header::<CSeq>() {
         builder = builder.header(TypedHeader::CSeq(cseq.clone()));
     }
 

@@ -329,22 +329,22 @@ impl ClientInviteTransaction {
                  ack_builder = ack_builder.header(TypedHeader::Route(route.clone()));
              }
         }
-        if let Some(from) = self.data.request.header::<From>() {
+        if let Some(from) = self.data.request.typed_header::<From>() {
              ack_builder = ack_builder.header(TypedHeader::From(from.clone()));
          } else {
              return Err(Error::Other("Original INVITE request missing From header".into()));
          }
-        if let Some(to) = response.header::<To>() {
+        if let Some(to) = response.typed_header::<To>() {
             ack_builder = ack_builder.header(TypedHeader::To(to.clone()));
         } else {
             return Err(Error::Other("Response missing To header".into()));
         }
-         if let Some(call_id) = self.data.request.header::<CallId>() {
+         if let Some(call_id) = self.data.request.typed_header::<CallId>() {
              ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone()));
          } else {
              return Err(Error::Other("Original INVITE request missing Call-ID".into()));
          }
-        if let Some(cseq) = self.data.request.header::<CSeq>() {
+        if let Some(cseq) = self.data.request.typed_header::<CSeq>() {
              ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(cseq.sequence(), Method::Ack)));
          } else {
              return Err(Error::Other("Original INVITE request missing CSeq".into()));
@@ -414,7 +414,7 @@ impl Transaction for ClientInviteTransaction {
 
 
     fn matches(&self, message: &Message) -> bool {
-        TransactionKey::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+        crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
     }
 
     // Keep original_request and last_response accessors if needed by TU via manager
@@ -757,7 +757,7 @@ impl Transaction for ClientNonInviteTransaction {
 
 
      fn matches(&self, message: &Message) -> bool {
-          TransactionKey::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+          crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
      }
 
       // Keep original_request and last_response accessors if needed by TU via manager

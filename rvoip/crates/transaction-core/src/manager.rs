@@ -621,10 +621,10 @@ impl TransactionManager {
     ) -> Result<()> {
 
          // Get Request-URI from Contact or To
-         let request_uri = match final_response.header::<Contact>() { 
+         let request_uri = match final_response.typed_header::<Contact>() { 
              Some(contact) => contact.addresses().next().map(|a| a.uri.clone()),
              None => None,
-         }.or_else(|| final_response.header::<To>().map(|t| t.address().uri.clone())) 
+         }.or_else(|| final_response.typed_header::<To>().map(|t| t.address().uri.clone())) 
           .ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
 
          let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?;
@@ -634,17 +634,17 @@ impl TransactionManager {
          } else {
              return Err(Error::Other("Cannot determine Via header for ACK from response".into()));
          }
-         if let Some(from) = final_response.from() {
+         if let Some(from) = final_response.typed_header::<From>() {
             ack_builder = ack_builder.header(TypedHeader::From(from.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing From header in response for ACK".into()));
          }
-         if let Some(to) = final_response.to() {
+         if let Some(to) = final_response.typed_header::<To>() {
              ack_builder = ack_builder.header(TypedHeader::To(to.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing To header in response for ACK".into()));
          }
-         if let Some(call_id) = final_response.call_id() {
+         if let Some(call_id) = final_response.typed_header::<CallId>() {
              ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing Call-ID header in response for ACK".into()));
@@ -675,41 +675,34 @@ impl TransactionManager {
 
      // Helper to determine ACK destination
      async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
-         if let Some(contact) = response.header::<Contact>() {
+         if let Some(contact) = response.typed_header::<Contact>() {
              if let Some(addr) = contact.addresses().next() {
                   if let Some(dest) = Self::resolve_uri_to_socketaddr(&addr.uri).await {
                       return Some(dest);
                   }
              }
          }
+         
+         // Try via received/rport
          if let Some(via) = response.first_via() {
-              if let (Some(received_ip_str), rport_opt) = (via.received(), via.rport()) {
-                  // Use IpAddr::from_str
-                  if let Ok(ip) = IpAddr::from_str(received_ip_str) {
-                      // Handle Option<u16> for rport using ok_or or if let
-                      if let Some(port) = rport_opt {
-                         let dest = SocketAddr::new(ip, port);
-                         return Some(dest);
-                      } else {
-                          warn!("Via had received but no rport");
-                      }
+              if let (Some(received_ip_str), Some(port)) = (via.received().map(|ip| ip.to_string()), via.rport().flatten()) {
+                  if let Ok(ip) = IpAddr::from_str(&received_ip_str) {
+                     let dest = SocketAddr::new(ip, port);
+                     return Some(dest);
                   } else {
                       warn!(ip=%received_ip_str, "Failed to parse received IP in Via");
                   }
               }
+              
               // Fallback to Via host/port
-              let host_str = via.sent_by_host().unwrap_or("localhost");
-              let port = via.sent_by_port().unwrap_or(5060);
-              
-              // Create a proper Host enum
-              let host = if let Ok(ip) = IpAddr::from_str(host_str) {
-                  Host::Address(ip)
-              } else {
-                  Host::Domain(host_str.to_string())
-              };
-              
-              if let Some(dest) = Self::resolve_host_to_socketaddr(&host, port).await {
-                  return Some(dest);
+              // For the sent_by, use ViaHeader struct fields
+              if let Some(via_header) = via.headers().first() {
+                  let host = &via_header.sent_by_host;
+                  let port = via_header.sent_by_port.unwrap_or(5060);
+                  
+                  if let Some(dest) = Self::resolve_host_to_socketaddr(host, port).await {
+                      return Some(dest);
+                  }
               }
          }
          None
@@ -752,16 +745,16 @@ impl ResponseBuilderExt for ResponseBuilder {
         if let Some(via) = request.first_via() {
              self = self.header(TypedHeader::Via(via.clone()));
          }
-         if let Some(to) = request.header::<To>() {
+         if let Some(to) = request.typed_header::<To>() {
              self = self.header(TypedHeader::To(to.clone()));
          }
-         if let Some(from) = request.header::<From>() {
+         if let Some(from) = request.typed_header::<From>() {
              self = self.header(TypedHeader::From(from.clone()));
          }
-         if let Some(call_id) = request.header::<CallId>() {
+         if let Some(call_id) = request.typed_header::<CallId>() {
              self = self.header(TypedHeader::CallId(call_id.clone()));
          }
-         if let Some(cseq) = request.header::<CSeq>() {
+         if let Some(cseq) = request.typed_header::<CSeq>() {
              self = self.header(TypedHeader::CSeq(cseq.clone()));
          }
          self = self.header(TypedHeader::ContentLength(ContentLength::new(0)));
