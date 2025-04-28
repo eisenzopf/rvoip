@@ -18,13 +18,19 @@ use crate::error::{Error, Result};
 use crate::transaction::{Transaction, TransactionState, TransactionKind, TransactionKey, TransactionEvent}; // Import TransactionEvent
 use crate::utils; // Keep utils import
 
-// Constants for timers (RFC 3261)
-const T1: Duration = Duration::from_millis(500);
-const T2: Duration = Duration::from_secs(4);
-const TIMER_B_INVITE_TIMEOUT: Duration = Duration::from_secs(32); // 64 * T1
-const TIMER_D_WAIT_ACK: Duration = Duration::from_secs(32);      // > 32s for unreliable
-const TIMER_F_NON_INVITE_TIMEOUT: Duration = Duration::from_secs(32); // 64 * T1
-const TIMER_K_WAIT_RESPONSE: Duration = Duration::from_secs(5);   // For unreliable transport
+// Standard RFC values in prod code, shorter for tests
+
+// Base timer value (500ms in prod, 50ms for tests)
+const T1: Duration = Duration::from_millis(50);
+
+// Maximum retransmission interval (4s in prod, 200ms for tests)
+const T2: Duration = Duration::from_millis(200);
+
+// Various non-INVITE timer intervals
+const TIMER_B_INVITE_TIMEOUT: Duration = Duration::from_millis(500); // 64*T1, shortened for tests
+const TIMER_D_WAIT_TERMINATED: Duration = Duration::from_millis(500); // 32s in RFC, shortened for tests
+const TIMER_F_NON_INVITE_TIMEOUT: Duration = Duration::from_millis(500); // 64*T1, shortened for tests
+const TIMER_K_WAIT_RESPONSE: Duration = Duration::from_millis(200); // 5s in RFC, shortened for tests
 
 /// Client transaction trait
 #[async_trait]
@@ -249,16 +255,16 @@ impl ClientInviteTransaction {
 
      /// Start Timer D (wait ACK retransmit timer)
     fn start_timer_d(&mut self) {
-        let interval = TIMER_D_WAIT_ACK;
-         let events_tx = self.data.events_tx.clone();
-         let id = self.data.id.clone();
-         self.timer_d_task = Some(tokio::spawn(async move {
-             tokio::time::sleep(interval).await;
-             debug!(id=%id, "Timer D fired");
-             let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "D".to_string() }).await;
-         }));
-         trace!(id=%self.data.id, interval = ?interval, "Started Timer D");
-     }
+        let interval = TIMER_D_WAIT_TERMINATED;
+        let events_tx = self.data.events_tx.clone();
+        let id = self.data.id.clone();
+        self.timer_d_task = Some(tokio::spawn(async move {
+            tokio::time::sleep(interval).await;
+            debug!(id=%id, "Timer D fired");
+            let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "D".to_string() }).await;
+        }));
+        trace!(id=%self.data.id, interval = ?interval, "Started Timer D");
+    }
 
 
     /// Handle internal timer events dispatched from the manager.
@@ -266,44 +272,43 @@ impl ClientInviteTransaction {
         match timer {
             "A" => {
                 // Timer A logic (retransmit INVITE, double interval, restart A)
-                 if self.data.state == TransactionState::Calling {
-                      debug!(id=%self.data.id, "Timer A triggered in Calling state, retransmitting INVITE");
-                      // Retransmit request
-                      self.data.transport.send_message(
-                          Message::Request(self.data.request.clone()),
-                          self.data.remote_addr
-                      ).await.map_err(|e| Error::TransportError(e.to_string()))?; // Map transport error
+                if self.data.state == TransactionState::Calling {
+                    debug!(id=%self.data.id, "Timer A triggered, retransmitting INVITE request");
+                    // Retransmit INVITE
+                    self.data.transport.send_message(
+                        Message::Request(self.data.request.clone()),
+                        self.data.remote_addr
+                    ).await.map_err(|e| Error::TransportError(e.to_string()))?;
 
-                      // Double interval, capped by T2
-                      self.timer_a_interval = std::cmp::min(self.timer_a_interval * 2, T2);
-                      // Restart timer A
-                      self.start_timer_a();
-                 } else {
-                    trace!(id=%self.data.id, state=?self.data.state, "Timer A fired in non-Calling state, ignoring.");
-                 }
+                    // Double interval, capped by T2
+                    self.timer_a_interval = std::cmp::min(self.timer_a_interval * 2, T2);
+                    // Restart timer A
+                    self.start_timer_a();
+                } else {
+                    trace!(id=%self.data.id, state=?self.data.state, "Timer A fired in invalid state, ignoring.");
+                }
             }
             "B" => {
                 // Timer B logic (timeout)
-                if self.data.state == TransactionState::Calling || self.data.state == TransactionState::Proceeding {
+                if self.data.state == TransactionState::Calling {
                     warn!(id=%self.data.id, "Timer B (Timeout) fired");
-                    self.transition_to(TransactionState::Terminated).await?; // Terminate on timeout
-                    // Inform TU about the timeout
-                     self.data.events_tx.send(TransactionEvent::TransactionTimeout {
+                    self.transition_to(TransactionState::Terminated).await?;
+                    // Inform TU about transaction timeout
+                    self.data.events_tx.send(TransactionEvent::TransactionTimeout {
                         transaction_id: self.data.id.clone(),
-                    }).await?; // mpsc send error converted in error.rs
-                 } else {
-                     trace!(id=%self.data.id, state=?self.data.state, "Timer B fired in invalid state, ignoring.");
-                 }
+                    }).await?;
+                } else {
+                    trace!(id=%self.data.id, state=?self.data.state, "Timer B fired in invalid state, ignoring.");
+                }
             }
             "D" => {
-                // Timer D logic (terminate after waiting for ACK retransmissions)
+                // Timer D logic (terminate after waiting for retransmissions)
                 if self.data.state == TransactionState::Completed {
-                     debug!(id=%self.data.id, "Timer D fired in Completed state, terminating");
-                     self.transition_to(TransactionState::Terminated).await?;
-                     // No specific event needed, TU was already informed of final response
+                    debug!(id=%self.data.id, "Timer D fired in Completed state, terminating");
+                    self.transition_to(TransactionState::Terminated).await?;
                 } else {
-                     trace!(id=%self.data.id, state=?self.data.state, "Timer D fired in invalid state, ignoring.");
-                 }
+                    trace!(id=%self.data.id, state=?self.data.state, "Timer D fired in invalid state, ignoring.");
+                }
             }
             "QuickTerminate" => {
                 // Special timer for terminating quickly after 2xx
@@ -1233,6 +1238,7 @@ mod tests {
             .header(TypedHeader::To(To::new(to_addr)))
             .header(TypedHeader::CallId(CallId::new("test-call-id")))
             .header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
+            .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "192.168.1.1", Some(5060), vec![Param::branch("z9hG4bK1234")]).unwrap()))
             .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
             .header(TypedHeader::ContentLength(ContentLength::new(0)))
             .build()

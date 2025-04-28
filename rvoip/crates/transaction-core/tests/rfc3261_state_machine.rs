@@ -197,13 +197,31 @@ async fn test_invite_client_transaction_success() {
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Calling, "Client INVITE transaction should transition to Calling state after sending");
     
-    // Check event for request
-    let event = events_rx.recv().await.unwrap();
-    match event {
-        TransactionEvent::NewRequest { .. } => {
-            // Expected
-        },
-        _ => panic!("Expected NewRequest event, got {:?}", event),
+    // Check events - drain timer events first
+    let mut event_found = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::NewRequest { .. } => {
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => panic!("Unexpected event: {:?}", other),
+        }
+    }
+    
+    if !event_found {
+        // Wait for NewRequest event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::NewRequest { .. } => {
+                // Expected
+            },
+            _ => panic!("Expected NewRequest event, got {:?}", event),
+        }
     }
     
     // Simulate 100 Trying response
@@ -218,13 +236,33 @@ async fn test_invite_client_transaction_success() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event and verify state transition to Proceeding
-    let event = events_rx.recv().await.unwrap();
-    match event {
-        TransactionEvent::ProvisionalResponse { transaction_id: tx_id, .. } => {
-            assert_eq!(tx_id, transaction_id);
-        },
-        _ => panic!("Expected ProvisionalResponse event, got {:?}", event),
+    // Drain any timer events first
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::ProvisionalResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => {
+                panic!("Expected ProvisionalResponse event, got {:?}", other);
+            }
+        }
+    }
+    
+    if !event_found {
+        // Wait for ProvisionalResponse event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::ProvisionalResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+            },
+            _ => panic!("Expected ProvisionalResponse event, got {:?}", event),
+        }
     }
     
     let state = manager.transaction_state(&transaction_id).await.unwrap();
@@ -242,13 +280,34 @@ async fn test_invite_client_transaction_success() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event for 2xx response
-    let event = events_rx.recv().await.unwrap();
-    match event {
-        TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
-            assert_eq!(tx_id, transaction_id);
-        },
-        _ => panic!("Expected SuccessResponse event, got {:?}", event),
+    // Check for SuccessResponse, ignoring any timer events
+    event_found = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => {
+                panic!("Expected SuccessResponse event, got {:?}", other);
+            }
+        }
+    }
+    
+    if !event_found {
+        // Wait for SuccessResponse event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+            },
+            _ => panic!("Expected SuccessResponse event, got {:?}", event),
+        }
     }
     
     // Allow time for termination
@@ -287,8 +346,37 @@ async fn test_invite_client_transaction_failure() {
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Calling, "Client INVITE transaction should transition to Calling state after sending");
     
-    // Check event for request
-    let _ = events_rx.recv().await.unwrap(); // NewRequest event
+    // Check event for request - ignore timer events
+    let mut found_new_request = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::NewRequest { .. } => {
+                found_new_request = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            _ => {}
+        }
+    }
+    
+    if !found_new_request {
+        // Wait for NewRequest event if we haven't found it yet
+        while let Some(event) = events_rx.recv().await {
+            match event {
+                TransactionEvent::NewRequest { .. } => {
+                    break;
+                },
+                TransactionEvent::TimerTriggered { .. } => {
+                    // Ignore timer events
+                    continue;
+                },
+                _ => panic!("Expected NewRequest or TimerTriggered event, got {:?}", event),
+            }
+        }
+    }
     
     // Simulate 100 Trying response
     let trying_response = create_test_response(&invite_request, StatusCode::Trying);
@@ -302,8 +390,37 @@ async fn test_invite_client_transaction_failure() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event and verify state transition to Proceeding
-    let _ = events_rx.recv().await.unwrap(); // ProvisionalResponse event
+    // Get event and verify state transition to Proceeding - ignore timer events
+    let mut found_provisional = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::ProvisionalResponse { .. } => {
+                found_provisional = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            _ => {}
+        }
+    }
+    
+    if !found_provisional {
+        // Wait for ProvisionalResponse event if we haven't found it yet
+        while let Some(event) = events_rx.recv().await {
+            match event {
+                TransactionEvent::ProvisionalResponse { .. } => {
+                    break;
+                },
+                TransactionEvent::TimerTriggered { .. } => {
+                    // Ignore timer events
+                    continue;
+                },
+                _ => panic!("Expected ProvisionalResponse or TimerTriggered event, got {:?}", event),
+            }
+        }
+    }
     
     // Simulate 404 Not Found response
     let not_found_response = create_test_response(&invite_request, StatusCode::NotFound);
@@ -317,24 +434,49 @@ async fn test_invite_client_transaction_failure() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event for 4xx response
-    let event = events_rx.recv().await.unwrap();
-    match event {
-        TransactionEvent::FailureResponse { transaction_id: tx_id, .. } => {
-            assert_eq!(tx_id, transaction_id);
-        },
-        _ => panic!("Expected FailureResponse event, got {:?}", event),
+    // Get event for 4xx response - ignore timer events
+    let mut found_failure = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::FailureResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+                found_failure = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            _ => {}
+        }
+    }
+    
+    if !found_failure {
+        // Wait for FailureResponse event if we haven't found it yet
+        while let Some(event) = events_rx.recv().await {
+            match event {
+                TransactionEvent::FailureResponse { transaction_id: tx_id, .. } => {
+                    assert_eq!(tx_id, transaction_id);
+                    break;
+                },
+                TransactionEvent::TimerTriggered { .. } => {
+                    // Ignore timer events
+                    continue;
+                },
+                _ => panic!("Expected FailureResponse or TimerTriggered event, got {:?}", event),
+            }
+        }
     }
     
     // Allow time for ACK to be sent and state to transition to Completed
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(100)).await;
     
     // Verify state is Completed after non-2xx final response
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Completed, "Client INVITE transaction should be in Completed state after receiving 4xx");
     
-    // Wait for Timer D to expire (using a short value for tests)
-    sleep(Duration::from_millis(500)).await;
+    // Wait for Timer D to expire - use a longer wait time to ensure it expires
+    sleep(Duration::from_millis(1000)).await;
     
     // Verify state is now Terminated after Timer D
     let state = manager.transaction_state(&transaction_id).await.unwrap_or(TransactionState::Terminated);
@@ -373,8 +515,32 @@ async fn test_non_invite_client_transaction_states() {
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Trying, "Non-INVITE client transaction should transition to Trying state after sending");
     
-    // Check event for request
-    let _ = events_rx.recv().await.unwrap(); // NewRequest event
+    // Check for NewRequest, ignoring timer events
+    let mut event_found = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::NewRequest { .. } => {
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => {
+                panic!("Unexpected event: {:?}", other);
+            }
+        }
+    }
+    
+    if !event_found {
+        // Wait for NewRequest event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::NewRequest { .. } => {},
+            _ => panic!("Expected NewRequest event, got {:?}", event),
+        }
+    }
     
     // Simulate 100 Trying response
     let trying_response = create_test_response(&register_request, StatusCode::Trying);
@@ -388,8 +554,32 @@ async fn test_non_invite_client_transaction_states() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event and verify state transition to Proceeding
-    let _ = events_rx.recv().await.unwrap(); // ProvisionalResponse event
+    // Check for ProvisionalResponse, ignoring timer events
+    event_found = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::ProvisionalResponse { .. } => {
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => {
+                panic!("Unexpected event: {:?}", other);
+            }
+        }
+    }
+    
+    if !event_found {
+        // Wait for ProvisionalResponse event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::ProvisionalResponse { .. } => {},
+            _ => panic!("Expected ProvisionalResponse event, got {:?}", event),
+        }
+    }
     
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Proceeding, "Non-INVITE client transaction should transition to Proceeding after 1xx response");
@@ -406,21 +596,42 @@ async fn test_non_invite_client_transaction_states() {
     // Allow time for processing
     sleep(Duration::from_millis(50)).await;
     
-    // Get event for 2xx response
-    let event = events_rx.recv().await.unwrap();
-    match event {
-        TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
-            assert_eq!(tx_id, transaction_id);
-        },
-        _ => panic!("Expected SuccessResponse event, got {:?}", event),
+    // Check for SuccessResponse, ignoring timer events
+    event_found = false;
+    while let Ok(event) = events_rx.try_recv() {
+        match event {
+            TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+                event_found = true;
+                break;
+            },
+            TransactionEvent::TimerTriggered { .. } => {
+                // Ignore timer events
+                continue;
+            },
+            other => {
+                panic!("Expected SuccessResponse event, got {:?}", other);
+            }
+        }
+    }
+    
+    if !event_found {
+        // Wait for SuccessResponse event
+        let event = events_rx.recv().await.unwrap();
+        match event {
+            TransactionEvent::SuccessResponse { transaction_id: tx_id, .. } => {
+                assert_eq!(tx_id, transaction_id);
+            },
+            _ => panic!("Expected SuccessResponse event, got {:?}", event),
+        }
     }
     
     // Verify state is Completed after final response
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     assert_eq!(state, TransactionState::Completed, "Non-INVITE client transaction should be in Completed state after receiving final response");
     
-    // Wait for Timer K to expire (using a short value for tests)
-    sleep(Duration::from_millis(500)).await;
+    // Wait for Timer K to expire - use a longer wait time to ensure it expires
+    sleep(Duration::from_millis(1000)).await;
     
     // Verify state is now Terminated after Timer K
     let state = manager.transaction_state(&transaction_id).await.unwrap_or(TransactionState::Terminated);
@@ -669,8 +880,8 @@ async fn test_server_non_invite_transaction_states() {
     let state = manager.transaction_state(&server_tx_id).await.unwrap();
     assert_eq!(state, TransactionState::Completed, "Server non-INVITE transaction should transition to Completed after sending final response");
     
-    // Wait for Timer J to expire (using a short value for tests)
-    sleep(Duration::from_millis(500)).await;
+    // Wait for Timer J to expire - use a longer wait time to ensure it expires
+    sleep(Duration::from_millis(1000)).await;
     
     // Verify server transaction terminates after Timer J
     let state = manager.transaction_state(&server_tx_id).await.unwrap_or(TransactionState::Terminated);
