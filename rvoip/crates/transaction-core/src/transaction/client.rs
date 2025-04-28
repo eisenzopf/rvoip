@@ -478,21 +478,102 @@ impl ClientTransaction for ClientInviteTransaction {
 
         let id = self.data.id.clone();
 
+        // Store the response for later access
+        self.data.last_response = Some(response.clone());
+
         match self.data.state {
             TransactionState::Calling => {
                 self.cancel_timers();
-                if is_provisional { /* ... */ }
-                else if is_success { /* ... */ }
-                else if is_failure { /* ... */ }
+                if is_provisional { 
+                    // 1xx responses move to Proceeding state
+                    self.transition_to(TransactionState::Proceeding).await?;
+                    
+                    // Notify TU of provisional response
+                    self.data.events_tx.send(TransactionEvent::ProvisionalResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
+                else if is_success { 
+                    // 2xx responses go directly to Completed
+                    self.transition_to(TransactionState::Completed).await?;
+                    
+                    // Notify TU of success response
+                    self.data.events_tx.send(TransactionEvent::SuccessResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
+                else if is_failure { 
+                    // 3xx-6xx responses
+                    self.transition_to(TransactionState::Completed).await?;
+                    
+                    // For non-2xx responses, we need to send ACK
+                    let ack = self.create_internal_ack(&response)?;
+                    self.data.transport.send_message(
+                        Message::Request(ack),
+                        self.data.remote_addr
+                    ).await.map_err(|e| Error::TransportError(e.to_string()))?;
+                    
+                    // Notify TU of failure response
+                    self.data.events_tx.send(TransactionEvent::FailureResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
             }
             TransactionState::Proceeding => {
-                 if is_provisional { /* ... */ }
-                 else if is_success { /* ... */ }
-                 else if is_failure { /* ... */ }
+                if is_provisional { 
+                    // Additional 1xx in Proceeding state, forward to TU
+                    self.data.events_tx.send(TransactionEvent::ProvisionalResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
+                else if is_success { 
+                    // 2xx responses transition to Completed
+                    self.transition_to(TransactionState::Completed).await?;
+                    
+                    // Notify TU of success response
+                    self.data.events_tx.send(TransactionEvent::SuccessResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
+                else if is_failure { 
+                    // 3xx-6xx responses transition to Completed
+                    self.transition_to(TransactionState::Completed).await?;
+                    
+                    // For non-2xx responses, we need to send ACK
+                    let ack = self.create_internal_ack(&response)?;
+                    self.data.transport.send_message(
+                        Message::Request(ack),
+                        self.data.remote_addr
+                    ).await.map_err(|e| Error::TransportError(e.to_string()))?;
+                    
+                    // Notify TU of failure response
+                    self.data.events_tx.send(TransactionEvent::FailureResponse {
+                        transaction_id: id,
+                        response: response.clone(),
+                    }).await?;
+                }
             }
             TransactionState::Completed => {
-                 if is_failure { /* ... */ }
-                 else { /* ... */ }
+                if is_failure { 
+                    // Received retransmission of final response
+                    // Resend ACK (RFC 3261 section 17.1.1.3)
+                    debug!(id=%id, "Received retransmission of error response in Completed state, resending ACK");
+                    
+                    if let Some(last_resp) = &self.data.last_response {
+                        let ack = self.create_internal_ack(last_resp)?;
+                        self.data.transport.send_message(
+                            Message::Request(ack),
+                            self.data.remote_addr
+                        ).await.map_err(|e| Error::TransportError(e.to_string()))?;
+                    }
+                } else { 
+                    trace!(id=%id, state=?self.data.state, %status, "Ignoring success or provisional response in Completed state");
+                }
             }
             TransactionState::Terminated | TransactionState::Initial | TransactionState::Trying | TransactionState::Confirmed => {
                  warn!(id=%id, state=?self.data.state, status=%status, "Received response in unexpected state");
@@ -821,25 +902,71 @@ impl ClientTransaction for ClientNonInviteTransaction {
         let is_final = !is_provisional;
 
         let id = self.data.id.clone();
+        
+        // Store the response for later access
+        self.data.last_response = Some(response.clone());
 
         match self.data.state {
              TransactionState::Trying => {
                  self.cancel_timers();
-                 if is_provisional { /* ... */ }
-                 else if is_final { /* ... */
-                     if is_success { /* ... */ }
-                     else { /* is_failure */ /* ... */ }
+                 if is_provisional {
+                     // Move to Proceeding state for 1xx responses
+                     self.transition_to(TransactionState::Proceeding).await?;
+                     
+                     // Notify TU of provisional response
+                     self.data.events_tx.send(TransactionEvent::ProvisionalResponse {
+                         transaction_id: id,
+                         response: response.clone(),
+                     }).await?;
+                 }
+                 else if is_final {
+                     // Move to Completed state for final responses
+                     self.transition_to(TransactionState::Completed).await?;
+                     
+                     if is_success {
+                         // Notify TU of success response
+                         self.data.events_tx.send(TransactionEvent::SuccessResponse {
+                             transaction_id: id,
+                             response: response.clone(),
+                         }).await?;
+                     } else { // is_failure
+                         // Notify TU of failure response
+                         self.data.events_tx.send(TransactionEvent::FailureResponse {
+                             transaction_id: id,
+                             response: response.clone(),
+                         }).await?;
+                     }
                  }
              }
              TransactionState::Proceeding => {
-                 if is_provisional { /* ... */ }
-                 else if is_final { /* ... */
-                     if is_success { /* ... */ }
-                     else { /* is_failure */ /* ... */ }
+                 if is_provisional {
+                     // Additional 1xx in Proceeding state, forward to TU
+                     self.data.events_tx.send(TransactionEvent::ProvisionalResponse {
+                         transaction_id: id,
+                         response: response.clone(),
+                     }).await?;
+                 }
+                 else if is_final {
+                     // Move to Completed state for final responses
+                     self.transition_to(TransactionState::Completed).await?;
+                     
+                     if is_success {
+                         // Notify TU of success response
+                         self.data.events_tx.send(TransactionEvent::SuccessResponse {
+                             transaction_id: id,
+                             response: response.clone(),
+                         }).await?;
+                     } else { // is_failure
+                         // Notify TU of failure response 
+                         self.data.events_tx.send(TransactionEvent::FailureResponse {
+                             transaction_id: id,
+                             response: response.clone(),
+                         }).await?;
+                     }
                  }
              }
              TransactionState::Completed | TransactionState::Terminated | TransactionState::Initial | TransactionState::Calling | TransactionState::Confirmed => {
-                 trace!(id=%id, state=?self.data.state, %status, "Ignoring response");
+                 trace!(id=%id, state=?self.data.state, %status, "Ignoring response in {:?} state", self.data.state);
              }
         }
         Ok(())
