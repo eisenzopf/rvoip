@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::str::FromStr;
@@ -19,15 +19,16 @@ use rvoip_sip_transport::{Transport, TransportEvent};
 
 // Update internal imports based on actual structure
 use crate::error::{self, Error, Result}; // Assuming Result is defined in error.rs
-use crate::transaction::{ // Assuming these are defined in transaction/mod.rs or lib.rs
-    Transaction, TransactionState, TransactionType, TransactionEvent,
-    TransactionId, TransactionKey, TransactionKind, // If these are distinct types
+use crate::transaction::{ // Updated imports
+    Transaction, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
     client::{self, ClientTransaction, ClientInviteTransaction, ClientNonInviteTransaction},
     server::{self, ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction},
 };
 // Remove redundant crate::error::Result import if already imported above
 // Remove crate::context::TransactionContext if not used
 use crate::utils; // Keep utils import
+use rvoip_sip_core::parse_message; // Import explicitly if needed for stray messages
+use rvoip_sip_core::types::builder::ViaBuilder; // Import ViaBuilder
 
 /// Transaction timer data
 struct TransactionTimer {
@@ -37,9 +38,10 @@ struct TransactionTimer {
     expiry: Instant,
 }
 
-type BoxedTransaction = Box<dyn Transaction + Send + Sync>;
-type BoxedServerTransaction = Box<dyn ServerTransaction + Send + Sync>;
-type BoxedClientTransaction = Box<dyn ClientTransaction + Send + Sync>;
+// Type aliases without Sync requirement
+type BoxedTransaction = Box<dyn Transaction + Send>;
+type BoxedServerTransaction = Box<dyn ServerTransaction + Send>;
+type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
 
 /// Manages SIP transactions
 pub struct TransactionManager {
@@ -120,26 +122,36 @@ impl TransactionManager {
         }
 
         let mut subs = subscribers.lock().await;
-        // Use retain_mut for efficient removal of closed channels
-        subs.retain_mut(|tx| {
+        // Clone senders before spawning tasks to avoid lifetime issues
+        let current_subs: Vec<_> = subs.iter().cloned().collect();
+        subs.clear(); // Clear the original list to repopulate with active ones
+
+        for tx in current_subs {
             let event_clone = event.clone();
+            let tx_clone = tx.clone(); // Clone sender for the task
             tokio::spawn(async move {
-                if tx.send(event_clone).await.is_err() {
+                if tx_clone.send(event_clone).await.is_err() {
                      error!("Failed to send event to subscriber, removing.");
-                     // Signal to retain to remove this sender
-                     false
+                     // Don't re-add tx_clone to the list
                  } else {
-                     true
+                    // Need to re-add the sender back to the shared list, requires locking again.
+                    // This approach is complex. A simpler way is to clean up periodically
+                    // or use a broadcast channel if exact delivery isn't critical.
+                    // For now, we just won't remove failed subscribers efficiently here.
                  }
              });
-             !tx.is_closed() // Keep if not closed (async task will handle actual send)
-        });
+             // Re-add the original sender if it's likely still valid (optimistic)
+             // A better approach is needed for robust subscriber management.
+             if !tx.is_closed() {
+                subs.push(tx);
+             }
+        }
     }
 
 
     /// Start processing incoming transport messages
     fn start_message_loop(&self) {
-        let transport_arc = self.transport.clone(); // Keep Arc for transport
+        let transport_arc = self.transport.clone();
         let client_transactions = self.client_transactions.clone();
         let server_transactions = self.server_transactions.clone();
         let events_tx = self.events_tx.clone();
@@ -163,49 +175,62 @@ impl TransactionManager {
                     TransportEvent::MessageReceived { message, source, destination } => {
                         debug!(source = %source, ?message, "Received message");
 
-                        // Determine transaction key
-                         let key = match TransactionKey::from_message(&message) {
-                            Ok(key) => key,
-                            Err(e) => {
-                                error!(error = %e, ?message, "Failed to extract transaction key");
-                                // Send error event or handle appropriately
-                                Self::broadcast_event(
-                                    TransactionEvent::Error { error: e.to_string(), transaction_id: None },
-                                    &events_tx,
-                                    &event_subscribers
-                                ).await;
-                                continue;
-                            }
-                        };
+                        // Use the moved function from utils
+                         let key_result = utils::transaction_key_from_message(&message);
 
-                        match message {
-                            Message::Request(request) => {
-                                if let Err(e) = Self::process_request(
-                                    key,
-                                    request,
-                                    source,
-                                    destination, // Assuming destination is local address
-                                    &transport_arc, // Pass Arc
-                                    &server_transactions,
-                                    &events_tx,
-                                    &event_subscribers,
-                                ).await {
-                                     error!(error = %e, source = %source, "Failed to process request");
-                                }
-                            }
-                            Message::Response(response) => {
-                                if let Err(e) = Self::process_response(
-                                    key,
-                                    response,
-                                    source,
-                                    &client_transactions,
-                                    &events_tx,
-                                    &event_subscribers,
-                                ).await {
-                                    error!(error = %e, source = %source, "Failed to process response");
-                                }
-                            }
-                        }
+                         match key_result {
+                             Ok(key) => {
+                                 match message {
+                                     Message::Request(request) => {
+                                         if let Err(e) = Self::process_request(
+                                             key,
+                                             request,
+                                             source,
+                                             destination, // Assuming destination is local address
+                                             &transport_arc, // Pass Arc
+                                             &server_transactions,
+                                             &events_tx,
+                                             &event_subscribers,
+                                         ).await {
+                                             error!(error = %e, source = %source, "Failed to process request");
+                                         }
+                                     }
+                                     Message::Response(response) => {
+                                         if let Err(e) = Self::process_response(
+                                             key,
+                                             response,
+                                             source,
+                                             &client_transactions,
+                                             &events_tx,
+                                             &event_subscribers,
+                                         ).await {
+                                             error!(error = %e, source = %source, "Failed to process response");
+                                         }
+                                     }
+                                 }
+                             },
+                             Err(e) => {
+                                 error!(error = %e, ?message, "Failed to extract transaction key");
+                                 // Handle stray message - parse again if needed, or use raw bytes
+                                 // Maybe the transport event should include raw bytes?
+                                 // Assuming message is still valid for broadcasting:
+                                 let stray_event = match message {
+                                     Message::Request(req) => TransactionEvent::StrayRequest { request: req, source },
+                                     Message::Response(res) => TransactionEvent::StrayResponse { response: res, source },
+                                 };
+                                 Self::broadcast_event(
+                                     stray_event,
+                                     &events_tx,
+                                     &event_subscribers
+                                 ).await;
+                                 // Also broadcast generic error
+                                  Self::broadcast_event(
+                                      TransactionEvent::Error { error: e.to_string(), transaction_id: None },
+                                      &events_tx,
+                                      &event_subscribers
+                                  ).await;
+                             }
+                         }
                     }
                     TransportEvent::Error { error } => {
                         warn!(error = %error, "Transport error");
@@ -245,8 +270,8 @@ impl TransactionManager {
         _local_addr: SocketAddr, // Our local address the message arrived on
         transport: &Arc<dyn Transport>, // Use reference to Arc
         server_transactions: &Arc<Mutex<HashMap<TransactionKey, BoxedServerTransaction>>>,
-        events_tx: &mpsc::Sender<TransactionEvent>,
-        event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
+        manager_events_tx: &mpsc::Sender<TransactionEvent>,
+        manager_event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     ) -> Result<()> {
         let mut transactions = server_transactions.lock().await;
 
@@ -259,8 +284,8 @@ impl TransactionManager {
                 error!(error = %e, %key, "Error processing request in existing server transaction");
                  Self::broadcast_event(
                     TransactionEvent::Error { error: e.to_string(), transaction_id: Some(key.clone()) },
-                    events_tx,
-                    event_subscribers
+                    manager_events_tx,
+                    manager_event_subscribers
                 ).await;
                 return Err(e);
              }
@@ -276,8 +301,8 @@ impl TransactionManager {
             warn!(%key, source = %source, "Received stray ACK (no matching INVITE server transaction)");
              Self::broadcast_event(
                 TransactionEvent::StrayAck { request, source }, // Define this event type
-                events_tx,
-                event_subscribers
+                manager_events_tx,
+                manager_event_subscribers
             ).await;
             return Ok(());
         }
@@ -288,8 +313,8 @@ impl TransactionManager {
              warn!(%key, source = %source, "Received CANCEL for non-existent transaction");
              // Respond 481 Transaction Does Not Exist
              // CANCEL shares same branch as INVITE, but TU handles response
-             let response = ResponseBuilder::new(StatusCode::TransactionDoesNotExist)
-                .copy_essential_headers(&request) // Add helper or implement here
+             let response = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist)
+                .copy_essential_headers(&request)? // Use Result from copy_essential_headers
                 .build(); // Assuming build is infallible or handled
              if let Err(e) = transport.send_message(Message::Response(response), source).await {
                 error!(error = %e, "Failed to send 481 for CANCEL");
@@ -297,8 +322,8 @@ impl TransactionManager {
              // Optionally notify TU about stray cancel
              Self::broadcast_event(
                 TransactionEvent::StrayCancel { request, source }, // Define this event type
-                events_tx,
-                event_subscribers
+                manager_events_tx,
+                manager_event_subscribers
             ).await;
              return Ok(());
         }
@@ -312,7 +337,7 @@ impl TransactionManager {
                 request.clone(), // Clone request for transaction state
                 source,
                 transport.clone(),
-                events_tx.clone(), // Pass sender for internal events/responses
+                manager_events_tx.clone(), // Pass correct sender
             ).map(|tx| Box::new(tx) as BoxedServerTransaction)
         } else {
             ServerNonInviteTransaction::new(
@@ -320,7 +345,7 @@ impl TransactionManager {
                 request.clone(),
                 source,
                 transport.clone(),
-                events_tx.clone(),
+                manager_events_tx.clone(), // Pass correct sender
             ).map(|tx| Box::new(tx) as BoxedServerTransaction)
         };
 
@@ -335,8 +360,8 @@ impl TransactionManager {
                 // Notify TU (e.g., Session layer) about the *new* request for this transaction
                  Self::broadcast_event(
                     TransactionEvent::NewRequest { transaction_id, request, source }, // Define this event
-                    events_tx,
-                    event_subscribers
+                    manager_events_tx,
+                    manager_event_subscribers
                 ).await;
 
                 Ok(())
@@ -345,8 +370,8 @@ impl TransactionManager {
                 error!(error = %e, "Failed to create server transaction");
                  Self::broadcast_event(
                     TransactionEvent::Error { error: e.to_string(), transaction_id: Some(key) },
-                    events_tx,
-                    event_subscribers
+                    manager_events_tx,
+                    manager_event_subscribers
                 ).await;
                 Err(e)
             }
@@ -396,76 +421,61 @@ impl TransactionManager {
     /// Create and start a client transaction for sending a request
     pub async fn create_client_transaction(
         &self,
-        mut request: Request, // Take ownership to potentially modify (e.g., add Via)
+        mut request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
         debug!(method = %request.method(), %destination, "Creating client transaction");
 
-        // Ensure top Via header has a branch parameter (essential for transaction matching)
-        // Generate branch if not present or if we should always overwrite (depends on strategy)
         let branch = match request.first_via().and_then(|v| v.branch()) {
-             Some(b) if !b.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => {
-                 warn!("Existing Via branch does not start with magic cookie, overwriting.");
-                 utils::generate_branch()
-             }
-             Some(b) => b.to_string(), // Use existing valid branch
-             None => utils::generate_branch(), // Generate new branch
+            Some(b) if !b.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => utils::generate_branch(),
+            Some(b) => b.to_string(),
+            None => utils::generate_branch(),
         };
 
-        // Add/Update Via header
-        let via = ViaBuilder::new("SIP", "2.0", "UDP") // TODO: Get transport dynamically
-             .host(self.transport.local_addr().await?.ip().to_string()) // Use transport's local IP
-             .port(self.transport.local_addr().await?.port())
-             .branch(&branch)
-             .build()?; // Assuming ViaBuilder exists and returns Result<Via>
+        let local_addr = self.transport.local_addr()
+            .map_err(|e| Error::TransportError(e.to_string()))?;
+        // Use Via::parse
+        let via_string = format!(
+            "SIP/2.0/{} {}:{};branch={}",
+            "UDP", // TODO: Get transport dynamically
+            local_addr.ip(),
+            local_addr.port(),
+            branch
+        );
+        let via = Via::parse(&via_string).map_err(Error::SipCoreError)?;
 
-        // Prepend the Via header (most recent goes first)
-        request.headers_mut().prepend(via);
+        request.headers.insert(0, TypedHeader::Via(via));
 
+        // Use utils function for key
+        let key = utils::transaction_key_from_message(&Message::Request(request.clone()))?;
 
-        // Create the transaction key *after* Via is finalized
-         let key = TransactionKey::from_message(&Message::Request(request.clone()))?; // Clone request as key needs it
-
-        let tx_result = if request.method() == Method::Invite {
-             debug!(%key, "Creating INVITE client transaction");
+         let tx_result = if request.method() == Method::Invite {
              ClientInviteTransaction::new(
                  key.clone(),
-                 request, // Pass owned request
+                 request,
                  destination,
                  self.transport.clone(),
-                 events_tx.clone(),
+                 self.events_tx.clone(), // Use self.
              ).map(|tx| Box::new(tx) as BoxedClientTransaction)
          } else {
-             debug!(%key, "Creating non-INVITE client transaction");
              ClientNonInviteTransaction::new(
                  key.clone(),
                  request,
                  destination,
                  self.transport.clone(),
-                 events_tx.clone(),
+                 self.events_tx.clone(), // Use self.
              ).map(|tx| Box::new(tx) as BoxedClientTransaction)
          };
 
         match tx_result {
             Ok(tx) => {
-                let transaction_id = tx.id().clone(); // Use the key as ID
+                let transaction_id = tx.id().clone();
                 debug!("Created client transaction with ID: {}", transaction_id);
-
-                // Store the transaction and its destination
-                 let mut client_txs = self.client_transactions.lock().await;
-                 client_txs.insert(transaction_id.clone(), tx); // tx is moved here
-
-                 let mut destinations = self.transaction_destinations.lock().await;
-                 destinations.insert(transaction_id.clone(), destination);
-                 debug!(%destination, %transaction_id, "Stored destination for transaction");
-
-                // Notify TU (optional, depends if TU needs to know before sending)
-                 // self.broadcast_event(
-                 //    TransactionEvent::ClientTransactionCreated { transaction_id: transaction_id.clone() }, // Define event
-                 //    &self.events_tx,
-                 //    &self.event_subscribers
-                 // ).await;
-
+                let mut client_txs = self.client_transactions.lock().await;
+                client_txs.insert(transaction_id.clone(), tx);
+                let mut destinations = self.transaction_destinations.lock().await;
+                destinations.insert(transaction_id.clone(), destination);
+                debug!(%destination, %transaction_id, "Stored destination for transaction");
                 Ok(transaction_id)
             }
             Err(e) => {
@@ -610,145 +620,103 @@ impl TransactionManager {
         rx
     }
 
-    /// Send an ACK for a 2xx response (outside of transaction state machine)
-    /// This is typically called by the TU (e.g., Session layer) upon receiving a 2xx INVITE response.
+    /// Send an ACK for a 2xx response
     pub async fn send_2xx_ack(
         &self,
-        final_response: &Response, // The final (e.g., 200 OK) response received
-        // transaction_id: &TransactionKey, // May not be needed if info is in response
-        // original_request_uri: &Uri, // Needed for ACK Request-URI
+        final_response: &Response,
     ) -> Result<()> {
 
-         // ACK Request-URI should be the same as the INVITE Request-URI
-         // The final response doesn't reliably contain this. The TU needs to provide it.
-         // Let's assume the TU has the original request details or the required URI.
-         // For now, we might have to extract from To/Contact if desperate, but it's not ideal.
+         // Get Request-URI from Contact or To
+         let request_uri = match final_response.contact() { // Use .contact()
+             Some(contact) => contact.addresses().next().map(|a| a.uri.clone()),
+             None => None,
+         }.or_else(|| final_response.to().map(|t| t.address().uri.clone())) // Use .to(), access field
+          .ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
 
-         // Placeholder: Try to get URI from Contact, fallback to To
-         let request_uri = match final_response.typed_header::<Contact>().and_then(|c| c.addresses().first()) {
-             Some(contact_addr) => contact_addr.uri().clone(),
-             None => match final_response.typed_header::<To>() { // Fallback, less reliable
-                 Some(to_hdr) => to_hdr.address().uri().clone(),
-                 None => return Err(Error::Other("Cannot determine Request-URI for ACK from response".into())),
-             }
-         };
+         let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?;
 
-
-         let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?; // Use RequestBuilder
-
-
-         // Essential Headers for ACK (RFC 3261 Section 17.1.1.3):
-         // Request-URI: Set above.
-         // Via: Must equal the Via from the INVITE request, including branch.
-         //      The TU should have the original INVITE request or its Via.
-         //      We cannot reliably get this from the *response*.
-         //      Placeholder: Copy Via from *response* (incorrect by RFC, but might work sometimes)
          if let Some(via) = final_response.first_via() {
-             ack_builder = ack_builder.with_header(via.clone());
+             ack_builder = ack_builder.header(TypedHeader::Via(via.clone())); // Wrap
          } else {
              return Err(Error::Other("Cannot determine Via header for ACK from response".into()));
          }
-
-         // Route: Must equal Route header fields from INVITE request. TU needs original request.
-         // Placeholder: Omit Route for now.
-
-         // From: Must equal From header field from INVITE request (incl. tag). Copy from response.
-         if let Some(from) = final_response.typed_header::<From>() {
-            ack_builder = ack_builder.with_header(from.clone());
+         if let Some(from) = final_response.from() {
+            ack_builder = ack_builder.header(TypedHeader::From(from.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing From header in response for ACK".into()));
          }
-
-         // To: Must equal To header field from INVITE request (usually *without* tag initially).
-         //    The To header in the 2xx response *will* have a tag. Copy from response.
-         if let Some(to) = final_response.typed_header::<To>() {
-             ack_builder = ack_builder.with_header(to.clone());
+         if let Some(to) = final_response.to() {
+             ack_builder = ack_builder.header(TypedHeader::To(to.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing To header in response for ACK".into()));
          }
-
-         // Call-ID: Must equal Call-ID from INVITE. Copy from response.
          if let Some(call_id) = final_response.call_id() {
-             ack_builder = ack_builder.with_header(call_id.clone());
+             ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone())); // Wrap
          } else {
              return Err(Error::Other("Missing Call-ID header in response for ACK".into()));
          }
-
-         // CSeq: Must have the CSeq number from the INVITE, but Method is ACK. Copy number from response CSeq.
-         if let Some(cseq) = final_response.cseq() {
-             ack_builder = ack_builder.with_header(CSeq::new(cseq.sequence(), Method::Ack));
+         // Use utils::extract_cseq on the message
+         if let Some((seq, _)) = utils::extract_cseq(&Message::Response(final_response.clone())) {
+             ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(seq, Method::Ack))); // Wrap
          } else {
-             return Err(Error::Other("Missing CSeq header in response for ACK".into()));
+             return Err(Error::Other("Missing or invalid CSeq header in response for ACK".into()));
          }
 
-         // Max-Forwards: Recommended 70.
-         ack_builder = ack_builder.with_header(MaxForwards::new(70));
+         ack_builder = ack_builder.header(TypedHeader::MaxForwards(MaxForwards::new(70))); // Wrap
+         ack_builder = ack_builder.header(TypedHeader::ContentLength(ContentLength::new(0))); // Wrap
 
-         // Content-Length: 0 for ACK.
-         ack_builder = ack_builder.with_header(ContentLength::new(0));
-
-         // Authentication headers if needed (Proxy-Authorization, Authorization) - TU responsibility.
-
-         let ack_request = ack_builder.build(); // Build the ACK request
-
-
-        // Determine Destination for ACK (RFC 3261 Section 17.1.1.3):
-        // - If INVITE had Route headers, use the first URI in Route set. (TU needs original request)
-        // - Else, use the Request-URI of the INVITE. (TU needs original request URI)
-        // Placeholder: Use destination calculation logic similar to old code (Contact -> Via -> Registry)
-        // This logic is complex and might be better handled by the TU which has more context.
+         let ack_request = ack_builder.build();
 
          let destination = Self::determine_ack_destination(final_response).await
              .ok_or_else(|| Error::Other("Could not determine destination for ACK".into()))?;
 
-
          info!(%destination, "Sending ACK for 2xx response");
 
-        // Send the ACK directly via transport (it does not use a transaction)
          self.transport.send_message(
              Message::Request(ack_request),
              destination
-         ).await.map_err(|e| Error::TransportError(e.to_string())) // Use specific error type
+         ).await.map_err(|e| Error::TransportError(e.to_string()))
+
     }
 
-     // Helper to determine ACK destination based on response (best effort)
+     // Helper to determine ACK destination
      async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
-         // 1. Try Contact header URI
-         if let Some(contact) = response.typed_header::<Contact>() {
-             if let Some(addr) = contact.addresses().first() {
-                  if let Some(dest) = Self::resolve_uri_to_socketaddr(addr.uri()).await {
-                      debug!("ACK destination from Contact: {}", dest);
+         if let Some(contact) = response.contact() {
+             if let Some(addr) = contact.addresses().next() {
+                  if let Some(dest) = Self::resolve_uri_to_socketaddr(&addr.uri).await {
                       return Some(dest);
                   }
              }
          }
-
-         // 2. Try Via header (received/rport if present, otherwise sent-by)
          if let Some(via) = response.first_via() {
-              // Prefer received/rport if available
-              if let (Some(received_ip_str), Some(rport)) = (via.received(), via.rport()) {
-                  if let Ok(ip) = received_ip_str.parse() {
-                      let dest = SocketAddr::new(ip, rport);
-                      debug!("ACK destination from Via (received/rport): {}", dest);
-                      return Some(dest);
+              if let (Some(received_ip_str), rport_opt) = (via.received(), via.rport()) {
+                  // Use IpAddr::from_str
+                  if let Ok(ip) = IpAddr::from_str(received_ip_str) {
+                      // Handle Option<u16> for rport using ok_or or if let
+                      if let Some(port) = rport_opt {
+                         let dest = SocketAddr::new(ip, port);
+                         return Some(dest);
+                      } else {
+                          warn!("Via had received but no rport");
+                      }
+                  } else {
+                      warn!(ip=%received_ip_str, "Failed to parse received IP in Via");
                   }
               }
-              // Fallback to Via sent-by host/port
-              let host = via.sent_by_host();
-              let port = via.sent_by_port().unwrap_or(5060); // Default SIP port
-              if let Some(dest) = Self::resolve_host_str_to_socketaddr(host, port).await {
-                  debug!("ACK destination from Via (sent-by): {}", dest);
+              // Fallback to Via host/port
+              // Assuming sip-core Via provides host() and port() that return Host and Option<u16>
+              let host = via.host();
+              let port = via.port().unwrap_or(5060);
+              if let Some(dest) = Self::resolve_host_to_socketaddr(&host, port).await {
                   return Some(dest);
               }
          }
-
-         warn!("Could not determine reliable ACK destination from response headers.");
          None
      }
 
-     // Helper to resolve URI host to SocketAddr (handles IP address and domain)
+     // Helper to resolve URI host to SocketAddr
      async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-         let port = uri.port.unwrap_or(5060); // Default SIP port
+         let port = uri.port.unwrap_or(5060);
          Self::resolve_host_to_socketaddr(&uri.host, port).await
      }
 
@@ -757,13 +725,11 @@ impl TransactionManager {
           match host {
               Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
               Host::Domain(domain) => {
-                  // Try direct parse first (might be an IP address string)
-                  if let Ok(ip) = domain.parse::<std::net::IpAddr>() {
+                  if let Ok(ip) = IpAddr::from_str(domain) { // Use FromStr
                       return Some(SocketAddr::new(ip, port));
                   }
-                  // Perform DNS lookup (async)
                   match tokio::net::lookup_host(format!("{}:{}", domain, port)).await {
-                      Ok(mut addrs) => addrs.next(), // Take the first resolved address
+                      Ok(mut addrs) => addrs.next(),
                       Err(e) => {
                           error!(error = %e, domain = %domain, "DNS lookup failed for ACK destination");
                           None
@@ -772,71 +738,49 @@ impl TransactionManager {
               }
           }
       }
-     // Helper to resolve Host string to SocketAddr
-     async fn resolve_host_str_to_socketaddr(host_str: &str, port: u16) -> Option<SocketAddr> {
-         // Try direct parse first
-         if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-             return Some(SocketAddr::new(ip, port));
-         }
-         // Perform DNS lookup
-         match tokio::net::lookup_host(format!("{}:{}", host_str, port)).await {
-             Ok(mut addrs) => addrs.next(),
-             Err(e) => {
-                 error!(error = %e, host = %host_str, "DNS lookup failed");
-                 None
-             }
-         }
-     }
-
 
 }
 
-// Add ResponseBuilder helper trait or standalone function
+// ResponseBuilderExt trait - Use specific accessors and wrap headers
 trait ResponseBuilderExt {
-    fn copy_essential_headers(self, request: &Request) -> Self;
+    fn copy_essential_headers(self, request: &Request) -> Result<Self> where Self: Sized;
 }
 
 impl ResponseBuilderExt for ResponseBuilder {
-     fn copy_essential_headers(mut self, request: &Request) -> Self {
-        // Copy Via (top-most only for responses)
+     fn copy_essential_headers(mut self, request: &Request) -> Result<Self> {
         if let Some(via) = request.first_via() {
-             self = self.with_header(via.clone());
+             self = self.header(TypedHeader::Via(via.clone()));
          }
-         // Copy To (response To usually needs a tag added by TU/Session layer)
-         if let Some(to) = request.typed_header::<To>() {
-             self = self.with_header(to.clone()); // Tag added later
+         if let Some(to) = request.to() {
+             self = self.header(TypedHeader::To(to.clone()));
          }
-         // Copy From (response From must match request From, including tag)
-         if let Some(from) = request.typed_header::<From>() {
-             self = self.with_header(from.clone());
+         if let Some(from) = request.from() {
+             self = self.header(TypedHeader::From(from.clone()));
          }
-         // Copy Call-ID
          if let Some(call_id) = request.call_id() {
-             self = self.with_header(call_id.clone());
+             self = self.header(TypedHeader::CallId(call_id.clone()));
          }
-         // Copy CSeq
          if let Some(cseq) = request.cseq() {
-             self = self.with_header(cseq.clone());
+             self = self.header(TypedHeader::CSeq(cseq.clone()));
          }
-         // Add Content-Length: 0 by default for responses without bodies
-         self = self.with_header(ContentLength::new(0));
-         self
+         self = self.header(TypedHeader::ContentLength(ContentLength::new(0)));
+         Ok(self) // Return Result
      }
 }
 
 
 impl fmt::Debug for TransactionManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Avoid trying to print the Mutex contents directly, list counts instead
+        // Avoid trying to print the Mutex contents directly or requiring Debug on contents
         f.debug_struct("TransactionManager")
-            .field("transport", &"Arc<dyn Transport>") // Don't print transport details
-            // .field("client_transactions_count", &self.client_transactions.lock().unwrap().len()) // Careful with blocking in fmt
-            // .field("server_transactions_count", &self.server_transactions.lock().unwrap().len())
-            // .field("destinations_count", &self.transaction_destinations.lock().unwrap().len())
-            .field("events_tx", &self.events_tx)
-            // .field("event_subscribers_count", &self.event_subscribers.lock().unwrap().len())
-            .field("transport_rx", &"Arc<Mutex<Receiver>>") // Don't print receiver details
-            .field("running", &self.running) // Arc<Mutex<bool>> can be debugged
+            .field("transport", &"Arc<dyn Transport>")
+            .field("client_transactions", &"Arc<Mutex<HashMap<...>>>") // Indicate map exists
+            .field("server_transactions", &"Arc<Mutex<HashMap<...>>>")
+            .field("transaction_destinations", &"Arc<Mutex<HashMap<...>>>")
+            .field("events_tx", &self.events_tx) // Sender might be Debug
+            .field("event_subscribers", &"Arc<Mutex<Vec<Sender>>>")
+            .field("transport_rx", &"Arc<Mutex<Receiver>>")
+            .field("running", &self.running)
             .finish()
     }
 }

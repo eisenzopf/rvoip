@@ -5,6 +5,8 @@ use std::str::FromStr;
 use tracing::debug;
 
 use crate::error::{self, Error, Result};
+use crate::transaction::TransactionKey; // Import TransactionKey
+use crate::transaction::TransactionKind; // Import Kind
 
 /// Generate a random branch parameter for Via header (RFC 3261 magic cookie + random string)
 pub fn generate_branch() -> String {
@@ -39,30 +41,24 @@ pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
 pub fn create_response(request: &Request, status: StatusCode) -> Response {
     let mut builder = ResponseBuilder::new(status);
 
-    // Copy required headers using dedicated accessors where possible
     if let Some(via) = request.first_via() {
-        // Only copy the top-most Via
-        builder = builder.header(via.clone()); // Use .header() for typed headers
+        builder = builder.header(TypedHeader::Via(via.clone()));
     }
-    // Use specific accessors for From/To/CallId/CSeq/ContentLength
     if let Some(from) = request.from() {
-        builder = builder.header(from.clone());
+        builder = builder.header(TypedHeader::From(from.clone()));
     }
     if let Some(to) = request.to() {
-        // Add tag to To header logic usually belongs in session/dialog layer
-        builder = builder.header(to.clone());
+        builder = builder.header(TypedHeader::To(to.clone()));
     }
     if let Some(call_id) = request.call_id() {
-        builder = builder.header(call_id.clone());
+        builder = builder.header(TypedHeader::CallId(call_id.clone()));
     }
     if let Some(cseq) = request.cseq() {
-        builder = builder.header(cseq.clone());
+        builder = builder.header(TypedHeader::CSeq(cseq.clone()));
     }
 
-    // Add Content-Length header (empty body)
-    builder = builder.header(ContentLength::new(0));
+    builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));
 
-    // build() should now be infallible if all headers are valid TypedHeaders
     builder.build()
 }
 
@@ -82,39 +78,35 @@ pub fn create_ok_response(request: &Request) -> Response {
     create_response(request, StatusCode::Ok)
 }
 
-/// Extract the potential transaction key prefix and branch from a message
-/// The manager will combine this with other elements (like method for server tx)
-/// to form the final key.
-pub fn extract_transaction_key_parts(message: &Message) -> Result<(String, String)> {
+/// Extract the transaction classification (prefix) and branch from a message
+/// Used by manager to determine transaction type and potentially match.
+pub fn extract_transaction_parts(message: &Message) -> Result<(TransactionKind, String)> {
     let branch = extract_branch(message)
         .ok_or_else(|| Error::Other("Missing branch parameter in Via header".to_string()))?;
 
-    let prefix = match message {
+    let kind = match message {
         Message::Request(req) => {
-            // Key generation depends on METHOD
             match req.method() {
-                 Method::Invite => "ist", // Invite Server Transaction
-                 Method::Ack => "ist", // ACK matches IST by branch
-                 Method::Cancel => "ist", // CANCEL matches IST by branch
-                 _ => "nist", // Non-Invite Server Transaction
+                 Method::Invite => TransactionKind::InviteServer,
+                 Method::Ack => TransactionKind::InviteServer, // Matches existing IST
+                 Method::Cancel => TransactionKind::InviteServer, // Matches existing IST
+                 _ => TransactionKind::NonInviteServer,
              }
         }
         Message::Response(_) => {
-             // Responses match Client Transactions
             let (_, cseq_method) = extract_cseq(message)
                 .ok_or_else(|| Error::Other("Missing or invalid CSeq header in Response".to_string()))?;
 
             if cseq_method == Method::Invite {
-                "ict" // Invite Client Transaction
+                TransactionKind::InviteClient
             } else {
-                "nict" // Non-Invite Client Transaction
+                TransactionKind::NonInviteClient
             }
         }
     };
 
-    Ok((prefix.to_string(), branch))
+    Ok((kind, branch))
 }
-
 
 /// Extract a potential client transaction ID branch from a response.
 /// Used by the manager to find the matching client transaction.
@@ -122,7 +114,6 @@ pub fn extract_client_branch_from_response(response: &Response) -> Option<String
     response.first_via()
         .and_then(|via| via.branch().map(|b| b.to_string()))
 }
-
 
 /// Extract the destination address from a transaction ID
 ///
@@ -142,11 +133,27 @@ pub fn extract_destination(_transaction_id: &str) -> Option<std::net::SocketAddr
     // Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5071)))
 }
 
+/// Creates a transaction key from a SIP message based on RFC 3261 rules.
+///
+/// This is a simplified placeholder and needs refinement for full RFC compliance.
+pub fn transaction_key_from_message(message: &Message) -> Result<TransactionKey> {
+    let branch = extract_branch(message)
+        .ok_or_else(|| Error::Other("Missing branch in Via for key generation".to_string()))?;
+    let method = match message {
+        Message::Request(req) => req.method().clone(),
+        Message::Response(_) => extract_cseq(message)
+                                    .ok_or(Error::Other("Missing or invalid CSeq in Response".to_string()))?
+                                    .1, // Get the Method part
+    };
+    // TODO: Refine key generation according to RFC 3261 Section 17.1.3 and 17.2.3 rigorously.
+    Ok(format!("{}-{}", branch, method))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rvoip_sip_core::prelude::*;
+    use crate::transaction::TransactionKind;
     use bytes::Bytes;
     use std::str::FromStr;
 
@@ -156,14 +163,21 @@ mod tests {
         let from_uri = "sip:alice@atlanta.com";
         let via_str = format!("SIP/2.0/UDP pc33.atlanta.com;branch={}", branch);
 
-        // Use builders correctly
-        RequestBuilder::new(method.clone(), uri).unwrap() // new takes &str
-            .header(Via::parse(&via_str).expect("Failed to parse Via")) // Via::parse returns Result
-            .header(From::new(Address::new(Uri::parse(from_uri).unwrap()).with_tag("fromtag").unwrap()))
-            .header(To::new(Address::new(Uri::parse(uri).unwrap())))
-            .header(CallId::new("test-call-id"))
-            .header(CSeq::new(1, method))
-            .header(ContentLength::new(0))
+        // Create header structs first
+        let via = Via::parse(&via_str).expect("Failed to parse Via");
+        let from = From::new(Address::new(Uri::parse(from_uri).unwrap()).with_tag("fromtag").unwrap());
+        let to = To::new(Address::new(Uri::parse(uri).unwrap()));
+        let call_id = CallId::new("test-call-id");
+        let cseq = CSeq::new(1, method);
+        let content_length = ContentLength::new(0);
+
+        RequestBuilder::new(method.clone(), uri).unwrap()
+            .header(TypedHeader::Via(via))
+            .header(TypedHeader::From(from))
+            .header(TypedHeader::To(to))
+            .header(TypedHeader::CallId(call_id))
+            .header(TypedHeader::CSeq(cseq))
+            .header(TypedHeader::ContentLength(content_length))
             .build()
     }
 
@@ -173,22 +187,27 @@ mod tests {
         let from_uri = "sip:alice@atlanta.com";
         let via_str = format!("SIP/2.0/UDP pc33.atlanta.com;branch={}", branch);
 
-        let mut builder = ResponseBuilder::new(status);
-
-        builder = builder.header(Via::parse(&via_str).expect("Failed to parse Via"));
-        builder = builder.header(From::new(Address::new(Uri::parse(from_uri).unwrap()).with_tag("fromtag").unwrap()));
-        builder = builder.header(CallId::new("test-call-id"));
-        builder = builder.header(CSeq::new(1, cseq_method));
+        let via = Via::parse(&via_str).expect("Failed to parse Via");
+        let from = From::new(Address::new(Uri::parse(from_uri).unwrap()).with_tag("fromtag").unwrap());
+        let call_id = CallId::new("test-call-id");
+        let cseq = CSeq::new(1, cseq_method);
+        let content_length = ContentLength::new(0);
 
         let mut to_addr = Address::new(Uri::parse(uri).unwrap());
         if let Some(tag) = to_tag {
             to_addr = to_addr.with_tag(tag).unwrap();
         }
-        builder = builder.header(To::new(to_addr));
-        builder = builder.header(ContentLength::new(0));
-        builder.build()
-    }
+        let to = To::new(to_addr);
 
+        ResponseBuilder::new(status)
+            .header(TypedHeader::Via(via))
+            .header(TypedHeader::From(from))
+            .header(TypedHeader::CallId(call_id))
+            .header(TypedHeader::CSeq(cseq))
+            .header(TypedHeader::To(to))
+            .header(TypedHeader::ContentLength(content_length))
+            .build()
+    }
 
     #[test]
     fn test_generate_branch() {
@@ -299,45 +318,43 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_transaction_key_parts_request() {
-        // Adjust expected prefix based on updated logic
+    fn test_extract_transaction_parts_request() {
         let invite_req = create_test_request(Method::Invite, "branch-invite");
-        let (prefix, branch) = extract_transaction_key_parts(&Message::Request(invite_req)).unwrap();
-        assert_eq!(prefix, "ist");
+        let (kind, branch) = extract_transaction_parts(&Message::Request(invite_req)).unwrap();
+        assert_eq!(kind, TransactionKind::InviteServer);
         assert_eq!(branch, "branch-invite");
 
         let options_req = create_test_request(Method::Options, "branch-options");
-        let (prefix, branch) = extract_transaction_key_parts(&Message::Request(options_req)).unwrap();
-         assert_eq!(prefix, "nist");
+        let (kind, branch) = extract_transaction_parts(&Message::Request(options_req)).unwrap();
+         assert_eq!(kind, TransactionKind::NonInviteServer);
          assert_eq!(branch, "branch-options");
 
-        // ACK/CANCEL now correctly associated with IST
         let ack_req = create_test_request(Method::Ack, "branch-ack");
-         let (prefix, branch) = extract_transaction_key_parts(&Message::Request(ack_req)).unwrap();
-        assert_eq!(prefix, "ist");
+         let (kind, branch) = extract_transaction_parts(&Message::Request(ack_req)).unwrap();
+        assert_eq!(kind, TransactionKind::InviteServer); // ACK targets IST
         assert_eq!(branch, "branch-ack");
 
         let cancel_req = create_test_request(Method::Cancel, "branch-cancel");
-        let (prefix, branch) = extract_transaction_key_parts(&Message::Request(cancel_req)).unwrap();
-        assert_eq!(prefix, "ist");
+        let (kind, branch) = extract_transaction_parts(&Message::Request(cancel_req)).unwrap();
+        assert_eq!(kind, TransactionKind::InviteServer); // CANCEL targets IST
         assert_eq!(branch, "branch-cancel");
     }
 
      #[test]
-    fn test_extract_transaction_key_parts_response() {
+    fn test_extract_transaction_parts_response() {
         let ok_invite_res = create_test_response(StatusCode::Ok, "branch-res-invite", Method::Invite, Some("tag"));
-        let (prefix, branch) = extract_transaction_key_parts(&Message::Response(ok_invite_res)).unwrap();
-        assert_eq!(prefix, "ict");
+        let (kind, branch) = extract_transaction_parts(&Message::Response(ok_invite_res)).unwrap();
+        assert_eq!(kind, TransactionKind::InviteClient);
         assert_eq!(branch, "branch-res-invite");
 
         let ok_options_res = create_test_response(StatusCode::Ok, "branch-res-options", Method::Options, Some("tag"));
-        let (prefix, branch) = extract_transaction_key_parts(&Message::Response(ok_options_res)).unwrap();
-        assert_eq!(prefix, "nict");
+        let (kind, branch) = extract_transaction_parts(&Message::Response(ok_options_res)).unwrap();
+        assert_eq!(kind, TransactionKind::NonInviteClient);
          assert_eq!(branch, "branch-res-options");
 
         let trying_invite_res = create_test_response(StatusCode::Trying, "branch-res-trying", Method::Invite, None);
-         let (prefix, branch) = extract_transaction_key_parts(&Message::Response(trying_invite_res)).unwrap();
-        assert_eq!(prefix, "ict"); // Still matches invite client tx
+         let (kind, branch) = extract_transaction_parts(&Message::Response(trying_invite_res)).unwrap();
+        assert_eq!(kind, TransactionKind::InviteClient);
         assert_eq!(branch, "branch-res-trying");
     }
 
@@ -350,5 +367,24 @@ mod tests {
          let not_found_res = create_test_response(StatusCode::NotFound, "branch-client-nf", Method::Register, None);
         let branch = extract_client_branch_from_response(&not_found_res);
         assert_eq!(branch, Some("branch-client-nf".to_string()));
+    }
+
+    #[test]
+    fn test_transaction_key_from_message() {
+        let invite_req = create_test_request(Method::Invite, "branch-invite");
+        let key = transaction_key_from_message(&Message::Request(invite_req)).unwrap();
+        assert_eq!(key, "branch-invite-INVITE");
+
+        let ok_invite_res = create_test_response(StatusCode::Ok, "branch-res-invite", Method::Invite, Some("tag"));
+        let key = transaction_key_from_message(&Message::Response(ok_invite_res)).unwrap();
+        assert_eq!(key, "branch-res-invite-INVITE");
+
+        let options_req = create_test_request(Method::Options, "branch-options");
+        let key = transaction_key_from_message(&Message::Request(options_req)).unwrap();
+        assert_eq!(key, "branch-options-OPTIONS");
+
+        let not_found_res = create_test_response(StatusCode::NotFound, "branch-client-nf", Method::Register, None);
+        let key = transaction_key_from_message(&Message::Response(not_found_res)).unwrap();
+        assert_eq!(key, "branch-client-nf-REGISTER");
     }
 } 

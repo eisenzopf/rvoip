@@ -206,33 +206,4 @@ pub trait Transaction: fmt::Debug + Send + 'static {
 
     /// Get the last response sent or received by this transaction.
     fn last_response(&self) -> Option<&Response>;
-}
-
-// Implement `from_message` for TransactionKey (placeholder)
-// In a real implementation, this would parse Via, CSeq etc.
-impl TransactionKey {
-    pub fn from_message(message: &Message) -> Result<Self> {
-        // Placeholder: Use Via branch + CSeq method for uniqueness attempt
-         let branch = utils::extract_branch(message)
-             .ok_or_else(|| Error::Other("Missing branch in Via for key generation".to_string()))?;
-         let method = match message {
-             Message::Request(req) => req.method().clone(),
-             // Use the helper function to extract CSeq from Response
-             Message::Response(_) => utils::extract_cseq(message)
-                                        .ok_or(Error::Other("Missing or invalid CSeq in Response".to_string()))?
-                                        .1, // Get the Method part
-         };
-
-        // Include CSeq method for server transactions to differentiate INVITE/non-INVITE on same branch
-        // Client transactions use CSeq method from original request implicitly via tx type.
-        // Include top Via sent-by for server requests to disambiguate retransmissions arriving
-        // at different transport listeners (though manager should ideally handle this).
-
-        // TODO: Refine key generation according to RFC 3261 Section 17.1.3 and 17.2.3 rigorously.
-        // For server transactions, key = branch + sent-by + method (excluding ACK/CANCEL?)
-        // For client transactions, key = branch + sent-by + method (of original request)
-        // This simple version might have collisions.
-
-         Ok(format!("{}-{}", branch, method)) // Highly simplified!
-    }
 } 
