@@ -215,8 +215,15 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         }
     }
     
+    // Take exactly content_length bytes for the body
     let (final_rest, body_slice) = take(content_length)(rest)?;
-    
+
+    // In lenient mode, if there's extra data after consuming content_length bytes, discard it with a warning
+    if mode == ParseMode::Lenient && !final_rest.is_empty() {
+        eprintln!("Warning: Message has {} extra bytes after Content-Length: {}. Ignoring excess data.", 
+                  final_rest.len(), content_length);
+    }
+
     // 6. Construct Message
     let body = Bytes::copy_from_slice(body_slice);
     let message = if is_request {
@@ -246,7 +253,15 @@ pub fn parse_message(input: &[u8]) -> Result<Message> {
 
 /// Parse a SIP message from bytes with specific parsing mode
 pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message> {
-    match all_consuming(|i| full_message_parser(i, mode))(input) {
+    // In strict mode, use all_consuming to ensure the entire input is consumed
+    // In lenient mode, don't use all_consuming to allow for excess input after valid message
+    let parser_result = if mode == ParseMode::Strict {
+        all_consuming(|i| full_message_parser(i, mode))(input)
+    } else {
+        full_message_parser(input, mode)
+    };
+    
+    match parser_result {
         Ok((_, message)) => Ok(message),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
              let offset = input.len() - e.input.len();
@@ -748,6 +763,20 @@ mod tests {
         assert!(result.is_ok(), "Lenient mode should accept message with Content-Length mismatch");
         if let Ok((_, Message::Request(req))) = result {
             assert_eq!(req.body.len(), 4, "Lenient mode should use available body data");
+        } else {
+            panic!("Expected Request in lenient parsing mode");
+        }
+        
+        // 6. Body longer than Content-Length - lenient mode should truncate to Content-Length
+        let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+                     Content-Length: 4\r\n\
+                     \r\n\
+                     TestExtraDataThatShouldBeIgnored";
+        let result = full_message_parser(input, ParseMode::Lenient);
+        assert!(result.is_ok(), "Lenient mode should accept message with body longer than Content-Length");
+        if let Ok((_, Message::Request(req))) = result {
+            assert_eq!(req.body.len(), 4, "Lenient mode should use only Content-Length bytes");
+            assert_eq!(&req.body[..], b"Test", "Lenient mode should use correct body part");
         } else {
             panic!("Expected Request in lenient parsing mode");
         }

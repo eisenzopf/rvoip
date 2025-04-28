@@ -339,11 +339,68 @@ fn build_response_with_macro(
 fn extract_from_header(headers: &[(String, String)]) -> Result<(&str, &str, &str), SipError> {
     for (name, value) in headers {
         if name.to_lowercase() == "from" || name == "f" {
-            // Very simplified parsing - in a real implementation would use a proper parser
-            // Looking for patterns like: "Display Name" <sip:user@domain>;tag=value
+            // In a production implementation, we would use the Address parser to parse this properly
+            // For test purposes, check some basic patterns
             
-            // For a simple test, just return some static values that will work with the macros
-            return Ok(("Alice", "sip:alice@example.com", "tag-value"));
+            // Check for display name pattern: "Name" <uri>;tag=value
+            if value.contains('<') && value.contains('>') {
+                // Extract display name (simple approximation)
+                let display_name = if let Some(name_end) = value.find('<') {
+                    let name = value[..name_end].trim();
+                    // Remove quotes if present
+                    if name.starts_with('"') && name.ends_with('"') {
+                        &name[1..name.len()-1]
+                    } else {
+                        name
+                    }
+                } else {
+                    ""
+                };
+                
+                // Extract URI
+                let uri = if let (Some(uri_start), Some(uri_end)) = (value.find('<'), value.find('>')) {
+                    value[uri_start+1..uri_end].trim()
+                } else {
+                    "sip:user@example.com" // Fallback
+                };
+                
+                // Extract tag
+                let tag = if let Some(tag_pos) = value.find("tag=") {
+                    // Get everything after "tag=" until end or semicolon
+                    let tag_start = tag_pos + 4;
+                    if let Some(end_pos) = value[tag_start..].find(';') {
+                        &value[tag_start..tag_start + end_pos]
+                    } else {
+                        &value[tag_start..]
+                    }
+                } else {
+                    "tag-value" // Default tag
+                };
+                
+                return Ok((display_name, uri, tag));
+            } else {
+                // Simple URI format: sip:user@domain;tag=value
+                let uri = if let Some(tag_pos) = value.find(';') {
+                    &value[..tag_pos]
+                } else {
+                    value
+                };
+                
+                // Extract tag
+                let tag = if let Some(tag_pos) = value.find("tag=") {
+                    // Get everything after "tag=" until end or semicolon
+                    let tag_start = tag_pos + 4;
+                    if let Some(end_pos) = value[tag_start..].find(';') {
+                        &value[tag_start..tag_start + end_pos]
+                    } else {
+                        &value[tag_start..]
+                    }
+                } else {
+                    "tag-value" // Default tag
+                };
+                
+                return Ok(("", uri, tag));
+            }
         }
     }
     
@@ -355,10 +412,39 @@ fn extract_from_header(headers: &[(String, String)]) -> Result<(&str, &str, &str
 fn extract_to_header(headers: &[(String, String)]) -> Result<(&str, &str), SipError> {
     for (name, value) in headers {
         if name.to_lowercase() == "to" || name == "t" {
-            // Very simplified parsing - in a real implementation would use a proper parser
-            
-            // For a simple test, just return some static values that will work with the macros
-            return Ok(("Bob", "sip:bob@example.com"));
+            // Check for display name pattern: "Name" <uri>
+            if value.contains('<') && value.contains('>') {
+                // Extract display name (simple approximation)
+                let display_name = if let Some(name_end) = value.find('<') {
+                    let name = value[..name_end].trim();
+                    // Remove quotes if present
+                    if name.starts_with('"') && name.ends_with('"') {
+                        &name[1..name.len()-1]
+                    } else {
+                        name
+                    }
+                } else {
+                    ""
+                };
+                
+                // Extract URI
+                let uri = if let (Some(uri_start), Some(uri_end)) = (value.find('<'), value.find('>')) {
+                    value[uri_start+1..uri_end].trim()
+                } else {
+                    "sip:user@example.com" // Fallback
+                };
+                
+                return Ok((display_name, uri));
+            } else {
+                // Simple URI format: sip:user@domain
+                let uri = if let Some(param_pos) = value.find(';') {
+                    &value[..param_pos]
+                } else {
+                    value
+                };
+                
+                return Ok(("", uri));
+            }
         }
     }
     
@@ -410,7 +496,15 @@ fn extract_cseq_tuple(headers: &[(String, String)]) -> Result<(u32, Method), Sip
                     "ACK" => Method::Ack,
                     "BYE" => Method::Bye,
                     "CANCEL" => Method::Cancel,
-                    _ => Method::Invite, // Default
+                    "SUBSCRIBE" => Method::Subscribe,
+                    "NOTIFY" => Method::Notify,
+                    "REFER" => Method::Refer,
+                    "INFO" => Method::Info,
+                    "MESSAGE" => Method::Message,
+                    "PRACK" => Method::Prack,
+                    "UPDATE" => Method::Update,
+                    "PUBLISH" => Method::Publish,
+                    _ => Method::Invite, // Default to INVITE for unknown methods
                 };
                 return Ok((num, method));
             }
@@ -425,8 +519,53 @@ fn extract_cseq_tuple(headers: &[(String, String)]) -> Result<(u32, Method), Sip
 fn extract_via(headers: &[(String, String)]) -> Result<(&str, &str, &str), SipError> {
     for (name, value) in headers {
         if name.to_lowercase() == "via" || name.to_lowercase() == "v" {
-            // For a simple test, just return some static values that will work with the macros
-            return Ok(("example.com", "UDP", "branch=z9hG4bK123"));
+            // Via format: SIP/2.0/transport host;branch=value;other-params
+
+            // Extract transport
+            let transport = if let Some(transport_start) = value.find("SIP/2.0/") {
+                let transport_start = transport_start + 8; // Move past "SIP/2.0/"
+                let transport_end = if let Some(pos) = value[transport_start..].find(' ') {
+                    transport_start + pos
+                } else if let Some(pos) = value[transport_start..].find(';') {
+                    transport_start + pos
+                } else {
+                    value.len()
+                };
+                
+                value[transport_start..transport_end].trim()
+            } else {
+                "UDP" // Default to UDP
+            };
+            
+            // Extract host
+            let host = if let Some(protocol_end) = value.find(transport) {
+                let host_start = protocol_end + transport.len();
+                let host_end = if let Some(pos) = value[host_start..].find(';') {
+                    host_start + pos
+                } else {
+                    value.len()
+                };
+                
+                value[host_start..host_end].trim()
+            } else {
+                "example.com" // Default host
+            };
+            
+            // Extract branch parameter
+            let branch = if let Some(branch_pos) = value.find("branch=") {
+                let branch_start = branch_pos;
+                let branch_end = if let Some(pos) = value[branch_start..].find(';') {
+                    branch_start + pos
+                } else {
+                    value.len()
+                };
+                
+                &value[branch_start..branch_end]
+            } else {
+                "branch=z9hG4bK123" // Default branch
+            };
+            
+            return Ok((host, transport, branch));
         }
     }
     
