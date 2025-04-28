@@ -313,7 +313,7 @@ mod tests {
             params: Vec::new(),
         };
         // In our normalizing constructor, this should be converted to None
-        let normalized = Address::new(Some("   "), addr2.uri.clone());
+        let normalized = Address::new_with_display_name("   ", addr2.uri.clone());
         assert_eq!(normalized.display_name, None);
     }
     

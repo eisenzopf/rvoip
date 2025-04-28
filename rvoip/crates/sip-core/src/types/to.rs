@@ -30,7 +30,7 @@
 /// let to = To::new(address);
 ///
 /// // Create a To header with a tag
-/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
 /// let mut address = Address::new(Some("Bob"), uri);
 /// address.set_tag("1928301774");
 /// let to = To::new(address);
@@ -80,7 +80,8 @@ use nom::combinator;
 /// assert_eq!(to.0.uri.host.to_string(), "example.com");
 ///
 /// // To header with display name
-/// let address = Address::new(Some("Bob Smith"), uri.clone());
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// let address = Address::new(Some("Bob Smith"), uri);
 /// let to = To::new(address);
 /// assert_eq!(to.0.display_name, Some("Bob Smith".to_string()));
 ///
@@ -120,7 +121,7 @@ impl To {
     ///
     /// // To header with display name
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let address = Address::new(Some("Alice Smith"), uri);
+    /// let address = Address::new_with_display_name("Alice", uri);
     /// let to = To::new(address);
     /// ```
     pub fn new(address: Address) -> Self {
@@ -193,6 +194,37 @@ impl To {
     /// ```
     pub fn set_tag(&mut self, tag: impl Into<String>) {
         self.0.set_tag(tag)
+    }
+
+    /// Creates a new To header with a tag.
+    ///
+    /// This method is used to create a new To header with a specific tag.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: The tag value to set in the To header
+    ///
+    /// # Returns
+    ///
+    /// A new `To` instance with the specified tag
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a To header manually
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let address = Address::new(uri);
+    /// let to = To::new(address).with_tag("1234abcd");
+    ///
+    /// // Verify the tag
+    /// assert_eq!(to.tag(), Some("1234abcd"));
+    /// ```
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.set_tag(tag);
+        self
     }
 }
 
@@ -299,7 +331,7 @@ impl Deref for To {
     ///
     /// // Create a To header directly
     /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    /// let mut address = Address::new(Some("Bob"), uri);
+    /// let mut address = Address::with_display_name("Bob", uri);
     /// address.set_tag("1928301774");
     /// let to = To::new(address);
     ///
@@ -311,4 +343,49 @@ impl Deref for To {
     fn deref(&self) -> &Self::Target {
         &self.0
     }
+}
+
+/// Represents the To header field.
+///
+/// The To header field specifies the logical recipient of the request.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+///
+/// // Create from string
+/// let to = To::from_str("\"Alice\" <sip:alice@example.com>").unwrap();
+/// assert_eq!(to.address().display_name(), Some("Alice"));
+///
+/// // Create programmatically
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// let address = Address::with_display_name("Bob", uri);
+/// let to = To::new(address);
+/// assert_eq!(to.address().display_name(), Some("Bob"));
+/// ```
+
+pub fn sip(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<To> {
+    let mut uri = crate::types::uri::Uri::sip(host);
+    if let Some(u) = user {
+        uri = uri.with_user(u);
+    }
+    let address = Address::new(uri);
+    Ok(To(address))
+}
+
+pub fn sips(host: impl Into<String>, user: Option<impl Into<String>>) -> Result<To> {
+    let mut uri = crate::types::uri::Uri::sips(host);
+    if let Some(u) = user {
+        uri = uri.with_user(u);
+    }
+    let address = Address::new(uri);
+    Ok(To(address))
+}
+
+pub fn tel(number: impl Into<String>) -> Result<To> {
+    let uri = crate::types::uri::Uri::tel(number);
+    let address = Address::new(uri);
+    Ok(To(address))
 }

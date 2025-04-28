@@ -44,7 +44,7 @@
 //!
 //! // Create an Address programmatically
 //! let uri = Uri::from_str("sip:alice@example.com").unwrap();
-//! let mut addr = Address::new(Some("Alice Smith"), uri);
+//! let mut addr = Address::new(uri.clone());
 //! addr.set_tag("5678");
 //! ```
 
@@ -78,7 +78,7 @@ use ordered_float::NotNan;
 ///
 /// // Create programmatically
 /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-/// let addr = Address::new(Some("Alice"), uri);
+/// let addr = Address::new(uri.clone());
 /// ```
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct Address {
@@ -154,15 +154,45 @@ impl fmt::Display for Address {
 }
 
 impl Address {
-    /// Creates a new Address with the given display name and URI.
+    /// Creates a new Address with just a URI and no display name.
     ///
-    /// The display name is optional and will be normalized:
+    /// # Parameters
+    ///
+    /// - `uri`: The SIP URI (e.g., sip:john@example.com)
+    ///
+    /// # Returns
+    ///
+    /// A new Address with no parameters and no display name
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::{Address, Uri};
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// 
+    /// // Without display name
+    /// let addr = Address::new(uri.clone());
+    /// assert_eq!(addr.display_name, None);
+    /// ```
+    pub fn new(uri: Uri) -> Self {
+        Address {
+            display_name: None,
+            uri,
+            params: Vec::new(),
+        }
+    }
+    
+    /// Creates a new Address with both display name and URI.
+    ///
+    /// The display name will be normalized:
     /// - An empty or whitespace-only display name will be converted to None
     /// - A non-empty display name will be preserved as provided
     ///
     /// # Parameters
     ///
-    /// - `display_name`: Optional display name (e.g., "John Doe")
+    /// - `display_name`: The display name (e.g., "John Doe")
     /// - `uri`: The SIP URI (e.g., sip:john@example.com)
     ///
     /// # Returns
@@ -178,27 +208,43 @@ impl Address {
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// 
     /// // With display name
-    /// let addr1 = Address::new(Some("Alice Smith"), uri.clone());
+    /// let addr1 = Address::new_with_display_name("Alice Smith", uri.clone());
     /// assert_eq!(addr1.display_name, Some("Alice Smith".to_string()));
     ///
-    /// // Without display name
-    /// let addr2 = Address::new(None::<String>, uri.clone());
-    /// assert_eq!(addr2.display_name, None);
-    ///
     /// // Empty display name becomes None
-    /// let addr3 = Address::new(Some(""), uri);
+    /// let addr3 = Address::new_with_display_name("", uri);
     /// assert_eq!(addr3.display_name, None);
     /// ```
-    pub fn new(display_name: Option<impl Into<String>>, uri: Uri) -> Self {
-        let normalized_display_name = display_name
-            .map(|s| s.into()) // Convert to String
-            .filter(|s| !s.trim().is_empty()); // Convert Some("") or Some("  ") to None
+    pub fn new_with_display_name(display_name: impl Into<String>, uri: Uri) -> Self {
+        let name = display_name.into();
+        let normalized_display_name = if name.trim().is_empty() {
+            None
+        } else {
+            Some(name)
+        };
             
         Address {
-            display_name: normalized_display_name, // Use the normalized version
+            display_name: normalized_display_name,
             uri,
             params: Vec::new(),
         }
+    }
+    
+    /// Creates a new Address with the given display name and URI.
+    ///
+    /// This is an alias for `new_with_display_name` to maintain backward compatibility.
+    /// New code should use `new_with_display_name` instead.
+    ///
+    /// # Parameters
+    ///
+    /// - `display_name`: The display name (e.g., "John Doe")
+    /// - `uri`: The SIP URI (e.g., sip:john@example.com)
+    ///
+    /// # Returns
+    ///
+    /// A new Address with no parameters
+    pub fn with_display_name(display_name: impl Into<String>, uri: Uri) -> Self {
+        Self::new_with_display_name(display_name, uri)
     }
 
     /// Gets the display name, if present.
@@ -216,11 +262,11 @@ impl Address {
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// 
     /// // With display name
-    /// let addr1 = Address::new(Some("Alice Smith"), uri.clone());
-    /// assert_eq!(addr1.display_name(), Some("Alice Smith"));
+    /// let addr1 = Address::new(uri.clone());
+    /// assert_eq!(addr1.display_name(), None);
     ///
     /// // Without display name
-    /// let addr2 = Address::new(None::<String>, uri.clone());
+    /// let addr2 = Address::new(uri.clone());
     /// assert_eq!(addr2.display_name(), None);
     /// ```
     pub fn display_name(&self) -> Option<&str> {
@@ -243,7 +289,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(Some("Alice"), uri);
+    /// let mut addr = Address::new(uri.clone());
     ///
     /// // Set the tag
     /// addr.set_tag("1234abcd");
@@ -258,6 +304,34 @@ impl Address {
         self.params.retain(|p| !matches!(p, Param::Tag(_)));
         // Add the new one
         self.params.push(Param::Tag(tag.into()));
+    }
+    
+    /// Sets a tag parameter and returns self for method chaining.
+    ///
+    /// The tag parameter is used in From and To headers to uniquely
+    /// identify dialog participants and ensure dialog matching.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: The tag value to set
+    ///
+    /// # Returns
+    ///
+    /// Self for method chaining
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::{Address, Uri};
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let addr = Address::new(uri).with_tag("1234abcd");
+    /// assert_eq!(addr.tag(), Some("1234abcd"));
+    /// ```
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.set_tag(tag);
+        self
     }
     
     /// Gets the tag parameter value, if present.
@@ -277,13 +351,13 @@ impl Address {
     ///
     /// // Create an address with a tag parameter
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// assert_eq!(addr.tag(), Some("1234"));
     ///
     /// // An address without a tag parameter
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let addr = Address::new(None::<String>, uri);
+    /// let addr = Address::new(uri.clone());
     /// assert_eq!(addr.tag(), None);
     /// ```
     pub fn tag(&self) -> Option<&str> {
@@ -310,13 +384,13 @@ impl Address {
     ///
     /// // Create an address with an expires parameter
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_expires(3600);
     /// assert_eq!(addr.expires(), Some(3600));
     ///
     /// // An address without an expires parameter
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let addr = Address::new(None::<String>, uri);
+    /// let addr = Address::new(uri.clone());
     /// assert_eq!(addr.expires(), None);
     /// ```
     pub fn expires(&self) -> Option<u32> {
@@ -345,7 +419,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     ///
     /// addr.set_expires(3600); // 1 hour
     /// assert_eq!(addr.expires(), Some(3600));
@@ -381,13 +455,13 @@ impl Address {
     ///
     /// // Create an address with a q parameter
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_q(0.5);
     /// assert_eq!(addr.q().map(|n| n.into_inner()), Some(0.5));
     ///
     /// // An address without a q parameter
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let addr = Address::new(None::<String>, uri);
+    /// let addr = Address::new(uri.clone());
     /// assert_eq!(addr.q(), None);
     /// ```
     pub fn q(&self) -> Option<NotNan<f32>> {
@@ -416,7 +490,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     ///
     /// // Set normal q-value
     /// addr.set_q(0.8);
@@ -455,7 +529,7 @@ impl Address {
     ///
     /// // Create an address with parameters
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// addr.set_expires(3600);
     /// 
@@ -510,7 +584,7 @@ impl Address {
     ///
     /// // Create an address with parameters
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// 
     /// // Add a flag parameter (lr)
@@ -569,7 +643,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     ///
     /// // Set a parameter with a value
     /// addr.set_param("custom", Some("value"));
@@ -628,7 +702,7 @@ impl Address {
     ///
     /// // Create an address with parameters
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// addr.set_expires(3600);
     /// 
@@ -716,7 +790,7 @@ impl FromStr for Address {
     /// 
     /// // Create an address with a tag parameter programmatically
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
-    /// let mut addr = Address::new(None::<String>, uri);
+    /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// assert_eq!(addr.tag(), Some("1234"));
     /// ```

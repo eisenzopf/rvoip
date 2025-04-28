@@ -221,7 +221,7 @@ fn test_parse_retry_after() {
 fn test_parse_from_header() {
     // Test parsing From header by using constructors directly
     let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    let addr = Address::new(Some("Alice"), uri);
+    let addr = Address::new_with_display_name("Alice", uri);
     let mut from = From::new(addr);
     from.set_tag("1928301774");
     
@@ -242,7 +242,7 @@ fn test_parse_from_header() {
     
     // Test without display name
     let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
-    let addr = Address::new(None::<String>, uri);
+    let addr = Address::new(uri);
     let mut from = From::new(addr);
     from.set_tag("a73kszlfl");
     
@@ -252,7 +252,7 @@ fn test_parse_from_header() {
     
     // Test without angle brackets (Note: Address always uses angle brackets in display)
     let uri = Uri::from_str("sip:carol@chicago.com").unwrap();
-    let addr = Address::new(None::<String>, uri);
+    let addr = Address::new(uri);
     let from = From::new(addr);
     
     assert_eq!(from.0.display_name, None);
@@ -264,7 +264,7 @@ fn test_parse_from_header() {
 fn test_parse_to_header() {
     // Test parsing To header
     let uri = Uri::from_str("sip:bob@example.com").unwrap();
-    let addr = Address::new(Some("Bob"), uri);
+    let addr = Address::new_with_display_name("Bob", uri);
     let mut to = To::new(addr);
     to.set_tag("456248");
     
@@ -285,7 +285,7 @@ fn test_parse_to_header() {
     
     // Test without tag (common for initial INVITE)
     let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
-    let addr = Address::new(None::<String>, uri);
+    let addr = Address::new(uri);
     let to = To::new(addr);
     
     assert_eq!(to.0.display_name, None);
@@ -321,4 +321,58 @@ fn test_parse_allow() {
             false
         }
     }));
+}
+
+#[test]
+fn test_parse_from_header_manual() {
+    // Create a From header manually
+    let uri = Uri::from_str("sip:alice@atlanta.com").unwrap();
+    let addr = Address::new_with_display_name("Alice", uri);
+    let from = From(addr);
+    
+    assert_eq!(from.0.display_name, Some("Alice".to_string()));
+    assert_eq!(from.0.uri.scheme.to_string(), "sip");
+    assert_eq!(from.0.uri.user.as_deref(), Some("alice"));
+    assert_eq!(from.0.uri.host.to_string(), "atlanta.com");
+    
+    // Check tag parameter
+    let tag = from.0.params.iter().find_map(|p| {
+        if let Param::Tag(val) = p {
+            Some(val)
+        } else {
+            None
+        }
+    });
+    assert_eq!(tag, Some(&"1928301774".to_string()));
+}
+
+#[test]
+fn test_parse_to_header_manual() {
+    // With custom tag parameter
+    let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
+    let mut addr = Address::new(uri);
+    addr.set_tag("1928301774");
+    let to = To(addr);
+    
+    assert_eq!(to.0.display_name, None);
+    assert_eq!(to.0.uri.user.as_deref(), Some("bob"));
+    assert_eq!(to.0.uri.host.to_string(), "biloxi.com");
+    
+    // With display name
+    let uri = Uri::from_str("sip:bob@biloxi.com").unwrap();
+    let mut addr = Address::new_with_display_name("Bob", uri);
+    addr.set_tag("a6c85cf");
+    let to = To(addr);
+    
+    assert_eq!(to.0.display_name, Some("Bob".to_string()));
+    assert_eq!(to.0.uri.user.as_deref(), Some("bob"));
+    assert_eq!(to.0.uri.host.to_string(), "biloxi.com");
+    
+    // Contact with display name and URI
+    let uri = Uri::from_str("sip:bob@192.0.2.4").unwrap();
+    let addr = Address::new(uri);
+    
+    assert_eq!(addr.display_name, None);
+    assert_eq!(addr.uri.user.as_deref(), Some("bob"));
+    assert_eq!(addr.uri.host.to_string(), "192.0.2.4");
 } 

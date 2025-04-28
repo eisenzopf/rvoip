@@ -115,8 +115,8 @@ impl Route {
     /// // Create route entries
     /// let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
     /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-    /// let addr1 = Address::new(None::<&str>, uri1);
-    /// let addr2 = Address::new(None::<&str>, uri2);
+    /// let addr1 = Address::new(uri1);
+    /// let addr2 = Address::new(uri2);
     /// 
     /// // Use parser route value type
     /// let entries = vec![
@@ -175,7 +175,7 @@ impl Route {
     ///
     /// // Create an address with a display name
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let address = Address::new(Some("Main Proxy"), uri);
+    /// let address = Address::new_with_display_name("Main Proxy", uri);
     ///
     /// // Create a Route header with this address
     /// let route = Route::with_address(address);
@@ -214,7 +214,7 @@ impl Route {
     /// assert_eq!(route.to_string(), "<sip:proxy.example.com;lr>");
     /// ```
     pub fn with_uri(uri: Uri) -> Self {
-        Self(vec![ParserRouteValue(Address::new(None::<String>, uri))])
+        Self(vec![ParserRouteValue(Address::new(uri))])
     }
     
     /// Checks if the route list is empty.
@@ -334,7 +334,7 @@ impl Route {
     ///
     /// // Create and add a route entry
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let entry = ParserRouteValue(address);
     ///
     /// route.add(entry);
@@ -365,11 +365,11 @@ impl Route {
     ///
     /// // Create and add an address
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let address = Address::new(Some("Main Proxy"), uri);
+    /// let address = Address::new(uri);
     ///
     /// route.add_address(address);
     /// assert_eq!(route.len(), 1);
-    /// assert_eq!(route.to_string(), "\"Main Proxy\" <sip:proxy.example.com;lr>");
+    /// assert_eq!(route.to_string(), "<sip:proxy.example.com;lr>");
     /// ```
     pub fn add_address(&mut self, address: Address) -> &mut Self {
         self.0.push(ParserRouteValue(address));
@@ -407,7 +407,7 @@ impl Route {
     /// assert_eq!(route.to_string(), "<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>");
     /// ```
     pub fn add_uri(&mut self, uri: Uri) -> &mut Self {
-        self.0.push(ParserRouteValue(Address::new(None::<String>, uri)));
+        self.0.push(ParserRouteValue(Address::new(uri)));
         self
     }
     
@@ -558,8 +558,8 @@ impl From<Vec<ParserRouteValue>> for Route {
     /// // Create route entries
     /// let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
     /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-    /// let addr1 = Address::new(None::<&str>, uri1);
-    /// let addr2 = Address::new(None::<&str>, uri2);
+    /// let addr1 = Address::new(uri1);
+    /// let addr2 = Address::new(uri2);
     ///
     /// let entries = vec![
     ///     ParserRouteValue(addr1),
@@ -586,7 +586,7 @@ impl From<ParserRouteValue> for Route {
     ///
     /// // Create a route entry
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let addr = Address::new(None::<&str>, uri);
+    /// let addr = Address::new(uri);
     /// let entry = ParserRouteValue(addr);
     ///
     /// // Create Route using From trait
@@ -609,12 +609,12 @@ impl From<Address> for Route {
     ///
     /// // Create an address
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
-    /// let addr = Address::new(Some("Main Proxy"), uri);
+    /// let addr = Address::new(uri);
     ///
     /// // Create Route using From trait
     /// let route = Route::from(addr);
     /// assert_eq!(route.len(), 1);
-    /// assert_eq!(route.first().unwrap().0.display_name, Some("Main Proxy".to_string()));
+    /// assert_eq!(route.first().unwrap().0.display_name(), None);
     /// ```
     fn from(address: Address) -> Self {
         Self(vec![ParserRouteValue(address)])
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn test_route_with_address() {
         let uri = Uri::sip("example.com");
-        let address = Address::new(Some("Test Proxy"), uri.clone());
+        let address = Address::new_with_display_name("Test Proxy", uri.clone());
         let route = Route::with_address(address.clone());
         assert_eq!(route.len(), 1);
         assert_eq!(route.first().unwrap().0, address);
@@ -666,13 +666,13 @@ mod tests {
         
         // Add an address
         let uri2 = Uri::sip("proxy2.example.com");
-        let address = Address::new(Some("Proxy 2"), uri2.clone());
+        let address = Address::new_with_display_name("Proxy 2", uri2.clone());
         route.add_address(address.clone());
         assert_eq!(route.len(), 2);
         
         // Add a route entry
         let uri3 = Uri::sips("secure.example.com");
-        let address3 = Address::new(None::<String>, uri3.clone());
+        let address3 = Address::new(uri3.clone());
         let entry = ParserRouteValue(address3.clone());
         route.add(entry);
         assert_eq!(route.len(), 3);
@@ -694,22 +694,22 @@ mod tests {
         // From Vec<ParserRouteValue>
         let uri1 = Uri::sip("proxy1.example.com");
         let uri2 = Uri::sip("proxy2.example.com");
-        let addr1 = Address::new(None::<&str>, uri1);
-        let addr2 = Address::new(None::<&str>, uri2);
+        let addr1 = Address::new(uri1);
+        let addr2 = Address::new(uri2);
         let entries = vec![ParserRouteValue(addr1), ParserRouteValue(addr2)];
         let route = Route::from(entries);
         assert_eq!(route.len(), 2);
         
         // From ParserRouteValue
         let uri = Uri::sip("proxy.example.com");
-        let addr = Address::new(None::<&str>, uri);
+        let addr = Address::new(uri);
         let entry = ParserRouteValue(addr);
         let route = Route::from(entry);
         assert_eq!(route.len(), 1);
         
         // From Address
         let uri = Uri::sip("proxy.example.com");
-        let addr = Address::new(None::<&str>, uri);
+        let addr = Address::new(uri);
         let route = Route::from(addr);
         assert_eq!(route.len(), 1);
     }
@@ -720,7 +720,7 @@ mod tests {
         let route = Route::from_str(route_str).unwrap();
         
         assert_eq!(route.len(), 2);
-        assert_eq!(route.first().unwrap().0.uri.scheme, Scheme::Sip);
+        assert_eq!(route.first().unwrap().0.uri.scheme(), &Scheme::Sip);
         
         // Test Display implementation
         let route_displayed = route.to_string();

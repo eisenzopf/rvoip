@@ -245,7 +245,7 @@ impl RequestBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn simple_to(mut self, display_name: &str, uri: &str) -> Result<Self> {
         let uri = Uri::from_str(uri)?;
-        let to_addr = Address::new(Some(display_name), uri);
+        let to_addr = Address::new_with_display_name(display_name, uri);
         self.request = self.request.with_header(TypedHeader::To(To(to_addr)));
         Ok(self)
     }
@@ -260,7 +260,7 @@ impl RequestBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn simple_from(mut self, display_name: &str, uri: &str) -> Result<Self> {
         let uri = Uri::from_str(uri)?;
-        let from_addr = Address::new(Some(display_name), uri);
+        let from_addr = Address::new_with_display_name(display_name, uri);
         self.request = self.request.with_header(TypedHeader::From(From(from_addr)));
         Ok(self)
     }
@@ -319,7 +319,7 @@ impl RequestBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn contact(mut self, uri: &str) -> Result<Self> {
         let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(None::<String>, contact_uri);
+        let contact_address = Address::new(contact_uri);
         let contact_param = ContactParamInfo { address: contact_address };
         self.request = self.request.with_header(TypedHeader::Contact(
             Contact::new_params(vec![contact_param])
@@ -337,7 +337,7 @@ impl RequestBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn contact_with_name(mut self, display_name: &str, uri: &str) -> Result<Self> {
         let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(Some(display_name), contact_uri);
+        let contact_address = Address::new_with_display_name(display_name, contact_uri);
         let contact_param = ContactParamInfo { address: contact_address };
         self.request = self.request.with_header(TypedHeader::Contact(
             Contact::new_params(vec![contact_param])
@@ -628,7 +628,7 @@ impl ResponseBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn contact(mut self, uri: &str) -> Result<Self> {
         let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(None::<String>, contact_uri);
+        let contact_address = Address::new(contact_uri);
         let contact_param = ContactParamInfo { address: contact_address };
         self.response = self.response.with_header(TypedHeader::Contact(
             Contact::new_params(vec![contact_param])
@@ -646,7 +646,7 @@ impl ResponseBuilder {
     /// A Result containing Self for method chaining, or an error if the URI is invalid
     pub fn contact_with_name(mut self, display_name: &str, uri: &str) -> Result<Self> {
         let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(Some(display_name), contact_uri);
+        let contact_address = Address::new_with_display_name(display_name, contact_uri);
         let contact_param = ContactParamInfo { address: contact_address };
         self.response = self.response.with_header(TypedHeader::Contact(
             Contact::new_params(vec![contact_param])
@@ -970,7 +970,7 @@ impl<P, T> AddressBuilder<P, T> {
             }
         };
         
-        let address = Address::new(Some(display_name), uri);
+        let address = Address::new_with_display_name(display_name, uri);
         
         Self {
             parent,

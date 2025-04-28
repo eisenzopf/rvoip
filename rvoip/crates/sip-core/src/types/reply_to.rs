@@ -31,7 +31,7 @@
 //!
 //! // Create a Reply-To header
 //! let uri = Uri::from_str("sip:support@example.com").unwrap();
-//! let address = Address::new(Some("Support Team"), uri);
+//! let address = Address::new_with_display_name("Support Team", uri);
 //! let reply_to = ReplyTo::new(address);
 //!
 //! // Parse a Reply-To header from a string
@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize}; // Add import
 ///
 /// // Create from an Address
 /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-/// let address = Address::new(Some("Support Team"), uri);
+/// let address = Address::new_with_display_name("Support Team", uri);
 /// let reply_to = ReplyTo::new(address);
 /// assert_eq!(reply_to.to_string(), "\"Support Team\" <sip:support@example.com>");
 ///
@@ -104,12 +104,12 @@ impl ReplyTo {
     ///
     /// // Create a simple Reply-To with just a URI
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let reply_to = ReplyTo::new(address);
     ///
     /// // Create with display name
     /// let uri = Uri::from_str("sip:help@example.com").unwrap();
-    /// let address = Address::new(Some("Help Desk"), uri);
+    /// let address = Address::new_with_display_name("Help Desk", uri);
     /// let reply_to = ReplyTo::new(address);
     /// ```
     pub fn new(address: Address) -> Self {
@@ -308,7 +308,7 @@ impl ReplyTo {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let reply_to = ReplyTo::new(address)
     ///     .with_param(Param::Other("dept".to_string(), Some(GenericValue::Token("sales".to_string()))))
     ///     .with_param(Param::Other("priority".to_string(), Some(GenericValue::Token("high".to_string()))));
@@ -354,7 +354,7 @@ impl ReplyTo {
         if let Some(u) = user {
             uri = uri.with_user(u);
         }
-        let address = Address::new(None::<String>, uri);
+        let address = Address::new(uri);
         Ok(Self(address))
     }
     
@@ -385,7 +385,7 @@ impl ReplyTo {
         if let Some(u) = user {
             uri = uri.with_user(u);
         }
-        let address = Address::new(None::<String>, uri);
+        let address = Address::new(uri);
         Ok(Self(address))
     }
     
@@ -411,7 +411,7 @@ impl ReplyTo {
     /// ```
     pub fn tel(number: impl Into<String>) -> Result<Self> {
         let uri = crate::types::uri::Uri::tel(number);
-        let address = Address::new(None::<String>, uri);
+        let address = Address::new(uri);
         Ok(Self(address))
     }
     
@@ -459,13 +459,13 @@ impl fmt::Display for ReplyTo {
     ///
     /// // Simple URI
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(None::<&str>, uri);
+    /// let address = Address::new(uri);
     /// let reply_to = ReplyTo::new(address);
     /// assert_eq!(reply_to.to_string(), "<sip:support@example.com>");
     ///
     /// // With display name
     /// let uri = Uri::from_str("sip:support@example.com").unwrap();
-    /// let address = Address::new(Some("Support Team"), uri);
+    /// let address = Address::new_with_display_name("Support Team", uri);
     /// let reply_to = ReplyTo::new(address);
     /// assert_eq!(reply_to.to_string(), "\"Support Team\" <sip:support@example.com>");
     /// ```
@@ -591,7 +591,7 @@ mod tests {
         };
         
         // Create Address directly
-        let addr = Address::new(None::<String>, uri);
+        let addr = Address::new(uri);
         let reply_to = ReplyTo::new(addr);
         
         assert_eq!(reply_to.to_string(), "<sip:user@example.com>");
@@ -609,7 +609,7 @@ mod tests {
         };
         
         // Test with display name
-        let addr_with_name = Address::new(Some("Test User"), uri2);
+        let addr_with_name = Address::new_with_display_name("Test User", uri2);
         let reply_to_with_name = ReplyTo::new(addr_with_name);
         
         // According to RFC 3261, display names with spaces must be quoted
@@ -634,7 +634,7 @@ mod tests {
         };
         
         // Create Address directly with display name
-        let mut addr = Address::new(Some("Support".to_string()), uri);
+        let mut addr = Address::new_with_display_name("Support", uri);
         
         // Add parameter directly to avoid using the Address::with_param method
         addr.params.push(Param::Other("dept".to_string(), Some(GenericValue::Token("sales".to_string()))));
@@ -671,7 +671,7 @@ mod tests {
         let s = "tel:+1-212-555-1234";
         let reply_to = ReplyTo::from_str(s).unwrap();
         
-        assert_eq!(reply_to.uri().scheme, Scheme::Tel);
+        assert_eq!(reply_to.uri().scheme(), &Scheme::Tel);
         // TEL URIs in our implementation store the number in the host field
         if let Host::Domain(number) = &reply_to.uri().host {
             assert_eq!(number, "+1-212-555-1234");
@@ -766,7 +766,7 @@ mod tests {
             raw_uri: Some("http://example.com".to_string()),
         };
         
-        let addr = Address::new(None::<String>, uri);
+        let addr = Address::new(uri);
         let reply_to = ReplyTo::new(addr);
         
         assert!(reply_to.validate().is_err());
