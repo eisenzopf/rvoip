@@ -430,7 +430,7 @@ impl Transaction for ClientInviteTransaction {
 
 
     fn matches(&self, message: &Message) -> bool {
-        crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+        crate::utils::transaction_key_from_message(message).map(|key| key == self.data.id).unwrap_or(false)
     }
 
     // Keep original_request and last_response accessors if needed by TU via manager
@@ -773,7 +773,7 @@ impl Transaction for ClientNonInviteTransaction {
 
 
      fn matches(&self, message: &Message) -> bool {
-          crate::transaction::transaction_key::from_message(message).map(|key| key == self.data.id).unwrap_or(false)
+          crate::utils::transaction_key_from_message(message).map(|key| key == self.data.id).unwrap_or(false)
      }
 
       // Keep original_request and last_response accessors if needed by TU via manager
