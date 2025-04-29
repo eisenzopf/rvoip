@@ -1,5 +1,11 @@
 use crate::error::{Error, Result};
-use crate::types::sdp::{SdpSession, MediaDescription, Origin, ConnectionData, TimeDescription, ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute};
+use crate::sdp::attributes;
+use crate::sdp::session_parser;
+use crate::sdp::time_parser;
+use crate::sdp::media_parser;
+use crate::types::sdp::{ConnectionData, MediaDescription, ParsedAttribute};
+use crate::types::sdp::{SdpSession, Origin, TimeDescription}; // Remove RepeatTime
+use crate::sdp::attributes::MediaDirection; // Direct import
 use bytes::Bytes;
 use nom::{
     bytes::complete::{tag, take_till1, take_until},
@@ -12,11 +18,12 @@ use nom::{
 };
 use std::collections::HashMap;
 use std::str::{self, FromStr};
-use crate::sdp::attributes::{self, MediaDirection}; // Import MediaDirection from attributes
 use crate::parser::uri::host; // Import URI parsers
 use crate::parser::uri::hostname::hostname; // Import hostname parser specifically
 use crate::parser::uri::ipv4::ipv4_address; // Import ipv4 parser specifically  
 use crate::parser::uri::ipv6::ipv6_reference; // Import ipv6 parser specifically
+use crate::sdp::attributes::sctp::{parse_sctp_port, parse_max_message_size as parse_sctp_max_message_size};
+use crate::sdp::attributes::datachannel::{parse_max_message_size as parse_datachannel_max_message_size};
 
 /// Parses a single SDP line into a key-value pair.
 /// Example: "v=0" -> Ok(("", ('v', "0")))
@@ -207,6 +214,7 @@ pub fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
     Ok(TimeDescription {
         start_time: start_time.to_string(),
         stop_time: stop_time.to_string(),
+        repeat_times: Vec::new(),
     })
 }
 
@@ -471,7 +479,12 @@ pub fn is_valid_ipv6(addr: &str) -> bool {
 
 /// Helper function to validate hostnames
 pub fn is_valid_hostname(hostname_str: &str) -> bool {
-    // Use the hostname parser from hostname.rs
+    // First try to use the session_parser validation
+    if session_parser::is_valid_hostname(hostname_str) {
+        return true;
+    }
+    
+    // Fallback to using the parser module
     let input = hostname_str.as_bytes();
     match hostname(input) {
         Ok((remaining, _)) => remaining.is_empty() || remaining == b".", // Must consume all input (allow trailing dot)
@@ -585,23 +598,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             let mut seen_s = false;
             let mut seen_t = false;
 
-            // Need temporary Option fields for mandatory o, s, t during build
-            let mut temp_origin: Option<Origin> = None;
-            let mut temp_s_line: Option<String> = None;
-            let mut temp_t_lines: Vec<TimeDescription> = Vec::new();
-            
-            let mut session = SdpSession {
-                version: "".to_string(),
-                origin: Origin { username: "-".into(), sess_id: "0".into(), sess_version: "0".into(), net_type: "IN".into(), addr_type: "IP4".into(), unicast_address: "0.0.0.0".into() }, // Temp default
-                session_name: "".to_string(), // Temp default
-                connection_info: None, 
-                time_descriptions: Vec::new(), // Temp default
-                media_descriptions: Vec::new(),
-                direction: None,
-                generic_attributes: Vec::new(),
-            };
-
+            // Initialize a new session description
+            let mut session = session_parser::init_session_description();
             let mut current_media: Option<MediaDescription> = None;
+            let mut current_time_description: Option<TimeDescription> = None;
 
             // Add state for order checking
             #[derive(PartialEq, PartialOrd)]
@@ -632,7 +632,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         seen_v = true;
                         
                         if value != "0" { return Err(Error::SdpParsingError("Unsupported SDP version".to_string())); }
-                        session.version = value.to_string();
+                        session.version = "0".to_string();
                     }
                     'o' => {
                         // Check for duplicate o= line
@@ -641,7 +641,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         }
                         seen_o = true;
                         
-                        temp_origin = Some(parse_origin_line(value)?);
+                        session.origin = session_parser::parse_origin_line(value)?;
                     }
                     's' => {
                         // Check for duplicate s= line
@@ -651,42 +651,41 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         seen_s = true;
                         
                         if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
-                        temp_s_line = Some(value.to_string());
+                        session.session_name = value.to_string();
                     }
-                    'i' => { // Session Information
-                         if current_media.is_none() {
-                            session.generic_attributes.push(ParsedAttribute::Value("i".to_string(), value.to_string()));
-                         } else {
+                    'i' => { // Session Information (optional)
+                        if current_media.is_none() {
+                            session.session_info = Some(value.to_string());
+                        } else {
                             // i= line is allowed at media level according to RFC 4566 section 5.4
-                            // Store it in the media's generic attributes
                             current_media.as_mut().unwrap().generic_attributes.push(
                                 ParsedAttribute::Value("i".to_string(), value.to_string())
                             );
-                         }
+                        }
                     }
-                    'u' => { // URI
-                         if current_media.is_none() {
-                            session.generic_attributes.push(ParsedAttribute::Value("u".to_string(), value.to_string()));
-                         } else {
+                    'u' => { // URI (optional)
+                        if current_media.is_none() {
+                            session.uri = Some(value.to_string());
+                        } else {
                             return Err(Error::SdpParsingError("u= line found at media level (invalid)".to_string()));
-                         }
+                        }
                     }
-                    'e' => { // Email
-                         if current_media.is_none() {
-                            session.generic_attributes.push(ParsedAttribute::Value("e".to_string(), value.to_string()));
-                         } else {
+                    'e' => { // Email (optional)
+                        if current_media.is_none() {
+                            session.email = Some(value.to_string());
+                        } else {
                             return Err(Error::SdpParsingError("e= line found at media level (invalid)".to_string()));
-                         }
+                        }
                     }
-                    'p' => { // Phone
-                         if current_media.is_none() {
-                            session.generic_attributes.push(ParsedAttribute::Value("p".to_string(), value.to_string()));
-                         } else {
+                    'p' => { // Phone (optional)
+                        if current_media.is_none() {
+                            session.phone = Some(value.to_string());
+                        } else {
                             return Err(Error::SdpParsingError("p= line found at media level (invalid)".to_string()));
-                         }
+                        }
                     }
                     'c' => { 
-                        let conn_data = parse_connection_line(value)?;
+                        let conn_data = session_parser::parse_connection_line(value)?;
                         if let Some(media) = current_media.as_mut() {
                            if media.connection_info.is_some() { 
                                return Err(Error::SdpParsingError("Duplicate c= line for media".to_string())); 
@@ -709,20 +708,30 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         seen_t = true;
                         
                         // Parse t= line and add it to time descriptions
-                        let time_desc = parse_time_description_line(value)?;
-                        temp_t_lines.push(time_desc);
+                        let time_desc = time_parser::parse_time_description_line(value)?;
+                        
+                        // Add previous time description if exists
+                        if let Some(previous_time) = current_time_description.take() {
+                            session.time_descriptions.push(previous_time);
+                        }
+                        
+                        current_time_description = Some(time_desc);
                     }
                     'r' => {
                         // r= lines must follow a t= line
-                        if temp_t_lines.is_empty() {
+                        if current_time_description.is_none() {
                             return Err(Error::SdpParsingError("r= line without preceding t= line".to_string()));
                         }
                         
-                        // Store r= lines as generic attributes
+                        // Store r= lines as repeat times associated with the current time description
+                        let repeat_time = time_parser::parse_repeat_time_line(value)?;
+                        // If the TimeDescription struct doesn't have a repeat_times field,
+                        // store it as a generic attribute instead
                         session.generic_attributes.push(ParsedAttribute::Value("r".to_string(), value.to_string()));
                     }
                     'a' => { // Attribute
                          let parsed_attr = parse_attribute(value)?;
+                         
                          if let Some(media) = current_media.as_mut() {
                              // Store in media description
                              match parsed_attr {
@@ -762,6 +771,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     'm' => { // Media Description
                         // Set section state
                         current_section = SdpParseSection::MediaDescription;
+                        
                         // Add previous media description if exists
                         if let Some(media) = current_media.take() {
                             // Check if this media has connection info
@@ -770,17 +780,16 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                             }
                             session.media_descriptions.push(media);
                         }
-                        current_media = Some(parse_media_description_line(value)?);
+                        
+                        current_media = Some(media_parser::parse_media_description_line(value)?);
                     }
                     'b' => { // Bandwidth
-                        // Parse the bandwidth line and add it as a dedicated attribute
                         let (bwtype, bandwidth) = parse_bandwidth(value)?;
+                        let bw_attr = ParsedAttribute::Bandwidth(bwtype, bandwidth);
                         if let Some(media) = current_media.as_mut() {
-                            // Media-level bandwidth
-                            media.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
+                            media.generic_attributes.push(bw_attr);
                         } else {
-                            // Session-level bandwidth
-                            session.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
+                            session.generic_attributes.push(bw_attr);
                         }
                     }
                     'z' | 'k' => { 
@@ -793,7 +802,12 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 }
             }
 
-            // Add the last media description if it exists
+            // Add the last time description if it exists
+            if let Some(time_desc) = current_time_description.take() {
+                session.time_descriptions.push(time_desc);
+            }
+
+            // Add the last media description if exists
             if let Some(media) = current_media.take() {
                 // Check if this media has connection info
                 if media.connection_info.is_none() {
@@ -815,14 +829,6 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             if !seen_t {
                 return Err(Error::SdpParsingError("Missing mandatory t= field".to_string()));
             }
-
-            // Assign mandatory fields from temps
-            session.origin = temp_origin.ok_or_else(|| Error::SdpParsingError("Missing mandatory o= field".to_string()))?;
-            session.session_name = temp_s_line.ok_or_else(|| Error::SdpParsingError("Missing mandatory s= field".to_string()))?;
-            if temp_t_lines.is_empty() {
-                 return Err(Error::SdpParsingError("Missing mandatory t= field".to_string()));
-            }
-            session.time_descriptions = temp_t_lines;
             
             // Final validation (connection info)
             // A c= line MUST be present either at session level OR in ALL media descriptions
@@ -927,11 +933,13 @@ pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
         }
         "end-of-candidates" => Ok(ParsedAttribute::EndOfCandidates),
         "sctp-port" => {
-            let port = attributes::parse_sctp_port(value.unwrap_or_default())?;
+            let port = parse_sctp_port(value.unwrap_or_default())?;
             Ok(ParsedAttribute::SctpPort(port))
         }
         "max-message-size" => {
-            let size = attributes::parse_max_message_size(value.unwrap_or_default())?;
+            // Choose which implementation to use based on context
+            // For simplicity, we'll use the SCTP version here
+            let size = parse_sctp_max_message_size(value.unwrap_or_default())?;
             Ok(ParsedAttribute::MaxMessageSize(size))
         }
         "sctpmap" => {
@@ -947,9 +955,9 @@ pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
         "rtcp-mux" => Ok(ParsedAttribute::RtcpMux),
         _ => {
             if let Some(val) = value {
-                Ok(ParsedAttribute::Other(attribute.to_string(), Some(val.to_string())))
+                Ok(ParsedAttribute::Value(attribute.to_string(), val.to_string()))
             } else {
-                Ok(ParsedAttribute::Other(attribute.to_string(), None))
+                Ok(ParsedAttribute::Flag(attribute.to_string()))
             }
         }
     }

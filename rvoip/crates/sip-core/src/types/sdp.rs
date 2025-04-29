@@ -201,6 +201,21 @@ pub struct TimeDescription {
     pub start_time: String,
     /// Stop time (NTP timestamp, 0 means open-ended)
     pub stop_time: String,
+    /// Associated repeat times (r= lines)
+    pub repeat_times: Vec<RepeatTime>,
+}
+
+/// Represents a Repeat Time (r=) field in an SDP message.
+///
+/// Format: `r=<repeat-interval> <active-duration> <list-of-offsets-from-start-time>`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatTime {
+    /// Repeat interval in seconds
+    pub repeat_interval: u64,
+    /// Active duration in seconds
+    pub active_duration: u64,
+    /// Offsets from start time in seconds
+    pub offsets: Vec<u64>,
 }
 
 /// Represents a complete SDP session with all its components.
@@ -215,6 +230,14 @@ pub struct SdpSession {
     pub origin: Origin,
     /// Session name (s=)
     pub session_name: String, 
+    /// Session information/description (i=)
+    pub session_info: Option<String>,
+    /// Session URI (u=)
+    pub uri: Option<String>,
+    /// Contact email address (e=)
+    pub email: Option<String>,
+    /// Contact phone number (p=)
+    pub phone: Option<String>,
     /// Optional connection information (c=)
     pub connection_info: Option<ConnectionData>,
     /// Time descriptions (t=)
@@ -252,8 +275,12 @@ impl SdpSession {
             version: "0".to_string(),
             origin,
             session_name: session_name.into(),
+            session_info: None,
+            uri: None,
+            email: None,
+            phone: None,
             connection_info: None,
-            time_descriptions: vec![TimeDescription { start_time: "0".to_string(), stop_time: "0".to_string()}],
+            time_descriptions: vec![TimeDescription { start_time: "0".to_string(), stop_time: "0".to_string(), repeat_times: Vec::new()}],
             media_descriptions: Vec::new(),
             direction: None,
             generic_attributes: Vec::new(),
