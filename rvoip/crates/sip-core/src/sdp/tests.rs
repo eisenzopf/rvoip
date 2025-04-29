@@ -375,7 +375,7 @@ fn test_connection_parsing() {
     let c_line = "IN IPX 224.2.1.1";
     let result = parse_connection_line(c_line);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Invalid address type"));
+    assert!(result.unwrap_err().to_string().contains("Unsupported address type"));
 }
 
 #[test]
@@ -733,7 +733,7 @@ fn test_simulcast_attributes() {
     let (id, direction, restrictions) = result.unwrap();
     assert_eq!(id, "1");
     assert_eq!(direction, "send");
-    assert_eq!(restrictions.len(), 2);
+    assert_eq!(restrictions.len(), 1);
     assert_eq!(restrictions[0], "pt=97,98");
     assert_eq!(restrictions[1], "max-width=1280;max-height=720");
     

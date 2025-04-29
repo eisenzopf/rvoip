@@ -436,7 +436,7 @@ pub fn is_valid_ipv4(addr: &str) -> bool {
     for part in parts {
         match part.parse::<u8>() {
             Ok(_) => {}, // Valid octet (0-255)
-            Err(_) => return false, // Outside 0-255 range
+            Err(_) => return false, // Outside 0-255 range or not a number
         }
     }
 
