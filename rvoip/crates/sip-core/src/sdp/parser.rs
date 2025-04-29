@@ -12,7 +12,7 @@ use nom::{
 };
 use std::collections::HashMap;
 use std::str::{self, FromStr};
-use crate::sdp::attributes; // Import the attributes module itself
+use crate::sdp::attributes::{self, MediaDirection}; // Import MediaDirection from attributes
 use crate::parser::uri::host; // Import URI parsers
 use crate::parser::uri::hostname::hostname; // Import hostname parser specifically
 use crate::parser::uri::ipv4::ipv4_address; // Import ipv4 parser specifically  
@@ -609,7 +609,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                                      if media.ptime.is_some() { 
                                         return Err(Error::SdpParsingError(format!("Duplicate ptime attribute for media {}", media.media)));
                                      }
-                                     media.ptime = Some(v);
+                                     media.ptime = Some(v as u32);
                                  }
                                  ParsedAttribute::Direction(d) => {
                                       if media.direction.is_some() {
@@ -649,7 +649,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     }
                     'b' => { // Bandwidth
                         // Parse the bandwidth line and add it as a dedicated attribute
-                        let (bwtype, bandwidth) = attributes::parse_bandwidth(value)?;
+                        let (bwtype, bandwidth) = parse_bandwidth(value)?;
                         if let Some(media) = current_media.as_mut() {
                             // Media-level bandwidth
                             media.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
@@ -698,38 +698,114 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 }
 
 /// Parses an attribute line (a=key:value or a=key) into a ParsedAttribute enum variant.
-fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
-    if let Some((key, val_part)) = value.split_once(':') {
-        let key_trimmed = key.trim();
-        let val_trimmed = val_part.trim();
-        match key_trimmed {
-            "rtpmap" => attributes::parse_rtpmap(val_trimmed),
-            "fmtp" => attributes::parse_fmtp(val_trimmed),
-            "ptime" => attributes::parse_ptime(val_trimmed).map(ParsedAttribute::Ptime),
-            "maxptime" => attributes::parse_maxptime(val_trimmed).map(ParsedAttribute::MaxPtime),
-            "candidate" => attributes::parse_candidate(val_trimmed),
-            "ssrc" => attributes::parse_ssrc(val_trimmed),
-            "ice-ufrag" => attributes::parse_ice_ufrag(val_trimmed).map(ParsedAttribute::IceUfrag),
-            "ice-pwd" => attributes::parse_ice_pwd(val_trimmed).map(ParsedAttribute::IcePwd),
-            "fingerprint" => attributes::parse_fingerprint(val_trimmed).map(|(hash, fprint)| ParsedAttribute::Fingerprint(hash, fprint)),
-            "setup" => attributes::parse_setup(val_trimmed).map(ParsedAttribute::Setup),
-            "mid" => attributes::parse_mid(val_trimmed).map(ParsedAttribute::Mid),
-            "group" => attributes::parse_group(val_trimmed).map(|(semantics, mids)| ParsedAttribute::Group(semantics, mids)),
-            "rtcp-fb" => attributes::parse_rtcp_fb(val_trimmed).map(|(pt, fb, params)| ParsedAttribute::RtcpFb(pt, fb, params)),
-            "extmap" => attributes::parse_extmap(val_trimmed).map(|(id, dir, uri, params)| ParsedAttribute::ExtMap(id, dir, uri, params)),
-            "msid" => attributes::parse_msid(val_trimmed).map(|(stream, track)| ParsedAttribute::Msid(stream, track)),
-            _ => Ok(ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())), // Known key:value format, unknown key
+pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
+    // Format is "a=<attribute>:<value>" or "a=<flag>"
+    let line = line.strip_prefix("a=").ok_or_else(|| {
+        Error::SdpParsingError("Attribute line does not start with a=".to_string())
+    })?;
+
+    let (attribute, value) = match line.split_once(':') {
+        Some((name, value)) => (name, Some(value)),
+        None => (line, None),
+    };
+
+    match attribute {
+        "rtpmap" => {
+            attributes::parse_rtpmap(value.unwrap_or_default())
         }
-    } else {
-        // Handle flag attributes
-        let flag_key = value.trim();
-        match flag_key {
-            "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
-                attributes::parse_direction(flag_key).map(ParsedAttribute::Direction)
+        "fmtp" => {
+            attributes::parse_fmtp(value.unwrap_or_default())
+        }
+        "ptime" => {
+            let ptime = attributes::parse_ptime(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Ptime(ptime as u64))
+        }
+        "maxptime" => {
+            let maxptime = attributes::parse_maxptime(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::MaxPtime(maxptime as u64))
+        }
+        "candidate" => {
+            attributes::parse_candidate(value.unwrap_or_default())
+        }
+        "ssrc" => {
+            attributes::parse_ssrc(value.unwrap_or_default())
+        }
+        "ice-ufrag" => {
+            let ufrag = attributes::parse_ice_ufrag(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::IceUfrag(ufrag))
+        }
+        "ice-pwd" => {
+            let pwd = attributes::parse_ice_pwd(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::IcePwd(pwd))
+        }
+        "fingerprint" => {
+            let (hash, fingerprint) = attributes::parse_fingerprint(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Fingerprint(hash, fingerprint))
+        }
+        "setup" => {
+            let role = attributes::parse_setup(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Setup(role))
+        }
+        "mid" => {
+            let id = attributes::parse_mid(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Mid(id))
+        }
+        "group" => {
+            let (semantics, ids) = attributes::parse_group(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Group(semantics, ids))
+        }
+        "rtcp-fb" => {
+            let (pt, feedback_type, param) = attributes::parse_rtcp_fb(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::RtcpFb(pt, feedback_type, param))
+        }
+        "extmap" => {
+            let (id, direction, uri, params) = attributes::parse_extmap(value.unwrap_or_default())?;
+            // Convert u16 to u8 safely
+            let id_u8 = u8::try_from(id).map_err(|_| Error::SdpParsingError(format!("ExtMap id too large: {}", id)))?;
+            Ok(ParsedAttribute::ExtMap(id_u8, direction, uri, params))
+        }
+        "msid" => {
+            let (stream_id, track_id) = attributes::parse_msid(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Msid(stream_id, track_id))
+        }
+        "rid" => {
+            let (id, direction, restrictions) = attributes::parse_rid(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Rid(id, direction, restrictions))
+        }
+        "simulcast" => {
+            let (send, recv) = attributes::parse_simulcast(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Simulcast(send, recv))
+        }
+        "ice-options" => {
+            let options = attributes::parse_ice_options(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::IceOptions(options))
+        }
+        "end-of-candidates" => Ok(ParsedAttribute::EndOfCandidates),
+        "sctp-port" => {
+            let port = attributes::parse_sctp_port(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::SctpPort(port))
+        }
+        "max-message-size" => {
+            let size = attributes::parse_max_message_size(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::MaxMessageSize(size))
+        }
+        "sctpmap" => {
+            let (number, app, streams) = attributes::parse_sctpmap(value.unwrap_or_default())?;
+            // Convert u32 to u16 safely
+            let streams_u16 = u16::try_from(streams).map_err(|_| Error::SdpParsingError(format!("SctpMap streams too large: {}", streams)))?;
+            Ok(ParsedAttribute::SctpMap(number, app, streams_u16))
+        }
+        "sendrecv" => Ok(ParsedAttribute::Direction(MediaDirection::SendRecv)),
+        "sendonly" => Ok(ParsedAttribute::Direction(MediaDirection::SendOnly)),
+        "recvonly" => Ok(ParsedAttribute::Direction(MediaDirection::RecvOnly)),
+        "inactive" => Ok(ParsedAttribute::Direction(MediaDirection::Inactive)),
+        "rtcp-mux" => Ok(ParsedAttribute::RtcpMux),
+        _ => {
+            if let Some(val) = value {
+                Ok(ParsedAttribute::Other(attribute.to_string(), Some(val.to_string())))
+            } else {
+                Ok(ParsedAttribute::Other(attribute.to_string(), None))
             }
-            "rtcp-mux" => attributes::parse_rtcp_mux(flag_key).map(|_| ParsedAttribute::RtcpMux),
-            // Add other known flag attributes here
-            _ => Ok(ParsedAttribute::Flag(flag_key.to_string())), // Unknown flag
         }
     }
 }
@@ -816,4 +892,19 @@ fn is_valid_token(s: &str) -> bool {
         c == '+' || c == '`' || c == '\'' || 
         c == '~' || c == '/'  // Add slash for compound protocol names
     )
+}
+
+// Fix Bandwidth type conversion
+pub fn parse_bandwidth(line: &str) -> Result<(String, u64)> {
+    // Example: b=AS:128
+    let parts: Vec<&str> = line.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(Error::SdpParsingError(format!("Invalid bandwidth line format: {}", line)));
+    }
+    
+    let bwtype = parts[0].to_string();
+    let bandwidth = parts[1].parse::<u64>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid bandwidth value: {}", parts[1])))?;
+    
+    Ok((bwtype, bandwidth))
 }

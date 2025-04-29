@@ -680,4 +680,335 @@ pub fn parse_bandwidth(value: &str) -> Result<(String, u32)> {
     Ok((bwtype.to_string(), bandwidth))
 }
 
+/// Parses rid attribute: a=rid:<id> <direction> [<pt-list>]...
+/// RFC 8851 defines the Restriction Identifier (RID) attribute
+pub fn parse_rid(value: &str) -> Result<(String, String, Vec<String>)> {
+    // Example: a=rid:1 send pt=97
+    // Example: a=rid:2 recv pt=98,99 max-width=800
+    
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err(Error::SdpParsingError(format!("Invalid rid format: {}", value)));
+    }
+    
+    let id = parts[0].to_string();
+    if id.is_empty() {
+        return Err(Error::SdpParsingError("Empty rid identifier".to_string()));
+    }
+    
+    // Validate id is alphanumeric
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(Error::SdpParsingError(format!("Invalid rid identifier (must be alphanumeric with - or _): {}", id)));
+    }
+    
+    let direction = parts[1].to_lowercase();
+    
+    // Validate direction
+    if direction != "send" && direction != "recv" {
+        return Err(Error::SdpParsingError(format!("Invalid rid direction (must be send or recv): {}", direction)));
+    }
+    
+    // Parse optional parameters and restrictions (each parameter is name=value, or pt=val1,val2)
+    let mut parameters = Vec::new();
+    
+    for param in parts.iter().skip(2) {
+        parameters.push(param.to_string());
+    }
+    
+    Ok((id, direction, parameters))
+}
+
+/// Parses simulcast attribute: a=simulcast:<dir> <list>
+/// RFC 8853 defines the simulcast attribute for multiple RTP streams
+pub fn parse_simulcast(value: &str) -> Result<(Vec<String>, Vec<String>)> {
+    // Example: a=simulcast:send 1,2,3;~4,~5 recv 6;~7,~8
+    // Returns (send_streams, recv_streams)
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(Error::SdpParsingError(format!("Invalid simulcast format: {}", value)));
+    }
+    
+    let mut send_streams = Vec::new();
+    let mut recv_streams = Vec::new();
+    
+    let mut i = 0;
+    while i < parts.len() {
+        let tag = parts[i].to_lowercase();
+        i += 1;
+        
+        // Get the list of streams that comes after the tag
+        if i >= parts.len() {
+            // Direction tag with no stream IDs
+            return Err(Error::SdpParsingError(format!("Missing simulcast streams for direction: {}", tag)));
+        }
+        
+        let stream_list = parts[i].to_string();
+        i += 1;
+        
+        match tag.as_str() {
+            "send" => {
+                for stream_id in stream_list.split(';') {
+                    if !stream_id.is_empty() {
+                        send_streams.push(stream_id.to_string());
+                    }
+                }
+            },
+            "recv" => {
+                for stream_id in stream_list.split(';') {
+                    if !stream_id.is_empty() {
+                        recv_streams.push(stream_id.to_string());
+                    }
+                }
+            },
+            _ => {
+                return Err(Error::SdpParsingError(format!("Invalid simulcast direction: {}", tag)));
+            }
+        }
+    }
+    
+    Ok((send_streams, recv_streams))
+}
+
+/// Parses scalability mode for AV1, H.264, and VP9: a=fmtp:<payload> scalability-mode=<mode>
+/// This is for Scalable Video Coding (SVC) scenarios, often used with simulcast
+pub fn parse_scalability_mode(mode: &str) -> Result<(String, Option<u32>, Option<u32>, Option<String>)> {
+    // Extracts SVC parameters from mode string like "L2T3" or "S2T3"
+    // Returns (pattern, spatial_layers, temporal_layers, extra)
+    
+    if mode.is_empty() {
+        return Err(Error::SdpParsingError("Empty scalability mode".to_string()));
+    }
+    
+    // Basic pattern is a letter followed by optional numbers and more patterns
+    let pattern_char = mode.chars().next().unwrap().to_ascii_uppercase();
+    
+    // Validate pattern character
+    if !['L', 'S', 'K'].contains(&pattern_char) {
+        return Err(Error::SdpParsingError(format!("Invalid scalability mode pattern: {}", pattern_char)));
+    }
+    
+    let pattern = pattern_char.to_string();
+    
+    // Parse spatial and temporal layers
+    let mut spatial_layers: Option<u32> = None;
+    let mut temporal_layers: Option<u32> = None;
+    let mut extra: Option<String> = None;
+    
+    // Simple parsing - in practice would use regex
+    if mode.len() > 1 {
+        let rest = &mode[1..];
+        if rest.contains('T') {
+            let parts: Vec<&str> = rest.split('T').collect();
+            if parts.len() >= 2 {
+                // Try to parse spatial layers (before 'T')
+                if !parts[0].is_empty() {
+                    if let Ok(num) = parts[0].parse::<u32>() {
+                        spatial_layers = Some(num);
+                    } else {
+                        extra = Some(rest.to_string());
+                    }
+                }
+                
+                // Parse temporal layers (after 'T')
+                let temporal_part = parts[1];
+                if !temporal_part.is_empty() {
+                    if let Ok(num) = temporal_part.chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse::<u32>() {
+                        temporal_layers = Some(num);
+                    }
+                    
+                    // Check for extra info
+                    let extra_part = temporal_part.chars()
+                        .skip_while(|c| c.is_ascii_digit())
+                        .collect::<String>();
+                    if !extra_part.is_empty() {
+                        extra = Some(extra_part);
+                    }
+                }
+            } else {
+                extra = Some(rest.to_string());
+            }
+        } else if rest.chars().all(|c| c.is_ascii_digit()) {
+            // Just a number, likely spatial layers
+            if let Ok(num) = rest.parse::<u32>() {
+                spatial_layers = Some(num);
+            }
+        } else {
+            // Something else, store as extra
+            extra = Some(rest.to_string());
+        }
+    }
+    
+    Ok((pattern, spatial_layers, temporal_layers, extra))
+}
+
+/// Parses ice-options attribute: a=ice-options:<option-tag> ...
+/// Used to indicate ICE extensions, like trickle, according to RFC 8840
+pub fn parse_ice_options(value: &str) -> Result<Vec<String>> {
+    // Example: a=ice-options:trickle
+    // Example: a=ice-options:trickle ice2
+    
+    let options: Vec<String> = value.split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    
+    if options.is_empty() {
+        return Err(Error::SdpParsingError("No ice-options specified".to_string()));
+    }
+    
+    // Validate option tags (must be valid tokens)
+    for option in &options {
+        if !is_valid_token(option) {
+            return Err(Error::SdpParsingError(format!("Invalid ice-option token: {}", option)));
+        }
+    }
+    
+    Ok(options)
+}
+
+/// Parses end-of-candidates attribute: a=end-of-candidates
+/// Used in Trickle ICE to indicate the end of candidate trickling
+pub fn parse_end_of_candidates(_value: &str) -> Result<bool> {
+    // This is a flag attribute with no value
+    Ok(true)
+}
+
+/// Parses sctp-port attribute: a=sctp-port:<port>
+/// Used in WebRTC data channels (RFC 8841)
+pub fn parse_sctp_port(value: &str) -> Result<u16> {
+    // Example: a=sctp-port:5000
+    match value.trim().parse::<u16>() {
+        Ok(port) => Ok(port),
+        Err(_) => Err(Error::SdpParsingError(format!("Invalid sctp-port value: {}", value)))
+    }
+}
+
+/// Parses max-message-size attribute: a=max-message-size:<size>
+/// Used in WebRTC data channels (RFC 8841)
+pub fn parse_max_message_size(value: &str) -> Result<u64> {
+    // Example: a=max-message-size:262144
+    match value.trim().parse::<u64>() {
+        Ok(size) => {
+            // Validate reasonable size values
+            if size == 0 {
+                return Err(Error::SdpParsingError("max-message-size cannot be 0".to_string()));
+            }
+            
+            // RFC 8841 suggests 262144 (2^18) as default max size
+            // and mentions an upper limit of 2^53-1
+            // We'll be more lenient and just ensure it's positive
+            Ok(size)
+        },
+        Err(_) => Err(Error::SdpParsingError(format!("Invalid max-message-size value: {}", value)))
+    }
+}
+
+/// Parses sctpmap attribute: a=sctpmap:<port> <app> <streams>
+/// Legacy attribute for SCTP in WebRTC data channels (obsolete by RFC 8841)
+pub fn parse_sctpmap(value: &str) -> Result<(u16, String, u32)> {
+    // Example: a=sctpmap:5000 webrtc-datachannel 1024
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Err(Error::SdpParsingError(format!("Invalid sctpmap format: {}", value)));
+    }
+    
+    // Parse the SCTP port number
+    let port = match parts[0].parse::<u16>() {
+        Ok(p) => p,
+        Err(_) => return Err(Error::SdpParsingError(format!("Invalid port in sctpmap: {}", parts[0])))
+    };
+    
+    // The app name (typically 'webrtc-datachannel')
+    let app = parts[1].to_string();
+    if !is_valid_token(&app) {
+        return Err(Error::SdpParsingError(format!("Invalid app name in sctpmap: {}", app)));
+    }
+    
+    // The number of streams
+    let streams = match parts[2].parse::<u32>() {
+        Ok(s) => s,
+        Err(_) => return Err(Error::SdpParsingError(format!("Invalid streams value in sctpmap: {}", parts[2])))
+    };
+    
+    Ok((port, app, streams))
+}
+
+/// Performs cross-attribute validation for a set of SDP attributes.
+/// Validates that attributes reference valid values from other attributes.
+pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
+    // Collect all mid values in the attributes
+    let mut mids: Vec<String> = Vec::new();
+    let mut has_bundle = false;
+    let mut bundle_mids: Vec<String> = Vec::new();
+    let mut rids: Vec<String> = Vec::new();
+    let mut simulcast_rids: Vec<String> = Vec::new();
+    
+    // First pass - collect values
+    for attr in attributes {
+        match attr {
+            ParsedAttribute::Mid(mid) => {
+                mids.push(mid.clone());
+            },
+            ParsedAttribute::Group(semantics, group_mids) => {
+                if semantics.to_uppercase() == "BUNDLE" {
+                    has_bundle = true;
+                    bundle_mids = group_mids.clone();
+                }
+            },
+            ParsedAttribute::Rid(rid, _, _) => {
+                rids.push(rid.clone());
+            },
+            ParsedAttribute::Simulcast(send_list, recv_list) => {
+                // Extract RIDs from simulcast lists (removing any paused indicators)
+                for list in [send_list, recv_list] {
+                    for stream_ids in list {
+                        for stream_id in stream_ids.split(',') {
+                            // Remove pause indicator if present
+                            let clean_id = stream_id.trim_start_matches('~').to_string();
+                            simulcast_rids.push(clean_id);
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    
+    // Second pass - validate references
+    for attr in attributes {
+        match attr {
+            ParsedAttribute::Group(semantics, group_mids) => {
+                if semantics.to_uppercase() == "BUNDLE" {
+                    // Verify all mids in BUNDLE exist
+                    for mid in group_mids {
+                        if !mids.contains(mid) {
+                            return Err(Error::SdpParsingError(
+                                format!("BUNDLE references non-existent mid: {}", mid)
+                            ));
+                        }
+                    }
+                }
+            },
+            ParsedAttribute::Simulcast(_, _) => {
+                // Verify all RIDs referenced in simulcast exist
+                for rid in &simulcast_rids {
+                    // The rid could have alternative formats in simulcast syntax
+                    let clean_rid = rid.trim_start_matches('~');
+                    if !clean_rid.is_empty() && !rids.contains(&clean_rid.to_string()) {
+                        return Err(Error::SdpParsingError(
+                            format!("Simulcast references non-existent rid: {}", clean_rid)
+                        ));
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
+
 // Add more attribute parsers as needed (e.g., candidate, ssrc, etc.) 

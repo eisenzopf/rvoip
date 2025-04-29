@@ -95,54 +95,64 @@ pub struct SsrcAttribute {
     pub value: Option<String>,
 }
 
-/// Enum representing a parsed SDP attribute.
-///
-/// SDP attributes provide detailed information about the session or media.
-/// All attributes follow the format `a=<attribute>` or `a=<attribute>:<value>`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A parsed attribute, identified by its type
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ParsedAttribute {
-    /// RTP mapping attribute (a=rtpmap)
+    /// RTP format parameters, corresponds to a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
     RtpMap(RtpMapAttribute),
-    /// Format parameters attribute (a=fmtp)
+    /// Format parameters, corresponds to a=fmtp:<format> <format specific parameters>
     Fmtp(FmtpAttribute),
-    /// Media direction attribute (a=sendrecv, a=sendonly, a=recvonly, a=inactive)
+    /// Media direction attributes: a=sendrecv, a=sendonly, a=recvonly, a=inactive
     Direction(MediaDirection),
-    /// Packetization time attribute (a=ptime)
-    Ptime(u32),
-    /// Maximum packetization time attribute (a=maxptime)
-    MaxPtime(u32),
-    /// ICE candidate attribute (a=candidate)
+    /// Packetization time, corresponds to a=ptime:<packet time>
+    Ptime(u64),
+    /// Maximum packetization time, corresponds to a=maxptime:<maximum packet time>
+    MaxPtime(u64),
+    /// ICE candidate, corresponds to a=candidate:<foundation> <component-id> <transport> <priority> <connection-address> <port> typ <cand-type> [raddr <rel-addr>] [rport <rel-port>] [tcptype <tcp-type>] [generation <generation>]
     Candidate(CandidateAttribute),
-    /// SSRC attribute (a=ssrc)
+    /// SSRC attribute, corresponds to a=ssrc:<ssrc-id> <attribute>[:value]
     Ssrc(SsrcAttribute),
-    /// ICE username fragment (a=ice-ufrag)
+    /// ICE username fragment, corresponds to a=ice-ufrag:<username>
     IceUfrag(String),
-    /// ICE password (a=ice-pwd)
+    /// ICE password, corresponds to a=ice-pwd:<password>
     IcePwd(String),
-    /// Fingerprint for DTLS-SRTP (a=fingerprint)
-    Fingerprint(String, String), // (hash-function, fingerprint)
-    /// Connection setup role for DTLS (a=setup)
-    Setup(String), // active, passive, actpass, holdconn
-    /// Media ID for grouping (a=mid)
+    /// DTLS fingerprint, corresponds to a=fingerprint:<hash-function> <fingerprint>
+    Fingerprint(String, String),
+    /// DTLS setup role, corresponds to a=setup:<role>
+    Setup(String),
+    /// Media identification, corresponds to a=mid:<identification-tag>
     Mid(String),
-    /// Group attribute for bundling (a=group)
-    Group(String, Vec<String>), // (semantics, mids)
-    /// RTP/RTCP multiplexing flag (a=rtcp-mux)
+    /// Media grouping, corresponds to a=group:<semantics> <id> <id> ...
+    Group(String, Vec<String>),
+    /// RTCP multiplexing, corresponds to a=rtcp-mux
     RtcpMux,
-    /// RTCP feedback mechanism (a=rtcp-fb)
-    RtcpFb(String, String, Option<String>), // (payload-type, feedback-type, additional-params)
-    /// RTP header extension mapping (a=extmap)
-    ExtMap(u16, Option<String>, String, Option<String>), // (id, direction, uri, parameters)
-    /// Media stream identifier (a=msid)
-    Msid(String, Option<String>), // (stream-id, track-id)
-    /// Bandwidth information (b=)
-    Bandwidth(String, u32), // (bwtype, bandwidth)
-    
-    /// A simple flag attribute (e.g., a=msid-semantic)
+    /// RTCP feedback, corresponds to a=rtcp-fb:<payload type> <feedback type> [<feedback parameter>]
+    RtcpFb(String, String, Option<String>),
+    /// Header extension, corresponds to a=extmap:<id>[/<direction>] <URI> [<params>]
+    ExtMap(u8, Option<String>, String, Option<String>),
+    /// Media stream identification, corresponds to a=msid:<stream id> [<track id>]
+    Msid(String, Option<String>),
+    /// Bandwidth information, corresponds to b=<bwtype>:<bandwidth>
+    Bandwidth(String, u64),
+    /// Restriction identifier, corresponds to a=rid:<id> <direction> [restrictions]
+    Rid(String, String, Vec<String>),
+    /// Simulcast attribute, corresponds to a=simulcast:<send list> <recv list>
+    Simulcast(Vec<String>, Vec<String>),
+    /// ICE options, corresponds to a=ice-options:<option-tag> [<option-tag>]*
+    IceOptions(Vec<String>),
+    /// End of candidates, corresponds to a=end-of-candidates
+    EndOfCandidates,
+    /// SCTP port, corresponds to a=sctp-port:<port>
+    SctpPort(u16),
+    /// Max message size, corresponds to a=max-message-size:<size>
+    MaxMessageSize(u64),
+    /// SCTP map, corresponds to a=sctpmap:<number> <app> <max-num-of-streams>
+    SctpMap(u16, String, u16),
+    /// Flag attribute, corresponds to a=<flag>
     Flag(String),
-    /// An attribute with a simple value that wasn't specifically parsed
+    /// Value attribute, corresponds to a=<name>:<value>
     Value(String, String),
-    /// Fallback for unparsed or unknown attributes (should be rare)
+    /// Other attribute, corresponds to a=<name>[:<value>]
     Other(String, Option<String>),
 }
 
@@ -543,7 +553,7 @@ impl MediaDescription {
     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
         // Handle setting dedicated fields vs adding to generic collection
         match attr {
-            ParsedAttribute::Ptime(v) => { self.ptime = Some(v); }
+            ParsedAttribute::Ptime(v) => { self.ptime = Some(v as u32); }
             ParsedAttribute::Direction(d) => { self.direction = Some(d); }
             _ => self.generic_attributes.push(attr),
         }
@@ -701,7 +711,9 @@ impl fmt::Display for ParsedAttribute {
                 }
                 Ok(())
             }
-            ParsedAttribute::Fmtp(fmtp) => write!(f, "a=fmtp:{} {}", fmtp.format, fmtp.parameters),
+            ParsedAttribute::Fmtp(fmtp) => {
+                write!(f, "a=fmtp:{} {}", fmtp.format, fmtp.parameters)
+            }
             ParsedAttribute::Direction(dir) => {
                 let dir_str = match dir {
                     MediaDirection::SendRecv => "sendrecv",
@@ -711,30 +723,34 @@ impl fmt::Display for ParsedAttribute {
                 };
                 write!(f, "a={}", dir_str)
             }
-            ParsedAttribute::Ptime(time) => write!(f, "a=ptime:{}", time),
-            ParsedAttribute::MaxPtime(time) => write!(f, "a=maxptime:{}", time),
+            ParsedAttribute::Ptime(ptime) => write!(f, "a=ptime:{}", ptime),
+            ParsedAttribute::MaxPtime(maxptime) => write!(f, "a=maxptime:{}", maxptime),
             ParsedAttribute::Candidate(candidate) => {
-                write!(f, "a=candidate:{} {} {} {} {} {} typ {}", 
-                    candidate.foundation, candidate.component_id, candidate.transport, 
-                    candidate.priority, candidate.connection_address, candidate.port,
-                    candidate.candidate_type)?;
-                
-                if let Some(addr) = &candidate.related_address {
-                    write!(f, " raddr {}", addr)?;
+                write!(
+                    f,
+                    "a=candidate:{} {} {} {} {} {} typ {}",
+                    candidate.foundation,
+                    candidate.component_id,
+                    candidate.transport,
+                    candidate.priority,
+                    candidate.connection_address,
+                    candidate.port,
+                    candidate.candidate_type
+                )?;
+                if let Some(rel_addr) = &candidate.related_address {
+                    write!(f, " raddr {}", rel_addr)?;
                 }
-                
-                if let Some(port) = candidate.related_port {
-                    write!(f, " rport {}", port)?;
+                if let Some(rel_port) = candidate.related_port {
+                    write!(f, " rport {}", rel_port)?;
                 }
-                
+                // Handle extensions as separate key-value pairs
                 for (key, value) in &candidate.extensions {
-                    if let Some(val) = value {
-                        write!(f, " {} {}", key, val)?;
+                    if let Some(v) = value {
+                        write!(f, " {} {}", key, v)?;
                     } else {
                         write!(f, " {}", key)?;
                     }
                 }
-                
                 Ok(())
             }
             ParsedAttribute::Ssrc(ssrc) => {
@@ -746,28 +762,30 @@ impl fmt::Display for ParsedAttribute {
             }
             ParsedAttribute::IceUfrag(ufrag) => write!(f, "a=ice-ufrag:{}", ufrag),
             ParsedAttribute::IcePwd(pwd) => write!(f, "a=ice-pwd:{}", pwd),
-            ParsedAttribute::Fingerprint(hash_func, fingerprint) => write!(f, "a=fingerprint:{} {}", hash_func, fingerprint),
+            ParsedAttribute::Fingerprint(hash, fingerprint) => {
+                write!(f, "a=fingerprint:{} {}", hash, fingerprint)
+            }
             ParsedAttribute::Setup(role) => write!(f, "a=setup:{}", role),
-            ParsedAttribute::Mid(mid) => write!(f, "a=mid:{}", mid),
-            ParsedAttribute::Group(semantics, mids) => {
+            ParsedAttribute::Mid(id) => write!(f, "a=mid:{}", id),
+            ParsedAttribute::Group(semantics, ids) => {
                 write!(f, "a=group:{}", semantics)?;
-                for mid in mids {
-                    write!(f, " {}", mid)?;
+                for id in ids {
+                    write!(f, " {}", id)?;
                 }
                 Ok(())
             }
             ParsedAttribute::RtcpMux => write!(f, "a=rtcp-mux"),
-            ParsedAttribute::RtcpFb(payload_type, fb_type, params) => {
-                write!(f, "a=rtcp-fb:{} {}", payload_type, fb_type)?;
-                if let Some(p) = params {
+            ParsedAttribute::RtcpFb(pt, feedback_type, param) => {
+                write!(f, "a=rtcp-fb:{} {}", pt, feedback_type)?;
+                if let Some(p) = param {
                     write!(f, " {}", p)?;
                 }
                 Ok(())
             }
             ParsedAttribute::ExtMap(id, direction, uri, params) => {
                 write!(f, "a=extmap:{}", id)?;
-                if let Some(dir) = direction {
-                    write!(f, "/{}", dir)?;
+                if let Some(dir_str) = direction {
+                    write!(f, "/{}", dir_str)?;
                 }
                 write!(f, " {}", uri)?;
                 if let Some(p) = params {
@@ -777,16 +795,56 @@ impl fmt::Display for ParsedAttribute {
             }
             ParsedAttribute::Msid(stream_id, track_id) => {
                 write!(f, "a=msid:{}", stream_id)?;
-                if let Some(track) = track_id {
-                    write!(f, " {}", track)?;
+                if let Some(id) = track_id {
+                    write!(f, " {}", id)?;
                 }
                 Ok(())
             }
-            ParsedAttribute::Bandwidth(bwtype, bandwidth) => write!(f, "b={}:{}", bwtype, bandwidth),
-            ParsedAttribute::Flag(key) => write!(f, "a={}", key),
-            ParsedAttribute::Value(key, value) => write!(f, "a={}:{}", key, value),
-            ParsedAttribute::Other(key, Some(value)) => write!(f, "a={}:{}", key, value), // Fallback with colon
-            ParsedAttribute::Other(key, None) => write!(f, "a={}", key), // Fallback flag
+            ParsedAttribute::Rid(id, direction, restrictions) => {
+                write!(f, "a=rid:{} {}", id, direction)?;
+                if !restrictions.is_empty() {
+                    // Join with space for display
+                    write!(f, " {}", restrictions.join(" "))?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::Simulcast(send, recv) => {
+                write!(f, "a=simulcast:")?;
+                let mut first = true;
+
+                if !send.is_empty() {
+                    write!(f, "send {}", send.join(";"))?;
+                    first = false;
+                }
+
+                if !recv.is_empty() {
+                    if !first {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "recv {}", recv.join(";"))?;
+                }
+
+                Ok(())
+            }
+            ParsedAttribute::IceOptions(options) => {
+                write!(f, "a=ice-options:{}", options.join(" "))
+            }
+            ParsedAttribute::EndOfCandidates => write!(f, "a=end-of-candidates"),
+            ParsedAttribute::SctpPort(port) => write!(f, "a=sctp-port:{}", port),
+            ParsedAttribute::MaxMessageSize(size) => write!(f, "a=max-message-size:{}", size),
+            ParsedAttribute::SctpMap(number, app, streams) => {
+                write!(f, "a=sctpmap:{} {} {}", number, app, streams)
+            }
+            ParsedAttribute::Bandwidth(bwtype, bandwidth) => {
+                write!(f, "b={}:{}", bwtype, bandwidth)
+            }
+            ParsedAttribute::Other(name, value) => {
+                if let Some(val) = value {
+                    write!(f, "a={}:{}", name, val)
+                } else {
+                    write!(f, "a={}", name)
+                }
+            }
         }
     }
 }

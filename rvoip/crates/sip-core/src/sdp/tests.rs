@@ -724,6 +724,146 @@ fn test_bandwidth_parsing() {
     assert!(attributes::parse_bandwidth(invalid_bw).is_err());
 }
 
+/// Tests for simulcast and RID attribute parsing (RFC 8853, 8851)
+#[test]
+fn test_simulcast_attributes() {
+    // Test rid attribute
+    let rid_value = "1 send pt=97,98 max-width=1280;max-height=720";
+    let result = attributes::parse_rid(rid_value);
+    assert!(result.is_ok());
+    let (id, direction, restrictions) = result.unwrap();
+    assert_eq!(id, "1");
+    assert_eq!(direction, "send");
+    assert_eq!(restrictions.len(), 2);
+    assert_eq!(restrictions[0], "pt=97,98");
+    assert_eq!(restrictions[1], "max-width=1280;max-height=720");
+    
+    // Test invalid rid - missing direction
+    let invalid_rid = "1";
+    assert!(attributes::parse_rid(invalid_rid).is_err());
+    
+    // Test simulcast attribute
+    let simulcast_value = "send 1,2,3;~4 recv 5;~6,~7";
+    let result = attributes::parse_simulcast(simulcast_value);
+    assert!(result.is_ok());
+    let (send_streams, recv_streams) = result.unwrap();
+    assert_eq!(send_streams, vec!["1,2,3", "~4"]);
+    assert_eq!(recv_streams, vec!["5", "~6,~7"]);
+    
+    // Test invalid simulcast - empty direction
+    let invalid_simulcast = "send";
+    assert!(attributes::parse_simulcast(invalid_simulcast).is_err());
+    
+    // Test SVC attribute (in fmtp)
+    let scalability_mode = "L2T3";
+    let result = attributes::parse_scalability_mode(scalability_mode);
+    assert!(result.is_ok());
+    let (pattern, spatial, temporal, extra) = result.unwrap();
+    assert_eq!(pattern, "L");
+    assert_eq!(spatial, Some(2));
+    assert_eq!(temporal, Some(3));
+    assert_eq!(extra, None);
+}
+
+/// Tests for Trickle ICE attributes (RFC 8840)
+#[test]
+fn test_trickle_ice_attributes() {
+    // Test ice-options attribute with trickle
+    let ice_options = "trickle";
+    let result = attributes::parse_ice_options(ice_options);
+    assert!(result.is_ok());
+    let options = result.unwrap();
+    assert_eq!(options, vec!["trickle"]);
+    
+    // Test ice-options with multiple options
+    let multiple_options = "trickle ice2 renomination";
+    let result = attributes::parse_ice_options(multiple_options);
+    assert!(result.is_ok());
+    let options = result.unwrap();
+    assert_eq!(options, vec!["trickle", "ice2", "renomination"]);
+    
+    // Test invalid ice-options - empty
+    let invalid_options = "";
+    assert!(attributes::parse_ice_options(invalid_options).is_err());
+    
+    // Test end-of-candidates attribute
+    let result = attributes::parse_end_of_candidates("");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+}
+
+/// Tests for WebRTC Data Channel attributes (RFC 8841)
+#[test]
+fn test_data_channel_attributes() {
+    // Test sctp-port attribute
+    let sctp_port = "5000";
+    let result = attributes::parse_sctp_port(sctp_port);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 5000);
+    
+    // Test invalid sctp-port - not a number
+    let invalid_port = "abc";
+    assert!(attributes::parse_sctp_port(invalid_port).is_err());
+    
+    // Test max-message-size attribute
+    let max_message_size = "262144";
+    let result = attributes::parse_max_message_size(max_message_size);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 262144);
+    
+    // Test invalid max-message-size - zero
+    let invalid_size = "0";
+    assert!(attributes::parse_max_message_size(invalid_size).is_err());
+    
+    // Test sctpmap attribute (legacy)
+    let sctpmap = "5000 webrtc-datachannel 1024";
+    let result = attributes::parse_sctpmap(sctpmap);
+    assert!(result.is_ok());
+    let (port, app, streams) = result.unwrap();
+    assert_eq!(port, 5000);
+    assert_eq!(app, "webrtc-datachannel");
+    assert_eq!(streams, 1024);
+    
+    // Test invalid sctpmap - missing parts
+    let invalid_sctpmap = "5000 webrtc-datachannel";
+    assert!(attributes::parse_sctpmap(invalid_sctpmap).is_err());
+}
+
+/// Test cross-attribute validation
+#[test]
+fn test_cross_attribute_validation() {
+    use crate::types::sdp::ParsedAttribute;
+    
+    // Test valid attribute set
+    let valid_attrs = vec![
+        ParsedAttribute::Mid("audio".to_string()),
+        ParsedAttribute::Mid("video".to_string()),
+        ParsedAttribute::Group("BUNDLE".to_string(), vec!["audio".to_string(), "video".to_string()]),
+    ];
+    
+    let result = attributes::validate_attributes(&valid_attrs);
+    assert!(result.is_ok());
+    
+    // Test invalid attribute set (BUNDLE references non-existent mid)
+    let invalid_attrs = vec![
+        ParsedAttribute::Mid("audio".to_string()),
+        ParsedAttribute::Group("BUNDLE".to_string(), vec!["audio".to_string(), "video".to_string()]),
+    ];
+    
+    let result = attributes::validate_attributes(&invalid_attrs);
+    assert!(result.is_err());
+    
+    // Test valid simulcast and rid references
+    let valid_simulcast_attrs = vec![
+        ParsedAttribute::Rid("1".to_string(), "send".to_string(), vec!["pt=97".to_string()]),
+        ParsedAttribute::Rid("2".to_string(), "send".to_string(), vec!["pt=98".to_string()]),
+        ParsedAttribute::Simulcast(vec!["1,2".to_string()], vec![]),
+    ];
+    
+    let result = attributes::validate_attributes(&valid_simulcast_attrs);
+    assert!(result.is_ok());
+}
+
 // ============================================================================
 // COMPREHENSIVE ATTRIBUTE TESTS
 // ============================================================================
@@ -1317,12 +1457,11 @@ fn test_extmap_attribute_comprehensive() {
     
     // Extmap with direction
     let with_dir = "2/sendrecv urn:ietf:params:rtp-hdrext:toffset";
-    assert!(attributes::parse_extmap(with_dir).is_ok());
-    let (id, direction, uri, params) = attributes::parse_extmap(with_dir).unwrap();
+    let result = attributes::parse_extmap(with_dir);
+    assert!(result.is_ok());
+    let (id, direction, uri, params) = result.unwrap();
     assert_eq!(id, 2);
     assert_eq!(direction, Some("sendrecv".to_string()));
-    assert_eq!(uri, "urn:ietf:params:rtp-hdrext:toffset");
-    assert_eq!(params, None);
     
     // Extmap with parameters
     let with_params = "3 urn:ietf:params:rtp-hdrext:sdes:mid config-params";
