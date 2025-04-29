@@ -109,10 +109,34 @@ pub enum ParsedAttribute {
     Direction(MediaDirection),
     /// Packetization time attribute (a=ptime)
     Ptime(u32),
+    /// Maximum packetization time attribute (a=maxptime)
+    MaxPtime(u32),
     /// ICE candidate attribute (a=candidate)
     Candidate(CandidateAttribute),
     /// SSRC attribute (a=ssrc)
     Ssrc(SsrcAttribute),
+    /// ICE username fragment (a=ice-ufrag)
+    IceUfrag(String),
+    /// ICE password (a=ice-pwd)
+    IcePwd(String),
+    /// Fingerprint for DTLS-SRTP (a=fingerprint)
+    Fingerprint(String, String), // (hash-function, fingerprint)
+    /// Connection setup role for DTLS (a=setup)
+    Setup(String), // active, passive, actpass, holdconn
+    /// Media ID for grouping (a=mid)
+    Mid(String),
+    /// Group attribute for bundling (a=group)
+    Group(String, Vec<String>), // (semantics, mids)
+    /// RTP/RTCP multiplexing flag (a=rtcp-mux)
+    RtcpMux,
+    /// RTCP feedback mechanism (a=rtcp-fb)
+    RtcpFb(String, String, Option<String>), // (payload-type, feedback-type, additional-params)
+    /// RTP header extension mapping (a=extmap)
+    ExtMap(u16, Option<String>, String, Option<String>), // (id, direction, uri, parameters)
+    /// Media stream identifier (a=msid)
+    Msid(String, Option<String>), // (stream-id, track-id)
+    /// Bandwidth information (b=)
+    Bandwidth(String, u32), // (bwtype, bandwidth)
     
     /// A simple flag attribute (e.g., a=msid-semantic)
     Flag(String),
@@ -688,36 +712,81 @@ impl fmt::Display for ParsedAttribute {
                 write!(f, "a={}", dir_str)
             }
             ParsedAttribute::Ptime(time) => write!(f, "a=ptime:{}", time),
-            ParsedAttribute::Flag(key) => write!(f, "a={}", key),
-            ParsedAttribute::Value(key, value) => write!(f, "a={}:{}", key, value),
-            ParsedAttribute::Other(key, Some(value)) => write!(f, "a={}:{}", key, value), // Fallback with colon
-            ParsedAttribute::Other(key, None) => write!(f, "a={}", key), // Fallback flag
+            ParsedAttribute::MaxPtime(time) => write!(f, "a=maxptime:{}", time),
             ParsedAttribute::Candidate(candidate) => {
                 write!(f, "a=candidate:{} {} {} {} {} {} typ {}", 
                     candidate.foundation, candidate.component_id, candidate.transport, 
-                    candidate.priority, candidate.connection_address, candidate.port, 
+                    candidate.priority, candidate.connection_address, candidate.port,
                     candidate.candidate_type)?;
-                if let Some(raddr) = &candidate.related_address {
-                    write!(f, " raddr {}", raddr)?;
+                
+                if let Some(addr) = &candidate.related_address {
+                    write!(f, " raddr {}", addr)?;
                 }
-                if let Some(rport) = candidate.related_port {
-                     write!(f, " rport {}", rport)?;
+                
+                if let Some(port) = candidate.related_port {
+                    write!(f, " rport {}", port)?;
                 }
-                for (ext_key, ext_value) in &candidate.extensions {
-                    write!(f, " {}", ext_key)?;
-                    if let Some(value) = ext_value {
-                        write!(f, " {}", value)?;
+                
+                for (key, value) in &candidate.extensions {
+                    if let Some(val) = value {
+                        write!(f, " {} {}", key, val)?;
+                    } else {
+                        write!(f, " {}", key)?;
                     }
                 }
+                
                 Ok(())
             }
             ParsedAttribute::Ssrc(ssrc) => {
                 write!(f, "a=ssrc:{} {}", ssrc.ssrc_id, ssrc.attribute)?;
-                if let Some(val) = &ssrc.value {
-                    write!(f, ":{}", val)?;
+                if let Some(value) = &ssrc.value {
+                    write!(f, ":{}", value)?;
                 }
                 Ok(())
             }
+            ParsedAttribute::IceUfrag(ufrag) => write!(f, "a=ice-ufrag:{}", ufrag),
+            ParsedAttribute::IcePwd(pwd) => write!(f, "a=ice-pwd:{}", pwd),
+            ParsedAttribute::Fingerprint(hash_func, fingerprint) => write!(f, "a=fingerprint:{} {}", hash_func, fingerprint),
+            ParsedAttribute::Setup(role) => write!(f, "a=setup:{}", role),
+            ParsedAttribute::Mid(mid) => write!(f, "a=mid:{}", mid),
+            ParsedAttribute::Group(semantics, mids) => {
+                write!(f, "a=group:{}", semantics)?;
+                for mid in mids {
+                    write!(f, " {}", mid)?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::RtcpMux => write!(f, "a=rtcp-mux"),
+            ParsedAttribute::RtcpFb(payload_type, fb_type, params) => {
+                write!(f, "a=rtcp-fb:{} {}", payload_type, fb_type)?;
+                if let Some(p) = params {
+                    write!(f, " {}", p)?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::ExtMap(id, direction, uri, params) => {
+                write!(f, "a=extmap:{}", id)?;
+                if let Some(dir) = direction {
+                    write!(f, "/{}", dir)?;
+                }
+                write!(f, " {}", uri)?;
+                if let Some(p) = params {
+                    write!(f, " {}", p)?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::Msid(stream_id, track_id) => {
+                write!(f, "a=msid:{}", stream_id)?;
+                if let Some(track) = track_id {
+                    write!(f, " {}", track)?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::Bandwidth(bwtype, bandwidth) => write!(f, "b={}:{}", bwtype, bandwidth),
+            ParsedAttribute::Flag(key) => write!(f, "a={}", key),
+            ParsedAttribute::Value(key, value) => write!(f, "a={}:{}", key, value),
+            ParsedAttribute::Other(key, Some(value)) => write!(f, "a={}:{}", key, value), // Fallback with colon
+            ParsedAttribute::Other(key, None) => write!(f, "a={}", key), // Fallback flag
         }
     }
 }

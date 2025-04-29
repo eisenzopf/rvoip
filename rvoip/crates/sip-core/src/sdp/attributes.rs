@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt; // Import fmt
 use std::net::IpAddr;
 use crate::parser::uri::{ipv4, ipv6, hostname}; // Import URI parsers
+use crate::parser::token::is_token_char; // Import token parser
 
 /// SDP Media Direction attribute (e.g., sendrecv, sendonly)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,53 +38,52 @@ impl fmt::Display for MediaDirection {
     }
 }
 
-// Validation helper functions - similar to those in parser.rs but need to be accessible here too
-/// Helper function to validate IPv4 addresses
+// Validation helper functions - using the existing parsers instead of custom implementations
+/// Helper function to validate IPv4 addresses using the parser module
 fn is_valid_ipv4(addr: &str) -> bool {
-    let parts: Vec<&str> = addr.split('.').collect();
-    if parts.len() != 4 {
-        return false;
+    // Use the parser module's ipv4_address function
+    let input = addr.as_bytes();
+    match ipv4::ipv4_address(input) {
+        Ok((remaining, _)) => remaining.is_empty(), // Must consume all input
+        Err(_) => false,
     }
-    
-    parts.iter().all(|part| {
-        if let Ok(num) = part.parse::<u8>() {
-            true
-        } else {
-            false
-        }
-    })
 }
 
-/// Helper function to validate IPv6 addresses
+/// Helper function to validate IPv6 addresses using the parser module
 fn is_valid_ipv6(addr: &str) -> bool {
-    // Simplified IPv6 validation - just check for basic format
-    addr.contains(':') && addr.split(':').count() <= 8
-}
-
-/// Helper function to validate hostnames
-fn is_valid_hostname(hostname: &str) -> bool {
-    // Simplified hostname validation
-    // A hostname should contain only alphanumeric characters, hyphens, and dots
-    // and should not start or end with a hyphen or dot
-    if hostname.is_empty() || hostname.starts_with('.') || hostname.ends_with('.') ||
-       hostname.starts_with('-') || hostname.ends_with('-') {
-        return false;
-    }
+    // If the address doesn't have brackets, add them for the parser
+    let input = if addr.starts_with('[') {
+        addr.as_bytes().to_vec()
+    } else {
+        let mut with_brackets = Vec::with_capacity(addr.len() + 2);
+        with_brackets.push(b'[');
+        with_brackets.extend_from_slice(addr.as_bytes());
+        with_brackets.push(b']');
+        with_brackets
+    };
     
-    hostname.chars().all(|c| {
-        c.is_alphanumeric() || c == '-' || c == '.'
-    })
+    match ipv6::ipv6_reference(&input) {
+        Ok((remaining, _)) => remaining.is_empty(), // Must consume all input
+        Err(_) => false,
+    }
 }
 
-/// Helper function to validate token format (per RFC 4566 ABNF)
+/// Helper function to validate hostnames using the parser module
+fn is_valid_hostname(hostname_str: &str) -> bool {
+    // Use the hostname parser from hostname.rs
+    let input = hostname_str.as_bytes();
+    match hostname::hostname(input) {
+        Ok((remaining, _)) => remaining.is_empty() || remaining == b".", // Must consume all input (allow trailing dot)
+        Err(_) => false,
+    }
+}
+
+/// Helper function to validate token format using the parser module
 fn is_valid_token(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| 
-        c.is_ascii_alphanumeric() || 
-        c == '-' || c == '.' || c == '!' || 
-        c == '%' || c == '*' || c == '_' || 
-        c == '+' || c == '`' || c == '\'' || 
-        c == '~'
-    )
+    !s.is_empty() && s.chars().all(|c| {
+        let byte = c as u8;
+        is_token_char(byte)
+    })
 }
 
 // --- Parsing Functions --- 
@@ -167,6 +167,19 @@ pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
 pub fn parse_ptime(value: &str) -> Result<u32> { // Return specific type
     value.trim().parse::<u32>()
          .map_err(|_| Error::SdpParsingError(format!("Invalid ptime value: {}", value)))
+}
+
+/// Parses maxptime attribute: a=maxptime:<maximum packet time>
+pub fn parse_maxptime(value: &str) -> Result<u32> {
+    let maxptime = value.trim().parse::<u32>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid maxptime value: {}", value)))?;
+    
+    // Typically maxptime should be reasonable (not too small, not too large)
+    if maxptime < 10 || maxptime > 5000 {
+        return Err(Error::SdpParsingError(format!("Unreasonable maxptime value: {}", maxptime)));
+    }
+    
+    Ok(maxptime)
 }
 
 /// Parses direction attributes (sendrecv, sendonly, recvonly, inactive)
@@ -314,6 +327,277 @@ pub fn parse_ssrc(value: &str) -> Result<ParsedAttribute> {
         attribute,
         value: ssrc_value,
     }))
+}
+
+/// Parses ice-ufrag attribute: a=ice-ufrag:<ufrag>
+pub fn parse_ice_ufrag(value: &str) -> Result<String> {
+    let ufrag = value.trim();
+    
+    // Validate the ICE username fragment (ufrag)
+    // Per RFC 8839, ufrag must be at least 4 characters and at most 256
+    if ufrag.len() < 4 || ufrag.len() > 256 {
+        return Err(Error::SdpParsingError(format!("Invalid ice-ufrag length (must be 4-256 chars): {}", ufrag)));
+    }
+    
+    // ICE ufrag should only contain printable ASCII characters
+    if !ufrag.chars().all(|c| c.is_ascii() && !c.is_ascii_control()) {
+        return Err(Error::SdpParsingError(format!("Invalid ice-ufrag (contains non-printable chars): {}", ufrag)));
+    }
+    
+    Ok(ufrag.to_string())
+}
+
+/// Parses ice-pwd attribute: a=ice-pwd:<pwd>
+pub fn parse_ice_pwd(value: &str) -> Result<String> {
+    let pwd = value.trim();
+    
+    // Validate the ICE password
+    // Per RFC 8839, pwd must be at least 22 characters and at most 256
+    if pwd.len() < 22 || pwd.len() > 256 {
+        return Err(Error::SdpParsingError(format!("Invalid ice-pwd length (must be 22-256 chars): {}", pwd)));
+    }
+    
+    // ICE pwd should only contain printable ASCII characters
+    if !pwd.chars().all(|c| c.is_ascii() && !c.is_ascii_control()) {
+        return Err(Error::SdpParsingError(format!("Invalid ice-pwd (contains non-printable chars): {}", pwd)));
+    }
+    
+    Ok(pwd.to_string())
+}
+
+/// Parses fingerprint attribute: a=fingerprint:<hash-function> <fingerprint>
+pub fn parse_fingerprint(value: &str) -> Result<(String, String)> {
+    // Example: sha-256 D1:2C:74:A7:E3:B5:11:04:87:0D:D7:3F:B8:BF:79:7D:CF:76:B3:97:B6:5F:A5:3D:EC:D8:79:49:5C:92:26:E9
+    let parts: Vec<&str> = value.splitn(2, ' ').collect();
+    if parts.len() != 2 {
+        return Err(Error::SdpParsingError(format!("Invalid fingerprint format: {}", value)));
+    }
+    
+    let hash_function = parts[0].trim().to_lowercase();
+    let fingerprint = parts[1].trim();
+    
+    // Validate the hash function
+    if !["sha-1", "sha-256", "sha-384", "sha-512", "md5"].contains(&hash_function.as_str()) {
+        return Err(Error::SdpParsingError(format!("Unsupported hash function: {}", hash_function)));
+    }
+    
+    // Validate the fingerprint format (colon-separated hex values)
+    let fingerprint_parts: Vec<&str> = fingerprint.split(':').collect();
+    if fingerprint_parts.is_empty() {
+        return Err(Error::SdpParsingError("Empty fingerprint value".to_string()));
+    }
+    
+    // Each segment should be a valid hex value
+    for part in &fingerprint_parts {
+        if part.is_empty() || part.len() > 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Error::SdpParsingError(format!("Invalid fingerprint hex value: {}", part)));
+        }
+    }
+    
+    Ok((hash_function, fingerprint.to_string()))
+}
+
+/// Parses setup attribute: a=setup:<role>
+pub fn parse_setup(value: &str) -> Result<String> {
+    // Values as per RFC 4145, used for DTLS (RFC 5763)
+    match value.trim() {
+        "active" | "passive" | "actpass" | "holdconn" => Ok(value.trim().to_string()),
+        _ => Err(Error::SdpParsingError(format!("Invalid setup value: {}", value)))
+    }
+}
+
+/// Parses mid attribute: a=mid:<identification-tag>
+pub fn parse_mid(value: &str) -> Result<String> {
+    let mid = value.trim();
+    
+    // Basic validation: mid should not be empty
+    if mid.is_empty() {
+        return Err(Error::SdpParsingError("Empty mid value".to_string()));
+    }
+    
+    // Per RFC 5888, the identification-tag is a token which means
+    // it should consist of ASCII alphanumeric, '-', '.', '!', '%', '*', '_', '+', '`', '\'', '~'
+    if !is_valid_token(mid) {
+        return Err(Error::SdpParsingError(format!("Invalid mid value (not a valid token): {}", mid)));
+    }
+    
+    Ok(mid.to_string())
+}
+
+/// Parses group attribute: a=group:<semantics> <identification-tag> ...
+pub fn parse_group(value: &str) -> Result<(String, Vec<String>)> {
+    // Example: BUNDLE audio video
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(Error::SdpParsingError("Empty group attribute".to_string()));
+    }
+    
+    let semantics = parts[0].to_string();
+    let mut mids = Vec::new();
+    
+    // Collect all identification tags (mids)
+    for part in parts.iter().skip(1) {
+        let mid = part.trim();
+        if !mid.is_empty() {
+            // Each mid should be a valid token
+            if !is_valid_token(mid) {
+                return Err(Error::SdpParsingError(format!("Invalid mid in group: {}", mid)));
+            }
+            mids.push(mid.to_string());
+        }
+    }
+    
+    // Validate semantics (common values as per RFC 5888, 7104, etc.)
+    match semantics.as_str() {
+        "BUNDLE" | "LS" | "FID" | "SRF" | "ANAT" => {},
+        _ => {
+            // Unknown semantics - we'll accept it but log a warning
+            // This is not an error as new semantics might be defined in the future
+            // println!("Warning: Unknown group semantics: {}", semantics);
+        }
+    }
+    
+    Ok((semantics, mids))
+}
+
+/// Parses rtcp-mux attribute: a=rtcp-mux
+/// This is a flag attribute with no value
+pub fn parse_rtcp_mux(_value: &str) -> Result<bool> {
+    // rtcp-mux is a flag attribute with no value
+    // We could validate that the value is empty, but some implementations
+    // might include extra data, so we'll be lenient here
+    Ok(true)
+}
+
+/// Parses rtcp-fb attribute: a=rtcp-fb:<payload type> <feedback type> [<additional feedback parameters>]
+pub fn parse_rtcp_fb(value: &str) -> Result<(String, String, Option<String>)> {
+    // Example: 96 nack
+    // Example: 96 nack pli
+    // Example: * ccm fir
+    let parts: Vec<&str> = value.splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        return Err(Error::SdpParsingError(format!("Invalid rtcp-fb format: {}", value)));
+    }
+    
+    let payload_type = parts[0].trim();
+    let feedback_type = parts[1].trim();
+    
+    // Payload type should be a number or "*" (meaning all payload types)
+    if payload_type != "*" && !payload_type.chars().all(|c| c.is_ascii_digit()) {
+        return Err(Error::SdpParsingError(format!("Invalid payload type in rtcp-fb: {}", payload_type)));
+    }
+    
+    // Validate feedback type
+    if !["nack", "ack", "ccm", "trr-int", "app"].contains(&feedback_type) {
+        // Unknown feedback type - some implementations may use custom types, so just warn
+        // println!("Warning: Unknown RTCP feedback type: {}", feedback_type);
+    }
+    
+    // Additional parameters are just passed through
+    let additional_params = if parts.len() > 2 && !parts[2].trim().is_empty() {
+        Some(parts[2].trim().to_string())
+    } else {
+        None
+    };
+    
+    Ok((payload_type.to_string(), feedback_type.to_string(), additional_params))
+}
+
+/// Parses extmap attribute: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
+pub fn parse_extmap(value: &str) -> Result<(u16, Option<String>, String, Option<String>)> {
+    // Example: 1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+    // Example: 2/sendrecv urn:ietf:params:rtp-hdrext:toffset
+    
+    // Split on first space to separate id/direction from URI and parameters
+    let parts: Vec<&str> = value.splitn(2, ' ').collect();
+    if parts.len() != 2 {
+        return Err(Error::SdpParsingError(format!("Invalid extmap format: {}", value)));
+    }
+    
+    // Parse id and optional direction
+    let id_part = parts[0].trim();
+    let (id_str, direction) = match id_part.split_once('/') {
+        Some((id, dir)) => (id, Some(dir.to_string())),
+        None => (id_part, None)
+    };
+    
+    // Validate id (1-14 for one-byte header, 15-255 for two-byte header)
+    let id = id_str.parse::<u16>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid extmap id: {}", id_str)))?;
+    if id < 1 || id > 255 {
+        return Err(Error::SdpParsingError(format!("Extmap id out of range (1-255): {}", id)));
+    }
+    
+    // Validate direction if present
+    if let Some(dir) = &direction {
+        if !["sendonly", "recvonly", "sendrecv", "inactive"].contains(&dir.as_str()) {
+            return Err(Error::SdpParsingError(format!("Invalid extmap direction: {}", dir)));
+        }
+    }
+    
+    // Parse URI and optional parameters
+    let uri_params_part = parts[1].trim();
+    let (uri, parameters) = match uri_params_part.split_once(' ') {
+        Some((uri, params)) => (uri.to_string(), Some(params.trim().to_string())),
+        None => (uri_params_part.to_string(), None)
+    };
+    
+    // Basic URI validation - should start with urn: or http:
+    if !uri.starts_with("urn:") && !uri.starts_with("http:") {
+        return Err(Error::SdpParsingError(format!("Invalid extmap URI: {}", uri)));
+    }
+    
+    Ok((id, direction, uri, parameters))
+}
+
+/// Parses msid attribute: a=msid:<stream identifier> [<track identifier>]
+pub fn parse_msid(value: &str) -> Result<(String, Option<String>)> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(Error::SdpParsingError("Empty msid attribute".to_string()));
+    }
+    
+    let stream_id = parts[0].to_string();
+    let track_id = if parts.len() > 1 { Some(parts[1].to_string()) } else { None };
+    
+    // Basic validation - identifiers should not be empty
+    if stream_id.is_empty() {
+        return Err(Error::SdpParsingError("Empty stream identifier in msid".to_string()));
+    }
+    
+    if let Some(track) = &track_id {
+        if track.is_empty() {
+            return Err(Error::SdpParsingError("Empty track identifier in msid".to_string()));
+        }
+    }
+    
+    Ok((stream_id, track_id))
+}
+
+/// Parses bandwidth attribute: b=<bwtype>:<bandwidth>
+pub fn parse_bandwidth(value: &str) -> Result<(String, u32)> {
+    // Example: b=AS:128
+    // Example: b=TIAS:64000
+    
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 2 {
+        return Err(Error::SdpParsingError(format!("Invalid bandwidth format: {}", value)));
+    }
+    
+    let bwtype = parts[0].trim();
+    let bandwidth = parts[1].trim().parse::<u32>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid bandwidth value: {}", parts[1])))?;
+    
+    // Validate bwtype
+    match bwtype {
+        "CT" | "AS" | "TIAS" | "RS" | "RR" => {}, // Known bandwidth types per various RFCs
+        _ => {
+            // Unknown bwtype - some implementations may use custom types, so just warn
+            // println!("Warning: Unknown bandwidth type: {}", bwtype);
+        }
+    }
+    
+    Ok((bwtype.to_string(), bandwidth))
 }
 
 // Add more attribute parsers as needed (e.g., candidate, ssrc, etc.) 

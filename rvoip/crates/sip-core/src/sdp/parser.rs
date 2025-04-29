@@ -649,7 +649,18 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         }
                         current_media = Some(parse_media_description_line(value)?);
                     }
-                    'b' | 'z' | 'k' | 'r' => { 
+                    'b' => { // Bandwidth
+                        // Parse the bandwidth line and add it as a dedicated attribute
+                        let (bwtype, bandwidth) = attributes::parse_bandwidth(value)?;
+                        if let Some(media) = current_media.as_mut() {
+                            // Media-level bandwidth
+                            media.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
+                        } else {
+                            // Session-level bandwidth
+                            session.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
+                        }
+                    }
+                    'z' | 'k' | 'r' => { 
                         // Store as generic attributes for now
                         session.generic_attributes.push(ParsedAttribute::Value(key.to_string(), value.to_string()));
                     }
@@ -697,20 +708,30 @@ fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
             "rtpmap" => attributes::parse_rtpmap(val_trimmed),
             "fmtp" => attributes::parse_fmtp(val_trimmed),
             "ptime" => attributes::parse_ptime(val_trimmed).map(ParsedAttribute::Ptime),
+            "maxptime" => attributes::parse_maxptime(val_trimmed).map(ParsedAttribute::MaxPtime),
             "candidate" => attributes::parse_candidate(val_trimmed),
             "ssrc" => attributes::parse_ssrc(val_trimmed),
-            // TODO: Add cases for other known attributes (mid, rtcp, etc.)
+            "ice-ufrag" => attributes::parse_ice_ufrag(val_trimmed).map(ParsedAttribute::IceUfrag),
+            "ice-pwd" => attributes::parse_ice_pwd(val_trimmed).map(ParsedAttribute::IcePwd),
+            "fingerprint" => attributes::parse_fingerprint(val_trimmed).map(|(hash, fprint)| ParsedAttribute::Fingerprint(hash, fprint)),
+            "setup" => attributes::parse_setup(val_trimmed).map(ParsedAttribute::Setup),
+            "mid" => attributes::parse_mid(val_trimmed).map(ParsedAttribute::Mid),
+            "group" => attributes::parse_group(val_trimmed).map(|(semantics, mids)| ParsedAttribute::Group(semantics, mids)),
+            "rtcp-fb" => attributes::parse_rtcp_fb(val_trimmed).map(|(pt, fb, params)| ParsedAttribute::RtcpFb(pt, fb, params)),
+            "extmap" => attributes::parse_extmap(val_trimmed).map(|(id, dir, uri, params)| ParsedAttribute::ExtMap(id, dir, uri, params)),
+            "msid" => attributes::parse_msid(val_trimmed).map(|(stream, track)| ParsedAttribute::Msid(stream, track)),
             _ => Ok(ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())), // Known key:value format, unknown key
         }
     } else {
         // Handle flag attributes
         let flag_key = value.trim();
         match flag_key {
-             "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
-                 attributes::parse_direction(flag_key).map(ParsedAttribute::Direction)
-             }
-             // Add other known flag attributes here
-             _ => Ok(ParsedAttribute::Flag(flag_key.to_string())), // Unknown flag
+            "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
+                attributes::parse_direction(flag_key).map(ParsedAttribute::Direction)
+            }
+            "rtcp-mux" => attributes::parse_rtcp_mux(flag_key).map(|_| ParsedAttribute::RtcpMux),
+            // Add other known flag attributes here
+            _ => Ok(ParsedAttribute::Flag(flag_key.to_string())), // Unknown flag
         }
     }
 }
