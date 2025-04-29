@@ -838,6 +838,8 @@ impl fmt::Display for ParsedAttribute {
             ParsedAttribute::Bandwidth(bwtype, bandwidth) => {
                 write!(f, "b={}:{}", bwtype, bandwidth)
             }
+            ParsedAttribute::Flag(name) => write!(f, "a={}", name),
+            ParsedAttribute::Value(name, value) => write!(f, "a={}:{}", name, value),
             ParsedAttribute::Other(name, value) => {
                 if let Some(val) = value {
                     write!(f, "a={}:{}", name, val)
