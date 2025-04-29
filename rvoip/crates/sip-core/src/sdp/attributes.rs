@@ -149,6 +149,12 @@ pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
 /// Parses fmtp attribute: a=fmtp:<format> <format specific parameters>
 pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
     // Example: 97 profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1
+    
+    // First check if there's a space in the value at all
+    if !value.contains(' ') {
+        return Err(Error::SdpParsingError(format!("Invalid fmtp format (missing space): {}", value)));
+    }
+    
     let parts: Vec<&str> = value.splitn(2, ' ').collect();
     if parts.len() != 2 {
         return Err(Error::SdpParsingError(format!("Invalid fmtp format: {}", value)));
@@ -718,52 +724,82 @@ pub fn parse_rid(value: &str) -> Result<(String, String, Vec<String>)> {
     Ok((id, direction, parameters))
 }
 
-/// Parses simulcast attribute: a=simulcast:<dir> <list>
-/// RFC 8853 defines the simulcast attribute for multiple RTP streams
+/// Parses simulcast attribute: a=simulcast:<send_streams> <recv_streams>
 pub fn parse_simulcast(value: &str) -> Result<(Vec<String>, Vec<String>)> {
-    // Example: a=simulcast:send 1,2,3;~4,~5 recv 6;~7,~8
-    // Returns (send_streams, recv_streams)
+    // Example: a=simulcast:send 1,2,3 recv 4,5,6
+    // Example: a=simulcast:send 1;2;3 recv 4;5;6  (alternative format with semicolons)
+    // Example: a=simulcast:send 1,~2,3;4 (with paused streams marked with ~)
+    
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.is_empty() {
-        return Err(Error::SdpParsingError(format!("Invalid simulcast format: {}", value)));
+        return Err(Error::SdpParsingError("Empty simulcast attribute".to_string()));
     }
     
-    let mut send_streams = Vec::new();
-    let mut recv_streams = Vec::new();
+    let mut send_streams: Vec<String> = Vec::new();
+    let mut recv_streams: Vec<String> = Vec::new();
     
-    let mut i = 0;
-    while i < parts.len() {
-        let tag = parts[i].to_lowercase();
-        i += 1;
-        
-        // Get the list of streams that comes after the tag
-        if i >= parts.len() {
-            // Direction tag with no stream IDs
-            return Err(Error::SdpParsingError(format!("Missing simulcast streams for direction: {}", tag)));
-        }
-        
-        let stream_list = parts[i].to_string();
-        i += 1;
-        
-        match tag.as_str() {
-            "send" => {
-                for stream_id in stream_list.split(';') {
-                    if !stream_id.is_empty() {
-                        send_streams.push(stream_id.to_string());
-                    }
-                }
-            },
-            "recv" => {
-                for stream_id in stream_list.split(';') {
-                    if !stream_id.is_empty() {
-                        recv_streams.push(stream_id.to_string());
-                    }
-                }
-            },
+    // Track the current state (send or receive)
+    enum ParseState {
+        None,
+        Send,
+        Recv
+    }
+    
+    let mut state = ParseState::None;
+    
+    // Parse all parts
+    for part in parts {
+        match part {
+            "send" => state = ParseState::Send,
+            "recv" => state = ParseState::Recv,
             _ => {
-                return Err(Error::SdpParsingError(format!("Invalid simulcast direction: {}", tag)));
+                // This is a stream specification part
+                match state {
+                    ParseState::Send => {
+                        // Split alternative formats: part could use either commas or semicolons as separators
+                        // Check if there are semicolons first
+                        if part.contains(';') {
+                            send_streams.push(part.to_string());
+                        } else if part.contains(',') {
+                            // Handle comma-separated format
+                            for stream in part.split(',') {
+                                if !stream.is_empty() {
+                                    send_streams.push(stream.to_string());
+                                }
+                            }
+                        } else {
+                            // Single stream ID
+                            send_streams.push(part.to_string());
+                        }
+                    }
+                    ParseState::Recv => {
+                        // Split alternative formats: part could use either commas or semicolons as separators
+                        // Check if there are semicolons first
+                        if part.contains(';') {
+                            recv_streams.push(part.to_string());
+                        } else if part.contains(',') {
+                            // Handle comma-separated format
+                            for stream in part.split(',') {
+                                if !stream.is_empty() {
+                                    recv_streams.push(stream.to_string());
+                                }
+                            }
+                        } else {
+                            // Single stream ID
+                            recv_streams.push(part.to_string());
+                        }
+                    }
+                    ParseState::None => {
+                        return Err(Error::SdpParsingError(format!("Simulcast stream ID without direction: {}", part)));
+                    }
+                }
             }
         }
+    }
+    
+    // Basic validation - we should have at least one stream ID
+    if send_streams.is_empty() && recv_streams.is_empty() {
+        return Err(Error::SdpParsingError("Simulcast attribute must include at least one stream ID".to_string()));
     }
     
     Ok((send_streams, recv_streams))

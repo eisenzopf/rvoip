@@ -26,27 +26,36 @@ fn parse_sdp_line(input: &str) -> IResult<&str, (char, &str)> {
     // value is the rest of the line until CRLF or LF
     let (input, key) = nom::character::complete::anychar(input)?;
     let (input, _) = terminated(char('='), space0)(input)?;
-    let (input, value) = not_line_ending(input)?;
     
-    // Per RFC 4566: "The carriage return (CR) and line feed (LF) characters
-    // (octets 13 and 10, respectively) are used to end a line, although
-    // parsers SHOULD be tolerant and also accept lines terminated with a
-    // single newline character."
-    //
-    // We'll properly handle all formats here: CRLF, LF, CR
-    let input = if input.starts_with("\r\n") {
-        &input[2..] // CRLF
-    } else if input.starts_with('\n') {
-        &input[1..] // LF
-    } else if input.starts_with('\r') {
-        &input[1..] // CR
+    // Split at the first line ending character, which could be \r, \n, or \r\n
+    // This handles mixed line endings properly
+    let mut value_end = input.len();
+    for (i, c) in input.char_indices() {
+        if c == '\r' || c == '\n' {
+            value_end = i;
+            break;
+        }
+    }
+    
+    let value = &input[..value_end];
+    let remainder = if value_end < input.len() {
+        let next_char = input.chars().nth(value_end).unwrap();
+        if next_char == '\r' {
+            // Check if we have \r\n
+            if value_end + 1 < input.len() && input.chars().nth(value_end + 1) == Some('\n') {
+                &input[value_end + 2..]
+            } else {
+                &input[value_end + 1..]
+            }
+        } else {
+            // Must be \n
+            &input[value_end + 1..]
+        }
     } else {
-        // If we don't find any line ending, it might be the last line
-        // Just return what's left (should be empty for valid SDP)
-        input
+        ""
     };
-
-    Ok((input, (key, value.trim())))
+    
+    Ok((remainder, (key, value.trim())))
 }
 
 fn validate_network_type(net_type: &str) -> Result<()> {
@@ -207,14 +216,31 @@ fn is_valid_address(addr: &str, addr_type: &str) -> bool {
         // If it looks like an IPv4 address (has 4 parts separated by dots), 
         // validate it strictly as an IPv4 address
         if addr.split('.').count() == 4 {
-            return is_valid_ipv4(addr);
+            // Check if all parts are valid octets
+            let octets: Vec<&str> = addr.split('.').collect();
+            let all_octets_valid = octets.iter().all(|octet| {
+                if let Ok(num) = octet.parse::<u8>() {
+                    true
+                } else {
+                    false
+                }
+            });
+            
+            if all_octets_valid {
+                return is_valid_ipv4(addr);
+            }
         }
         // Otherwise validate as a hostname
         return is_valid_hostname(addr);
     } else if addr_type == "IP6" {
         // If it contains colons, validate as IPv6
         if addr.contains(':') {
-            return is_valid_ipv6(addr);
+            let addr_to_validate = if addr.starts_with('[') && addr.ends_with(']') {
+                &addr[1..addr.len()-1]
+            } else {
+                addr
+            };
+            return is_valid_ipv6(addr_to_validate);
         }
         // Otherwise validate as a hostname
         return is_valid_hostname(addr);
@@ -299,10 +325,13 @@ pub fn parse_connection_line(line: &str) -> Result<ConnectionData> {
     let mut addr_parts = connection_address.split('/');
     let base_addr = addr_parts.next().unwrap(); // This can't fail since there's at least one part
     
+    // Keep the original connection address string for later
+    let original_connection_address = connection_address.to_string();
+    
     // Validate base address based on addr_type
     if addr_type == "IP4" {
-        if !is_valid_ipv4(base_addr) {
-            return Err(Error::SdpParsingError(format!("Invalid IPv4 address: {}", base_addr)));
+        if !is_valid_ipv4(base_addr) && !is_valid_hostname(base_addr) {
+            return Err(Error::SdpParsingError(format!("Invalid IPv4 address or hostname: {}", base_addr)));
         }
     } else if addr_type == "IP6" {
         // For IPv6, the address might be within [] brackets
@@ -312,8 +341,8 @@ pub fn parse_connection_line(line: &str) -> Result<ConnectionData> {
             base_addr
         };
         
-        if !is_valid_ipv6(addr_to_validate) {
-            return Err(Error::SdpParsingError(format!("Invalid IPv6 address: {}", base_addr)));
+        if !is_valid_ipv6(addr_to_validate) && !is_valid_hostname(addr_to_validate) {
+            return Err(Error::SdpParsingError(format!("Invalid IPv6 address or hostname: {}", base_addr)));
         }
     }
     
@@ -368,9 +397,10 @@ pub fn parse_connection_line(line: &str) -> Result<ConnectionData> {
     
     // Validate TTL for IPv4 multicast addresses
     if addr_type == "IP4" {
-        let ip_parts: Vec<&str> = base_addr.split('.').collect();
-        if ip_parts.len() == 4 {
-            // Check if this is a multicast address (first octet between 224-239)
+        // Check if this looks like an IPv4 address (not a hostname)
+        if base_addr.split('.').count() == 4 {
+            let ip_parts: Vec<&str> = base_addr.split('.').collect();
+            // Check if first octet is parseable
             if let Ok(first_octet) = ip_parts[0].parse::<u8>() {
                 let is_multicast = first_octet >= 224 && first_octet <= 239;
                 
@@ -387,7 +417,8 @@ pub fn parse_connection_line(line: &str) -> Result<ConnectionData> {
     Ok(ConnectionData {
         net_type: net_type.to_string(),
         addr_type: addr_type.to_string(),
-        connection_address: base_addr.to_string(),
+        // Use the original connection address with all TTL and multicast parts
+        connection_address: original_connection_address,
         ttl,
         multicast_count,
     })
@@ -524,8 +555,17 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
     let sdp_str = str::from_utf8(content)
         .map_err(|e| Error::SdpParsingError(format!("Invalid UTF-8 in SDP: {}", e)))?;
 
+    // Pre-process the string to remove comment lines
+    let filtered_sdp = sdp_str.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.starts_with('#') || trimmed.starts_with("//"))
+        })
+        .collect::<Vec<&str>>()
+        .join("\r\n");
+
     // Parse all lines into key-value pairs
-    let parse_result = many1(parse_sdp_line)(sdp_str);
+    let parse_result = many1(parse_sdp_line)(&filtered_sdp);
 
     match parse_result {
         Ok((remaining_input, lines)) => {
@@ -964,6 +1004,12 @@ fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
      
      // Handle formats, which are optional (RFC 8866 allows empty format list)
      let formats: Vec<String> = if parts.len() > 3 {
+         // Validate each format is a valid token
+         for fmt in &parts[3..] {
+             if !is_valid_token(fmt) {
+                 return Err(Error::SdpParsingError(format!("Invalid format value: {}", fmt)));
+             }
+         }
          parts[3..].iter().map(|s| s.to_string()).collect()
      } else {
          Vec::new()
