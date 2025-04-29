@@ -197,6 +197,18 @@ fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
     })
 }
 
+/// Helper function to validate IP address or hostname per RFC 8866
+fn is_valid_address(addr: &str, addr_type: &str) -> bool {
+    // An address can be an IP address or a fully qualified domain name
+    if addr_type == "IP4" {
+        is_valid_ipv4(addr) || is_valid_hostname(addr)
+    } else if addr_type == "IP6" {
+        is_valid_ipv6(addr) || is_valid_hostname(addr)
+    } else {
+        false
+    }
+}
+
 // Improve parse_origin_line to use the new validators
 fn parse_origin_line(value: &str) -> Result<Origin> {
     // Handle both prefixed and non-prefixed input
@@ -218,20 +230,10 @@ fn parse_origin_line(value: &str) -> Result<Origin> {
     validate_network_type(parts[3])?;
     validate_address_type(parts[4])?;
 
-    // Validate addresses according to address type
-    let unicast_address = if parts[4] == "IP4" {
-        if !is_valid_ipv4(parts[5]) {
-            return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", parts[5])));
-        }
-        parts[5].to_string()
-    } else if parts[4] == "IP6" {
-        if !is_valid_ipv6(parts[5]) {
-            return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", parts[5])));
-        }
-        parts[5].to_string()
-    } else {
-        return Err(Error::SdpParsingError(format!("Invalid address type: {}", parts[4])));
-    };
+    // Validate address (IP or hostname)
+    if !is_valid_address(parts[5], parts[4]) {
+        return Err(Error::SdpParsingError(format!("Invalid address format: {}", parts[5])));
+    }
 
     Ok(Origin {
         username,
@@ -239,7 +241,7 @@ fn parse_origin_line(value: &str) -> Result<Origin> {
         sess_version: sess_version.to_string(),
         net_type: parts[3].to_string(),
         addr_type: parts[4].to_string(),
-        unicast_address,
+        unicast_address: parts[5].to_string(),
     })
 }
 
@@ -264,31 +266,29 @@ fn parse_connection_line(line: &str) -> Result<ConnectionData> {
     let address_parts: Vec<&str> = parts[2].split('/').collect();
     let connection_address = match address_parts.len() {
         1 => {
-            // Just an address - validate according to address type
-            if parts[1] == "IP4" && !is_valid_ipv4(address_parts[0]) {
-                return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", address_parts[0])));
-            } else if parts[1] == "IP6" && !is_valid_ipv6(address_parts[0]) {
-                return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", address_parts[0])));
+            // Just an address (IP or hostname)
+            if !is_valid_address(address_parts[0], parts[1]) {
+                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
             }
             address_parts[0].to_string()
         }
         2 => {
-            // Address with TTL or multicast info - ensure address is valid and TTL/multicast value is numeric
+            // Address with TTL or multicast info
+            // First validate that the address part is valid
+            if !is_valid_address(address_parts[0], parts[1]) {
+                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
+            }
+            
+            // Then validate the TTL/scope value
             if parts[1] == "IP4" {
-                if !is_valid_ipv4(address_parts[0]) {
-                    return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", address_parts[0])));
-                }
                 match address_parts[1].parse::<u8>() {
                     Ok(_) => address_parts[0].to_string(),
                     Err(_) => return Err(Error::SdpParsingError(format!("Invalid TTL value: {}", address_parts[1]))),
                 }
             } else if parts[1] == "IP6" {
-                if !is_valid_ipv6(address_parts[0]) {
-                    return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", address_parts[0])));
-                }
                 match address_parts[1].parse::<u32>() {
                     Ok(_) => address_parts[0].to_string(),
-                    Err(_) => return Err(Error::SdpParsingError(format!("Invalid multicast value: {}", address_parts[1]))),
+                    Err(_) => return Err(Error::SdpParsingError(format!("Invalid scope value: {}", address_parts[1]))),
                 }
             } else {
                 return Err(Error::SdpParsingError(format!("Invalid address type: {}", parts[1])));
@@ -296,21 +296,20 @@ fn parse_connection_line(line: &str) -> Result<ConnectionData> {
         }
         3 => {
             // Three-part format (address/TTL/number of addresses) - RFC 8866 section 5.7
-            // This format is allowed for IP4 in older versions but generally discouraged,
-            // and for IP6 it's allowed (address/scope/multicast addresses)
             
-            // Validate address
-            if (parts[1] == "IP4" && !is_valid_ipv4(address_parts[0])) || 
-               (parts[1] == "IP6" && !is_valid_ipv6(address_parts[0])) {
+            // Validate the address part
+            if !is_valid_address(address_parts[0], parts[1]) {
                 return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
             }
             
             // Validate numeric parts
-            match (address_parts[1].parse::<u8>(), address_parts[2].parse::<u32>()) {
+            let ttl_result = address_parts[1].parse::<u8>();
+            let count_result = address_parts[2].parse::<u32>();
+            
+            match (ttl_result, count_result) {
                 (Ok(_), Ok(_)) => address_parts[0].to_string(),
-                _ => return Err(Error::SdpParsingError(
-                    format!("Invalid multicast values: {}/{}", address_parts[1], address_parts[2])
-                )),
+                (Err(_), _) => return Err(Error::SdpParsingError(format!("Invalid TTL value: {}", address_parts[1]))),
+                (_, Err(_)) => return Err(Error::SdpParsingError(format!("Invalid number of addresses: {}", address_parts[2]))),
             }
         }
         _ => return Err(Error::SdpParsingError(format!("Invalid address format: {}", parts[2]))),
