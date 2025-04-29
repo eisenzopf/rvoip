@@ -14,6 +14,7 @@ use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, ParsedAttribute, Candida
 use serde::{Deserialize, Serialize};
 use std::fmt; // Import fmt
 use std::net::IpAddr;
+use crate::parser::uri::{ipv4, ipv6, hostname}; // Import URI parsers
 
 // --- Placeholder Attribute Structs (Consider moving to types/sdp_attributes.rs later) ---
 
@@ -64,10 +65,48 @@ impl fmt::Display for MediaDirection {
 //    ... 
 //}
 
+// Validation helper functions - similar to those in parser.rs but need to be accessible here too
+/// Helper function to validate IPv4 addresses
+fn is_valid_ipv4(addr: &str) -> bool {
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    
+    parts.iter().all(|part| {
+        if let Ok(num) = part.parse::<u8>() {
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Helper function to validate IPv6 addresses
+fn is_valid_ipv6(addr: &str) -> bool {
+    // Simplified IPv6 validation - just check for basic format
+    addr.contains(':') && addr.split(':').count() <= 8
+}
+
+/// Helper function to validate hostnames
+fn is_valid_hostname(hostname: &str) -> bool {
+    // Simplified hostname validation
+    // A hostname should contain only alphanumeric characters, hyphens, and dots
+    // and should not start or end with a hyphen or dot
+    if hostname.is_empty() || hostname.starts_with('.') || hostname.ends_with('.') ||
+       hostname.starts_with('-') || hostname.ends_with('-') {
+        return false;
+    }
+    
+    hostname.chars().all(|c| {
+        c.is_alphanumeric() || c == '-' || c == '.'
+    })
+}
+
 // --- Parsing Functions --- 
 
 /// Parses rtpmap attribute: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
-pub fn parse_rtpmap(value: &str) -> Result<RtpMapAttribute> {
+pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
     // Example: 96 H264/90000
     // Example: 0 PCMU/8000
     // Example: 8 PCMA/8000/1
@@ -89,26 +128,26 @@ pub fn parse_rtpmap(value: &str) -> Result<RtpMapAttribute> {
          .map_err(|_| Error::SdpParsingError(format!("Invalid clock rate in rtpmap: {}", encoding_parts[1])))?;
     let encoding_params = encoding_parts.get(2).map(|s| s.to_string());
 
-    Ok(RtpMapAttribute {
+    Ok(ParsedAttribute::RtpMap(RtpMapAttribute {
         payload_type,
         encoding_name,
         clock_rate,
         encoding_params,
-    })
+    }))
 }
 
 /// Parses fmtp attribute: a=fmtp:<format> <format specific parameters>
-pub fn parse_fmtp(value: &str) -> Result<FmtpAttribute> {
+pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
     // Example: 97 profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1
      let parts: Vec<&str> = value.splitn(2, ' ').collect();
     if parts.len() != 2 {
         return Err(Error::SdpParsingError(format!("Invalid fmtp format: {}", value)));
     }
 
-    Ok(FmtpAttribute {
+    Ok(ParsedAttribute::Fmtp(FmtpAttribute {
         format: parts[0].to_string(),
         parameters: parts[1].to_string(),
-    })
+    }))
 }
 
 /// Parses ptime attribute: a=ptime:<packet time>
@@ -144,10 +183,25 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
     let priority = parts[3].parse::<u32>()
         .map_err(|_| Error::SdpParsingError(format!("Invalid priority in candidate: {}", parts[3])))?;
     let connection_address = parts[4].to_string();
+    
+    // Validate connection address using helper functions
+    let is_ipv4 = is_valid_ipv4(&connection_address);
+    let is_ipv6 = !is_ipv4 && is_valid_ipv6(&connection_address);
+    let is_hostname = !is_ipv4 && !is_ipv6 && is_valid_hostname(&connection_address);
+    
+    if !is_ipv4 && !is_ipv6 && !is_hostname {
+        return Err(Error::SdpParsingError(format!("Invalid connection address in candidate: {}", connection_address)));
+    }
+    
     let port = parts[5].parse::<u16>()
         .map_err(|_| Error::SdpParsingError(format!("Invalid port in candidate: {}", parts[5])))?;
     // parts[6] is "typ"
     let candidate_type = parts[7].to_string();
+    
+    // Validate candidate type
+    if !["host", "srflx", "prflx", "relay"].contains(&candidate_type.as_str()) {
+        return Err(Error::SdpParsingError(format!("Invalid candidate type: {}", candidate_type)));
+    }
     
     let mut current_index = 8;
     let mut related_address: Option<String> = None;
@@ -161,7 +215,18 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
         match key {
             "raddr" => {
                 if current_index < parts.len() {
-                    related_address = Some(parts[current_index].to_string());
+                    let raddr = parts[current_index].to_string();
+                    
+                    // Validate raddr using helper functions
+                    let is_ipv4 = is_valid_ipv4(&raddr);
+                    let is_ipv6 = !is_ipv4 && is_valid_ipv6(&raddr);
+                    let is_hostname = !is_ipv4 && !is_ipv6 && is_valid_hostname(&raddr);
+                    
+                    if !is_ipv4 && !is_ipv6 && !is_hostname {
+                        return Err(Error::SdpParsingError(format!("Invalid related address (raddr) in candidate: {}", raddr)));
+                    }
+                    
+                    related_address = Some(raddr);
                     current_index += 1;
                 } else {
                     return Err(Error::SdpParsingError("Missing value for raddr in candidate".to_string()));
@@ -181,7 +246,7 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
             // Handle other potential extensions (key-value or key-only)
             _ => {
                 // Check if the next part exists and isn't another keyword
-                if current_index < parts.len() && !["raddr", "rport", "typ" /* add more known ext keys */].contains(&parts[current_index]) {
+                if current_index < parts.len() && !["raddr", "rport", "typ", "tcptype", "generation", "network-id", "network-cost"].contains(&parts[current_index]) {
                     extensions.push((key.to_string(), Some(parts[current_index].to_string())));
                     current_index += 1;
                 } else {

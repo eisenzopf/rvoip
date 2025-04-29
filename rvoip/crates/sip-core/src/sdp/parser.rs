@@ -12,6 +12,7 @@ use nom::{
 use std::collections::HashMap;
 use std::str::{self, FromStr};
 use crate::sdp::attributes; // Import the attributes module itself
+use crate::parser::uri::{host, hostname, ipv4, ipv6}; // Import URI parsers
 
 /// Parses a single SDP line into a key-value pair.
 /// Example: "v=0" -> Ok(("", ('v', "0")))
@@ -56,10 +57,94 @@ fn parse_connection_line(value: &str) -> Result<ConnectionData> {
     if parts.len() < 3 {
         return Err(Error::SdpParsingError(format!("Invalid c= line format: {}", value)));
     }
+    
+    let net_type = parts[0].to_string();
+    let addr_type = parts[1].to_string();
+    let connection_address = parts[2].to_string();
+    
+    // Validate connection address based on addr_type
+    match addr_type.as_str() {
+        "IP4" => {
+            // Check if there's TTL/multicast info
+            if connection_address.contains('/') {
+                // Handle multicast with TTL/count: <base-multicast-address>/<ttl>[/<number of addresses>]
+                let addr_parts: Vec<&str> = connection_address.split('/').collect();
+                if !addr_parts.is_empty() {
+                    // Just do basic validation here instead of using the URI parsers
+                    // since they work with &[u8] instead of &str
+                    let base_addr = addr_parts[0];
+                    if !is_valid_ipv4(base_addr) {
+                        return Err(Error::SdpParsingError(format!("Invalid IPv4 address in c= line: {}", base_addr)));
+                    }
+                }
+            } else if !is_valid_ipv4(&connection_address) {
+                // Try hostname if not valid IPv4
+                if !is_valid_hostname(&connection_address) {
+                    return Err(Error::SdpParsingError(format!("Invalid IPv4 address or hostname in c= line: {}", connection_address)));
+                }
+            }
+        },
+        "IP6" => {
+            // Check if there's multicast info
+            if connection_address.contains('/') {
+                let addr_parts: Vec<&str> = connection_address.split('/').collect();
+                if !addr_parts.is_empty() {
+                    let base_addr = addr_parts[0];
+                    if !is_valid_ipv6(base_addr) {
+                        return Err(Error::SdpParsingError(format!("Invalid IPv6 address in c= line: {}", base_addr)));
+                    }
+                }
+            } else if !is_valid_ipv6(&connection_address) {
+                // Try hostname if not valid IPv6
+                if !is_valid_hostname(&connection_address) {
+                    return Err(Error::SdpParsingError(format!("Invalid IPv6 address or hostname in c= line: {}", connection_address)));
+                }
+            }
+        },
+        _ => return Err(Error::SdpParsingError(format!("Invalid address type in c= line: {}", addr_type))),
+    }
+    
     Ok(ConnectionData {
-        net_type: parts[0].to_string(),
-        addr_type: parts[1].to_string(),
-        connection_address: parts[2].to_string(),
+        net_type,
+        addr_type,
+        connection_address,
+    })
+}
+
+/// Helper function to validate IPv4 addresses
+fn is_valid_ipv4(addr: &str) -> bool {
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    
+    parts.iter().all(|part| {
+        if let Ok(num) = part.parse::<u8>() {
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Helper function to validate IPv6 addresses
+fn is_valid_ipv6(addr: &str) -> bool {
+    // Simplified IPv6 validation - just check for basic format
+    addr.contains(':') && addr.split(':').count() <= 8
+}
+
+/// Helper function to validate hostnames
+fn is_valid_hostname(hostname: &str) -> bool {
+    // Simplified hostname validation
+    // A hostname should contain only alphanumeric characters, hyphens, and dots
+    // and should not start or end with a hyphen or dot
+    if hostname.is_empty() || hostname.starts_with('.') || hostname.ends_with('.') ||
+       hostname.starts_with('-') || hostname.ends_with('-') {
+        return false;
+    }
+    
+    hostname.chars().all(|c| {
+        c.is_alphanumeric() || c == '-' || c == '.'
     })
 }
 
@@ -88,8 +173,8 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
     match parse_result {
         Ok((remaining_input, lines)) => {
             if !remaining_input.trim().is_empty() {
-                // Should ideally parse everything
-                println!("SDP Parser Warning: Trailing data after parsing lines: {:?}", remaining_input);
+                // Return error for trailing data, consistent with other parsers
+                return Err(Error::SdpParsingError(format!("Trailing data after parsing lines: {:?}", remaining_input)));
             }
 
             // Need temporary Option fields for mandatory o, s, t during build
@@ -121,7 +206,6 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     current_section = SdpParseSection::MediaDescription;
                 } else if key != 'm' && current_section == SdpParseSection::MediaDescription && !matches!(key, 'a' | 'c' | 'b' | 'k' | 'i') {
                     // Allow only specific keys after m= line starts media section (a=, c=, b=, k=, i= according to RFC 4566)
-                    // Simplified check: disallow v, o, s, t, p, u, e, r, z after m=
                     if matches!(key, 'v' | 'o' | 's' | 't' | 'p' | 'u' | 'e' | 'r' | 'z') {
                          return Err(Error::SdpParsingError(format!("Invalid SDP order: '{}=' line found after 'm=' line", key)));
                     }
@@ -146,28 +230,28 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                             session.generic_attributes.push(ParsedAttribute::Value("i".to_string(), value.to_string()));
                          } else {
                             // i= line not allowed at media level
-                            println!("SDP Warning: i= line found at media level (invalid)");
+                            return Err(Error::SdpParsingError("i= line found at media level (invalid)".to_string()));
                          }
                     }
                     'u' => { // URI
                          if current_media.is_none() {
                             session.generic_attributes.push(ParsedAttribute::Value("u".to_string(), value.to_string()));
                          } else {
-                            println!("SDP Warning: u= line found at media level (invalid)");
+                            return Err(Error::SdpParsingError("u= line found at media level (invalid)".to_string()));
                          }
                     }
                     'e' => { // Email
                          if current_media.is_none() {
                             session.generic_attributes.push(ParsedAttribute::Value("e".to_string(), value.to_string()));
                          } else {
-                            println!("SDP Warning: e= line found at media level (invalid)");
+                            return Err(Error::SdpParsingError("e= line found at media level (invalid)".to_string()));
                          }
                     }
                     'p' => { // Phone
                          if current_media.is_none() {
                             session.generic_attributes.push(ParsedAttribute::Value("p".to_string(), value.to_string()));
                          } else {
-                            println!("SDP Warning: p= line found at media level (invalid)");
+                            return Err(Error::SdpParsingError("p= line found at media level (invalid)".to_string()));
                          }
                     }
                     'c' => { 
@@ -188,16 +272,20 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         temp_t_lines.push(parse_time_description_line(value)?);
                     }
                     'a' => { // Attribute
-                         let parsed_attr = parse_attribute(value);
+                         let parsed_attr = parse_attribute(value)?;
                          if let Some(media) = current_media.as_mut() {
                              // Store in media description
                              match parsed_attr {
                                  ParsedAttribute::Ptime(v) => {
-                                     if media.ptime.is_some() { println!("SDP Warning: Duplicate ptime attribute for media {}", media.media); }
+                                     if media.ptime.is_some() { 
+                                        return Err(Error::SdpParsingError(format!("Duplicate ptime attribute for media {}", media.media)));
+                                     }
                                      media.ptime = Some(v);
                                  }
                                  ParsedAttribute::Direction(d) => {
-                                      if media.direction.is_some() { println!("SDP Warning: Duplicate direction attribute for media {}", media.media); }
+                                      if media.direction.is_some() {
+                                        return Err(Error::SdpParsingError(format!("Duplicate direction attribute for media {}", media.media)));
+                                      }
                                      media.direction = Some(d);
                                  }
                                  // Other attribute types go into the generic vec
@@ -207,14 +295,14 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                             // Store in session description
                              match parsed_attr {
                                  ParsedAttribute::Direction(d) => {
-                                     if session.direction.is_some() { println!("SDP Warning: Duplicate session-level direction attribute"); }
+                                     if session.direction.is_some() {
+                                        return Err(Error::SdpParsingError("Duplicate session-level direction attribute".to_string()));
+                                     }
                                      session.direction = Some(d);
                                  }
-                                  // Ptime is typically media-level, but handle if found at session level
-                                 ParsedAttribute::Ptime(v) => {
-                                     println!("SDP Warning: ptime attribute found at session level (usually media level)");
-                                     // Decide whether to store it anyway or just put in generic
-                                     session.generic_attributes.push(ParsedAttribute::Ptime(v)); 
+                                  // Ptime is typically media-level, but treat as error when found at session level
+                                 ParsedAttribute::Ptime(_) => {
+                                     return Err(Error::SdpParsingError("ptime attribute found at session level (should be media level)".to_string()));
                                  }
                                  // Other attribute types go into the generic vec
                                  _ => session.generic_attributes.push(parsed_attr),
@@ -225,13 +313,18 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         // Set section state
                         current_section = SdpParseSection::MediaDescription;
                         // Add previous media description if exists
-                        if let Some(mut media) = current_media.take() {
+                        if let Some(media) = current_media.take() {
                             session.media_descriptions.push(media);
                         }
                         current_media = Some(parse_media_description_line(value)?);
                     }
-                    'b' | 'z' | 'k' | 'r' => { println!("SDP Info: Ignoring {}={} line", key, value); }
-                    _ => { println!("SDP Warning: Ignoring unknown line type '{}'", key); } // Log unknown lines
+                    'b' | 'z' | 'k' | 'r' => { 
+                        // Store as generic attributes for now
+                        session.generic_attributes.push(ParsedAttribute::Value(key.to_string(), value.to_string()));
+                    }
+                    _ => { 
+                        return Err(Error::SdpParsingError(format!("Unknown line type: '{}'", key)));
+                    }
                 }
             }
 
@@ -254,7 +347,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             let all_media_have_c = !session.media_descriptions.is_empty() && 
                                    session.media_descriptions.iter().all(|m| m.connection_info.is_some());
 
-            if !session_c_present && !all_media_have_c {
+            if !session_c_present && !all_media_have_c && !session.media_descriptions.is_empty() {
                  return Err(Error::SdpParsingError("Missing mandatory c= field (must be session level or in all media)".to_string()));
             }
 
@@ -265,67 +358,28 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 }
 
 /// Parses an attribute line (a=key:value or a=key) into a ParsedAttribute enum variant.
-fn parse_attribute(value: &str) -> ParsedAttribute {
+fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
     if let Some((key, val_part)) = value.split_once(':') {
         let key_trimmed = key.trim();
         let val_trimmed = val_part.trim();
         match key_trimmed {
-            "rtpmap" => {
-                attributes::parse_rtpmap(val_trimmed)
-                    .map(ParsedAttribute::RtpMap)
-                    .unwrap_or_else(|e| {
-                         println!("SDP Attribute Warning: Failed to parse rtpmap '{}': {}", value, e);
-                         ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
-                    })
-            }
-            "fmtp" => {
-                 attributes::parse_fmtp(val_trimmed)
-                    .map(ParsedAttribute::Fmtp)
-                    .unwrap_or_else(|e| {
-                        println!("SDP Attribute Warning: Failed to parse fmtp '{}': {}", value, e);
-                        ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
-                    })
-            }
-             "ptime" => {
-                 attributes::parse_ptime(val_trimmed)
-                    .map(ParsedAttribute::Ptime)
-                    .unwrap_or_else(|e| {
-                        println!("SDP Attribute Warning: Failed to parse ptime '{}': {}", value, e);
-                        ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
-                    })
-            }
-            "candidate" => {
-                attributes::parse_candidate(val_trimmed)
-                    .unwrap_or_else(|e| {
-                        println!("SDP Attribute Warning: Failed to parse candidate '{}': {}", value, e);
-                        ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
-                    })
-            }
-            "ssrc" => {
-                 attributes::parse_ssrc(val_trimmed)
-                    .unwrap_or_else(|e| {
-                        println!("SDP Attribute Warning: Failed to parse ssrc '{}': {}", value, e);
-                        ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())
-                    })
-            }
+            "rtpmap" => attributes::parse_rtpmap(val_trimmed),
+            "fmtp" => attributes::parse_fmtp(val_trimmed),
+            "ptime" => attributes::parse_ptime(val_trimmed).map(ParsedAttribute::Ptime),
+            "candidate" => attributes::parse_candidate(val_trimmed),
+            "ssrc" => attributes::parse_ssrc(val_trimmed),
             // TODO: Add cases for other known attributes (mid, rtcp, etc.)
-            _ => ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string()), // Known key:value format, unknown key
+            _ => Ok(ParsedAttribute::Value(key_trimmed.to_string(), val_trimmed.to_string())), // Known key:value format, unknown key
         }
     } else {
         // Handle flag attributes
         let flag_key = value.trim();
         match flag_key {
              "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
-                 attributes::parse_direction(flag_key)
-                    .map(ParsedAttribute::Direction)
-                     .unwrap_or_else(|e| {
-                        // This path should ideally not be reached if parse_direction handles the same keys
-                        println!("SDP Attribute Warning: Failed to parse direction '{}': {}", value, e);
-                        ParsedAttribute::Flag(flag_key.to_string())
-                    })
+                 attributes::parse_direction(flag_key).map(ParsedAttribute::Direction)
              }
              // Add other known flag attributes here
-             _ => ParsedAttribute::Flag(flag_key.to_string()), // Unknown flag
+             _ => Ok(ParsedAttribute::Flag(flag_key.to_string())), // Unknown flag
         }
     }
 }
@@ -354,4 +408,613 @@ fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
          direction: None, // Initialize new field
          generic_attributes: Vec::new(), // Initialize new Vec
      })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdp::attributes::MediaDirection;
+    use crate::types::sdp::ParsedAttribute;
+
+    // Helper function to create SDP test content
+    fn create_test_sdp_bytes(content: &str) -> Bytes {
+        Bytes::copy_from_slice(content.as_bytes())
+    }
+
+    #[test]
+    fn test_valid_minimal_sdp() {
+        // A minimal valid SDP per RFC 4566
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok(), "Failed to parse valid minimal SDP: {:?}", result.err());
+        let session = result.unwrap();
+        assert_eq!(session.version, "0");
+        assert_eq!(session.session_name, "SDP Seminar");
+        assert_eq!(session.origin.username, "jdoe");
+        assert_eq!(session.origin.unicast_address, "10.47.16.5");
+        assert_eq!(session.media_descriptions.len(), 1);
+        assert_eq!(session.media_descriptions[0].media, "audio");
+        assert_eq!(session.media_descriptions[0].port, 49170);
+    }
+
+    #[test]
+    fn test_valid_comprehensive_sdp() {
+        // A more comprehensive SDP with multiple media types and attributes
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+i=A Seminar on the session description protocol\r
+u=http://www.example.com/seminars/sdp.pdf\r
+e=j.doe@example.com (Jane Doe)\r
+p=+1 617 555-6011\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+a=recvonly\r
+m=audio 49170 RTP/AVP 0 8 97\r
+i=Audio stream\r
+c=IN IP4 0.0.0.0\r
+a=rtpmap:0 PCMU/8000\r
+a=rtpmap:8 PCMA/8000\r
+a=rtpmap:97 iLBC/8000\r
+a=sendrecv\r
+m=video 51372 RTP/AVP 99\r
+a=rtpmap:99 H264/90000\r
+a=fmtp:99 profile-level-id=42e01f;level-asymmetry-allowed=1\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok(), "Failed to parse valid comprehensive SDP: {:?}", result.err());
+        let session = result.unwrap();
+        
+        // Session level checks
+        assert_eq!(session.version, "0");
+        assert_eq!(session.time_descriptions.len(), 1);
+        assert_eq!(session.direction, Some(MediaDirection::RecvOnly));
+        assert_eq!(session.media_descriptions.len(), 2);
+        
+        // Audio media checks
+        let audio = &session.media_descriptions[0];
+        assert_eq!(audio.media, "audio");
+        assert_eq!(audio.port, 49170);
+        assert_eq!(audio.formats, vec!["0", "8", "97"]);
+        assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
+        
+        // Attribute checks for rtpmap
+        let rtpmap_attrs: Vec<&RtpMapAttribute> = audio.generic_attributes.iter()
+            .filter_map(|attr| match attr {
+                ParsedAttribute::RtpMap(rtp) => Some(rtp),
+                _ => None
+            }).collect();
+        assert_eq!(rtpmap_attrs.len(), 3);
+        assert!(rtpmap_attrs.iter().any(|r| r.payload_type == 0 && r.encoding_name == "PCMU" && r.clock_rate == 8000));
+        
+        // Video media checks
+        let video = &session.media_descriptions[1];
+        assert_eq!(video.media, "video");
+        assert_eq!(video.port, 51372);
+        
+        // Check for fmtp attribute in video
+        let has_fmtp = video.generic_attributes.iter().any(|attr| {
+            if let ParsedAttribute::Fmtp(fmtp) = attr {
+                fmtp.format == "99" && fmtp.parameters.contains("profile-level-id=42e01f")
+            } else {
+                false
+            }
+        });
+        assert!(has_fmtp, "Failed to find expected fmtp attribute in video");
+    }
+
+    #[test]
+    fn test_sdp_with_ice_candidates() {
+        // SDP with ICE candidates (RFC 8839)
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 192.168.0.1\r
+t=0 0\r
+m=audio 49170 UDP/TLS/RTP/SAVPF 109\r
+a=rtpmap:109 opus/48000/2\r
+a=ice-ufrag:F7gI\r
+a=ice-pwd:x9cml/YzichV2+XlhiMu8g\r
+a=candidate:1 1 UDP 2130706431 192.168.1.5 49170 typ host\r
+a=candidate:2 1 UDP 1694498815 192.0.2.3 51372 typ srflx raddr 192.168.1.5 rport 49170\r
+a=candidate:3 1 UDP 100 2001:db8:a0b:12f0::1 60000 typ relay raddr 2001:db8:a0b:12f0::3 rport 61000\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok(), "Failed to parse SDP with ICE candidates: {:?}", result.err());
+        let session = result.unwrap();
+        
+        // Check the ICE candidates
+        let audio = &session.media_descriptions[0];
+        let candidates: Vec<_> = audio.generic_attributes.iter()
+            .filter_map(|attr| {
+                if let ParsedAttribute::Candidate(c) = attr {
+                    Some(c)
+                } else {
+                    None
+                }
+            }).collect();
+        
+        assert_eq!(candidates.len(), 3, "Expected 3 candidates, found {}", candidates.len());
+        
+        // Check host candidate
+        let host_candidate = candidates.iter().find(|c| c.candidate_type == "host").unwrap();
+        assert_eq!(host_candidate.foundation, "1");
+        assert_eq!(host_candidate.component_id, 1);
+        assert_eq!(host_candidate.connection_address, "192.168.1.5");
+        assert!(host_candidate.related_address.is_none());
+        
+        // Check srflx candidate
+        let srflx_candidate = candidates.iter().find(|c| c.candidate_type == "srflx").unwrap();
+        assert_eq!(srflx_candidate.foundation, "2");
+        assert_eq!(srflx_candidate.component_id, 1);
+        assert_eq!(srflx_candidate.connection_address, "192.0.2.3");
+        assert_eq!(srflx_candidate.related_address, Some("192.168.1.5".to_string()));
+        assert_eq!(srflx_candidate.related_port, Some(49170));
+        
+        // Check relay candidate with IPv6
+        let relay_candidate = candidates.iter().find(|c| c.candidate_type == "relay").unwrap();
+        assert_eq!(relay_candidate.foundation, "3");
+        assert_eq!(relay_candidate.connection_address, "2001:db8:a0b:12f0::1");
+        assert_eq!(relay_candidate.related_address, Some("2001:db8:a0b:12f0::3".to_string()));
+    }
+
+    #[test]
+    fn test_sdp_with_ssrc_attributes() {
+        // SDP with SSRC attributes (RFC 5576)
+        let sdp = "\
+v=0\r
+o=alice 2890844526 2890844526 IN IP4 host.example.com\r
+s=SIP Call\r
+c=IN IP4 host.example.com\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+a=ssrc:314159 cname:user@example.com\r
+a=ssrc:314159 msid:stream1 track1\r
+a=ssrc:314159 mslabel:stream1\r
+a=ssrc:314159 label:track1\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok(), "Failed to parse SDP with SSRC attributes: {:?}", result.err());
+        let session = result.unwrap();
+        
+        let audio = &session.media_descriptions[0];
+        let ssrcs: Vec<_> = audio.generic_attributes.iter()
+            .filter_map(|attr| {
+                if let ParsedAttribute::Ssrc(s) = attr {
+                    Some(s)
+                } else {
+                    None
+                }
+            }).collect();
+        
+        assert_eq!(ssrcs.len(), 4, "Expected 4 SSRC attributes, found {}", ssrcs.len());
+        
+        // Check ssrc attributes
+        assert!(ssrcs.iter().any(|s| s.ssrc_id == 314159 && s.attribute == "cname" && s.value == Some("user@example.com".to_string())));
+        assert!(ssrcs.iter().any(|s| s.ssrc_id == 314159 && s.attribute == "msid" && s.value == Some("stream1 track1".to_string())));
+    }
+
+    #[test]
+    fn test_missing_mandatory_fields() {
+        // Test missing v=
+        let sdp = "\
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        
+        // Test missing o=
+        let sdp = "\
+v=0\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing mandatory o= field"));
+        
+        // Test missing s=
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing mandatory s= field"));
+        
+        // Test missing t=
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing mandatory t= field"));
+        
+        // Test missing c= with media
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing mandatory c= field"));
+    }
+
+    #[test]
+    fn test_line_ordering() {
+        // Test invalid ordering: t= after m=
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+m=audio 49170 RTP/AVP 0\r
+t=0 0\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid SDP order: 't=' line found after 'm=' line"));
+        
+        // Test invalid: session-level attributes after media section
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12/127\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+o=jane 2890844527 2890842808 IN IP4 10.47.16.6\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid SDP order: 'o=' line found after 'm=' line"));
+    }
+
+    #[test]
+    fn test_attribute_parsing() {
+        // Test rtpmap parsing
+        let rtpmap_value = "96 H264/90000";
+        let result = attributes::parse_rtpmap(rtpmap_value);
+        assert!(result.is_ok());
+        let rtpmap = result.unwrap();
+        assert_eq!(rtpmap.payload_type, 96);
+        assert_eq!(rtpmap.encoding_name, "H264");
+        assert_eq!(rtpmap.clock_rate, 90000);
+        assert!(rtpmap.encoding_params.is_none());
+        
+        // Test rtpmap with encoding parameters
+        let rtpmap_value = "97 AMR/8000/1";
+        let result = attributes::parse_rtpmap(rtpmap_value);
+        assert!(result.is_ok());
+        let rtpmap = result.unwrap();
+        assert_eq!(rtpmap.payload_type, 97);
+        assert_eq!(rtpmap.encoding_name, "AMR");
+        assert_eq!(rtpmap.clock_rate, 8000);
+        assert_eq!(rtpmap.encoding_params, Some("1".to_string()));
+        
+        // Test fmtp parsing
+        let fmtp_value = "96 profile-level-id=42e01f;level-asymmetry-allowed=1";
+        let result = attributes::parse_fmtp(fmtp_value);
+        assert!(result.is_ok());
+        let fmtp = result.unwrap();
+        assert_eq!(fmtp.format, "96");
+        assert_eq!(fmtp.parameters, "profile-level-id=42e01f;level-asymmetry-allowed=1");
+        
+        // Test ptime parsing
+        let ptime_value = "20";
+        let result = attributes::parse_ptime(ptime_value);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 20);
+        
+        // Test direction parsing
+        let direction_value = "sendrecv";
+        let result = attributes::parse_direction(direction_value);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MediaDirection::SendRecv);
+    }
+
+    #[test]
+    fn test_connection_parsing() {
+        // Test standard IPv4
+        let c_line = "IN IP4 224.2.17.12";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_ok());
+        let conn = result.unwrap();
+        assert_eq!(conn.net_type, "IN");
+        assert_eq!(conn.addr_type, "IP4");
+        assert_eq!(conn.connection_address, "224.2.17.12");
+        
+        // Test IPv4 with TTL
+        let c_line = "IN IP4 224.2.1.1/127";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_ok());
+        
+        // Test IPv4 with TTL and multicast addresses
+        let c_line = "IN IP4 224.2.1.1/127/3";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_ok());
+        
+        // Test IPv6
+        let c_line = "IN IP6 FF15::101";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_ok());
+        
+        // Test hostname
+        let c_line = "IN IP4 example.com";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_ok());
+        
+        // Test invalid address type
+        let c_line = "IN IPX 224.2.1.1";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_err());
+        
+        // Test invalid IPv4 address
+        let c_line = "IN IP4 999.999.999.999";
+        let result = parse_connection_line(c_line);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_candidate_parsing() {
+        // Test standard host candidate
+        let candidate = "1 1 UDP 2130706431 192.168.1.5 49170 typ host";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_ok());
+        if let ParsedAttribute::Candidate(c) = result.unwrap() {
+            assert_eq!(c.foundation, "1");
+            assert_eq!(c.component_id, 1);
+            assert_eq!(c.transport, "UDP");
+            assert_eq!(c.priority, 2130706431);
+            assert_eq!(c.connection_address, "192.168.1.5");
+            assert_eq!(c.port, 49170);
+            assert_eq!(c.candidate_type, "host");
+        } else {
+            panic!("Expected Candidate attribute");
+        }
+        
+        // Test candidate with related address (server reflexive)
+        let candidate = "2 1 UDP 1694498815 192.0.2.3 51372 typ srflx raddr 192.168.1.5 rport 49170";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_ok());
+        if let ParsedAttribute::Candidate(c) = result.unwrap() {
+            assert_eq!(c.foundation, "2");
+            assert_eq!(c.candidate_type, "srflx");
+            assert_eq!(c.related_address, Some("192.168.1.5".to_string()));
+            assert_eq!(c.related_port, Some(49170));
+        } else {
+            panic!("Expected Candidate attribute");
+        }
+        
+        // Test IPv6 candidate
+        let candidate = "3 1 UDP 100 2001:db8:a0b:12f0::1 60000 typ relay raddr 2001:db8:a0b:12f0::3 rport 61000";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_ok());
+        
+        // Test candidate with additional extensions
+        let candidate = "4 1 UDP 100 192.168.1.5 49170 typ host generation 0 network-id 1";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_ok());
+        if let ParsedAttribute::Candidate(c) = result.unwrap() {
+            let extensions: Vec<_> = c.extensions.iter()
+                .filter(|(key, _)| key == "generation" || key == "network-id")
+                .collect();
+            assert_eq!(extensions.len(), 2);
+        } else {
+            panic!("Expected Candidate attribute");
+        }
+        
+        // Test invalid candidate (missing typ)
+        let candidate = "1 1 UDP 2130706431 192.168.1.5 49170 host";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_err());
+        
+        // Test invalid candidate (invalid type)
+        let candidate = "1 1 UDP 2130706431 192.168.1.5 49170 typ invalid";
+        let result = attributes::parse_candidate(candidate);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ssrc_parsing() {
+        // Test SSRC with value
+        let ssrc = "314159 cname:user@example.com";
+        let result = attributes::parse_ssrc(ssrc);
+        assert!(result.is_ok());
+        if let ParsedAttribute::Ssrc(s) = result.unwrap() {
+            assert_eq!(s.ssrc_id, 314159);
+            assert_eq!(s.attribute, "cname");
+            assert_eq!(s.value, Some("user@example.com".to_string()));
+        } else {
+            panic!("Expected SSRC attribute");
+        }
+        
+        // Test SSRC without value (flag-like)
+        let ssrc = "314159 mslabel";
+        let result = attributes::parse_ssrc(ssrc);
+        assert!(result.is_ok());
+        if let ParsedAttribute::Ssrc(s) = result.unwrap() {
+            assert_eq!(s.ssrc_id, 314159);
+            assert_eq!(s.attribute, "mslabel");
+            assert_eq!(s.value, None);
+        } else {
+            panic!("Expected SSRC attribute");
+        }
+        
+        // Test invalid SSRC (non-numeric ID)
+        let ssrc = "invalid cname:user@example.com";
+        let result = attributes::parse_ssrc(ssrc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_line_ending_handling() {
+        // Test with CR+LF (RFC standard)
+        let sdp = "v=0\r\no=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\ns=SDP Seminar\r\nc=IN IP4 224.2.17.12/127\r\nt=0 0\r\n";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok());
+        
+        // Test with just LF (allowed by parser but not RFC compliant)
+        let sdp = "v=0\no=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\ns=SDP Seminar\nc=IN IP4 224.2.17.12/127\nt=0 0\n";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok());
+        
+        // Test with mixed line endings
+        let sdp = "v=0\r\no=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\ns=SDP Seminar\r\nc=IN IP4 224.2.17.12/127\nt=0 0\r\n";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_media_description_parsing() {
+        // Test audio media description
+        let m_line = "audio 49170 RTP/AVP 0 8 97";
+        let result = parse_media_description_line(m_line);
+        assert!(result.is_ok());
+        let media = result.unwrap();
+        assert_eq!(media.media, "audio");
+        assert_eq!(media.port, 49170);
+        assert_eq!(media.protocol, "RTP/AVP");
+        assert_eq!(media.formats, vec!["0", "8", "97"]);
+        
+        // Test video media description
+        let m_line = "video 51372 RTP/AVP 31 32";
+        let result = parse_media_description_line(m_line);
+        assert!(result.is_ok());
+        let media = result.unwrap();
+        assert_eq!(media.media, "video");
+        assert_eq!(media.port, 51372);
+        assert_eq!(media.formats, vec!["31", "32"]);
+        
+        // Test application media description
+        let m_line = "application 22334 UDP/DTLS/SCTP webrtc-datachannel";
+        let result = parse_media_description_line(m_line);
+        assert!(result.is_ok());
+        let media = result.unwrap();
+        assert_eq!(media.media, "application");
+        assert_eq!(media.protocol, "UDP/DTLS/SCTP");
+        assert_eq!(media.formats, vec!["webrtc-datachannel"]);
+        
+        // Test invalid media description (missing format)
+        let m_line = "audio 49170 RTP/AVP";
+        let result = parse_media_description_line(m_line);
+        assert!(result.is_err());
+        
+        // Test invalid port
+        let m_line = "audio invalid RTP/AVP 0";
+        let result = parse_media_description_line(m_line);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_connection_validation() {
+        // Test valid: session-level c=
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+m=video 51372 RTP/AVP 31\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok());
+        
+        // Test valid: all media have c=
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+c=IN IP4 224.2.17.12\r
+m=video 51372 RTP/AVP 31\r
+c=IN IP4 224.2.17.13\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_ok());
+        
+        // Test invalid: missing c= for one media
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+c=IN IP4 224.2.17.12\r
+m=video 51372 RTP/AVP 31\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing mandatory c= field"));
+    }
+
+    #[test]
+    fn test_duplicate_attribute_rejection() {
+        // Test duplicate session direction
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12\r
+t=0 0\r
+a=sendrecv\r
+a=recvonly\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate session-level direction attribute"));
+        
+        // Test duplicate media direction
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+a=sendrecv\r
+a=recvonly\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate direction attribute for media audio"));
+        
+        // Test duplicate ptime
+        let sdp = "\
+v=0\r
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r
+s=SDP Seminar\r
+c=IN IP4 224.2.17.12\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+a=ptime:20\r
+a=ptime:30\r
+";
+        let result = parse_sdp(&create_test_sdp_bytes(sdp));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Duplicate ptime attribute for media audio"));
+    }
 } 
