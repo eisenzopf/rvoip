@@ -284,9 +284,9 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
                 if current_index < parts.len() {
                     let raddr = parts[current_index].to_string();
                     
-                    // Validate raddr directly
+                    // Validate raddr - could be IP or hostname
                     if raddr.split('.').count() == 4 {
-                        // IPv4 validation
+                        // Looks like IPv4 - validate octets
                         let octets: Vec<&str> = raddr.split('.').collect();
                         for octet in octets {
                             if let Err(_) = octet.parse::<u8>() {
@@ -296,16 +296,14 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
                             }
                         }
                     } else if raddr.contains(':') {
-                        // IPv6 validation
+                        // Looks like IPv6
                         if !is_valid_ipv6(&raddr) {
                             return Err(Error::SdpParsingError(
                                 format!("Invalid IPv6 address in raddr: {}", raddr)
                             ));
                         }
                     } else {
-                        // Hostname validation - do additional validation
-                        
-                        // First check for invalid hostname characters
+                        // Must be a hostname - check for invalid characters
                         if raddr.contains('@') || 
                            raddr.contains('_') || 
                            raddr.contains(' ') ||
@@ -325,6 +323,12 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
                     
                     related_address = Some(raddr);
                     current_index += 1;
+                    
+                    // Check if we have rport following this - it's required when raddr is present
+                    // We need at least 2 more parts: "rport" and its value
+                    if current_index + 1 >= parts.len() || parts[current_index] != "rport" {
+                        return Err(Error::SdpParsingError("When raddr is present, rport is required".to_string()));
+                    }
                 } else {
                     return Err(Error::SdpParsingError("Missing value for raddr in candidate".to_string()));
                 }
