@@ -240,7 +240,19 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
             ));
         }
     } else {
-        // It's a hostname - validate using the helper function
+        // It's a hostname - do additional validation
+        
+        // First check for invalid hostname characters that aren't caught by is_valid_hostname
+        if connection_address.contains('@') || 
+           connection_address.contains('_') || 
+           connection_address.contains(' ') ||
+           connection_address.contains(':') {
+            return Err(Error::SdpParsingError(
+                format!("Invalid hostname in candidate (contains invalid characters): {}", connection_address)
+            ));
+        }
+        
+        // Then use the helper function
         if !is_valid_hostname(&connection_address) {
             return Err(Error::SdpParsingError(
                 format!("Invalid hostname in candidate: {}", connection_address)
@@ -291,7 +303,19 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
                             ));
                         }
                     } else {
-                        // Hostname validation
+                        // Hostname validation - do additional validation
+                        
+                        // First check for invalid hostname characters
+                        if raddr.contains('@') || 
+                           raddr.contains('_') || 
+                           raddr.contains(' ') ||
+                           raddr.contains(':') {
+                            return Err(Error::SdpParsingError(
+                                format!("Invalid hostname in raddr (contains invalid characters): {}", raddr)
+                            ));
+                        }
+                        
+                        // Then use the helper function
                         if !is_valid_hostname(&raddr) {
                             return Err(Error::SdpParsingError(
                                 format!("Invalid hostname in raddr: {}", raddr)
