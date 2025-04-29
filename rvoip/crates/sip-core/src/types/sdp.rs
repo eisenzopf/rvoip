@@ -184,8 +184,12 @@ pub struct ConnectionData {
     pub net_type: String,
     /// Address type ("IP4" or "IP6")
     pub addr_type: String,
-    /// Connection address (IP address or FQDN, potentially with TTL/count)
+    /// Connection address (IP address or FQDN)
     pub connection_address: String,
+    /// Time-to-live for multicast (IPv4 only)
+    pub ttl: Option<u8>,
+    /// Number of addresses in multicast group
+    pub multicast_count: Option<u32>,
 }
 
 /// Represents a Time Description (t=) field in an SDP message.
@@ -861,7 +865,19 @@ impl fmt::Display for Origin {
 
 impl fmt::Display for ConnectionData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-         write!(f, "{} {} {}", self.net_type, self.addr_type, self.connection_address)
+        let mut address = self.connection_address.clone();
+        
+        // Add TTL if present
+        if let Some(ttl) = self.ttl {
+            address.push_str(&format!("/{}", ttl));
+            
+            // Add multicast count if present
+            if let Some(count) = self.multicast_count {
+                address.push_str(&format!("/{}", count));
+            }
+        }
+        
+        write!(f, "{} {} {}", self.net_type, self.addr_type, address)
     }
 }
 

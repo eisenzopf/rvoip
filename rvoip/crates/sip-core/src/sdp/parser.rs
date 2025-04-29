@@ -28,14 +28,18 @@ fn parse_sdp_line(input: &str) -> IResult<&str, (char, &str)> {
     let (input, _) = terminated(char('='), space0)(input)?;
     let (input, value) = not_line_ending(input)?;
     
-    // Use a custom approach to handle mixed line endings
-    // Try CRLF first, then LF, then CR
+    // Per RFC 4566: "The carriage return (CR) and line feed (LF) characters
+    // (octets 13 and 10, respectively) are used to end a line, although
+    // parsers SHOULD be tolerant and also accept lines terminated with a
+    // single newline character."
+    //
+    // We'll properly handle all formats here: CRLF, LF, CR
     let input = if input.starts_with("\r\n") {
-        &input[2..]
+        &input[2..] // CRLF
     } else if input.starts_with('\n') {
-        &input[1..]
+        &input[1..] // LF
     } else if input.starts_with('\r') {
-        &input[1..]
+        &input[1..] // CR
     } else {
         // If we don't find any line ending, it might be the last line
         // Just return what's left (should be empty for valid SDP)
@@ -268,80 +272,124 @@ pub fn parse_origin_line(value: &str) -> Result<Origin> {
     })
 }
 
-// Improve parse_connection_line to use the new validators
+/// Parse SDP connection line (c=)
+/// Per RFC 4566 and 8866, the format is:
+/// c=<nettype> <addrtype> <connection-address>
 pub fn parse_connection_line(line: &str) -> Result<ConnectionData> {
-    // Handle both prefixed and non-prefixed input
-    let line_to_parse = if line.starts_with("c=") {
-        &line[2..]
-    } else {
-        line
-    };
-    
-    let parts: Vec<&str> = line_to_parse.split_whitespace().collect();
-    if parts.len() != 3 {
-        return Err(Error::SdpParsingError(format!("Invalid connection line format: {}", line)));
+    let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
+    if parts.len() < 3 {
+        return Err(Error::SdpParsingError(format!("Invalid connection line: {}", line)));
     }
 
-    validate_network_type(parts[0])?;
-    validate_address_type(parts[1])?;
+    let net_type = parts[0];
+    if net_type != "IN" {
+        return Err(Error::SdpParsingError(format!("Unsupported network type: {}", net_type)));
+    }
 
-    // Parse the address and optional TTL/multicast fields
-    let address_parts: Vec<&str> = parts[2].split('/').collect();
-    let connection_address = match address_parts.len() {
-        1 => {
-            // Just an address (IP or hostname)
-            if !is_valid_address(address_parts[0], parts[1]) {
-                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
-            }
-            address_parts[0].to_string()
+    let addr_type = parts[1];
+    if addr_type != "IP4" && addr_type != "IP6" {
+        return Err(Error::SdpParsingError(format!("Unsupported address type: {}", addr_type)));
+    }
+
+    // Connection address
+    let connection_address = parts[2];
+    
+    // Parse IP address and optional TTL/multicast count for IP4
+    // Format: <base-unicast-address>[/<ttl>]/<number of addresses>
+    let mut addr_parts = connection_address.split('/');
+    let base_addr = addr_parts.next().unwrap(); // This can't fail since there's at least one part
+    
+    // Validate base address based on addr_type
+    if addr_type == "IP4" {
+        if !is_valid_ipv4(base_addr) {
+            return Err(Error::SdpParsingError(format!("Invalid IPv4 address: {}", base_addr)));
         }
-        2 => {
-            // Address with TTL or multicast info
-            // First validate that the address part is valid
-            if !is_valid_address(address_parts[0], parts[1]) {
-                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
-            }
-            
-            // Then validate the TTL/scope value
-            if parts[1] == "IP4" {
-                match address_parts[1].parse::<u8>() {
-                    Ok(_) => address_parts[0].to_string(),
-                    Err(_) => return Err(Error::SdpParsingError(format!("Invalid TTL value: {}", address_parts[1]))),
+    } else if addr_type == "IP6" {
+        // For IPv6, the address might be within [] brackets
+        let addr_to_validate = if base_addr.starts_with('[') && base_addr.ends_with(']') {
+            &base_addr[1..base_addr.len()-1]
+        } else {
+            base_addr
+        };
+        
+        if !is_valid_ipv6(addr_to_validate) {
+            return Err(Error::SdpParsingError(format!("Invalid IPv6 address: {}", base_addr)));
+        }
+    }
+    
+    // Now handle TTL and multicast for IPv4
+    let mut ttl = None;
+    let mut multicast_count = None;
+    
+    // Second part could be TTL or multicast count
+    if let Some(second) = addr_parts.next() {
+        // Parse as u8/u32 and validate
+        match second.parse::<u32>() {
+            Ok(val) => {
+                // For IPv4, this is TTL
+                if addr_type == "IP4" {
+                    if val > 255 {
+                        return Err(Error::SdpParsingError(format!("Invalid TTL (must be <= 255): {}", val)));
+                    }
+                    ttl = Some(val as u8);
+                } else {
+                    // For IPv6, this is multicast count
+                    multicast_count = Some(val);
                 }
-            } else if parts[1] == "IP6" {
-                match address_parts[1].parse::<u32>() {
-                    Ok(_) => address_parts[0].to_string(),
-                    Err(_) => return Err(Error::SdpParsingError(format!("Invalid scope value: {}", address_parts[1]))),
+            }
+            Err(_) => {
+                return Err(Error::SdpParsingError(format!("Invalid numeric value in connection address: {}", second)));
+            }
+        }
+    }
+    
+    // Third part, if present, is always multicast count
+    if let Some(third) = addr_parts.next() {
+        // This should only happen for IPv4 with both TTL and multicast count
+        if addr_type == "IP4" && ttl.is_some() {
+            match third.parse::<u32>() {
+                Ok(val) => {
+                    multicast_count = Some(val);
                 }
-            } else {
-                return Err(Error::SdpParsingError(format!("Invalid address type: {}", parts[1])));
+                Err(_) => {
+                    return Err(Error::SdpParsingError(format!("Invalid multicast count: {}", third)));
+                }
+            }
+        } else {
+            // Too many parts in the address
+            return Err(Error::SdpParsingError(format!("Too many parts in connection address: {}", connection_address)));
+        }
+    }
+    
+    // Ensure no more parts remain
+    if addr_parts.next().is_some() {
+        return Err(Error::SdpParsingError(format!("Invalid connection address format: {}", connection_address)));
+    }
+    
+    // Validate TTL for IPv4 multicast addresses
+    if addr_type == "IP4" {
+        let ip_parts: Vec<&str> = base_addr.split('.').collect();
+        if ip_parts.len() == 4 {
+            // Check if this is a multicast address (first octet between 224-239)
+            if let Ok(first_octet) = ip_parts[0].parse::<u8>() {
+                let is_multicast = first_octet >= 224 && first_octet <= 239;
+                
+                // TTL should be present for multicast addresses
+                if is_multicast && ttl.is_none() && multicast_count.is_none() {
+                    // RFC says TTL should be provided for IPv4 multicast
+                    // But many implementations don't follow this strictly, so we'll just warn
+                    log::warn!("IPv4 multicast address without TTL: {}", base_addr);
+                }
             }
         }
-        3 => {
-            // Three-part format (address/TTL/number of addresses) - RFC 8866 section 5.7
-            
-            // Validate the address part
-            if !is_valid_address(address_parts[0], parts[1]) {
-                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
-            }
-            
-            // Validate numeric parts
-            let ttl_result = address_parts[1].parse::<u8>();
-            let count_result = address_parts[2].parse::<u32>();
-            
-            match (ttl_result, count_result) {
-                (Ok(_), Ok(_)) => address_parts[0].to_string(),
-                (Err(_), _) => return Err(Error::SdpParsingError(format!("Invalid TTL value: {}", address_parts[1]))),
-                (_, Err(_)) => return Err(Error::SdpParsingError(format!("Invalid number of addresses: {}", address_parts[2]))),
-            }
-        }
-        _ => return Err(Error::SdpParsingError(format!("Invalid address format: {}", parts[2]))),
-    };
+    }
 
     Ok(ConnectionData {
-        net_type: parts[0].to_string(),
-        addr_type: parts[1].to_string(),
-        connection_address,
+        net_type: net_type.to_string(),
+        addr_type: addr_type.to_string(),
+        connection_address: base_addr.to_string(),
+        ttl,
+        multicast_count,
     })
 }
 
@@ -491,6 +539,12 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 return Err(Error::SdpParsingError("SDP must start with a v= line".to_string()));
             }
 
+            // Track seen mandatory fields to detect duplicates and ensure all are present
+            let mut seen_v = false;
+            let mut seen_o = false;
+            let mut seen_s = false;
+            let mut seen_t = false;
+
             // Need temporary Option fields for mandatory o, s, t during build
             let mut temp_origin: Option<Origin> = None;
             let mut temp_s_line: Option<String> = None;
@@ -514,6 +568,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             enum SdpParseSection { SessionHeader, MediaDescription }
             let mut current_section = SdpParseSection::SessionHeader;
 
+            // Keep track of media-level connection info to enforce having it at session
+            // level or in all media descriptions
+            let mut all_media_have_connection = true;
+
             for (key, value) in lines {
                 // Enforce basic order: session headers before media descriptions
                 if key == 'm' && current_section < SdpParseSection::MediaDescription {
@@ -527,17 +585,33 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 
                 match key {
                     'v' => {
+                        // Check for duplicate v= line
+                        if seen_v {
+                            return Err(Error::SdpParsingError("Duplicate v= line".to_string()));
+                        }
+                        seen_v = true;
+                        
                         if value != "0" { return Err(Error::SdpParsingError("Unsupported SDP version".to_string())); }
                         session.version = value.to_string();
                     }
                     'o' => {
-                        if temp_origin.is_some() { return Err(Error::SdpParsingError("Duplicate o= line".to_string())); }
+                        // Check for duplicate o= line
+                        if seen_o {
+                            return Err(Error::SdpParsingError("Duplicate o= line".to_string()));
+                        }
+                        seen_o = true;
+                        
                         temp_origin = Some(parse_origin_line(value)?);
                     }
                     's' => {
-                         if temp_s_line.is_some() { return Err(Error::SdpParsingError("Duplicate s= line".to_string())); }
-                         if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
-                         temp_s_line = Some(value.to_string());
+                        // Check for duplicate s= line
+                        if seen_s {
+                            return Err(Error::SdpParsingError("Duplicate s= line".to_string()));
+                        }
+                        seen_s = true;
+                        
+                        if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
+                        temp_s_line = Some(value.to_string());
                     }
                     'i' => { // Session Information
                          if current_media.is_none() {
@@ -574,18 +648,25 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     'c' => { 
                         let conn_data = parse_connection_line(value)?;
                         if let Some(media) = current_media.as_mut() {
-                           if media.connection_info.is_some() { return Err(Error::SdpParsingError("Duplicate c= line for media".to_string())); }
+                           if media.connection_info.is_some() { 
+                               return Err(Error::SdpParsingError("Duplicate c= line for media".to_string())); 
+                           }
                            media.connection_info = Some(conn_data);
                         } else {
-                            if session.connection_info.is_some() { return Err(Error::SdpParsingError("Duplicate session-level c= line".to_string())); }
+                            if session.connection_info.is_some() { 
+                                return Err(Error::SdpParsingError("Duplicate session-level c= line".to_string())); 
+                            }
                             session.connection_info = Some(conn_data);
                         }
                     }
                     't' => { 
-                        // Check if t= appears after m= (invalid order)
+                        // Check for t= in media section (invalid)
                         if current_section == SdpParseSection::MediaDescription {
                             return Err(Error::SdpParsingError("Invalid SDP order: 't=' line found after 'm=' line".to_string()));
                         }
+                        
+                        // Record that we've seen at least one t= line
+                        seen_t = true;
                         
                         // Parse t= line and add it to time descriptions
                         let time_desc = parse_time_description_line(value)?;
@@ -643,6 +724,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         current_section = SdpParseSection::MediaDescription;
                         // Add previous media description if exists
                         if let Some(media) = current_media.take() {
+                            // Check if this media has connection info
+                            if media.connection_info.is_none() {
+                                all_media_have_connection = false;
+                            }
                             session.media_descriptions.push(media);
                         }
                         current_media = Some(parse_media_description_line(value)?);
@@ -658,8 +743,8 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                             session.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype, bandwidth));
                         }
                     }
-                    'z' | 'k' | 'r' => { 
-                        // Store as generic attributes for now
+                    'z' | 'k' => { 
+                        // Store as generic attributes
                         session.generic_attributes.push(ParsedAttribute::Value(key.to_string(), value.to_string()));
                     }
                     _ => { 
@@ -670,7 +755,25 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 
             // Add the last media description if it exists
             if let Some(media) = current_media.take() {
+                // Check if this media has connection info
+                if media.connection_info.is_none() {
+                    all_media_have_connection = false;
+                }
                 session.media_descriptions.push(media);
+            }
+
+            // Verify all mandatory fields are present
+            if !seen_v {
+                return Err(Error::SdpParsingError("Missing mandatory v= field".to_string()));
+            }
+            if !seen_o {
+                return Err(Error::SdpParsingError("Missing mandatory o= field".to_string()));
+            }
+            if !seen_s {
+                return Err(Error::SdpParsingError("Missing mandatory s= field".to_string()));
+            }
+            if !seen_t {
+                return Err(Error::SdpParsingError("Missing mandatory t= field".to_string()));
             }
 
             // Assign mandatory fields from temps
@@ -684,10 +787,8 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             // Final validation (connection info)
             // A c= line MUST be present either at session level OR in ALL media descriptions
             let session_c_present = session.connection_info.is_some();
-            let all_media_have_c = !session.media_descriptions.is_empty() && 
-                                   session.media_descriptions.iter().all(|m| m.connection_info.is_some());
-
-            if !session_c_present && !all_media_have_c && !session.media_descriptions.is_empty() {
+            
+            if !session_c_present && !all_media_have_connection && !session.media_descriptions.is_empty() {
                  return Err(Error::SdpParsingError("Missing mandatory c= field (must be session level or in all media)".to_string()));
             }
 
