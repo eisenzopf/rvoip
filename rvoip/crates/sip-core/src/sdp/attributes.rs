@@ -79,7 +79,7 @@ fn is_valid_hostname(hostname_str: &str) -> bool {
 }
 
 /// Helper function to validate token format using the parser module
-fn is_valid_token(s: &str) -> bool {
+pub fn is_valid_token(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| {
         let byte = c as u8;
         is_token_char(byte)
