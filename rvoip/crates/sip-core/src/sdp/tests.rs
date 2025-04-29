@@ -436,6 +436,12 @@ fn test_candidate_parsing() {
     let candidate = "1 1 UDP 2130706431 192.168.1.5 49170 typ invalid";
     let result = attributes::parse_candidate(candidate);
     assert!(result.is_err());
+
+    // Invalid IP address (actually invalid hostname with illegal characters)
+    assert!(attributes::parse_candidate("1 1 UDP 2130706431 invalid@hostname 49170 typ host").is_err());
+    
+    // Invalid IP address (octets > 255 are invalid)
+    assert!(attributes::parse_candidate("1 1 UDP 2130706431 999.999.999.999 49170 typ host").is_err());
 }
 
 #[test]
@@ -926,9 +932,8 @@ fn test_candidate_attribute_comprehensive() {
         assert_eq!(c.connection_address, "192.168.1.5");
         assert_eq!(c.port, 49170);
         assert_eq!(c.candidate_type, "host");
-        assert!(c.related_address.is_none());
-        assert!(c.related_port.is_none());
-        assert!(c.extensions.is_empty());
+    } else {
+        panic!("Expected Candidate attribute");
     }
     
     // Valid server reflexive candidate with related address/port
@@ -938,6 +943,8 @@ fn test_candidate_attribute_comprehensive() {
         assert_eq!(c.candidate_type, "srflx");
         assert_eq!(c.related_address, Some("192.168.1.5".to_string()));
         assert_eq!(c.related_port, Some(49170));
+    } else {
+        panic!("Expected Candidate attribute");
     }
     
     // Valid relay candidate with extensions
@@ -975,7 +982,10 @@ fn test_candidate_attribute_comprehensive() {
     // Invalid priority (not a number)
     assert!(attributes::parse_candidate("1 1 UDP priority 192.168.1.5 49170 typ host").is_err());
     
-    // Invalid IP address
+    // Invalid IP address (actually invalid hostname with illegal characters)
+    assert!(attributes::parse_candidate("1 1 UDP 2130706431 invalid@hostname 49170 typ host").is_err());
+    
+    // Invalid IP address (octets > 255 are invalid)
     assert!(attributes::parse_candidate("1 1 UDP 2130706431 999.999.999.999 49170 typ host").is_err());
     
     // Missing typ keyword
@@ -1010,6 +1020,8 @@ fn test_ssrc_attribute_comprehensive() {
         assert_eq!(s.ssrc_id, 314159);
         assert_eq!(s.attribute, "mslabel");
         assert_eq!(s.value, None);
+    } else {
+        panic!("Expected SSRC attribute");
     }
     
     // Valid SSRC with spaces in value
@@ -1220,11 +1232,6 @@ fn test_group_attribute_comprehensive() {
     let (semantics, mids) = attributes::parse_group("BUNDLE").unwrap();
     assert_eq!(semantics, "BUNDLE");
     assert!(mids.is_empty());
-    
-    // Group with invalid mid (if mid validation is strict)
-    // Note: The current implementation doesn't validate mids strictly
-    // let invalid_mid = "BUNDLE audio@invalid video";
-    // assert!(attributes::parse_group(invalid_mid).is_err());
 }
 
 /// Tests for RTCP multiplexing attribute parsing

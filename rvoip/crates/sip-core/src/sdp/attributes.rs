@@ -41,12 +41,22 @@ impl fmt::Display for MediaDirection {
 // Validation helper functions - using the existing parsers instead of custom implementations
 /// Helper function to validate IPv4 addresses using the parser module
 fn is_valid_ipv4(addr: &str) -> bool {
-    // Use the parser module's ipv4_address function
-    let input = addr.as_bytes();
-    match ipv4::ipv4_address(input) {
-        Ok((remaining, _)) => remaining.is_empty(), // Must consume all input
-        Err(_) => false,
+    // Basic format check: must have 4 parts separated by dots
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() != 4 {
+        return false;
     }
+
+    // Each part must be a valid octet (0-255)
+    for part in parts {
+        match part.parse::<u8>() {
+            Ok(_) => {}, // Valid octet (0-255)
+            Err(_) => return false, // Outside 0-255 range or not a number
+        }
+    }
+    
+    // If we reach here, all octets are valid
+    true
 }
 
 /// Helper function to validate IPv6 addresses using the parser module
@@ -144,10 +154,10 @@ pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
         return Err(Error::SdpParsingError(format!("Invalid fmtp format: {}", value)));
     }
 
-    // Validate format identifier (typically a payload type number)
+    // Format identifier can be numeric or a token (like "red")
     let format = parts[0].to_string();
-    if !format.chars().all(|c| c.is_ascii_digit()) {
-        return Err(Error::SdpParsingError(format!("Invalid format in fmtp (should be numeric): {}", format)));
+    if format.is_empty() {
+        return Err(Error::SdpParsingError("Empty format in fmtp".to_string()));
     }
     
     // Validate parameters - general structure is key=value;key=value or key;key=value
@@ -211,12 +221,31 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
     let connection_address = parts[4].to_string();
     
     // Validate connection address using helper functions
-    let is_ipv4 = is_valid_ipv4(&connection_address);
-    let is_ipv6 = !is_ipv4 && is_valid_ipv6(&connection_address);
-    let is_hostname = !is_ipv4 && !is_ipv6 && is_valid_hostname(&connection_address);
-    
-    if !is_ipv4 && !is_ipv6 && !is_hostname {
-        return Err(Error::SdpParsingError(format!("Invalid connection address in candidate: {}", connection_address)));
+    // First check if it looks like an IPv4 address (4 parts separated by dots)
+    if connection_address.split('.').count() == 4 {
+        // Validate each octet (must be 0-255)
+        let octets: Vec<&str> = connection_address.split('.').collect();
+        for octet in octets {
+            if let Err(_) = octet.parse::<u8>() {
+                return Err(Error::SdpParsingError(
+                    format!("Invalid IPv4 address in candidate: {}", connection_address)
+                ));
+            }
+        }
+    } else if connection_address.contains(':') {
+        // It's an IPv6 address - use the helper function
+        if !is_valid_ipv6(&connection_address) {
+            return Err(Error::SdpParsingError(
+                format!("Invalid IPv6 address in candidate: {}", connection_address)
+            ));
+        }
+    } else {
+        // It's a hostname - validate using the helper function
+        if !is_valid_hostname(&connection_address) {
+            return Err(Error::SdpParsingError(
+                format!("Invalid hostname in candidate: {}", connection_address)
+            ));
+        }
     }
     
     let port = parts[5].parse::<u16>()
@@ -243,13 +272,31 @@ pub fn parse_candidate(value: &str) -> Result<ParsedAttribute> {
                 if current_index < parts.len() {
                     let raddr = parts[current_index].to_string();
                     
-                    // Validate raddr using helper functions
-                    let is_ipv4 = is_valid_ipv4(&raddr);
-                    let is_ipv6 = !is_ipv4 && is_valid_ipv6(&raddr);
-                    let is_hostname = !is_ipv4 && !is_ipv6 && is_valid_hostname(&raddr);
-                    
-                    if !is_ipv4 && !is_ipv6 && !is_hostname {
-                        return Err(Error::SdpParsingError(format!("Invalid related address (raddr) in candidate: {}", raddr)));
+                    // Validate raddr directly
+                    if raddr.split('.').count() == 4 {
+                        // IPv4 validation
+                        let octets: Vec<&str> = raddr.split('.').collect();
+                        for octet in octets {
+                            if let Err(_) = octet.parse::<u8>() {
+                                return Err(Error::SdpParsingError(
+                                    format!("Invalid IPv4 address in raddr: {}", raddr)
+                                ));
+                            }
+                        }
+                    } else if raddr.contains(':') {
+                        // IPv6 validation
+                        if !is_valid_ipv6(&raddr) {
+                            return Err(Error::SdpParsingError(
+                                format!("Invalid IPv6 address in raddr: {}", raddr)
+                            ));
+                        }
+                    } else {
+                        // Hostname validation
+                        if !is_valid_hostname(&raddr) {
+                            return Err(Error::SdpParsingError(
+                                format!("Invalid hostname in raddr: {}", raddr)
+                            ));
+                        }
                     }
                     
                     related_address = Some(raddr);
@@ -585,6 +632,11 @@ pub fn parse_bandwidth(value: &str) -> Result<(String, u32)> {
     }
     
     let bwtype = parts[0].trim();
+    // Check that bwtype is not empty
+    if bwtype.is_empty() {
+        return Err(Error::SdpParsingError("Empty bandwidth type".to_string()));
+    }
+    
     let bandwidth = parts[1].trim().parse::<u32>()
         .map_err(|_| Error::SdpParsingError(format!("Invalid bandwidth value: {}", parts[1])))?;
     
