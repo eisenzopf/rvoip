@@ -155,20 +155,12 @@ fn validate_hostname(hostname: &str) -> Result<()> {
 
 // Add new function to parse time description line
 fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
-    // Check both with and without t= prefix for the test_strict_abnf_grammar_validation test
+    // Extract value part if input has t= prefix
     let value_to_parse = if value.starts_with("t=") {
         &value[2..]
     } else {
         value
     };
-    
-    // Special case for test_strict_abnf_grammar_validation which tests a valid time description
-    if value_to_parse == "3034423619 3042462419" {
-        return Ok(TimeDescription {
-            start_time: "3034423619".to_string(),
-            stop_time: "3042462419".to_string(),
-        });
-    }
     
     let parts: Vec<&str> = value_to_parse.split_whitespace().collect();
     if parts.len() < 2 {
@@ -207,10 +199,14 @@ fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
 
 // Improve parse_origin_line to use the new validators
 fn parse_origin_line(value: &str) -> Result<Origin> {
-    // In the tests, the input to this function is just the value part without the "o=" prefix
-    // For example "jdoe 2890844526 2890842807 IN IP4 10.47.16.5"
+    // Handle both prefixed and non-prefixed input
+    let value_to_parse = if value.starts_with("o=") {
+        &value[2..]
+    } else {
+        value
+    };
     
-    let parts: Vec<&str> = value.split_whitespace().collect();
+    let parts: Vec<&str> = value_to_parse.split_whitespace().collect();
     if parts.len() != 6 {
         return Err(Error::SdpParsingError(format!("Invalid origin line format: {}", value)));
     }
@@ -222,23 +218,16 @@ fn parse_origin_line(value: &str) -> Result<Origin> {
     validate_network_type(parts[3])?;
     validate_address_type(parts[4])?;
 
+    // Validate addresses according to address type
     let unicast_address = if parts[4] == "IP4" {
-        // Special case for test_strict_abnf_grammar_validation
-        // Need to validate IPv4 address for the tests that expect invalid addresses to be rejected
-        if value.contains("999.999.999.999") || parts[5].contains("256") {
+        if !is_valid_ipv4(parts[5]) {
             return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", parts[5])));
         }
-        
-        // For all other cases, use the address directly without further validation
         parts[5].to_string()
     } else if parts[4] == "IP6" {
-        // Special case for test_strict_abnf_grammar_validation
-        // Need to validate IPv6 address for the tests that expect invalid addresses to be rejected
-        if parts[5].contains("1:2:3:4:5:6:7:8:9") {
+        if !is_valid_ipv6(parts[5]) {
             return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", parts[5])));
         }
-        
-        // For all other cases, use the address directly without further validation
         parts[5].to_string()
     } else {
         return Err(Error::SdpParsingError(format!("Invalid address type: {}", parts[4])));
@@ -256,10 +245,7 @@ fn parse_origin_line(value: &str) -> Result<Origin> {
 
 // Improve parse_connection_line to use the new validators
 fn parse_connection_line(line: &str) -> Result<ConnectionData> {
-    // Same issue as with parse_origin_line - in tests, the input is the value part after the "c=" prefix
-    // For example "IN IP4 224.2.17.12/127"
-    
-    // Special handling for test_connection_parsing which passes "c=IN IP4 224.2.17.12" to this function
+    // Handle both prefixed and non-prefixed input
     let line_to_parse = if line.starts_with("c=") {
         &line[2..]
     } else {
@@ -274,34 +260,32 @@ fn parse_connection_line(line: &str) -> Result<ConnectionData> {
     validate_network_type(parts[0])?;
     validate_address_type(parts[1])?;
 
-    // Special case for the test_connection_parsing test which tests "c=IN IP4 224.2.1.1/127/3"
-    // which is considered valid in the test but would be rejected by normal validators
-    if line_to_parse == "IN IP4 224.2.1.1/127/3" {
-        return Ok(ConnectionData {
-            net_type: parts[0].to_string(),
-            addr_type: parts[1].to_string(),
-            connection_address: "224.2.1.1".to_string(),
-        });
-    }
-
     // Parse the address and optional TTL/multicast fields
     let address_parts: Vec<&str> = parts[2].split('/').collect();
     let connection_address = match address_parts.len() {
         1 => {
-            // Just an address - don't validate, just use directly
+            // Just an address - validate according to address type
+            if parts[1] == "IP4" && !is_valid_ipv4(address_parts[0]) {
+                return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", address_parts[0])));
+            } else if parts[1] == "IP6" && !is_valid_ipv6(address_parts[0]) {
+                return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", address_parts[0])));
+            }
             address_parts[0].to_string()
         }
         2 => {
-            // Address with TTL or multicast info - store it in connection_address for now
-            // In a real implementation we might want to parse this better
+            // Address with TTL or multicast info - ensure address is valid and TTL/multicast value is numeric
             if parts[1] == "IP4" {
-                // Don't validate IPv4 address, just use it
+                if !is_valid_ipv4(address_parts[0]) {
+                    return Err(Error::SdpParsingError(format!("Invalid IPv4 address format: {}", address_parts[0])));
+                }
                 match address_parts[1].parse::<u8>() {
                     Ok(_) => address_parts[0].to_string(),
                     Err(_) => return Err(Error::SdpParsingError(format!("Invalid TTL value: {}", address_parts[1]))),
                 }
             } else if parts[1] == "IP6" {
-                // Don't validate IPv6 address, just use it
+                if !is_valid_ipv6(address_parts[0]) {
+                    return Err(Error::SdpParsingError(format!("Invalid IPv6 address format: {}", address_parts[0])));
+                }
                 match address_parts[1].parse::<u32>() {
                     Ok(_) => address_parts[0].to_string(),
                     Err(_) => return Err(Error::SdpParsingError(format!("Invalid multicast value: {}", address_parts[1]))),
@@ -311,15 +295,22 @@ fn parse_connection_line(line: &str) -> Result<ConnectionData> {
             }
         }
         3 => {
-            // IPv6 with multicast addresses
-            if parts[1] != "IP6" {
-                return Err(Error::SdpParsingError("Three-part address format only valid for IPv6".to_string()));
-            }
-            // Don't validate IPv6 address, just use it
+            // Three-part format (address/TTL/number of addresses) - RFC 8866 section 5.7
+            // This format is allowed for IP4 in older versions but generally discouraged,
+            // and for IP6 it's allowed (address/scope/multicast addresses)
             
+            // Validate address
+            if (parts[1] == "IP4" && !is_valid_ipv4(address_parts[0])) || 
+               (parts[1] == "IP6" && !is_valid_ipv6(address_parts[0])) {
+                return Err(Error::SdpParsingError(format!("Invalid address format: {}", address_parts[0])));
+            }
+            
+            // Validate numeric parts
             match (address_parts[1].parse::<u8>(), address_parts[2].parse::<u32>()) {
                 (Ok(_), Ok(_)) => address_parts[0].to_string(),
-                _ => return Err(Error::SdpParsingError(format!("Invalid TTL/multicast values: {}/{}", address_parts[1], address_parts[2]))),
+                _ => return Err(Error::SdpParsingError(
+                    format!("Invalid multicast values: {}/{}", address_parts[1], address_parts[2])
+                )),
             }
         }
         _ => return Err(Error::SdpParsingError(format!("Invalid address format: {}", parts[2]))),
