@@ -16,25 +16,6 @@ use std::fmt; // Import fmt
 use std::net::IpAddr;
 use crate::parser::uri::{ipv4, ipv6, hostname}; // Import URI parsers
 
-// --- Placeholder Attribute Structs (Consider moving to types/sdp_attributes.rs later) ---
-
-// Remove these struct definitions as they should be defined in types/sdp.rs
-/*
-#[derive(Debug, Clone, PartialEq)]
-pub struct RtpMapAttribute {
-    pub payload_type: u8,
-    pub encoding_name: String,
-    pub clock_rate: u32,
-    pub encoding_params: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FmtpAttribute {
-    pub format: String,
-    pub parameters: String, // Keep as raw string for now
-}
-*/
-
 /// SDP Media Direction attribute (e.g., sendrecv, sendonly)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MediaDirection {
@@ -55,15 +36,6 @@ impl fmt::Display for MediaDirection {
         }
     }
 }
-
-// Add MediaDirection to ParsedAttribute enum
-// #[derive(Debug, Clone, PartialEq)]
-// pub enum ParsedAttribute {
-//    ... 
-//    Direction(MediaDirection),
-//    Ptime(u32),
-//    ... 
-//}
 
 // Validation helper functions - similar to those in parser.rs but need to be accessible here too
 /// Helper function to validate IPv4 addresses
