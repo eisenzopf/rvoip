@@ -650,13 +650,13 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         }
                         seen_s = true;
                         
-                        if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
+                         if value.is_empty() { return Err(Error::SdpParsingError("Empty s= line".to_string())); } 
                         session.session_name = value.to_string();
                     }
                     'i' => { // Session Information (optional)
-                        if current_media.is_none() {
+                         if current_media.is_none() {
                             session.session_info = Some(value.to_string());
-                        } else {
+                         } else {
                             // i= line is allowed at media level according to RFC 4566 section 5.4
                             current_media.as_mut().unwrap().generic_attributes.push(
                                 ParsedAttribute::Value("i".to_string(), value.to_string())
@@ -664,25 +664,25 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         }
                     }
                     'u' => { // URI (optional)
-                        if current_media.is_none() {
+                         if current_media.is_none() {
                             session.uri = Some(value.to_string());
-                        } else {
+                         } else {
                             return Err(Error::SdpParsingError("u= line found at media level (invalid)".to_string()));
-                        }
+                         }
                     }
                     'e' => { // Email (optional)
-                        if current_media.is_none() {
+                         if current_media.is_none() {
                             session.email = Some(value.to_string());
-                        } else {
+                         } else {
                             return Err(Error::SdpParsingError("e= line found at media level (invalid)".to_string()));
-                        }
+                         }
                     }
                     'p' => { // Phone (optional)
-                        if current_media.is_none() {
+                         if current_media.is_none() {
                             session.phone = Some(value.to_string());
-                        } else {
+                         } else {
                             return Err(Error::SdpParsingError("p= line found at media level (invalid)".to_string()));
-                        }
+                         }
                     }
                     'c' => { 
                         let conn_data = session_parser::parse_connection_line(value)?;
@@ -827,13 +827,13 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 return Err(Error::SdpParsingError("Missing mandatory s= field".to_string()));
             }
             if !seen_t {
-                return Err(Error::SdpParsingError("Missing mandatory t= field".to_string()));
+                 return Err(Error::SdpParsingError("Missing mandatory t= field".to_string()));
             }
             
             // Final validation (connection info)
             // A c= line MUST be present either at session level OR in ALL media descriptions
             let session_c_present = session.connection_info.is_some();
-            
+
             if !session_c_present && !all_media_have_connection && !session.media_descriptions.is_empty() {
                  return Err(Error::SdpParsingError("Missing mandatory c= field (must be session level or in all media)".to_string()));
             }
@@ -861,24 +861,24 @@ pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
     };
 
     match attribute {
-        "rtpmap" => {
+            "rtpmap" => {
             attributes::parse_rtpmap(value.unwrap_or_default())
-        }
-        "fmtp" => {
+            }
+            "fmtp" => {
             attributes::parse_fmtp(value.unwrap_or_default())
-        }
-        "ptime" => {
+            }
+             "ptime" => {
             let ptime = attributes::parse_ptime(value.unwrap_or_default())?;
             Ok(ParsedAttribute::Ptime(ptime as u64))
         }
         "maxptime" => {
             let maxptime = attributes::parse_maxptime(value.unwrap_or_default())?;
             Ok(ParsedAttribute::MaxPtime(maxptime as u64))
-        }
-        "candidate" => {
+            }
+            "candidate" => {
             attributes::parse_candidate(value.unwrap_or_default())
-        }
-        "ssrc" => {
+            }
+            "ssrc" => {
             attributes::parse_ssrc(value.unwrap_or_default())
         }
         "ice-ufrag" => {
@@ -920,8 +920,8 @@ pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
             Ok(ParsedAttribute::Msid(stream_id, track_id))
         }
         "rid" => {
-            let (id, direction, restrictions) = attributes::parse_rid(value.unwrap_or_default())?;
-            Ok(ParsedAttribute::Rid(id, direction, restrictions))
+            let rid_attr = attributes::rid::parse_rid(value.unwrap_or_default())?;
+            Ok(ParsedAttribute::Rid(rid_attr))
         }
         "simulcast" => {
             let (send, recv) = attributes::parse_simulcast(value.unwrap_or_default())?;
@@ -956,7 +956,7 @@ pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
         _ => {
             if let Some(val) = value {
                 Ok(ParsedAttribute::Value(attribute.to_string(), val.to_string()))
-            } else {
+    } else {
                 Ok(ParsedAttribute::Flag(attribute.to_string()))
             }
         }
@@ -1033,7 +1033,7 @@ fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
          direction: None, // Initialize new field
          generic_attributes: Vec::new(), // Initialize new Vec
      })
-}
+} 
 
 /// Helper function to validate token format (per RFC 4566 ABNF)
 fn is_valid_token(s: &str) -> bool {

@@ -9,7 +9,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{alphanumeric1, char, space0, space1},
-    combinator::{map, opt, value},
+    combinator::{map, opt, value, all_consuming, eof},
     multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
     IResult,
@@ -66,7 +66,9 @@ fn parse_simulcast_direction(input: &str) -> IResult<&str, SimulcastDirection> {
     ))(input)
 }
 
-/// Parse a RID identifier
+/// Parse a RID identifier according to RFC 8851
+/// A RID identifier is a token defined in RFC 8851 as
+/// consisting of alphanumeric characters, underscore, and hyphen
 fn parse_rid(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-')(input)
 }
@@ -91,6 +93,14 @@ fn parse_simulcast_alternative(input: &str) -> IResult<&str, SimulcastAlternativ
 
 /// Parse a simulcast version
 fn parse_simulcast_version(input: &str) -> IResult<&str, SimulcastVersion> {
+    // Check for trailing comma before parsing
+    if input.trim().ends_with(',') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge
+        )));
+    }
+    
     map(
         separated_list1(
             char(','),
@@ -102,6 +112,14 @@ fn parse_simulcast_version(input: &str) -> IResult<&str, SimulcastVersion> {
 
 /// Parse simulcast stream versions
 fn parse_simulcast_stream_versions(input: &str) -> IResult<&str, Vec<SimulcastVersion>> {
+    // Check for trailing semicolon before parsing
+    if input.trim().ends_with(';') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge
+        )));
+    }
+    
     separated_list1(
         char(';'),
         parse_simulcast_version
@@ -131,8 +149,14 @@ fn simulcast_parser(input: &str) -> IResult<&str, SimulcastAttribute> {
 ///
 /// Example: a=simulcast:send 1;2,3 recv 4
 pub fn parse_simulcast_struct(value: &str) -> Result<Vec<SimulcastAttribute>> {
+    // Trim the input and normalize whitespace
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(Error::SdpParsingError("Empty simulcast attribute".to_string()));
+    }
+    
     // Split the value into space-separated parts
-    let parts: Vec<&str> = value.trim().split_whitespace().collect();
+    let parts: Vec<&str> = value.split_whitespace().collect();
     
     // We need at least a direction followed by stream descriptions
     if parts.len() < 2 {
@@ -157,11 +181,37 @@ pub fn parse_simulcast_struct(value: &str) -> Result<Vec<SimulcastAttribute>> {
             return Err(Error::SdpParsingError(format!("Incomplete simulcast attribute: {}", value)));
         }
         
-        // Parse the stream versions
-        let versions_str = parts[i];
+        // Collect all parts until the next direction or end
+        let mut versions_str = parts[i].to_string();
         i += 1;
         
-        match parse_simulcast_stream_versions(versions_str) {
+        while i < parts.len() && parts[i] != "send" && parts[i] != "recv" {
+            versions_str.push(' ');
+            versions_str.push_str(parts[i]);
+            i += 1;
+        }
+        
+        // Reject stream versions with trailing delimiters
+        if versions_str.trim().ends_with(',') || versions_str.trim().ends_with(';') {
+            return Err(Error::SdpParsingError(format!("Invalid simulcast stream format (trailing delimiter): {}", versions_str)));
+        }
+        
+        // Check for invalid RID format
+        if versions_str.contains('@') || versions_str.contains('!') || 
+           versions_str.contains('#') || versions_str.contains('$') ||
+           versions_str.contains(",,") || versions_str.contains(";;") {
+            return Err(Error::SdpParsingError(format!("Invalid RID format in simulcast: {}", versions_str)));
+        }
+        
+        // Handle the case where we have semicolons or commas with whitespace 
+        let normalized_versions = versions_str
+            .replace(" ;", ";")
+            .replace("; ", ";")
+            .replace(" , ", ",")
+            .replace(", ", ",")
+            .replace(" ,", ",");
+        
+        match parse_simulcast_stream_versions(&normalized_versions) {
             Ok((_, stream_versions)) => {
                 result.push(SimulcastAttribute {
                     direction,
@@ -226,7 +276,7 @@ mod tests {
     #[test]
     fn test_simulcast_parsing() {
         // Basic simulcast test
-        let simulcast_value = "send 1,2,3;~4 recv 5;~6,~7";
+        let simulcast_value = "send a1,a2,a3;~a4 recv a5;~a6,~a7";
         let result = parse_simulcast_struct(simulcast_value);
         assert!(result.is_ok(), "Failed to parse valid simulcast attribute");
         
@@ -247,13 +297,13 @@ mod tests {
         // Check specific stream versions
         let send_version1 = &send_attr.stream_versions[0];
         assert_eq!(send_version1.alternatives.len(), 3);
-        assert_eq!(send_version1.alternatives[0].rid, "1");
-        assert_eq!(send_version1.alternatives[1].rid, "2");
-        assert_eq!(send_version1.alternatives[2].rid, "3");
+        assert_eq!(send_version1.alternatives[0].rid, "a1");
+        assert_eq!(send_version1.alternatives[1].rid, "a2");
+        assert_eq!(send_version1.alternatives[2].rid, "a3");
         
         let send_version2 = &send_attr.stream_versions[1];
         assert_eq!(send_version2.alternatives.len(), 1);
-        assert_eq!(send_version2.alternatives[0].rid, "4");
+        assert_eq!(send_version2.alternatives[0].rid, "a4");
         assert!(matches!(send_version2.alternatives[0].status, SimulcastStatus::Paused));
         
         // Test invalid simulcast - empty direction
@@ -261,13 +311,13 @@ mod tests {
         assert!(parse_simulcast_struct(invalid_simulcast).is_err());
         
         // Test with only send direction
-        let send_only = "send 1;2";
+        let send_only = "send a1;a2";
         let (send, recv) = parse_simulcast_compat(send_only).unwrap();
         assert_eq!(send.len(), 2);
         assert_eq!(recv.len(), 0);
         
         // Test with only recv direction
-        let recv_only = "recv 3;4";
+        let recv_only = "recv a3;a4";
         let (send, recv) = parse_simulcast_compat(recv_only).unwrap();
         assert_eq!(send.len(), 0);
         assert_eq!(recv.len(), 2);
@@ -276,7 +326,7 @@ mod tests {
     #[test]
     fn test_complex_simulcast() {
         // Complex simulcast with multiple patterns
-        let complex_simulcast = "send 1,~2,3;4,~5 recv 6;~7,8;~9";
+        let complex_simulcast = "send a1,~a2,a3;a4,~a5 recv a6;~a7,a8;~a9";
         let result = parse_simulcast_struct(complex_simulcast);
         assert!(result.is_ok(), "Failed to parse complex simulcast");
         
@@ -292,19 +342,19 @@ mod tests {
         // Check first send version
         let send_version1 = &send_attr.stream_versions[0];
         assert_eq!(send_version1.alternatives.len(), 3);
-        assert_eq!(send_version1.alternatives[0].rid, "1");
+        assert_eq!(send_version1.alternatives[0].rid, "a1");
         assert!(matches!(send_version1.alternatives[0].status, SimulcastStatus::Active));
-        assert_eq!(send_version1.alternatives[1].rid, "2");
+        assert_eq!(send_version1.alternatives[1].rid, "a2");
         assert!(matches!(send_version1.alternatives[1].status, SimulcastStatus::Paused));
-        assert_eq!(send_version1.alternatives[2].rid, "3");
+        assert_eq!(send_version1.alternatives[2].rid, "a3");
         assert!(matches!(send_version1.alternatives[2].status, SimulcastStatus::Active));
         
         // Check second send version
         let send_version2 = &send_attr.stream_versions[1];
         assert_eq!(send_version2.alternatives.len(), 2);
-        assert_eq!(send_version2.alternatives[0].rid, "4");
+        assert_eq!(send_version2.alternatives[0].rid, "a4");
         assert!(matches!(send_version2.alternatives[0].status, SimulcastStatus::Active));
-        assert_eq!(send_version2.alternatives[1].rid, "5");
+        assert_eq!(send_version2.alternatives[1].rid, "a5");
         assert!(matches!(send_version2.alternatives[1].status, SimulcastStatus::Paused));
         
         // Check recv attribute
@@ -316,22 +366,172 @@ mod tests {
     #[test]
     fn test_simulcast_edge_cases() {
         // Test with multiple alternative patterns
-        let multi_pattern = "send 1,2,3,4,5";
+        let multi_pattern = "send a1,a2,a3,a4,a5";
         let (send, _) = parse_simulcast_compat(multi_pattern).unwrap();
-        assert_eq!(send[0], "1,2,3,4,5");
+        assert_eq!(send[0], "a1,a2,a3,a4,a5");
         
         // Test with invalid direction
-        let invalid_direction = "foo 1";
+        let invalid_direction = "foo a1";
         assert!(parse_simulcast_struct(invalid_direction).is_err());
         
-        // Test with invalid version pattern
-        let invalid_pattern = "send 1,";
-        assert!(parse_simulcast_struct(invalid_pattern).is_err());
+        // Test with trailing comma
+        let invalid_pattern = "send a1,";
+        assert!(parse_simulcast_struct(invalid_pattern).is_err(), "Should reject trailing comma in alternatives");
+        
+        // Test with trailing semicolon
+        let invalid_pattern2 = "send a1;";
+        assert!(parse_simulcast_struct(invalid_pattern2).is_err(), "Should reject trailing semicolon in versions");
         
         // Test with both directions
-        let both_directions = "send 1 recv 2";
+        let both_directions = "send a1 recv a2";
         let (send, recv) = parse_simulcast_compat(both_directions).unwrap();
         assert_eq!(send.len(), 1);
         assert_eq!(recv.len(), 1);
+    }
+    
+    #[test]
+    fn test_rfc8853_examples() {
+        // Example from RFC 8853 Section 5.1
+        let example1 = "send rid-1,rid-2;rid-3 recv rid-4";
+        let result = parse_simulcast_struct(example1);
+        assert!(result.is_ok(), "Failed to parse RFC example 1");
+        
+        let attrs = result.unwrap();
+        assert_eq!(attrs.len(), 2);
+        
+        // Check send attribute from example
+        let send_attr = &attrs[0];
+        assert!(matches!(send_attr.direction, SimulcastDirection::Send));
+        assert_eq!(send_attr.stream_versions.len(), 2);
+        assert_eq!(send_attr.stream_versions[0].alternatives.len(), 2);
+        assert_eq!(send_attr.stream_versions[0].alternatives[0].rid, "rid-1");
+        assert_eq!(send_attr.stream_versions[0].alternatives[1].rid, "rid-2");
+        assert_eq!(send_attr.stream_versions[1].alternatives.len(), 1);
+        assert_eq!(send_attr.stream_versions[1].alternatives[0].rid, "rid-3");
+        
+        // Check recv attribute from example
+        let recv_attr = &attrs[1];
+        assert!(matches!(recv_attr.direction, SimulcastDirection::Recv));
+        assert_eq!(recv_attr.stream_versions.len(), 1);
+        assert_eq!(recv_attr.stream_versions[0].alternatives.len(), 1);
+        assert_eq!(recv_attr.stream_versions[0].alternatives[0].rid, "rid-4");
+        
+        // Example with paused streams
+        let example2 = "recv ~rid-1,rid-2";
+        let result = parse_simulcast_struct(example2);
+        assert!(result.is_ok(), "Failed to parse RFC example 2");
+        
+        let attrs = result.unwrap();
+        assert_eq!(attrs.len(), 1);
+        let recv_attr = &attrs[0];
+        assert!(matches!(recv_attr.direction, SimulcastDirection::Recv));
+        assert_eq!(recv_attr.stream_versions.len(), 1);
+        assert_eq!(recv_attr.stream_versions[0].alternatives.len(), 2);
+        assert_eq!(recv_attr.stream_versions[0].alternatives[0].rid, "rid-1");
+        assert!(matches!(recv_attr.stream_versions[0].alternatives[0].status, SimulcastStatus::Paused));
+        assert_eq!(recv_attr.stream_versions[0].alternatives[1].rid, "rid-2");
+        assert!(matches!(recv_attr.stream_versions[0].alternatives[1].status, SimulcastStatus::Active));
+    }
+    
+    #[test]
+    fn test_invalid_simulcast_formats() {
+        // Empty string
+        assert!(parse_simulcast_struct("").is_err(), "Should reject empty string");
+        
+        // Missing stream versions
+        assert!(parse_simulcast_struct("send").is_err(), "Should reject missing stream versions");
+        
+        // Empty stream versions
+        assert!(parse_simulcast_struct("send ").is_err(), "Should reject empty stream versions");
+        
+        // Invalid direction
+        assert!(parse_simulcast_struct("invalid a1").is_err(), "Should reject invalid direction");
+        
+        // Invalid RID format with @
+        assert!(parse_simulcast_struct("send a1@invalid").is_err(), "Should reject invalid RID format with @");
+        
+        // Malformed version list (empty part between commas)
+        assert!(parse_simulcast_struct("send a1,,a2").is_err(), "Should reject empty parts between commas");
+        
+        // Malformed version list (empty part between semicolons)
+        assert!(parse_simulcast_struct("send a1;;a2").is_err(), "Should reject empty parts between semicolons");
+        
+        // Missing direction value
+        assert!(parse_simulcast_struct("a1").is_err(), "Should reject missing direction");
+        
+        // Valid format but with direction in wrong case
+        assert!(parse_simulcast_struct("SEND a1").is_err(), "Should reject direction in wrong case");
+    }
+    
+    #[test]
+    fn test_whitespace_handling() {
+        // Test with extra whitespace
+        let with_spaces = "send a1,a2 ; a3 recv a4";
+        let result = parse_simulcast_struct(with_spaces);
+        assert!(result.is_ok(), "Should handle extra whitespace");
+        
+        // Test with tabs
+        let with_tabs = "send\ta1,a2;\ta3\trecv\ta4";
+        let result = parse_simulcast_struct(with_tabs);
+        assert!(result.is_ok(), "Should handle tabs");
+        
+        // Test with leading/trailing whitespace
+        let with_whitespace = "  send a1 recv a2  ";
+        let result = parse_simulcast_struct(with_whitespace);
+        assert!(result.is_ok(), "Should handle leading/trailing whitespace");
+        
+        // Check that alternatives are correctly parsed with extra whitespace
+        let with_specific_spaces = "send a1 , a2 ; a3";
+        let result = parse_simulcast_struct(with_specific_spaces);
+        assert!(result.is_ok(), "Should handle spaces around commas and semicolons");
+        let attrs = result.unwrap();
+        assert_eq!(attrs[0].stream_versions[0].alternatives.len(), 2);
+        assert_eq!(attrs[0].stream_versions[0].alternatives[0].rid, "a1");
+        assert_eq!(attrs[0].stream_versions[0].alternatives[1].rid, "a2");
+        assert_eq!(attrs[0].stream_versions[1].alternatives[0].rid, "a3");
+    }
+    
+    #[test]
+    fn test_parser_functions_directly() {
+        // Test parse_simulcast_direction
+        let (rest, direction) = parse_simulcast_direction("send rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert!(matches!(direction, SimulcastDirection::Send));
+        
+        let (rest, direction) = parse_simulcast_direction("recv rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert!(matches!(direction, SimulcastDirection::Recv));
+        
+        // Test parse_rid
+        let (rest, rid) = parse_rid("rid-1 rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert_eq!(rid, "rid-1");
+        
+        // Test parse_simulcast_alternative
+        let (rest, alt) = parse_simulcast_alternative("rid-1 rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert_eq!(alt.rid, "rid-1");
+        assert!(matches!(alt.status, SimulcastStatus::Active));
+        
+        let (rest, alt) = parse_simulcast_alternative("~rid-1 rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert_eq!(alt.rid, "rid-1");
+        assert!(matches!(alt.status, SimulcastStatus::Paused));
+        
+        // Test parse_simulcast_version
+        let (rest, version) = parse_simulcast_version("rid-1,rid-2 rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert_eq!(version.alternatives.len(), 2);
+        assert_eq!(version.alternatives[0].rid, "rid-1");
+        assert_eq!(version.alternatives[1].rid, "rid-2");
+        
+        // Test parse_simulcast_stream_versions
+        let (rest, versions) = parse_simulcast_stream_versions("rid-1;rid-2 rest").unwrap();
+        assert_eq!(rest, " rest");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].alternatives.len(), 1);
+        assert_eq!(versions[0].alternatives[0].rid, "rid-1");
+        assert_eq!(versions[1].alternatives.len(), 1);
+        assert_eq!(versions[1].alternatives[0].rid, "rid-2");
     }
 } 

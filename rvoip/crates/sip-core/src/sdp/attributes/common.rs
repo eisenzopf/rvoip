@@ -38,22 +38,38 @@ pub fn identifier(input: &str) -> IResult<&str, &str> {
 
 /// Helper function to validate IPv4 address format
 pub fn is_valid_ipv4(addr: &str) -> bool {
-    // Basic format check: must have 4 parts separated by dots
-    let parts: Vec<&str> = addr.split('.').collect();
-    if parts.len() != 4 {
+    addr.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// Helper function to validate IPv6 address format
+pub fn is_valid_ipv6(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
+/// Helper function to validate hostname format
+pub fn is_valid_hostname(hostname: &str) -> bool {
+    // Simple validation rules for hostnames
+    // - Should not be empty
+    // - Should only contain letters, numbers, dots and hyphens
+    // - Should not start or end with dot or hyphen
+    // - Should not have consecutive dots
+    
+    if hostname.is_empty() {
         return false;
     }
-
-    // Each part must be a valid octet (0-255)
-    for part in parts {
-        match part.parse::<u8>() {
-            Ok(_) => {}, // Valid octet (0-255)
-            Err(_) => return false, // Outside 0-255 range or not a number
-        }
+    
+    if hostname.starts_with('.') || hostname.ends_with('.') || 
+       hostname.starts_with('-') || hostname.ends_with('-') {
+        return false;
     }
     
-    // If we reach here, all octets are valid
-    true
+    if hostname.contains("..") {
+        return false;
+    }
+    
+    hostname.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '.' || c == '-'
+    })
 }
 
 /// Parses key-value pair separated by equals sign
@@ -95,8 +111,8 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
                     bundle_mids = group_mids.clone();
                 }
             },
-            ParsedAttribute::Rid(rid, _, _) => {
-                rids.push(rid.clone());
+            ParsedAttribute::Rid(rid) => {
+                rids.push(rid.id.clone());
             },
             ParsedAttribute::Simulcast(send_list, recv_list) => {
                 // Extract RIDs from simulcast lists (removing any paused indicators)

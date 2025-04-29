@@ -21,7 +21,8 @@ use crate::error::{Error, Result};
 use crate::sdp::parser::parse_sdp;
 
 // Import attribute structs/enums from the correct location
-use crate::sdp::attributes::MediaDirection; // Keep this
+use crate::sdp::attributes::MediaDirection;
+use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
 // Remove other potential imports from crate::sdp if they were added erroneously
 
 // --- Placeholder Attribute Structs --- 
@@ -134,8 +135,8 @@ pub enum ParsedAttribute {
     Msid(String, Option<String>),
     /// Bandwidth information, corresponds to b=<bwtype>:<bandwidth>
     Bandwidth(String, u64),
-    /// Restriction identifier, corresponds to a=rid:<id> <direction> [restrictions]
-    Rid(String, String, Vec<String>),
+    /// Restriction identifier, corresponds to a=rid:<id> <direction> [pt=<formats>] [;<key=value>*]
+    Rid(RidAttribute),
     /// Simulcast attribute, corresponds to a=simulcast:<send list> <recv list>
     Simulcast(Vec<String>, Vec<String>),
     /// ICE options, corresponds to a=ice-options:<option-tag> [<option-tag>]*
@@ -150,9 +151,9 @@ pub enum ParsedAttribute {
     SctpMap(u16, String, u16),
     /// Flag attribute, corresponds to a=<flag>
     Flag(String),
-    /// Value attribute, corresponds to a=<name>:<value>
+    /// Value attribute, corresponds to a=<n>:<value>
     Value(String, String),
-    /// Other attribute, corresponds to a=<name>[:<value>]
+    /// Other attribute, corresponds to a=<n>[:<value>]
     Other(String, Option<String>),
 }
 
@@ -328,6 +329,8 @@ impl SdpSession {
     ///     net_type: "IN".to_string(),
     ///     addr_type: "IP4".to_string(),
     ///     connection_address: "192.168.1.100".to_string(),
+    ///     ttl: None,                // Optional TTL for multicast (IPv4 only)
+    ///     multicast_count: None,    // Optional number of addresses in multicast group
     /// };
     /// let session = session.with_connection_data(conn);
     /// ```
@@ -555,6 +558,8 @@ impl MediaDescription {
     ///     net_type: "IN".to_string(),
     ///     addr_type: "IP4".to_string(),
     ///     connection_address: "192.168.1.100".to_string(),
+    ///     ttl: None,                // Optional TTL for multicast (IPv4 only)
+    ///     multicast_count: None,    // Optional number of addresses in multicast group
     /// };
     /// let media = media.with_connection_data(conn);
     /// ```
@@ -831,12 +836,24 @@ impl fmt::Display for ParsedAttribute {
                 }
                 Ok(())
             }
-            ParsedAttribute::Rid(id, direction, restrictions) => {
-                write!(f, "a=rid:{} {}", id, direction)?;
-                if !restrictions.is_empty() {
-                    // Join with space for display
-                    write!(f, " {}", restrictions.join(" "))?;
+            ParsedAttribute::Rid(rid) => {
+                write!(f, "a=rid:{} {}", rid.id, match rid.direction {
+                    RidDirection::Send => "send",
+                    RidDirection::Recv => "recv",
+                })?;
+                
+                // Add formats if present
+                if !rid.formats.is_empty() {
+                    write!(f, " pt={}", rid.formats.join(","))?;
                 }
+                
+                // Add restrictions if present
+                if !rid.restrictions.is_empty() {
+                    for (key, value) in &rid.restrictions {
+                        write!(f, ";{}={}", key, value)?;
+                    }
+                }
+                
                 Ok(())
             }
             ParsedAttribute::Simulcast(send, recv) => {
