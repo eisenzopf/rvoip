@@ -2269,15 +2269,29 @@ m=audio 5000 RTP/AVP 0\r
         let (id, direction, restrictions) = result.unwrap();
         assert_eq!(id, "1");
         assert_eq!(direction, "send");
-        assert_eq!(restrictions.len(), 2);
+        // According to RFC 8851, these should be 5 separate restrictions:
+        // 1. pt=96,97,98 (payload types)
+        // 2. max-width=1280
+        // 3. max-height=720
+        // 4. max-fps=30
+        // 5. max-fs=8160
+        assert_eq!(restrictions.len(), 5);
+        assert_eq!(restrictions[0], "pt=96,97,98");
+        assert_eq!(restrictions[1], "max-width=1280");
+        assert_eq!(restrictions[2], "max-height=720");
+        assert_eq!(restrictions[3], "max-fps=30");
+        assert_eq!(restrictions[4], "max-fs=8160");
         
         // Simulcast with complex layers
         let complex_simulcast = "send 1,~2,3;4,~5 recv 6;~7,8;~9";
+        println!("Testing simulcast parse with: '{}'", complex_simulcast);
         let result = attributes::parse_simulcast(complex_simulcast);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Failed to parse simulcast");
         let (send_streams, recv_streams) = result.unwrap();
-        assert_eq!(send_streams.len(), 2);
-        assert_eq!(recv_streams.len(), 3);
+        println!("Simulcast result: send_streams={:?}, recv_streams={:?}", send_streams, recv_streams);
+        println!("send_streams.len()={}, recv_streams.len()={}", send_streams.len(), recv_streams.len());
+        assert_eq!(send_streams.len(), 2, "Expected 2 send streams, got {}", send_streams.len());
+        assert_eq!(recv_streams.len(), 3, "Expected 3 recv streams, got {}", recv_streams.len());
         
         // SSRC with multiple attributes for the same SSRC ID
         assert!(attributes::parse_ssrc("1234 cname:user@example.com").is_ok());

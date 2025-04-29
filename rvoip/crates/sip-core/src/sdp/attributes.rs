@@ -686,123 +686,184 @@ pub fn parse_bandwidth(value: &str) -> Result<(String, u32)> {
     Ok((bwtype.to_string(), bandwidth))
 }
 
-/// Parses rid attribute: a=rid:<id> <direction> [<pt-list>]...
+/// Parses rid attribute: a=rid:<id> <direction> [pt=<fmt-list>] [<restriction-name>=<restriction-value>]...
 /// RFC 8851 defines the Restriction Identifier (RID) attribute
 pub fn parse_rid(value: &str) -> Result<(String, String, Vec<String>)> {
-    // Example: a=rid:1 send pt=97
-    // Example: a=rid:2 recv pt=98,99 max-width=800
+    println!("Parsing RID value: '{}'", value);
     
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(Error::SdpParsingError(format!("Invalid rid format: {}", value)));
+    // Define a nom parser for the RID attribute according to RFC 8851
+    fn rid_parser(input: &str) -> IResult<&str, (String, String, Vec<String>)> {
+        // Parse the ID (alphanumeric with - and _)
+        let (input, id) = take_while1(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')(input)?;
+        println!("  ID: '{}', remaining: '{}'", id, input);
+        
+        // Parse the space and direction
+        let (input, _) = space1(input)?;
+        let (input, direction) = take_while1(|c: char| c.is_ascii_alphabetic())(input)?;
+        println!("  Direction: '{}', remaining: '{}'", direction, input);
+        
+        // Validate direction
+        if direction != "send" && direction != "recv" {
+            println!("  Invalid direction: '{}'", direction);
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag
+            )));
+        }
+        
+        // Parse the remaining restrictions
+        let mut remaining = input;
+        let mut restrictions = Vec::new();
+        
+        // Each restriction is whitespace-separated
+        while let Ok((rest, _)) = space1::<_, nom::error::Error<_>>(remaining) {
+            // We have more content to parse
+            remaining = rest;
+            println!("  Parsing restriction from: '{}'", remaining);
+            
+            // Handle special case for pt= format lists
+            if remaining.starts_with("pt=") {
+                // Parse until next whitespace for payload type
+                let (rest, pt_restriction) = take_till1(|c: char| c.is_ascii_whitespace())(remaining)?;
+                println!("  Found pt restriction: '{}'", pt_restriction);
+                restrictions.push(pt_restriction.to_string());
+                remaining = rest;
+                continue;
+            }
+            
+            // Parse a single restriction group (until next whitespace)
+            let (rest, restriction_group) = take_till1(|c: char| c.is_ascii_whitespace())(remaining)?;
+            println!("  Found restriction group: '{}'", restriction_group);
+            
+            // If semicolons are present, split by semicolons
+            if restriction_group.contains(';') {
+                println!("  Splitting by semicolons: '{}'", restriction_group);
+                for restriction in restriction_group.split(';') {
+                    println!("    Split restriction: '{}'", restriction);
+                    restrictions.push(restriction.to_string());
+                }
+            } else {
+                // No semicolons, treat as a single restriction
+                println!("  No semicolons, using as is: '{}'", restriction_group);
+                restrictions.push(restriction_group.to_string());
+            }
+            
+            // Continue from the rest
+            remaining = rest;
+        }
+        
+        println!("  Parsed {} restrictions: {:?}", restrictions.len(), restrictions);
+        
+        Ok((
+            remaining,
+            (id.to_string(), direction.to_string(), restrictions)
+        ))
     }
     
-    let id = parts[0].to_string();
-    if id.is_empty() {
-        return Err(Error::SdpParsingError("Empty rid identifier".to_string()));
+    // Apply the parser to the input
+    match rid_parser(value) {
+        Ok((_, result)) => {
+            println!("Successfully parsed RID with {} restrictions", result.2.len());
+            Ok(result)
+        },
+        Err(e) => {
+            println!("Failed to parse RID: {:?}", e);
+            Err(Error::SdpParsingError(format!("Invalid RID format: {}", value)))
+        }
     }
-    
-    // Validate id is alphanumeric
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(Error::SdpParsingError(format!("Invalid rid identifier (must be alphanumeric with - or _): {}", id)));
-    }
-    
-    let direction = parts[1].to_lowercase();
-    
-    // Validate direction
-    if direction != "send" && direction != "recv" {
-        return Err(Error::SdpParsingError(format!("Invalid rid direction (must be send or recv): {}", direction)));
-    }
-    
-    // Parse optional parameters and restrictions (each parameter is name=value, or pt=val1,val2)
-    let mut parameters = Vec::new();
-    
-    for param in parts.iter().skip(2) {
-        parameters.push(param.to_string());
-    }
-    
-    Ok((id, direction, parameters))
 }
 
 /// Parses simulcast attribute: a=simulcast:<send_streams> <recv_streams>
 pub fn parse_simulcast(value: &str) -> Result<(Vec<String>, Vec<String>)> {
     // Example: a=simulcast:send 1,2,3 recv 4,5,6
     // Example: a=simulcast:send 1;2;3 recv 4;5;6  (alternative format with semicolons)
-    // Example: a=simulcast:send 1,~2,3;4 (with paused streams marked with ~)
+    // Example: a=simulcast:send 1,~2,3;4,~5 recv 6;~7,8;~9
     
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(Error::SdpParsingError("Empty simulcast attribute".to_string()));
+    // Define nom parsers for stream identifiers and groups
+    fn stream_id(input: &str) -> IResult<&str, &str> {
+        take_while1(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '~')(input)
     }
     
-    let mut send_streams: Vec<String> = Vec::new();
-    let mut recv_streams: Vec<String> = Vec::new();
-    
-    // Track the current state (send or receive)
-    enum ParseState {
-        None,
-        Send,
-        Recv
+    // Parse comma-separated stream IDs
+    fn stream_list(input: &str) -> IResult<&str, Vec<&str>> {
+        separated_list1(
+            char(','),
+            stream_id
+        )(input)
     }
     
-    let mut state = ParseState::None;
+    // Parse a single alternative (either a stream list or a single stream ID)
+    fn stream_alternative(input: &str) -> IResult<&str, String> {
+        let (input, content) = take_till1(|c: char| c == ';' || c.is_ascii_whitespace())(input)?;
+        Ok((input, content.to_string()))
+    }
     
-    // Parse all parts
-    for part in parts {
-        match part {
-            "send" => state = ParseState::Send,
-            "recv" => state = ParseState::Recv,
-            _ => {
-                // This is a stream specification part
-                match state {
-                    ParseState::Send => {
-                        // Split alternative formats: part could use either commas or semicolons as separators
-                        // Check if there are semicolons first
-                        if part.contains(';') {
-                            send_streams.push(part.to_string());
-                        } else if part.contains(',') {
-                            // Handle comma-separated format
-                            for stream in part.split(',') {
-                                if !stream.is_empty() {
-                                    send_streams.push(stream.to_string());
-                                }
-                            }
-                        } else {
-                            // Single stream ID
-                            send_streams.push(part.to_string());
-                        }
-                    }
-                    ParseState::Recv => {
-                        // Split alternative formats: part could use either commas or semicolons as separators
-                        // Check if there are semicolons first
-                        if part.contains(';') {
-                            recv_streams.push(part.to_string());
-                        } else if part.contains(',') {
-                            // Handle comma-separated format
-                            for stream in part.split(',') {
-                                if !stream.is_empty() {
-                                    recv_streams.push(stream.to_string());
-                                }
-                            }
-                        } else {
-                            // Single stream ID
-                            recv_streams.push(part.to_string());
-                        }
-                    }
-                    ParseState::None => {
-                        return Err(Error::SdpParsingError(format!("Simulcast stream ID without direction: {}", part)));
-                    }
-                }
+    // Parse a list of alternatives (separated by semicolons)
+    fn stream_alternatives(input: &str) -> IResult<&str, Vec<String>> {
+        separated_list1(
+            char(';'),
+            map(stream_alternative, |s| s)
+        )(input)
+    }
+    
+    // Parse the send section
+    fn send_section(input: &str) -> IResult<&str, Vec<String>> {
+        let (input, _) = tag("send")(input)?;
+        let (input, _) = space1(input)?;
+        let (input, alternatives) = stream_alternatives(input)?;
+        Ok((input, alternatives))
+    }
+    
+    // Parse the recv section
+    fn recv_section(input: &str) -> IResult<&str, Vec<String>> {
+        let (input, _) = tag("recv")(input)?;
+        let (input, _) = space1(input)?;
+        let (input, alternatives) = stream_alternatives(input)?;
+        Ok((input, alternatives))
+    }
+    
+    // Main parser for the entire simulcast attribute
+    fn simulcast_parser(input: &str) -> IResult<&str, (Vec<String>, Vec<String>)> {
+        let mut send_streams: Vec<String> = Vec::new();
+        let mut recv_streams: Vec<String> = Vec::new();
+        let mut remaining = input;
+        
+        // Try to parse send section
+        if let Ok((rest, streams)) = send_section(remaining) {
+            send_streams = streams;
+            remaining = rest;
+            
+            // Skip whitespace
+            if let Ok((rest, _)) = space0::<_, nom::error::Error<_>>(remaining) {
+                remaining = rest;
             }
         }
+        
+        // Try to parse recv section
+        if let Ok((rest, streams)) = recv_section(remaining) {
+            recv_streams = streams;
+            remaining = rest;
+        }
+        
+        // Ensure we parsed at least something
+        if send_streams.is_empty() && recv_streams.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag
+            )));
+        }
+        
+        Ok((remaining, (send_streams, recv_streams)))
     }
     
-    // Basic validation - we should have at least one stream ID
-    if send_streams.is_empty() && recv_streams.is_empty() {
-        return Err(Error::SdpParsingError("Simulcast attribute must include at least one stream ID".to_string()));
+    // Apply the parser
+    match simulcast_parser(value) {
+        Ok((_, result)) => Ok(result),
+        Err(e) => {
+            println!("Simulcast parsing error: {:?}", e);
+            Err(Error::SdpParsingError(format!("Invalid simulcast format: {}", value)))
+        }
     }
-    
-    Ok((send_streams, recv_streams))
 }
 
 /// Parses scalability mode for AV1, H.264, and VP9: a=fmtp:<payload> scalability-mode=<mode>
