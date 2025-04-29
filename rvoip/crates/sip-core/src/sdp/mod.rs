@@ -9,6 +9,9 @@ pub mod time_parser;
 pub mod media;
 pub mod attributes;
 
+#[cfg(test)]
+mod tests;
+
 pub use parser::parse_sdp;
 
 // For backward compatibility
