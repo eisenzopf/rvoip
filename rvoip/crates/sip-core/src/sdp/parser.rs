@@ -324,7 +324,22 @@ fn parse_connection_line(line: &str) -> Result<ConnectionData> {
 
 /// Helper function to validate IPv4 addresses
 fn is_valid_ipv4(addr: &str) -> bool {
-    // Use the parser module's ipv4_address function
+    // Basic format check: must have 4 parts separated by dots
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+
+    // Each part must be a valid octet (0-255)
+    for part in parts {
+        match part.parse::<u8>() {
+            Ok(_) => {}, // Valid octet (0-255)
+            Err(_) => return false, // Outside 0-255 range
+        }
+    }
+
+    // If we also want to use the parser module validation
+    // This is a stronger check that ensures complete RFC compliance
     let input = addr.as_bytes();
     match ipv4_address(input) {
         Ok((remaining, _)) => remaining.is_empty(), // Must consume all input
