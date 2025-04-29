@@ -103,6 +103,17 @@ fn is_valid_hostname(hostname: &str) -> bool {
     })
 }
 
+/// Helper function to validate token format (per RFC 4566 ABNF)
+fn is_valid_token(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| 
+        c.is_ascii_alphanumeric() || 
+        c == '-' || c == '.' || c == '!' || 
+        c == '%' || c == '*' || c == '_' || 
+        c == '+' || c == '`' || c == '\'' || 
+        c == '~'
+    )
+}
+
 // --- Parsing Functions --- 
 
 /// Parses rtpmap attribute: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
@@ -115,18 +126,35 @@ pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
         return Err(Error::SdpParsingError(format!("Invalid rtpmap format: {}", value)));
     }
     
+    // Validate payload type: must be between 0-127 per RFC
     let payload_type = parts[0].parse::<u8>()
         .map_err(|_| Error::SdpParsingError(format!("Invalid payload type in rtpmap: {}", parts[0])))?;
     
+    // Validate encoding format: <encoding name>/<clock rate>[/<encoding parameters>]
     let encoding_parts: Vec<&str> = parts[1].splitn(3, '/').collect();
     if encoding_parts.len() < 2 {
          return Err(Error::SdpParsingError(format!("Invalid encoding format in rtpmap: {}", parts[1])));
     }
 
+    // Encoding name validation per RFC: should be token format (alpha-numeric + -)
     let encoding_name = encoding_parts[0].to_string();
+    if !is_valid_token(&encoding_name) {
+        return Err(Error::SdpParsingError(format!("Invalid encoding name in rtpmap (should be alpha-numeric): {}", encoding_name)));
+    }
+    
+    // Clock rate validation: must be numeric
     let clock_rate = encoding_parts[1].parse::<u32>()
          .map_err(|_| Error::SdpParsingError(format!("Invalid clock rate in rtpmap: {}", encoding_parts[1])))?;
-    let encoding_params = encoding_parts.get(2).map(|s| s.to_string());
+    
+    // Optional encoding parameters (e.g., channels)
+    let encoding_params = encoding_parts.get(2).map(|s| {
+        let param = s.to_string();
+        // Validate that parameter is numeric (for audio this is channels)
+        if !param.chars().all(|c| c.is_ascii_digit()) {
+            return Err(Error::SdpParsingError(format!("Invalid encoding parameters in rtpmap (should be numeric): {}", param)));
+        }
+        Ok(param)
+    }).transpose()?;
 
     Ok(ParsedAttribute::RtpMap(RtpMapAttribute {
         payload_type,
@@ -139,14 +167,27 @@ pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
 /// Parses fmtp attribute: a=fmtp:<format> <format specific parameters>
 pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
     // Example: 97 profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1
-     let parts: Vec<&str> = value.splitn(2, ' ').collect();
+    let parts: Vec<&str> = value.splitn(2, ' ').collect();
     if parts.len() != 2 {
         return Err(Error::SdpParsingError(format!("Invalid fmtp format: {}", value)));
     }
 
+    // Validate format identifier (typically a payload type number)
+    let format = parts[0].to_string();
+    if !format.chars().all(|c| c.is_ascii_digit()) {
+        return Err(Error::SdpParsingError(format!("Invalid format in fmtp (should be numeric): {}", format)));
+    }
+    
+    // Validate parameters - general structure is key=value;key=value or key;key=value
+    // In practice, we just ensure it's not empty
+    let parameters = parts[1].to_string();
+    if parameters.trim().is_empty() {
+        return Err(Error::SdpParsingError("Empty format parameters in fmtp".to_string()));
+    }
+
     Ok(ParsedAttribute::Fmtp(FmtpAttribute {
-        format: parts[0].to_string(),
-        parameters: parts[1].to_string(),
+        format,
+        parameters,
     }))
 }
 
