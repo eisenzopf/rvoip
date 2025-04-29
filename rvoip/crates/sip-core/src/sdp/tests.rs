@@ -437,7 +437,7 @@ fn test_candidate_parsing() {
     let result = attributes::parse_candidate(candidate);
     assert!(result.is_err());
 
-    // Invalid IP address (actually invalid hostname with illegal characters)
+    // Invalid IP address (actually invalid hostname with illegal character (@))
     assert!(attributes::parse_candidate("1 1 UDP 2130706431 invalid@hostname 49170 typ host").is_err());
     
     // Invalid IP address (octets > 255 are invalid)
@@ -982,7 +982,7 @@ fn test_candidate_attribute_comprehensive() {
     // Invalid priority (not a number)
     assert!(attributes::parse_candidate("1 1 UDP priority 192.168.1.5 49170 typ host").is_err());
     
-    // Invalid IP address (actually invalid hostname with illegal characters)
+    // Invalid IP address (actually invalid hostname with illegal character (@))
     assert!(attributes::parse_candidate("1 1 UDP 2130706431 invalid@hostname 49170 typ host").is_err());
     
     // Invalid IP address (octets > 255 are invalid)
@@ -1011,12 +1011,15 @@ fn test_ssrc_attribute_comprehensive() {
         assert_eq!(s.ssrc_id, 314159);
         assert_eq!(s.attribute, "cname");
         assert_eq!(s.value, Some("user@example.com".to_string()));
+    } else {
+        panic!("Expected SSRC attribute");
     }
     
     // Valid SSRC without value
     let ssrc_mslabel = "314159 mslabel";
-    assert!(attributes::parse_ssrc(ssrc_mslabel).is_ok());
-    if let ParsedAttribute::Ssrc(s) = attributes::parse_ssrc(ssrc_mslabel).unwrap() {
+    let result = attributes::parse_ssrc(ssrc_mslabel);
+    assert!(result.is_ok());
+    if let ParsedAttribute::Ssrc(s) = result.unwrap() {
         assert_eq!(s.ssrc_id, 314159);
         assert_eq!(s.attribute, "mslabel");
         assert_eq!(s.value, None);
