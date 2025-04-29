@@ -700,13 +700,17 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 /// Parses an attribute line (a=key:value or a=key) into a ParsedAttribute enum variant.
 pub fn parse_attribute(line: &str) -> Result<ParsedAttribute> {
     // Format is "a=<attribute>:<value>" or "a=<flag>"
-    let line = line.strip_prefix("a=").ok_or_else(|| {
-        Error::SdpParsingError("Attribute line does not start with a=".to_string())
-    })?;
+    // Get the actual attribute part (strip "a=" prefix if present)
+    let line_to_parse = if line.starts_with("a=") {
+        &line[2..]
+    } else {
+        // If "a=" is not present, assume the line is already the attribute part
+        line
+    };
 
-    let (attribute, value) = match line.split_once(':') {
+    let (attribute, value) = match line_to_parse.split_once(':') {
         Some((name, value)) => (name, Some(value)),
-        None => (line, None),
+        None => (line_to_parse, None),
     };
 
     match attribute {
