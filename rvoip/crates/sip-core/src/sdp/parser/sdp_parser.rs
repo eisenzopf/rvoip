@@ -240,6 +240,12 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             // t= (Timing)
             't' => {
                 let time_desc = parse_time_description_line(value)?;
+                // Clear the default time descriptions for the first t= line
+                if session.time_descriptions.len() == 1 && 
+                   session.time_descriptions[0].start_time == "0" && 
+                   session.time_descriptions[0].stop_time == "0" {
+                    session.time_descriptions.clear();
+                }
                 session.time_descriptions.push(time_desc);
             },
             

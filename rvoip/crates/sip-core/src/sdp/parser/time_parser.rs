@@ -131,18 +131,26 @@ fn parse_time_field(input: &str) -> IResult<&str, u64> {
 fn parse_time_description_nom(input: &str) -> IResult<&str, TimeDescription> {
     // Format: t=<start-time> <stop-time>
     let (input, _) = opt(tag("t="))(input)?;
-    let (input, (start_time, _, stop_time)) = 
+    let (input, (start_str, _, stop_str)) = 
         tuple((
-            parse_time_field,
+            digit1,
             space1,
-            parse_time_field
+            digit1
         ))(input)?;
+    
+    // Validate that the times can be parsed as u64, but keep the original strings
+    if start_str.parse::<u64>().is_err() || stop_str.parse::<u64>().is_err() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input, 
+            nom::error::ErrorKind::Digit
+        )));
+    }
     
     Ok((
         input,
         TimeDescription {
-            start_time: start_time.to_string(),
-            stop_time: stop_time.to_string(),
+            start_time: start_str.to_string(),
+            stop_time: stop_str.to_string(),
             repeat_times: Vec::new(),
         }
     ))
@@ -168,21 +176,23 @@ pub fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
         return Err(Error::SdpParsingError(format!("Invalid t= line format: {}", value)));
     }
     
-    // Parse start time
-    let start_time = match parts[0].parse::<u64>() {
-        Ok(val) => val,
-        Err(_) => return Err(Error::SdpParsingError(format!("Invalid start time (not numeric): {}", parts[0])))
+    // Parse and validate start time (but keep original string)
+    let start_str = parts[0];
+    match start_str.parse::<u64>() {
+        Ok(_) => {}, // Valid u64, but we'll use the original string
+        Err(_) => return Err(Error::SdpParsingError(format!("Invalid start time (not numeric): {}", start_str)))
     };
     
-    // Parse stop time
-    let stop_time = match parts[1].parse::<u64>() {
-        Ok(val) => val,
-        Err(_) => return Err(Error::SdpParsingError(format!("Invalid stop time (not numeric): {}", parts[1])))
+    // Parse and validate stop time (but keep original string)
+    let stop_str = parts[1];
+    match stop_str.parse::<u64>() {
+        Ok(_) => {}, // Valid u64, but we'll use the original string
+        Err(_) => return Err(Error::SdpParsingError(format!("Invalid stop time (not numeric): {}", stop_str)))
     };
     
     Ok(TimeDescription {
-        start_time: start_time.to_string(),
-        stop_time: stop_time.to_string(),
+        start_time: start_str.to_string(),
+        stop_time: stop_str.to_string(),
         repeat_times: Vec::new(),
     })
 }
