@@ -4,16 +4,17 @@
 //! complete SDP messages and coordinates the various specialized parsers.
 
 use crate::error::{Error, Result};
-use crate::types::sdp::{SdpSession, ParsedAttribute, MediaDescription};
+use crate::types::sdp::{ConnectionData, MediaDescription, Origin, ParsedAttribute, RepeatTime, SdpSession, TimeDescription};
+use crate::sdp::parser::attribute_parser;
+use crate::sdp::parser::validation;
+use crate::sdp::attributes::MediaDirection;
 use bytes::Bytes;
-use std::str;
+use std::str::{self, FromStr};
 
 use super::session_parser;
 use super::line_parser::parse_sdp_line;
-use super::attribute_parser::parse_attribute;
 use super::media_parser::parse_media_description_line;
 use super::time_parser::{parse_time_description_line, parse_repeat_time_line};
-use super::validation;
 
 /// Parses the entire SDP content from bytes into an SdpSession struct.
 ///
@@ -280,20 +281,12 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             
             // a= (Attribute)
             'a' => {
-                let attribute = parse_attribute(value)?;
+                // Parse attribute line into key and value
+                let mut parts = value.splitn(2, ':');
+                let key = parts.next().unwrap_or("").trim();
+                let val = parts.next().unwrap_or("").trim();
                 
-                match parse_section {
-                    SdpParseSection::SessionHeader => {
-                        session = session.with_attribute(attribute);
-                    },
-                    SdpParseSection::MediaDescription => {
-                        if let Some(md) = &mut current_media_description {
-                            *md = md.clone().with_attribute(attribute);
-                        } else {
-                            return Err(Error::SdpParsingError("a= line found outside of media section".to_string()));
-                        }
-                    }
-                }
+                handle_attribute(&mut session, current_media_description.as_mut(), key, val)?;
             },
             
             // m= (Media Description)
@@ -337,8 +330,50 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
         return Err(Error::SdpParsingError("Missing t= line".to_string()));
     }
     
-    // Validate the overall SDP structure
+    // Validate the resulting SDP session
     validation::validate_sdp(&session)?;
     
     Ok(session)
+}
+
+/// Handle an attribute line
+fn handle_attribute(session: &mut SdpSession, current_media: Option<&mut MediaDescription>, key: &str, value: &str) -> Result<()> {
+    // Attributes that require values but are missing them should be rejected
+    match key {
+        "rtpmap" | "fmtp" | "candidate" | "ssrc" | "mid" | "msid" | "ice-ufrag" | "ice-pwd" | "fingerprint" | "setup" | "rid" | "extmap" => {
+            if value.is_empty() {
+                return Err(Error::SdpParsingError(format!("Attribute '{}' requires a value but none was provided", key)));
+            }
+        },
+        _ => {},
+    }
+    
+    // Create a formatted attribute line for the parser
+    let attr_line = if value.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}:{}", key, value)
+    };
+    
+    let parsed_attr = attribute_parser::parse_attribute(&attr_line)?;
+    
+    if let Some(media) = current_media {
+        // Media-level attributes
+        if let ParsedAttribute::Direction(direction) = parsed_attr {
+            media.direction = Some(direction);
+        } else if let ParsedAttribute::Ptime(ptime) = parsed_attr {
+            media.ptime = Some(ptime as u32);
+        } else {
+            media.generic_attributes.push(parsed_attr);
+        }
+    } else {
+        // Session-level attributes
+        if let ParsedAttribute::Direction(direction) = parsed_attr {
+            session.direction = Some(direction);
+        } else {
+            session.generic_attributes.push(parsed_attr);
+        }
+    }
+    
+    Ok(())
 } 
