@@ -8,11 +8,13 @@ pub mod session;
 pub mod time_parser;
 pub mod media;
 pub mod attributes;
+pub mod sdp_macros;
 
 #[cfg(test)]
 mod tests;
 
 pub use parser::parse_sdp;
+pub use sdp_macros::*;
 
 // For backward compatibility
 pub mod media_parser {
