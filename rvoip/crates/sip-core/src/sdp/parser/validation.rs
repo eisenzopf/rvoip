@@ -4,39 +4,15 @@
 
 use crate::error::{Error, Result};
 use crate::types::sdp::SdpSession;
+use crate::sdp::session::validation as session_validation;
 
-/// Helper function to check if a string is a valid hostname
-pub fn is_valid_hostname(hostname: &str) -> bool {
-    if hostname.is_empty() || hostname.len() > 255 {
-        return false;
-    }
-
-    let labels: Vec<&str> = hostname.split('.').collect();
-    
-    if labels.is_empty() {
-        return false;
-    }
-    
-    for label in labels {
-        // Each DNS label must be between 1 and 63 characters long
-        if label.is_empty() || label.len() > 63 {
-            return false;
-        }
-        
-        // Labels must start and end with alphanumeric characters
-        if !label.chars().next().unwrap().is_alphanumeric() 
-           || !label.chars().last().unwrap().is_alphanumeric() {
-            return false;
-        }
-        
-        // Labels can contain alphanumeric characters and hyphens
-        if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
-            return false;
-        }
-    }
-    
-    true
-}
+// Re-export validation functions from session module
+pub use crate::sdp::session::validation::{
+    is_valid_hostname,
+    is_valid_username,
+    is_valid_ipv4_or_hostname,
+    is_valid_ipv6_or_hostname,
+};
 
 /// Validate that a network type is valid according to RFC 8866
 ///
@@ -76,77 +52,65 @@ pub fn validate_address_type(addr_type: &str) -> Result<()> {
 
 /// Helper function to check if a string is a valid IPv4 address
 pub fn is_valid_ipv4(addr: &str) -> bool {
-    let segments: Vec<&str> = addr.split('.').collect();
-    
-    if segments.len() != 4 {
-        return false;
-    }
-    
-    for segment in segments {
-        match segment.parse::<u8>() {
-            Ok(_) => {}, // Valid octet
-            Err(_) => return false,
-        }
-    }
-    
-    true
+    addr.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 /// Helper function to check if a string is a valid IPv6 address
 pub fn is_valid_ipv6(addr: &str) -> bool {
-    // Basic validation for IPv6
+    // Handle RFC format with brackets
     let addr = if addr.starts_with('[') && addr.ends_with(']') {
         &addr[1..addr.len()-1]
     } else {
         addr
     };
     
-    // Check if there are too many double colons (can only have one)
-    if addr.matches("::").count() > 1 {
-        return false;
-    }
-    
-    // Count segments - should be 8 or fewer with ::
-    let segments: Vec<&str> = addr.split(':').collect();
-    if segments.len() > 8 {
-        return false;
-    }
-    
-    // Check each segment is valid hex
-    for segment in segments {
-        if segment.is_empty() {
-            continue; // This is part of a :: sequence
-        }
-        
-        if segment.len() > 4 {
-            return false;
-        }
-        
-        if !segment.chars().all(|c| c.is_digit(16)) {
-            return false;
-        }
-    }
-    
-    true
+    addr.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
 /// Helper function to validate an address based on its type
 pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
-    if addr_type == "IP4" {
-        if addr.split('.').count() == 4 {
-            return is_valid_ipv4(addr);
-        } else {
-            return is_valid_hostname(addr);
-        }
-    } else if addr_type == "IP6" {
-        if addr.contains(':') {
-            return is_valid_ipv6(addr);
-        } else {
-            return is_valid_hostname(addr);
-        }
+    match addr_type {
+        "IP4" => {
+            // Check if it's a multicast address with TTL/count specification
+            if addr.contains('/') {
+                let parts: Vec<&str> = addr.split('/').collect();
+                if parts.len() <= 2 {
+                    // Just validate the IP portion
+                    return is_valid_ipv4(parts[0]) || is_valid_hostname(parts[0]);
+                }
+                return false;
+            }
+            
+            // Normal address
+            is_valid_ipv4(addr) || session_validation::is_valid_hostname(addr)
+        },
+        "IP6" => {
+            // Check if it's a multicast address with count specification
+            if addr.contains('/') {
+                let parts: Vec<&str> = addr.split('/').collect();
+                if parts.len() <= 2 {
+                    // Just validate the IP portion
+                    let ip_part = if parts[0].starts_with('[') && parts[0].ends_with(']') {
+                        &parts[0][1..parts[0].len()-1]
+                    } else {
+                        parts[0]
+                    };
+                    return is_valid_ipv6(ip_part) || is_valid_hostname(ip_part);
+                }
+                return false;
+            }
+            
+            // Handle bracketed IPv6
+            let addr = if addr.starts_with('[') && addr.ends_with(']') {
+                &addr[1..addr.len()-1]
+            } else {
+                addr
+            };
+            
+            is_valid_ipv6(addr) || session_validation::is_valid_hostname(addr)
+        },
+        _ => false,
     }
-    
-    false
 }
 
 /// Validates a complete SDP session for compliance with RFC 8866
@@ -178,7 +142,28 @@ pub fn validate_sdp(session: &SdpSession) -> Result<()> {
         return Err(Error::SdpValidationError("Empty session name".to_string()));
     }
     
-    // Additional validation would go here
+    // Validate connection data if present
+    if let Some(conn) = &session.connection_info {
+        validate_network_type(&conn.net_type)?;
+        validate_address_type(&conn.addr_type)?;
+        
+        if !is_valid_address(&conn.connection_address, &conn.addr_type) {
+            return Err(Error::SdpValidationError(format!("Invalid connection address: {}", conn.connection_address)));
+        }
+    }
+    
+    // Validate media descriptions
+    for media in &session.media_descriptions {
+        // Validate media connection info if present
+        if let Some(conn) = &media.connection_info {
+            validate_network_type(&conn.net_type)?;
+            validate_address_type(&conn.addr_type)?;
+            
+            if !is_valid_address(&conn.connection_address, &conn.addr_type) {
+                return Err(Error::SdpValidationError(format!("Invalid media connection address: {}", conn.connection_address)));
+            }
+        }
+    }
     
     Ok(())
 } 
