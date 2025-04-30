@@ -9,6 +9,8 @@ The SDP module consists of:
 - **Parser**: A robust parser that converts SDP text to structured data
 - **Types**: Data structures representing SDP sessions, media descriptions, and attributes
 - **Attributes**: Parsers for various standard and extended SDP attributes
+- **Builder**: Fluent builder API for creating SDP sessions programmatically
+- **Macros**: Declarative macro-based syntax for creating SDP sessions
 - **Generator**: Methods to convert SDP structures back to standard format
 
 ## Compliance
@@ -130,16 +132,68 @@ for media in &session.media_descriptions {
     println!("Media type: {}, port: {}", media.media, media.port);
     
     // Get specific attributes
-    if let Some(rtpmap) = media.get_rtpmap(0) {
+    if let Some(rtpmap) = media.get_rtpmap("0") {
         println!("Codec: {}/{}", rtpmap.encoding_name, rtpmap.clock_rate);
     }
 }
 ```
 
-### Creating and Modifying SDP
+### Creating SDP with the Builder Pattern (Recommended)
+
+The SdpBuilder provides a fluent interface for creating SDP sessions programmatically:
+
+```rust
+use rvoip_sip_core::sdp_prelude::*;
+
+// Create an SDP session with the builder
+let sdp = SdpBuilder::new("My Session")
+    .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
+    .connection("IN", "IP4", "192.168.1.100")
+    .time("0", "0")  // Time 0-0 means permanent session
+    .media_audio(49170, "RTP/AVP")
+        .formats(&["0", "8"])
+        .direction(MediaDirection::SendRecv)
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .done()
+    .build()
+    .expect("Valid SDP");
+```
+
+### Creating SDP with the Declarative Macro
+
+The `sdp!` macro offers a concise, declarative way to create SDP sessions:
+
+```rust
+use rvoip_sip_core::sdp;
+use rvoip_sip_core::sdp_prelude::*;
+
+// Create an SDP session with the sdp! macro
+let sdp_result = sdp! {
+    origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
+    session_name: "Audio Call",
+    connection: ("IN", "IP4", "192.168.1.100"),
+    time: ("0", "0"),
+    media: {
+        type: "audio",
+        port: 49170,
+        protocol: "RTP/AVP",
+        formats: ["0", "8"],
+        rtpmap: ("0", "PCMU/8000"),
+        rtpmap: ("8", "PCMA/8000"),
+        direction: "sendrecv"
+    }
+};
+
+let sdp = sdp_result.expect("Valid SDP");
+```
+
+### Creating SDP Manually (Low-level API)
 
 ```rust
 use rvoip_sip_core::types::sdp::{SdpSession, Origin, MediaDescription, ConnectionData};
+use rvoip_sip_core::types::sdp::{ParsedAttribute, RtpMapAttribute};
+use rvoip_sip_core::sdp::attributes::MediaDirection;
 
 // Create a basic session
 let origin = Origin {
@@ -163,15 +217,44 @@ let conn = ConnectionData {
 };
 session = session.with_connection_data(conn);
 
+// Add a time description
+session.time_descriptions.push(TimeDescription {
+    start_time: "0".to_string(),
+    stop_time: "0".to_string(),
+    repeat_times: vec![],
+});
+
 // Add a media description
-let audio_media = MediaDescription::new(
-    "audio", 
+let mut audio_media = MediaDescription::new(
+    "audio".to_string(), 
     49170, 
-    "RTP/AVP", 
+    "RTP/AVP".to_string(), 
     vec!["0".to_string(), "8".to_string()]
 );
+
+// Add media attributes
+audio_media.generic_attributes.push(ParsedAttribute::RtpMap(RtpMapAttribute {
+    payload_type: 0,
+    encoding_name: "PCMU".to_string(),
+    clock_rate: 8000,
+    encoding_params: None,
+}));
+
+// Set media direction
+audio_media.direction = Some(MediaDirection::SendRecv);
+
 session.add_media(audio_media);
 ```
+
+## Choosing the Right Approach
+
+For creating SDP messages, we provide three approaches:
+
+1. **Builder Pattern** (Recommended): Provides a fluent, type-safe API for creating complex SDP sessions programmatically. Best for dynamic SDP generation where values are determined at runtime.
+
+2. **Declarative Macro**: Offers a concise, declarative syntax for defining SDP sessions with minimal boilerplate. Best for static SDP configurations known at compile time.
+
+3. **Manual Construction**: Gives complete control over the SDP structure. Most verbose but allows full customization for advanced use cases.
 
 ## Compliance Testing
 

@@ -16,6 +16,9 @@ Core SIP protocol implementation for the rvoip VoIP stack.
 - Multipart MIME body handling
 - IPv6 support
 - Strict and lenient parsing modes to handle both compliant and real-world SIP messages
+- Fluent builder patterns for creating SIP messages
+- Declarative macros for concise SIP/SDP creation
+- Session validation with RFC-compliant IP address checking
 - Extensive test suite with RFC torture tests
 
 ## Installation
@@ -29,10 +32,11 @@ rvoip-sip-core = "0.1.0"
 
 ## Quick Start
 
+### Parsing SIP Messages
+
 ```rust
 use rvoip_sip_core::prelude::*;
 use bytes::Bytes;
-use std::str::FromStr;
 
 // Parse a SIP message
 let data = Bytes::from(
@@ -58,28 +62,95 @@ if let Message::Request(request) = message {
     let from = request.typed_header::<From>().expect("From header");
     println!("From: {}", from.address());
 }
+```
 
-// Create a SIP request
-let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
-    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
-    .with_header(To::new(Address::new_with_display_name("Bob", Uri::from_str("sip:bob@example.com").unwrap())))
-    .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-    .with_header(CSeq::new(314159, Method::Invite))
-    .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-    .with_header(MaxForwards::new(70))
-    .with_header(Contact::new(Address::new(Uri::from_str("sip:alice@pc33.atlanta.com").unwrap())))
-    .with_header(ContentLength::new(0))
-    .build();
+### Creating SIP Messages
 
-// Create a SIP response
-let response = ResponseBuilder::new(StatusCode::Ok)
-    .with_header(From::new(Address::new_with_display_name("Alice", Uri::from_str("sip:alice@atlanta.com").unwrap())))
-    .with_header(To::new(Address::new_with_display_name("Bob", Uri::from_str("sip:bob@example.com").unwrap())))
-    .with_header(CallId::new("a84b4c76e66710@pc33.atlanta.com"))
-    .with_header(CSeq::new(314159, Method::Invite))
-    .with_header(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap())
-    .with_header(ContentLength::new(0))
+#### Using the Builder Pattern (recommended for complex messages)
+
+```rust
+use rvoip_sip_core::prelude::*;
+
+// Create a SIP request with the RequestBuilder
+let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
+let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
+let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
+
+let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
+    .unwrap()
+    .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri.clone()))))
+    .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
+    .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+    .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+    .header(TypedHeader::Via(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()))
+    .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+    .header(TypedHeader::Contact(Contact::new(Address::new(contact_uri))))
+    .header(TypedHeader::ContentLength(ContentLength::new(0)))
     .build();
+```
+
+#### Using the SIP Macros (recommended for simple messages)
+
+```rust
+use rvoip_sip_core::prelude::*;
+
+// Create a SIP request with the sip! macro
+let request = sip! {
+    method: Method::Invite,
+    uri: "sip:bob@example.com",
+    headers: {
+        Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
+        MaxForwards: 70,
+        To: "Bob <sip:bob@example.com>",
+        From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
+        CallId: "a84b4c76e66710@pc33.atlanta.com",
+        CSeq: "314159 INVITE",
+        Contact: "<sip:alice@pc33.atlanta.com>",
+        ContentLength: 0
+    }
+};
+```
+
+### Creating SDP Messages
+
+#### Using the SdpBuilder Pattern
+
+```rust
+use rvoip_sip_core::sdp_prelude::*;
+
+// Create an SDP session with the SdpBuilder
+let sdp = SdpBuilder::new("My Session")
+    .origin("-", "1234567890", "2", "IN", "IP4", "127.0.0.1")
+    .time("0", "0")  // Time 0-0 means permanent session
+    .media_audio(49170, "RTP/AVP")
+        .formats(&["0", "8"])
+        .direction(MediaDirection::SendRecv)
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .done()
+    .build();
+```
+
+#### Using the sdp! Macro (recommended for simple messages)
+
+```rust
+use rvoip_sip_core::sdp_prelude::*;
+
+// Create an SDP session with the sdp! macro
+let sdp = sdp! {
+    origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
+    session_name: "Audio Call",
+    time: ("0", "0"),
+    media: {
+        type: "audio",
+        port: 49170,
+        protocol: "RTP/AVP",
+        formats: ["0", "8"],
+        rtpmap: ("0", "PCMU/8000"),
+        rtpmap: ("8", "PCMA/8000"),
+        direction: "sendrecv"
+    }
+};
 ```
 
 ## Core Components
@@ -117,6 +188,7 @@ For handling multimedia session information:
 - `SdpSession`: Full SDP session representation
 - `MediaDescription`: Media type, port, and attributes
 - `Connection`: Network connection information
+- Complete support for WebRTC attributes and data channels
 
 ## Advanced Usage
 
@@ -156,10 +228,11 @@ multipart.add_part(MimePart::new(
     Bytes::from("<xml>Some XML content</xml>")
 ));
 
-// Add to a request
-let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
+// Add to a request using the builder
+let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+    .unwrap()
     // Add headers...
-    .with_body(multipart.to_bytes())
+    .body(multipart.to_bytes())
     .build();
 ```
 
@@ -167,7 +240,6 @@ let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example
 
 ```rust
 use rvoip_sip_core::prelude::*;
-use std::str::FromStr;
 
 // Create an Authorization header
 let auth = Authorization::new_digest(
@@ -180,10 +252,45 @@ let auth = Authorization::new_digest(
     "cnonce-value"
 );
 
-let request = RequestBuilder::new(Method::Invite, Uri::from_str("sip:bob@example.com").unwrap())
-    .with_header(auth)
+// Add to a request using the builder
+let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+    .unwrap()
+    .header(TypedHeader::Authorization(auth))
     // Add other headers...
     .build();
+```
+
+## Validation
+
+The library includes comprehensive validation for SIP messages and SDP content:
+
+```rust
+use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::sdp_prelude::*;
+
+// Validate an IP address
+let is_valid = is_valid_ipv4("192.168.1.1"); // true
+let is_valid = is_valid_ipv4("256.0.0.1");   // false (invalid IPv4)
+
+// Validate an SDP session
+let validation_result = sdp_session.validate();
+if let Err(errors) = validation_result {
+    for error in errors {
+        println!("Validation error: {}", error);
+    }
+}
+```
+
+## Prelude Modules
+
+The library provides convenient prelude modules to import common types:
+
+```rust
+// For SIP functionality
+use rvoip_sip_core::prelude::*;
+
+// For SDP functionality
+use rvoip_sip_core::sdp_prelude::*;
 ```
 
 ## Feature Flags
