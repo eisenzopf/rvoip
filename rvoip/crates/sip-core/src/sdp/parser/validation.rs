@@ -1,6 +1,15 @@
 //! SDP validation functionality 
 //!
-//! This module provides validation functions for SDP messages.
+//! This module provides validation functions for SDP messages according to RFC 8866.
+//! 
+//! It includes validators for:
+//! - Network types (e.g., "IN" for Internet)
+//! - Address types (e.g., "IP4", "IP6")
+//! - IPv4 and IPv6 addresses and hostnames
+//! - Complete SDP session validation
+//!
+//! The validation functions follow the requirements specified in RFC 8866:
+//! [Session Description Protocol](https://datatracker.ietf.org/doc/html/rfc8866).
 
 use crate::error::{Error, Result};
 use crate::types::sdp::SdpSession;
@@ -16,6 +25,9 @@ pub use crate::sdp::session::validation::{
 
 /// Validate that a network type is valid according to RFC 8866
 ///
+/// RFC 8866 only defines "IN" (Internet) as a valid network type. Other network
+/// types are not currently supported in the SDP specification.
+///
 /// # Parameters
 ///
 /// - `net_type`: The network type string to validate
@@ -23,7 +35,20 @@ pub use crate::sdp::session::validation::{
 /// # Returns
 ///
 /// - `Ok(())` if valid
-/// - `Err` with an error message if invalid
+/// - `Err` with an `SdpParsingError` if invalid
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::parser::validation::validate_network_type;
+/// 
+/// // Valid network type
+/// assert!(validate_network_type("IN").is_ok());
+/// 
+/// // Invalid network types
+/// assert!(validate_network_type("NET").is_err());
+/// assert!(validate_network_type("in").is_err()); // Case-sensitive
+/// ```
 pub fn validate_network_type(net_type: &str) -> Result<()> {
     // RFC 8866 only defines "IN" for Internet
     if net_type != "IN" {
@@ -34,6 +59,9 @@ pub fn validate_network_type(net_type: &str) -> Result<()> {
 
 /// Validate that an address type is valid according to RFC 8866
 ///
+/// RFC 8866 defines "IP4" and "IP6" as valid address types for IPv4 and IPv6 addresses
+/// respectively.
+///
 /// # Parameters
 ///
 /// - `addr_type`: The address type string to validate
@@ -41,7 +69,21 @@ pub fn validate_network_type(net_type: &str) -> Result<()> {
 /// # Returns
 ///
 /// - `Ok(())` if valid
-/// - `Err` with an error message if invalid
+/// - `Err` with an `SdpParsingError` if invalid
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::parser::validation::validate_address_type;
+/// 
+/// // Valid address types
+/// assert!(validate_address_type("IP4").is_ok());
+/// assert!(validate_address_type("IP6").is_ok());
+/// 
+/// // Invalid address types
+/// assert!(validate_address_type("ip4").is_err()); // Case-sensitive
+/// assert!(validate_address_type("IPV4").is_err());
+/// ```
 pub fn validate_address_type(addr_type: &str) -> Result<()> {
     // RFC 8866 defines "IP4" and "IP6"
     match addr_type {
@@ -51,11 +93,71 @@ pub fn validate_address_type(addr_type: &str) -> Result<()> {
 }
 
 /// Helper function to check if a string is a valid IPv4 address
+///
+/// Uses Rust's standard library to validate that the address is a correctly formatted
+/// IPv4 address with values in the proper ranges.
+///
+/// # Parameters
+///
+/// - `addr`: The string to check
+///
+/// # Returns
+///
+/// - `true` if the string is a valid IPv4 address
+/// - `false` otherwise
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::parser::validation::is_valid_ipv4;
+/// 
+/// // Valid IPv4 addresses
+/// assert!(is_valid_ipv4("192.168.1.1"));
+/// assert!(is_valid_ipv4("0.0.0.0"));
+/// assert!(is_valid_ipv4("255.255.255.255"));
+/// 
+/// // Invalid IPv4 addresses
+/// assert!(!is_valid_ipv4("256.0.0.1")); // Invalid range
+/// assert!(!is_valid_ipv4("192.168.1")); // Incomplete
+/// assert!(!is_valid_ipv4("192.168.1.1.5")); // Too many segments
+/// ```
 pub fn is_valid_ipv4(addr: &str) -> bool {
+    // Use standard library's Ipv4Addr parsing which properly validates range limits
     addr.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 /// Helper function to check if a string is a valid IPv6 address
+///
+/// Validates both standard and RFC-compliant IPv6 addresses (with brackets).
+/// Returns false for empty strings or malformed IPv6 addresses.
+///
+/// # Parameters
+///
+/// - `addr`: The string to check
+///
+/// # Returns
+///
+/// - `true` if the string is a valid IPv6 address
+/// - `false` otherwise
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::parser::validation::is_valid_ipv6;
+/// 
+/// // Valid IPv6 addresses
+/// assert!(is_valid_ipv6("2001:db8::1"));
+/// assert!(is_valid_ipv6("::1")); // Localhost
+/// assert!(is_valid_ipv6("::")); // Unspecified
+/// 
+/// // Valid with brackets (RFC format)
+/// assert!(is_valid_ipv6("[2001:db8::1]"));
+/// 
+/// // Invalid IPv6 addresses
+/// assert!(!is_valid_ipv6("2001:db8")); // Incomplete
+/// assert!(!is_valid_ipv6("2001:zz::1")); // Invalid characters
+/// assert!(!is_valid_ipv6("[2001:db8::1")); // Unclosed bracket
+/// ```
 pub fn is_valid_ipv6(addr: &str) -> bool {
     // Handle RFC format with brackets
     let addr = if addr.starts_with('[') && addr.ends_with(']') {
@@ -68,6 +170,46 @@ pub fn is_valid_ipv6(addr: &str) -> bool {
 }
 
 /// Helper function to validate an address based on its type
+///
+/// Validates that an address string is appropriate for the specified address type
+/// according to RFC 8866. For IP4, validates IPv4 addresses and hostnames. For IP6,
+/// validates IPv6 addresses and hostnames.
+///
+/// Handles multicast addresses with TTL or count specifications (e.g., "224.0.0.1/127").
+/// Also properly validates addresses with special formats for each type.
+///
+/// # Parameters
+///
+/// - `addr`: The address string to validate
+/// - `addr_type`: The address type ("IP4" or "IP6")
+///
+/// # Returns
+///
+/// - `true` if the address is valid for the given address type
+/// - `false` otherwise
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::parser::validation::{is_valid_address, is_valid_hostname};
+/// 
+/// // Valid IP4 addresses
+/// assert!(is_valid_address("192.168.1.1", "IP4"));
+/// assert!(is_valid_address("224.0.0.1/127", "IP4")); // Multicast with TTL
+/// assert!(is_valid_address("example.com", "IP4")); // Hostname
+/// 
+/// // Invalid IP4 addresses
+/// assert!(!is_valid_address("256.0.0.1", "IP4")); // Invalid range
+/// assert!(!is_valid_address("192.168.1", "IP4")); // Incomplete
+/// 
+/// // Valid IP6 addresses
+/// assert!(is_valid_address("2001:db8::1", "IP6"));
+/// assert!(is_valid_address("[2001:db8::1]", "IP6")); // With brackets
+/// assert!(is_valid_address("example.com", "IP6")); // Hostname
+/// 
+/// // Invalid IP6 addresses
+/// assert!(!is_valid_address("192.168.1.1", "IP6")); // IPv4 address with IP6 type
+/// ```
 pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
     match addr_type {
         "IP4" => {
@@ -77,45 +219,39 @@ pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
                 if parts.len() <= 2 {
                     // Just validate the IP portion
                     let ip_part = parts[0];
-                    
-                    // Reject incomplete IPv4 addresses that have fewer than 4 segments
-                    if !is_valid_ipv4(ip_part) {
-                        // If it looks like an IPv4 address (only contains digits and dots)
-                        // but has fewer than 4 segments, reject it
-                        if ip_part.chars().all(|c| c.is_ascii_digit() || c == '.') &&
-                           ip_part.contains('.') &&
-                           ip_part.split('.').count() < 4 {
-                            return false;
-                        }
-                    }
-                    
                     return is_valid_ipv4(ip_part) || is_valid_hostname(ip_part);
                 }
                 return false;
             }
             
-            // Normal address
-            // Reject incomplete IPv4 addresses that have fewer than 4 segments
-            if !is_valid_ipv4(addr) {
-                // If it looks like an IPv4 address (only contains digits and dots)
-                // but has fewer than 4 segments, reject it
-                if addr.chars().all(|c| c.is_ascii_digit() || c == '.') &&
-                   addr.contains('.') &&
-                   addr.split('.').count() < 4 {
+            // Check for incomplete IPv4-like addresses (contains dots and only digits)
+            // These should not be treated as hostnames
+            if addr.contains('.') {
+                let segments = addr.split('.').count();
+                let has_only_dots_and_digits = addr.chars().all(|c| c.is_ascii_digit() || c == '.');
+                
+                // If it looks like an IPv4 address but doesn't have 4 segments, reject it
+                if has_only_dots_and_digits && segments != 4 {
                     return false;
                 }
             }
             
-            // Only return true if it's a valid IPv4 or a hostname
+            // Special check for invalid IP address values like "256.0.0.1"
+            if addr.split('.').count() == 4 {
+                let parts: Vec<&str> = addr.split('.').collect();
+                for part in parts {
+                    if let Ok(num) = part.parse::<u32>() {
+                        if num > 255 {
+                            return false;
+                        }
+                    }
+                }
+            }
+            
+            // For regular addresses, use either IPv4 validation or hostname validation
             is_valid_ipv4(addr) || is_valid_hostname(addr)
         },
         "IP6" => {
-            // First, check if this looks like an IPv4 address (has dots)
-            if addr.contains('.') && !addr.contains(':') {
-                // Reject IPv4 addresses when the address type is IP6
-                return false;
-            }
-            
             // Check if it's a multicast address with count specification
             if addr.contains('/') {
                 let parts: Vec<&str> = addr.split('/').collect();
@@ -132,19 +268,40 @@ pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
             }
             
             // Handle bracketed IPv6
-            let addr = if addr.starts_with('[') && addr.ends_with(']') {
+            let addr_to_check = if addr.starts_with('[') && addr.ends_with(']') {
                 &addr[1..addr.len()-1]
             } else {
                 addr
             };
             
-            is_valid_ipv6(addr) || is_valid_hostname(addr)
+            // Only reject dot-notation addresses that look like IPv4 but not hostnames
+            if addr.contains('.') && !addr.contains(':') {
+                // Check if it looks like an IPv4 address
+                let has_only_dots_and_digits = addr.chars().all(|c| c.is_ascii_digit() || c == '.');
+                // If it has dots and digits only but not IPv6 colons, it's probably an IPv4 address
+                if has_only_dots_and_digits {
+                    return false; // Reject IPv4-like addresses for IP6 type
+                }
+            }
+            
+            is_valid_ipv6(addr_to_check) || is_valid_hostname(addr_to_check)
         },
         _ => false,
     }
 }
 
 /// Validates a complete SDP session for compliance with RFC 8866
+///
+/// Performs thorough validation of an SDP session including:
+/// - Version number (must be "0")
+/// - Origin field validity
+/// - Connection information
+/// - Session name presence
+/// - Time descriptions (at least one required)
+/// - Media descriptions format validation
+///
+/// This function implements the requirements from RFC 8866 to ensure the SDP
+/// session is well-formed and valid.
 ///
 /// # Parameters
 ///
@@ -153,7 +310,58 @@ pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
 /// # Returns
 ///
 /// - `Ok(())` if validation succeeds
-/// - `Err` with validation errors if it fails
+/// - `Err` with an `SdpValidationError` detailing the specific validation failure
+///
+/// # Example
+///
+/// ```
+/// use rvoip_sip_core::sdp::validate_sdp;
+/// use rvoip_sip_core::types::sdp::{Origin, ConnectionData, MediaDescription, TimeDescription, SdpSession};
+/// 
+/// // Create a minimal valid SDP session
+/// let origin = Origin {
+///     username: "user".to_string(),
+///     sess_id: "123".to_string(),
+///     sess_version: "456".to_string(),
+///     net_type: "IN".to_string(),
+///     addr_type: "IP4".to_string(),
+///     unicast_address: "192.168.1.1".to_string(),
+/// };
+/// 
+/// let connection = ConnectionData {
+///     net_type: "IN".to_string(),
+///     addr_type: "IP4".to_string(),
+///     connection_address: "224.0.0.1".to_string(),
+///     ttl: Some(127),
+///     multicast_count: None,
+/// };
+/// 
+/// let time = TimeDescription {
+///     start_time: "0".to_string(),
+///     stop_time: "0".to_string(),
+///     repeat_times: Vec::new(),
+/// };
+/// 
+/// let media = MediaDescription {
+///     media: "audio".to_string(),
+///     port: 49170,
+///     protocol: "RTP/AVP".to_string(),
+///     formats: vec!["0".to_string()],
+///     connection_info: None,
+///     ptime: None,
+///     direction: None,
+///     generic_attributes: Vec::new(),
+/// };
+/// 
+/// let mut session = SdpSession::new(origin, "Test Session".to_string());
+/// session.version = "0".to_string();
+/// session.connection_info = Some(connection);
+/// session.time_descriptions = vec![time];
+/// session.media_descriptions = vec![media];
+/// 
+/// // Should validate successfully
+/// assert!(validate_sdp(&session).is_ok());
+/// ```
 pub fn validate_sdp(session: &SdpSession) -> Result<()> {
     // Check version
     if session.version != "0" {
