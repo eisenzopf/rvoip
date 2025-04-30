@@ -42,12 +42,24 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
     let lines: Vec<&str> = sdp_str.lines().collect();
     
     // Define the state for tracking the current parsing section
+    #[derive(PartialEq)]
     enum SdpParseSection {
         SessionHeader,
         MediaDescription,
     }
     
+    // Define the state for tracking field order according to RFC 8866
+    #[derive(PartialEq, PartialOrd)]
+    enum FieldOrder {
+        Version,     // v= (must be first)
+        Origin,      // o= (must be second)
+        SessionName, // s= (must be third)
+        SessionLevel, // All other session-level fields (more lenient ordering)
+        Media,       // m= (starts media section, must be after session fields)
+    }
+    
     let mut parse_section = SdpParseSection::SessionHeader;
+    let mut field_position = FieldOrder::Version; // Must start with version
     
     // Initialize a session with default values
     let mut session = session_parser::init_session_description();
@@ -72,6 +84,54 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             Ok((_, result)) => result,
             Err(_) => return Err(Error::SdpParsingError(format!("Failed to parse SDP line: {}", line))),
         };
+        
+        // Check field order according to RFC 8866, but be lenient where possible
+        match key {
+            'v' => {
+                // Version must be the first field
+                if field_position != FieldOrder::Version {
+                    return Err(Error::SdpParsingError("v= must be the first line in SDP".to_string()));
+                }
+                field_position = FieldOrder::Origin;
+            },
+            'o' => {
+                // Origin must come after version but before any m= line
+                if field_position < FieldOrder::Origin {
+                    return Err(Error::SdpParsingError("o= must come after v=".to_string()));
+                }
+                if field_position > FieldOrder::SessionLevel {
+                    return Err(Error::SdpParsingError("o= must come before m=".to_string()));
+                }
+                field_position = FieldOrder::SessionName;
+            },
+            's' => {
+                // Session name must come after origin but before any m= line
+                if field_position < FieldOrder::SessionName {
+                    return Err(Error::SdpParsingError("s= must come after o=".to_string()));
+                }
+                if field_position > FieldOrder::SessionLevel {
+                    return Err(Error::SdpParsingError("s= must come before m=".to_string()));
+                }
+                field_position = FieldOrder::SessionLevel;
+            },
+            'm' => {
+                if field_position < FieldOrder::SessionLevel {
+                    return Err(Error::SdpParsingError("m= must come after v=, o=, and s=".to_string()));
+                }
+                field_position = FieldOrder::Media;
+            },
+            _ => {
+                // For all other fields, just ensure they come after v=, o=, s= and in the right section
+                if field_position < FieldOrder::SessionName {
+                    return Err(Error::SdpParsingError(format!("{}= must come after v=, o=, and s=", key)));
+                }
+                
+                // Once we're in the session level fields or media section, be lenient with ordering
+                if parse_section == SdpParseSection::SessionHeader {
+                    field_position = FieldOrder::SessionLevel;
+                }
+            }
+        }
         
         // Process the line based on its type
         match key {
