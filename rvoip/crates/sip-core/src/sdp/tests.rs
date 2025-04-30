@@ -8,7 +8,7 @@
 
 use crate::error::Error;
 use crate::sdp::parser::parse_sdp;
-use crate::types::sdp::{SdpSession, MediaDescription, ConnectionData, Origin, ParsedAttribute};
+use crate::types::sdp::{SdpSession, MediaDescription, ConnectionData, Origin, ParsedAttribute, TimeDescription};
 use crate::sdp::attributes::MediaDirection;
 use bytes::Bytes;
 
@@ -692,6 +692,13 @@ mod tests {
         
         let mut session = SdpSession::new(origin, "Programmatic Test");
         session = session.with_connection_data(conn);
+        
+        // Add a time description (required after recent changes)
+        session.time_descriptions.push(TimeDescription {
+            start_time: "0".to_string(),
+            stop_time: "0".to_string(),
+            repeat_times: Vec::new(),
+        });
         
         // Add a media description
         let mut audio_media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);

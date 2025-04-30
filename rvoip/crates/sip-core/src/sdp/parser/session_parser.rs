@@ -127,7 +127,7 @@ pub fn parse_connection_line(value: &str) -> Result<ConnectionData> {
     Ok(ConnectionData {
         net_type,
         addr_type,
-        connection_address,
+        connection_address: base_addr.to_string(),
         ttl,
         multicast_count,
     })
