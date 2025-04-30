@@ -15,8 +15,136 @@
 //! - **URI Handling**: Comprehensive SIP URI parsing and manipulation
 //! - **SDP Support**: Session Description Protocol integration
 //! - **Parsing**: Robust, efficient, and RFC-compliant message parsing
+//! - **Builder Patterns**: Fluent APIs for constructing SIP and SDP messages
+//! - **Macros**: Convenient macros for creating SIP requests and responses
 //!
 //! ## Getting Started
+//!
+//! ### Creating SIP Messages
+//!
+//! The recommended way to create SIP messages is to use either the builder pattern or macros:
+//!
+//! #### Using the Builder Pattern (recommended for complex messages)
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//!
+//! // Create a SIP request with the RequestBuilder
+//! let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
+//! let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
+//! let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
+//! 
+//! let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
+//!     .unwrap()
+//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri.clone()))))
+//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
+//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
+//!     .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+//!     .header(TypedHeader::Contact(Contact::new_params(vec![ContactParamInfo { 
+//!         address: Address::new(contact_uri)
+//!     }])))
+//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
+//!     .build();
+//!
+//! // Create a SIP response with the ResponseBuilder
+//! let response = ResponseBuilder::new(StatusCode::Ok)
+//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri))))
+//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri))))
+//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
+//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
+//!     .build();
+//! ```
+//!
+//! #### Using Macros (recommended for simple messages)
+//!
+//! ```no_run
+//! use rvoip_sip_core::prelude::*;
+//!
+//! // Create a SIP request with the sip_request! macro
+//! let request = sip_request! {
+//!     method: Method::Invite,
+//!     uri: "sip:bob@example.com",
+//!     headers: {
+//!         From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
+//!         To: "Bob <sip:bob@example.com>",
+//!         CallId: "a84b4c76e66710@pc33.atlanta.com",
+//!         CSeq: "314159 INVITE",
+//!         Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
+//!         MaxForwards: "70",
+//!         Contact: "<sip:alice@pc33.atlanta.com>",
+//!         ContentLength: "0"
+//!     }
+//! };
+//!
+//! // Create a SIP response with the sip_response! macro
+//! let response = sip_response! {
+//!     status: StatusCode::Ok,
+//!     headers: {
+//!         From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
+//!         To: "Bob <sip:bob@example.com>",
+//!         CallId: "a84b4c76e66710@pc33.atlanta.com",
+//!         CSeq: "314159 INVITE",
+//!         Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
+//!         ContentLength: "0"
+//!     }
+//! };
+//! ```
+//!
+//! ### Creating SDP Messages
+//!
+//! For SDP messages, you can use either the SdpBuilder (for programmatic creation) or the sdp! macro (for declarative creation):
+//!
+//! #### Using the SdpBuilder Pattern
+//!
+//! ```rust
+//! use rvoip_sip_core::sdp_prelude::*;
+//!
+//! // Create an SDP session with the SdpBuilder
+//! let sdp = SdpBuilder::new("My Session")
+//!     .origin("-", "1234567890", "2", "IN", "IP4", "127.0.0.1")
+//!     .time("0", "0")  // Time 0-0 means permanent session
+//!     .media_audio(49170, "RTP/AVP")
+//!         .formats(&["0", "8"])
+//!         .direction(MediaDirection::SendRecv)
+//!         .rtpmap("0", "PCMU/8000")
+//!         .rtpmap("8", "PCMA/8000")
+//!         .done()
+//!     .build();
+//! ```
+//!
+//! #### Using the sdp! Macro (recommended for simple messages)
+//!
+//! ```rust
+//! use rvoip_sip_core::sdp;
+//! use rvoip_sip_core::sdp_prelude::*;
+//!
+//! // Create an SDP session with the sdp! macro
+//! let sdp_result = sdp! {
+//!     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
+//!     session_name: "Audio Call",
+//!     connection: ("IN", "IP4", "192.168.1.100"),
+//!     time: ("0", "0"),
+//!     media: {
+//!         type: "audio",
+//!         port: 49170,
+//!         protocol: "RTP/AVP",
+//!         formats: ["0", "8"],
+//!         rtpmap: ("0", "PCMU/8000"),
+//!         rtpmap: ("8", "PCMA/8000"),
+//!         direction: "sendrecv"
+//!     }
+//! };
+//!
+//! let sdp = sdp_result.expect("Valid SDP");
+//! ```
+//!
+//! ### Parsing SIP Messages
+//!
+//! The library provides robust parsing for SIP messages:
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
@@ -51,35 +179,6 @@
 //!         println!("To: {}", to_header);
 //!     }
 //! }
-//!
-//! // Create a SIP request
-//! let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-//! let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
-//! let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
-//! 
-//! let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
-//!     .unwrap()
-//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri.clone()))))
-//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
-//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
-//!     .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-//!     .header(TypedHeader::Contact(Contact::new_params(vec![ContactParamInfo { 
-//!         address: Address::new(contact_uri)
-//!     }])))
-//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
-//!     .build();
-//!
-//! // Create a SIP response
-//! let response = ResponseBuilder::new(StatusCode::Ok)
-//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri))))
-//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri))))
-//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
-//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
-//!     .build();
 //! ```
 //!
 //! ## Parsing Modes
@@ -154,14 +253,35 @@ pub use types::{
     sdp::TimeDescription,
     auth::*,
     sdp::ParsedAttribute,
+    sdp::RtpMapAttribute,
+    sdp::FmtpAttribute,
+    sdp::CandidateAttribute,
+    sdp::SsrcAttribute,
+    sdp::RepeatTime,
     Version,
+    Allow,
+    Accept,
+    Subject,
+    CallInfo,
 };
 pub use types::uri::{Uri, Host};
 pub use sdp::attributes::MediaDirection;
+pub use sdp::parser::{
+    validate_sdp,
+    validate_network_type,
+    validate_address_type,
+    is_valid_address,
+    is_valid_ipv4,
+    is_valid_ipv6,
+    is_valid_hostname,
+    parse_bandwidth_line,
+    parse_sdp
+};
 pub use types::builder::{RequestBuilder, ResponseBuilder};
+pub use sdp::builder::SdpBuilder;
 pub use macros::*;
 
-/// Re-export of common types and functions
+/// Re-export of common types and functions for SIP
 pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
@@ -223,6 +343,36 @@ pub mod prelude {
         WwwAuthenticate, AuthScheme
     };
     pub use crate::types::{Algorithm, Qop};
+    
+    // Additional header types previously missing
+    pub use crate::types::Allow;
+    pub use crate::types::Accept;
+    pub use crate::parser::headers::accept::AcceptValue;
+    pub use crate::types::Subject;
+    pub use crate::types::call_info::{CallInfo, CallInfoValue, InfoPurpose};
+    pub use crate::types::AcceptLanguage;
+    pub use crate::parser::headers::accept_language::LanguageInfo;
+}
+
+/// Re-export of common types and functions for SDP
+pub mod sdp_prelude {
+    pub use crate::types::sdp::{SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription};
+    pub use crate::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, RepeatTime};
+    pub use crate::sdp::attributes::MediaDirection;
+    pub use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
+    pub use crate::sdp::parser::{
+        validate_sdp,
+        validate_network_type,
+        validate_address_type,
+        is_valid_address,
+        is_valid_ipv4,
+        is_valid_ipv6,
+        is_valid_hostname,
+        parse_bandwidth_line,
+        parse_sdp
+    };
+    pub use crate::sdp::builder::SdpBuilder;
+    pub use crate::sdp;  // For the macro
 }
 
 #[cfg(test)]
