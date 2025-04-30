@@ -6,7 +6,6 @@
 
 pub mod parser;
 pub mod session;
-pub mod time_parser;
 pub mod media;
 pub mod attributes;
 pub mod macros;
@@ -28,4 +27,9 @@ pub mod media_parser {
 // For backward compatibility
 pub mod session_parser {
     pub use crate::sdp::session::*;
+}
+
+// For backward compatibility
+pub mod time_parser {
+    pub use crate::sdp::parser::time_parser::*;
 } 

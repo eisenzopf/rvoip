@@ -6,7 +6,7 @@
 // - Media formats
 // - Media descriptions
 
-mod types;
+pub mod types;
 mod transport;
 mod format;
 mod description;

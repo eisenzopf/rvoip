@@ -7,7 +7,7 @@
 // - Validation of hostnames, usernames, and addresses
 // - Utility functions for session parsing
 
-mod validation;
+pub mod validation;
 mod origin;
 mod connection;
 mod bandwidth;
