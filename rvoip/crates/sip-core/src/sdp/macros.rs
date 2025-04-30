@@ -8,6 +8,7 @@ use crate::types::sdp::{
     ParsedAttribute, RtpMapAttribute, FmtpAttribute,
 };
 use crate::sdp::attributes::MediaDirection;
+use crate::error::Result;
 
 /// Creates an SDP session with a declarative syntax
 ///
@@ -20,13 +21,14 @@ use crate::sdp::attributes::MediaDirection;
 ///     ParsedAttribute, RtpMapAttribute, FmtpAttribute,
 /// };
 /// use rvoip_sip_core::sdp::attributes::MediaDirection;
+/// use rvoip_sip_core::error::Result;
 /// 
 /// // This line is just to satisfy the doc test even though we're not using these variables
 /// let (SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription, 
-///      ParsedAttribute, RtpMapAttribute, FmtpAttribute, MediaDirection) = 
-///      (1, 2, 3, 4, 5, 6, 7, 8, 9);
+///      ParsedAttribute, RtpMapAttribute, FmtpAttribute, MediaDirection, Result) = 
+///      (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 ///
-/// let session = sdp! {
+/// let session: Result<SdpSession> = sdp! {
 ///     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
 ///     session_name: "Test SDP Session",
 ///     connection: ("IN", "IP4", "192.168.1.100"),
@@ -157,7 +159,8 @@ macro_rules! sdp {
             session.add_media(media);
         )*
         
-        session
+        // Validate the SDP session
+        $crate::sdp::parser::validate_sdp(&session).map(|_| session)
     }};
 }
 
@@ -168,7 +171,7 @@ mod tests {
     #[test]
     fn test_basic_sdp_macro() {
         // Create a minimal SDP session with one audio media section
-        let session = sdp! {
+        let session: Result<SdpSession> = sdp! {
             origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
             session_name: "Test SDP Session",
             connection: ("IN", "IP4", "192.168.1.100"),
@@ -183,6 +186,11 @@ mod tests {
                 direction: "sendrecv"
             }
         };
+        
+        // Verify the session is valid
+        assert!(session.is_ok(), "SDP validation failed: {:?}", session.err());
+        
+        let session = session.unwrap();
         
         // Verify basic session properties
         assert_eq!(session.origin.username, "-");
@@ -234,15 +242,30 @@ mod tests {
     #[test]
     fn test_minimal_sdp_macro() {
         // Create an SDP with only the required fields
-        let session = sdp! {
+        let session: Result<SdpSession> = sdp! {
             origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
             session_name: "Minimal SDP Session"
         };
         
+        // This should fail validation as it's missing required fields (time description)
+        assert!(session.is_err(), "Minimal SDP without time should fail validation");
+        
+        // Create a minimal valid SDP
+        let session = sdp! {
+            origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
+            session_name: "Minimal SDP Session",
+            connection: ("IN", "IP4", "192.168.1.100"),
+            time: ("0", "0")
+        };
+        
+        // This should pass validation
+        assert!(session.is_ok(), "Minimal valid SDP failed validation: {:?}", session.err());
+        
+        let session = session.unwrap();
         assert_eq!(session.origin.username, "-");
         assert_eq!(session.session_name, "Minimal SDP Session");
-        assert!(session.connection_info.is_none());
-        assert_eq!(session.time_descriptions.len(), 0);
+        assert!(session.connection_info.is_some());
+        assert_eq!(session.time_descriptions.len(), 1);
         assert_eq!(session.media_descriptions.len(), 0);
     }
 } 

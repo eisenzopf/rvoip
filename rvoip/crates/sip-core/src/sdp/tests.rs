@@ -757,6 +757,11 @@ mod api_tests {
             }
         };
         
+        // Verify the session is valid
+        assert!(session.is_ok(), "SDP validation failed: {:?}", session.err());
+        
+        let session = session.unwrap();
+        
         // Validate the created SDP
         assert_eq!(session.version, "0");
         assert_eq!(session.origin.username, "-");
