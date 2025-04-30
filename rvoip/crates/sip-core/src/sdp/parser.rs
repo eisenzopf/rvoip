@@ -1067,3 +1067,173 @@ pub fn parse_bandwidth(line: &str) -> Result<(String, u64)> {
     
     Ok((bwtype, bandwidth))
 }
+
+/// Validates a complete SDP session for well-formedness according to RFC 8866
+///
+/// Performs checks to ensure the SDP conforms to the standard, including:
+/// - Presence of all required fields
+/// - Connection data is present at session level or in all media sections
+/// - Media sections have at least one format
+/// - Protocol-specific validations for WebRTC
+///
+/// # Parameters
+/// - `session`: The SDP session to validate
+///
+/// # Returns
+/// - Ok(()) if the SDP is valid
+/// - Err(Error) with a description of what's invalid
+pub fn validate_sdp(session: &SdpSession) -> Result<()> {
+    // Check required fields
+    if session.version.is_empty() {
+        return Err(Error::SdpValidationError("Missing required version (v=)".to_string()));
+    }
+    
+    // Check origin parts
+    if session.origin.username.is_empty() || 
+       session.origin.sess_id.is_empty() || 
+       session.origin.sess_version.is_empty() || 
+       session.origin.net_type.is_empty() || 
+       session.origin.addr_type.is_empty() || 
+       session.origin.unicast_address.is_empty() {
+        return Err(Error::SdpValidationError("Invalid origin (o=): missing required fields".to_string()));
+    }
+    
+    // Validate network type is IN
+    if session.origin.net_type != "IN" {
+        return Err(Error::SdpValidationError(format!("Invalid network type: {}", session.origin.net_type)));
+    }
+    
+    // Validate address type is IP4 or IP6
+    if session.origin.addr_type != "IP4" && session.origin.addr_type != "IP6" {
+        return Err(Error::SdpValidationError(format!("Invalid address type: {}", session.origin.addr_type)));
+    }
+    
+    // Check session name exists
+    if session.session_name.is_empty() {
+        return Err(Error::SdpValidationError("Missing required session name (s=)".to_string()));
+    }
+    
+    // Check at least one time description exists
+    if session.time_descriptions.is_empty() {
+        return Err(Error::SdpValidationError("Missing required time description (t=)".to_string()));
+    }
+    
+    // Check connection data requirements
+    let session_has_connection = session.connection_info.is_some();
+    
+    // If we have media sections, check that all have connection data or session has it
+    if !session.media_descriptions.is_empty() {
+        let mut all_media_have_connection = true;
+        
+        for (i, media) in session.media_descriptions.iter().enumerate() {
+            // Check media has connection info
+            if media.connection_info.is_none() {
+                all_media_have_connection = false;
+            }
+            
+            // Validate media has at least one format
+            if media.formats.is_empty() {
+                return Err(Error::SdpValidationError(
+                    format!("Media section {} ({}) must have at least one format", i+1, media.media)
+                ));
+            }
+            
+            // Validate media type
+            let valid_media_types = ["audio", "video", "text", "application", "message"];
+            if !valid_media_types.contains(&media.media.as_str()) && !is_valid_token(&media.media) {
+                return Err(Error::SdpValidationError(format!("Invalid media type: {}", media.media)));
+            }
+            
+            // Validate protocol
+            if !is_valid_token(&media.protocol) {
+                return Err(Error::SdpValidationError(format!("Invalid protocol: {}", media.protocol)));
+            }
+            
+            // Additional protocol-specific validations
+            if media.protocol.contains("RTP") {
+                // For RTP-based media, check for rtpmap attributes for dynamic payload types
+                let dynamic_formats: Vec<&String> = media.formats.iter()
+                    .filter(|f| match f.parse::<u8>() {
+                        Ok(pt) => pt >= 96, // Dynamic payload types are >= 96
+                        Err(_) => false
+                    })
+                    .collect();
+                
+                // For each dynamic payload type, check if rtpmap exists
+                for fmt in dynamic_formats {
+                    let pt = fmt.parse::<u8>().unwrap();
+                    let has_rtpmap = media.generic_attributes.iter().any(|attr| {
+                        match attr {
+                            ParsedAttribute::RtpMap(rtpmap) if rtpmap.payload_type == pt => true,
+                            _ => false
+                        }
+                    });
+                    
+                    if !has_rtpmap {
+                        return Err(Error::SdpValidationError(
+                            format!("Missing rtpmap for dynamic payload type {} in media {}", pt, media.media)
+                        ));
+                    }
+                }
+            }
+            
+            // For WebRTC, check for required attributes
+            if media.protocol.contains("DTLS") || media.protocol.contains("TLS") {
+                // Check if this is WebRTC (either DTLS/SRTP or SCTP for data channels)
+                let is_webrtc = media.protocol.contains("DTLS") || 
+                                media.protocol.contains("TLS") || 
+                                media.protocol.contains("SCTP") ||
+                                media.protocol.contains("webrtc");
+                
+                if is_webrtc {
+                    // Check for ICE attributes (could be at session or media level)
+                    let session_has_ice = session.generic_attributes.iter().any(|attr| {
+                        matches!(attr, ParsedAttribute::IceUfrag(_)) || matches!(attr, ParsedAttribute::IcePwd(_))
+                    });
+                    
+                    let media_has_ice = media.generic_attributes.iter().any(|attr| {
+                        matches!(attr, ParsedAttribute::IceUfrag(_)) || matches!(attr, ParsedAttribute::IcePwd(_))
+                    });
+                    
+                    if !session_has_ice && !media_has_ice {
+                        // For WebRTC, ice-ufrag and ice-pwd are required, but we'll just log a warning
+                        // as some implementations might not follow the spec exactly
+                        log::warn!("WebRTC media missing required ICE attributes (ice-ufrag, ice-pwd)");
+                    }
+                    
+                    // For DTLS, check for fingerprint and setup
+                    if media.protocol.contains("DTLS") || media.protocol.contains("TLS") {
+                        let session_has_fingerprint = session.generic_attributes.iter().any(|attr| {
+                            matches!(attr, ParsedAttribute::Fingerprint(_, _))
+                        });
+                        
+                        let media_has_fingerprint = media.generic_attributes.iter().any(|attr| {
+                            matches!(attr, ParsedAttribute::Fingerprint(_, _))
+                        });
+                        
+                        if !session_has_fingerprint && !media_has_fingerprint {
+                            // DTLS requires fingerprint, but we'll just log a warning
+                            log::warn!("DTLS media missing required fingerprint attribute");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Ensure either session has connection info or all media do
+        if !session_has_connection && !all_media_have_connection {
+            return Err(Error::SdpValidationError(
+                "Connection information must be present at session level or in all media sections".to_string()
+            ));
+        }
+    } else {
+        // If no media sections, session must have connection info
+        if !session_has_connection {
+            return Err(Error::SdpValidationError(
+                "Connection information (c=) is required when no media sections are present".to_string()
+            ));
+        }
+    }
+    
+    Ok(())
+} 

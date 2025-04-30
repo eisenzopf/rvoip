@@ -1,20 +1,24 @@
 // Session Description Protocol (SDP) module
 //
 // This module contains parsers and types for working with SDP messages
-// as defined in RFC 8866.
+// as defined in RFC 8866. It also provides utilities for creating SDP messages,
+// both through helper functions (sdp_macros) and declarative Rust macros (new_macros).
 
 pub mod parser;
 pub mod session;
 pub mod time_parser;
 pub mod media;
 pub mod attributes;
-pub mod sdp_macros;
+pub mod macros;
+pub mod builder;
 
 #[cfg(test)]
 mod tests;
 
 pub use parser::parse_sdp;
-pub use sdp_macros::*;
+pub use parser::validate_sdp;
+pub use macros::*;
+pub use builder::SdpBuilder;
 
 // For backward compatibility
 pub mod media_parser {

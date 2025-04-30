@@ -47,20 +47,20 @@ pub fn parse_group(input: &str) -> Result<(String, Vec<String>)> {
     let trimmed_input = input.trim();
     
     if trimmed_input.is_empty() {
-        return Err(Error::SdpParseError("Invalid group format".to_string()));
+        return Err(Error::SdpParsingError("Invalid group format".to_string()));
     }
     
     let parts: Vec<&str> = trimmed_input.splitn(2, ' ').collect();
     
     // Group needs at least a semantics part
     if parts.is_empty() {
-        return Err(Error::SdpParseError("Invalid group format".to_string()));
+        return Err(Error::SdpParsingError("Invalid group format".to_string()));
     }
     
     // Check if the semantics part looks like a valid semantics value
     // Must contain only alphanumeric characters, hyphens, or underscores
     if !parts[0].chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(Error::SdpParseError("Invalid semantics value".to_string()));
+        return Err(Error::SdpParsingError("Invalid semantics value".to_string()));
     }
     
     // According to RFC 5888, semantics values should typically be uppercase tokens
@@ -71,15 +71,15 @@ pub fn parse_group(input: &str) -> Result<(String, Vec<String>)> {
        !parts[0].starts_with("X-") && !parts[0].starts_with("x-") {
         // Heuristic: If it looks like it might be an identification tag
         // and not a valid semantics value, reject it
-        return Err(Error::SdpParseError("Invalid semantics value, possibly misplaced identification tag".to_string()));
+        return Err(Error::SdpParsingError("Invalid semantics value, possibly misplaced identification tag".to_string()));
     }
     
     let semantics = parts[0].to_string();
     
     // According to RFC 5888, at least one identification tag should be present
     if parts.len() < 2 || parts[1].trim().is_empty() {
-        return Err(Error::SdpParseError(
-            "Group attribute must have at least one identification tag".to_string(),
+        return Err(Error::SdpParsingError(
+            format!("Group attribute must have at least one identification tag: '{}'", semantics)
         ));
     }
     

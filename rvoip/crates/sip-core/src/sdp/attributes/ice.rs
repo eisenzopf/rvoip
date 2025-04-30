@@ -50,13 +50,13 @@ pub fn parse_ice_ufrag(value: &str) -> Result<String> {
     let trimmed = value.trim();
     
     // Check for control characters explicitly
-    if trimmed.chars().any(|c| c.is_ascii_control()) {
-        return Err(Error::SdpParseError(format!("Invalid ice-ufrag value contains control characters: {}", value)));
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(Error::SdpParsingError(format!("Invalid ice-ufrag value contains control characters: {}", value)));
     }
     
     // Check for non-ASCII characters
-    if trimmed.chars().any(|c| !c.is_ascii()) {
-        return Err(Error::SdpParseError(format!("Invalid ice-ufrag value contains non-ASCII characters: {}", value)));
+    if !trimmed.is_ascii() {
+        return Err(Error::SdpParsingError(format!("Invalid ice-ufrag value contains non-ASCII characters: {}", value)));
     }
     
     to_result(
@@ -70,13 +70,13 @@ pub fn parse_ice_pwd(value: &str) -> Result<String> {
     let trimmed = value.trim();
     
     // Check for control characters explicitly
-    if trimmed.chars().any(|c| c.is_ascii_control()) {
-        return Err(Error::SdpParseError(format!("Invalid ice-pwd value contains control characters: {}", value)));
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(Error::SdpParsingError(format!("Invalid ice-pwd value contains control characters: {}", value)));
     }
     
     // Check for non-ASCII characters
-    if trimmed.chars().any(|c| !c.is_ascii()) {
-        return Err(Error::SdpParseError(format!("Invalid ice-pwd value contains non-ASCII characters: {}", value)));
+    if !trimmed.is_ascii() {
+        return Err(Error::SdpParsingError(format!("Invalid ice-pwd value contains non-ASCII characters: {}", value)));
     }
     
     to_result(

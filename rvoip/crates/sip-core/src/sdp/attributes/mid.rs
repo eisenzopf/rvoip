@@ -26,32 +26,25 @@ pub fn parse_mid(value: &str) -> Result<String> {
     
     // MID must be a single token - check that there are no spaces
     if trimmed.contains(' ') {
-        return Err(Error::SdpParseError(format!("MID contains spaces, which is not allowed for tokens: {}", value)));
+        return Err(Error::SdpParsingError(format!("MID contains spaces, which is not allowed for tokens: {}", value)));
     }
     
     // Explicitly check for control characters
     if trimmed.chars().any(|c| c.is_control()) {
-        return Err(Error::SdpParseError(format!("MID contains control characters, which is not allowed for tokens: {}", value)));
+        return Err(Error::SdpParsingError(format!("MID contains control characters, which is not allowed for tokens: {}", value)));
     }
     
     // Explicitly check for non-ASCII characters
-    if trimmed.chars().any(|c| !c.is_ascii()) {
-        return Err(Error::SdpParseError(format!("MID contains non-ASCII characters, which is not allowed for tokens: {}", value)));
+    if !trimmed.is_ascii() {
+        return Err(Error::SdpParsingError(format!("MID contains non-ASCII characters, which is not allowed for tokens: {}", value)));
     }
     
-    // Check for token-disallowed characters (per RFC 4566)
-    // token-char =  %x21 / %x23-27 / %x2A-2B / %x2D-2E / %x30-39 / %x41-5A / %x5E-7E
+    // Check for characters that are not allowed in tokens
     if trimmed.chars().any(|c| {
-        let cp = c as u32;
-        !((cp == 0x21) || 
-          (0x23..=0x27).contains(&cp) || 
-          (0x2A..=0x2B).contains(&cp) || 
-          (0x2D..=0x2E).contains(&cp) || 
-          (0x30..=0x39).contains(&cp) || 
-          (0x41..=0x5A).contains(&cp) || 
-          (0x5E..=0x7E).contains(&cp))
+        // Separators and other non-token characters
+        matches!(c, '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '[' | ']' | '?' | '=' | '{' | '}')
     }) {
-        return Err(Error::SdpParseError(format!("MID contains characters not allowed in tokens: {}", value)));
+        return Err(Error::SdpParsingError(format!("MID contains characters not allowed in tokens: {}", value)));
     }
     
     to_result(

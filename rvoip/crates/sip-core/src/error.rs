@@ -88,6 +88,10 @@ pub enum Error {
     #[error("SDP parsing error: {0}")]
     SdpParsingError(String),
 
+    /// SDP validation error
+    #[error("SDP validation error: {0}")]
+    SdpValidationError(String),
+
     /// Transport-specific error
     #[error("Transport error: {0}")]
     Transport(String),
@@ -123,10 +127,6 @@ pub enum Error {
     /// I/O error
     #[error("I/O Error: {0}")]
     IoError(#[from] io::Error),
-
-    /// SDP parsing error
-    #[error("SDP Parsing Error: {0}")]
-    SdpParseError(String),
 
     /// SDP generation error
     #[error("SDP Generation Error: {0}")]

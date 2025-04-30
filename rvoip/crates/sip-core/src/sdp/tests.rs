@@ -711,4 +711,223 @@ mod tests {
         assert_eq!(parsed.media_descriptions[0].media, "audio");
         assert_eq!(parsed.media_descriptions[0].direction, Some(MediaDirection::SendRecv));
     }
+}
+
+// ----- TESTS FOR MACRO AND BUILDER API -----
+
+mod api_tests {
+    use super::*;
+    use crate::sdp;
+    use crate::sdp::builder::SdpBuilder;
+    use crate::error::Result;
+    use crate::sdp::macros::*;  // Import the macros explicitly
+    use crate::types::sdp::{
+        SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription,
+        ParsedAttribute, RtpMapAttribute, FmtpAttribute,
+    };
+
+    /// Test creating an SDP message using the sdp! macro
+    #[test]
+    fn test_sdp_macro_creation() {
+        // Create a complete SDP message using the macro
+        let session = sdp! {
+            origin: ("-", "2890844526", "2890842807", "IN", "IP4", "10.47.16.5"),
+            session_name: "SDP Test Using Macro",
+            connection: ("IN", "IP4", "224.2.17.12"),
+            time: ("2873397496", "2873404696"),
+            media: {
+                type: "audio",
+                port: 49170,
+                protocol: "RTP/AVP",
+                formats: ["0", "8", "97"],
+                rtpmap: ("0", "PCMU/8000"),
+                rtpmap: ("8", "PCMA/8000"),
+                rtpmap: ("97", "iLBC/8000"),
+                fmtp: ("97", "mode=20"),
+                direction: "sendrecv"
+            },
+            media: {
+                type: "video",
+                port: 51372,
+                protocol: "RTP/AVP",
+                formats: ["31", "32"],
+                rtpmap: ("31", "H261/90000"),
+                rtpmap: ("32", "MPV/90000"),
+                direction: "recvonly"
+            }
+        };
+        
+        // Validate the created SDP
+        assert_eq!(session.version, "0");
+        assert_eq!(session.origin.username, "-");
+        assert_eq!(session.origin.sess_id, "2890844526");
+        assert_eq!(session.origin.sess_version, "2890842807");
+        assert_eq!(session.session_name, "SDP Test Using Macro");
+        
+        // Check connection data
+        assert!(session.connection_info.is_some());
+        if let Some(conn) = &session.connection_info {
+            assert_eq!(conn.connection_address, "224.2.17.12");
+        }
+        
+        // Check time description
+        assert_eq!(session.time_descriptions.len(), 1);
+        assert_eq!(session.time_descriptions[0].start_time, "2873397496");
+        assert_eq!(session.time_descriptions[0].stop_time, "2873404696");
+        
+        // Check media sections
+        assert_eq!(session.media_descriptions.len(), 2);
+        
+        // Check first media (audio)
+        let audio = &session.media_descriptions[0];
+        assert_eq!(audio.media, "audio");
+        assert_eq!(audio.port, 49170);
+        assert_eq!(audio.protocol, "RTP/AVP");
+        assert_eq!(audio.formats, vec!["0", "8", "97"]);
+        assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
+        
+        // Check second media (video)
+        let video = &session.media_descriptions[1];
+        assert_eq!(video.media, "video");
+        assert_eq!(video.port, 51372);
+        assert_eq!(video.formats, vec!["31", "32"]);
+        assert_eq!(video.direction, Some(MediaDirection::RecvOnly));
+        
+        // Check audio rtpmap and fmtp
+        let rtpmaps = audio.generic_attributes.iter()
+            .filter_map(|attr| {
+                if let ParsedAttribute::RtpMap(rtpmap) = attr {
+                    Some(rtpmap)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        
+        assert_eq!(rtpmaps.len(), 3);
+        assert_eq!(rtpmaps[2].payload_type, 97);
+        assert_eq!(rtpmaps[2].encoding_name, "iLBC");
+        
+        // Check fmtp
+        let fmtps = audio.generic_attributes.iter()
+            .filter_map(|attr| {
+                if let ParsedAttribute::Fmtp(fmtp) = attr {
+                    Some(fmtp)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        
+        assert_eq!(fmtps.len(), 1);
+        assert_eq!(fmtps[0].format, "97");
+        assert_eq!(fmtps[0].parameters, "mode=20");
+    }
+
+    /// Test creating an SDP message using the SdpBuilder
+    #[test]
+    fn test_sdp_builder_creation() -> Result<()> {
+        // Create a complete SDP message using the builder
+        let session = SdpBuilder::new("SDP Test Using Builder")
+            .origin("-", "2890844526", "2890842807", "IN", "IP4", "10.47.16.5")
+            .connection("IN", "IP4", "224.2.17.12")
+            .time("2873397496", "2873404696")
+            .group("BUNDLE", &["audio", "video"])
+            .ice_ufrag("F7gI")
+            .ice_pwd("x9cml/YzichV2+XlhiMu8g")
+            .fingerprint("sha-256", "D2:FA:0E:C3:22:59:5E:14:95:69:92:3D:13:B4:84:24:2C:C2:A2:C0:3E:FD:34:8E:5E:EA:6F:AF:52:CE:E6:0F")
+            .media_audio(49170, "RTP/AVP")
+                .formats(&["0", "8", "97"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
+                .rtpmap("97", "iLBC/8000")
+                .fmtp("97", "mode=20")
+                .direction(MediaDirection::SendRecv)
+                .mid("audio")
+                .rtcp_mux()
+                .done()
+            .media_video(51372, "RTP/AVP")
+                .formats(&["31", "32"])
+                .rtpmap("31", "H261/90000")
+                .rtpmap("32", "MPV/90000")
+                .direction(MediaDirection::RecvOnly)
+                .mid("video")
+                .rtcp_mux()
+                .done()
+            .build()?;
+        
+        // Validate the created SDP
+        assert_eq!(session.version, "0");
+        assert_eq!(session.origin.username, "-");
+        assert_eq!(session.origin.sess_id, "2890844526");
+        assert_eq!(session.origin.sess_version, "2890842807");
+        assert_eq!(session.session_name, "SDP Test Using Builder");
+        
+        // Check connection data
+        assert!(session.connection_info.is_some());
+        if let Some(conn) = &session.connection_info {
+            assert_eq!(conn.connection_address, "224.2.17.12");
+        }
+        
+        // Check time description
+        assert_eq!(session.time_descriptions.len(), 1);
+        assert_eq!(session.time_descriptions[0].start_time, "2873397496");
+        assert_eq!(session.time_descriptions[0].stop_time, "2873404696");
+        
+        // Check media sections
+        assert_eq!(session.media_descriptions.len(), 2);
+        
+        // Check first media (audio)
+        let audio = &session.media_descriptions[0];
+        assert_eq!(audio.media, "audio");
+        assert_eq!(audio.port, 49170);
+        assert_eq!(audio.protocol, "RTP/AVP");
+        assert_eq!(audio.formats, vec!["0", "8", "97"]);
+        assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
+        
+        // Check second media (video)
+        let video = &session.media_descriptions[1];
+        assert_eq!(video.media, "video");
+        assert_eq!(video.port, 51372);
+        assert_eq!(video.formats, vec!["31", "32"]);
+        assert_eq!(video.direction, Some(MediaDirection::RecvOnly));
+        
+        // Check BUNDLE attribute
+        let bundle = session.generic_attributes.iter().find_map(|attr| {
+            if let ParsedAttribute::Group(semantic, ids) = attr {
+                if semantic == "BUNDLE" {
+                    Some(ids)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        
+        assert!(bundle.is_some());
+        if let Some(ids) = bundle {
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0], "audio");
+            assert_eq!(ids[1], "video");
+        }
+        
+        // Check ICE attributes
+        let ice_ufrag = session.generic_attributes.iter().find_map(|attr| {
+            if let ParsedAttribute::IceUfrag(ufrag) = attr {
+                Some(ufrag)
+            } else {
+                None
+            }
+        });
+        
+        assert!(ice_ufrag.is_some());
+        assert_eq!(ice_ufrag.unwrap(), "F7gI");
+        
+        // Check rtcp-mux in both media sections
+        assert!(audio.generic_attributes.iter().any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
+        assert!(video.generic_attributes.iter().any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
+        
+        Ok(())
+    }
 } 
