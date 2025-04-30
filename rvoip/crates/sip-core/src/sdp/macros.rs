@@ -31,6 +31,9 @@
 //! ```
 //! use rvoip_sip_core::sdp;
 //! use rvoip_sip_core::types::sdp::SdpSession;
+//! use rvoip_sip_core::types::sdp::{Origin, ConnectionData, TimeDescription, MediaDescription};
+//! use rvoip_sip_core::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute};
+//! use rvoip_sip_core::sdp::attributes::MediaDirection;
 //!
 //! let result = sdp! {
 //!     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
@@ -59,6 +62,9 @@
 //! ```
 //! use rvoip_sip_core::sdp;
 //! use rvoip_sip_core::types::sdp::SdpSession;
+//! use rvoip_sip_core::types::sdp::{Origin, ConnectionData, TimeDescription, MediaDescription};
+//! use rvoip_sip_core::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute};
+//! use rvoip_sip_core::sdp::attributes::MediaDirection;
 //!
 //! let result = sdp! {
 //!     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
@@ -127,7 +133,7 @@ use crate::error::Result;
 ///     origin: (username, session_id, session_version, net_type, addr_type, unicast_address),
 ///     session_name: "name",
 ///     connection: (net_type, addr_type, connection_address),  // optional
-///     time: (start_time, stop_time),  // optional
+///     time: (start_time, stop_time),  // required for RFC 8866 compliance
 ///     media: {  // optional, can have multiple
 ///         type: "media_type",
 ///         port: port_number,
@@ -192,6 +198,9 @@ use crate::error::Result;
 /// ```
 /// use rvoip_sip_core::sdp;
 /// use rvoip_sip_core::types::sdp::SdpSession;
+/// use rvoip_sip_core::types::sdp::{Origin, ConnectionData, TimeDescription, MediaDescription};
+/// use rvoip_sip_core::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute};
+/// use rvoip_sip_core::sdp::attributes::MediaDirection;
 ///
 /// let session = sdp! {
 ///     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
@@ -215,6 +224,9 @@ use crate::error::Result;
 /// ```
 /// use rvoip_sip_core::sdp;
 /// use rvoip_sip_core::types::sdp::SdpSession;
+/// use rvoip_sip_core::types::sdp::{Origin, ConnectionData, TimeDescription, MediaDescription};
+/// use rvoip_sip_core::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute};
+/// use rvoip_sip_core::sdp::attributes::MediaDirection;
 ///
 /// let session = sdp! {
 ///     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
@@ -246,6 +258,7 @@ use crate::error::Result;
 /// ```
 /// use rvoip_sip_core::sdp;
 /// use rvoip_sip_core::types::sdp::SdpSession;
+/// use rvoip_sip_core::types::sdp::{Origin, ConnectionData, TimeDescription};
 ///
 /// let session = sdp! {
 ///     origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
