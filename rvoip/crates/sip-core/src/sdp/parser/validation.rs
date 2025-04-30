@@ -142,7 +142,13 @@ pub fn validate_sdp(session: &SdpSession) -> Result<()> {
         return Err(Error::SdpValidationError("Empty session name".to_string()));
     }
     
+    // Check for time descriptions
+    if session.time_descriptions.is_empty() {
+        return Err(Error::SdpValidationError("SDP must have at least one time description".to_string()));
+    }
+    
     // Validate connection data if present
+    let session_has_connection = session.connection_info.is_some();
     if let Some(conn) = &session.connection_info {
         validate_network_type(&conn.net_type)?;
         validate_address_type(&conn.addr_type)?;
@@ -162,6 +168,14 @@ pub fn validate_sdp(session: &SdpSession) -> Result<()> {
             if !is_valid_address(&conn.connection_address, &conn.addr_type) {
                 return Err(Error::SdpValidationError(format!("Invalid media connection address: {}", conn.connection_address)));
             }
+        } else if !session_has_connection {
+            // If no session-level connection and no media-level connection, that's an error
+            return Err(Error::SdpValidationError("Connection information must be present at session or media level".to_string()));
+        }
+        
+        // Check that media section has at least one format
+        if media.formats.is_empty() {
+            return Err(Error::SdpValidationError(format!("Media section ({}) must have at least one format", media.media)));
         }
     }
     
