@@ -281,7 +281,7 @@ impl SdpSession {
             email: None,
             phone: None,
             connection_info: None,
-            time_descriptions: vec![TimeDescription { start_time: "0".to_string(), stop_time: "0".to_string(), repeat_times: Vec::new()}],
+            time_descriptions: Vec::new(),
             media_descriptions: Vec::new(),
             direction: None,
             generic_attributes: Vec::new(),

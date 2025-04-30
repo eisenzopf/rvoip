@@ -76,12 +76,36 @@ pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
                 let parts: Vec<&str> = addr.split('/').collect();
                 if parts.len() <= 2 {
                     // Just validate the IP portion
-                    return is_valid_ipv4(parts[0]) || is_valid_hostname(parts[0]);
+                    let ip_part = parts[0];
+                    
+                    // Reject incomplete IPv4 addresses that have fewer than 4 segments
+                    if !is_valid_ipv4(ip_part) {
+                        // If it looks like an IPv4 address (only contains digits and dots)
+                        // but has fewer than 4 segments, reject it
+                        if ip_part.chars().all(|c| c.is_ascii_digit() || c == '.') &&
+                           ip_part.contains('.') &&
+                           ip_part.split('.').count() < 4 {
+                            return false;
+                        }
+                    }
+                    
+                    return is_valid_ipv4(ip_part) || is_valid_hostname(ip_part);
                 }
                 return false;
             }
             
             // Normal address
+            // Reject incomplete IPv4 addresses that have fewer than 4 segments
+            if !is_valid_ipv4(addr) {
+                // If it looks like an IPv4 address (only contains digits and dots)
+                // but has fewer than 4 segments, reject it
+                if addr.chars().all(|c| c.is_ascii_digit() || c == '.') &&
+                   addr.contains('.') &&
+                   addr.split('.').count() < 4 {
+                    return false;
+                }
+            }
+            
             is_valid_ipv4(addr) || session_validation::is_valid_hostname(addr)
         },
         "IP6" => {
