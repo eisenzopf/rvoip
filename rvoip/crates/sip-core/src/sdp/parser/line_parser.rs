@@ -102,11 +102,7 @@ pub fn parse_sdp_line(input: &str) -> IResult<&str, (char, &str)> {
 /// # Examples
 ///
 /// ```
-/// # // Since parse_bandwidth_line is not publicly exported, we need to use it directly in the test
-/// # use rvoip_sip_core::sdp::parser::line_parser::parse_bandwidth_line;
-/// 
-/// // This example is only for illustrative purposes since `parse_bandwidth_line` is a private function.
-/// // In actual use, you would typically use higher-level functions that handle SDP parsing.
+/// use rvoip_sip_core::sdp::parser::parse_bandwidth_line;
 /// 
 /// // Parse an Application Specific bandwidth line
 /// let (remaining, (bw_type, bw_value)) = parse_bandwidth_line("AS:128").unwrap();

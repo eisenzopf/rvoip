@@ -118,6 +118,7 @@ mod sdp_parser;
 
 // Re-export the parsing functions 
 pub use self::line_parser::parse_sdp_line;
+pub use self::line_parser::parse_bandwidth_line;
 pub use self::validation::{
     validate_sdp,
     validate_network_type,
