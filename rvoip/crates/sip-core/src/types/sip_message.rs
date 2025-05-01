@@ -234,7 +234,7 @@ impl Message {
         self.as_response().map(|resp| resp.status)
     }
 
-    /// Returns the headers of the message
+    /// Returns a reference to all headers in the message
     ///
     /// # Returns
     /// A slice of all TypedHeader objects in the message
@@ -244,16 +244,16 @@ impl Message {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let response = Response::new(StatusCode::Ok)
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
     ///     .with_header(TypedHeader::CallId(CallId::new("abc123")));
-    /// let message: Message = response.into();
     ///
-    /// assert_eq!(message.headers().len(), 1);
+    /// let message: Message = request.into();
+    /// assert_eq!(message.all_headers().len(), 1);
     /// ```
-    pub fn headers(&self) -> &[TypedHeader] {
+    pub fn all_headers(&self) -> &[TypedHeader] {
         match self {
-            Message::Request(req) => &req.headers,
-            Message::Response(resp) => &resp.headers,
+            Message::Request(req) => req.all_headers(),
+            Message::Response(resp) => resp.all_headers(),
         }
     }
 
@@ -303,7 +303,7 @@ impl Message {
     /// assert!(header.is_some());
     /// ```
     pub fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
-        self.headers().iter().find(|h| h.name() == *name)
+        self.all_headers().iter().find(|h| h.name() == *name)
     }
 
     /// Retrieves a strongly-typed header value
@@ -769,7 +769,7 @@ mod tests {
         // so we won't test it
         
         // Get all headers
-        let all_headers = message.headers();
+        let all_headers = message.all_headers();
         assert_eq!(all_headers.len(), 1);
         
         // Test call_id convenience method

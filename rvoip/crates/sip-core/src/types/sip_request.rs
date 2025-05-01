@@ -299,25 +299,81 @@ impl Request {
     /// Retrieves the From header value, if present
     ///
     /// # Returns
-    /// An optional string reference to the From header value
-    pub fn from(&self) -> Option<&str> {
-        None // Placeholder
+    /// An optional reference to the From header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let from = From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse().unwrap())
+    ///     .with_parameter("tag", "1928301774"));
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+    ///     .with_header(TypedHeader::From(from.clone()));
+    ///
+    /// let retrieved = request.from();
+    /// assert!(retrieved.is_some());
+    /// ```
+    pub fn from(&self) -> Option<&From> {
+        if let Some(h) = self.header(&HeaderName::From) {
+            if let TypedHeader::From(from) = h {
+                return Some(from);
+            }
+        }
+        None
     }
     
     /// Retrieves the To header value, if present
     ///
     /// # Returns
-    /// An optional string reference to the To header value
-    pub fn to(&self) -> Option<&str> {
-        None // Placeholder
+    /// An optional reference to the To header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let to = To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()));
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+    ///     .with_header(TypedHeader::To(to.clone()));
+    ///
+    /// let retrieved = request.to();
+    /// assert!(retrieved.is_some());
+    /// ```
+    pub fn to(&self) -> Option<&To> {
+        if let Some(h) = self.header(&HeaderName::To) {
+            if let TypedHeader::To(to) = h {
+                return Some(to);
+            }
+        }
+        None
     }
     
     /// Retrieves the CSeq header value, if present
     ///
     /// # Returns
-    /// An optional string reference to the CSeq header value
-    pub fn cseq(&self) -> Option<&str> {
-        None // Placeholder
+    /// An optional reference to the CSeq header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(1, Method::Invite);
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+    ///     .with_header(TypedHeader::CSeq(cseq.clone()));
+    ///
+    /// let retrieved = request.cseq();
+    /// assert!(retrieved.is_some());
+    /// assert_eq!(retrieved.unwrap().method(), Method::Invite);
+    /// ```
+    pub fn cseq(&self) -> Option<&CSeq> {
+        if let Some(h) = self.header(&HeaderName::CSeq) {
+            if let TypedHeader::CSeq(cseq) = h {
+                return Some(cseq);
+            }
+        }
+        None
     }
 
     /// Get all Via headers as structured Via objects
@@ -535,6 +591,63 @@ impl Request {
             .with_header(TypedHeader::CallId(types::CallId::new(call_id_value)))
             .with_header(TypedHeader::CSeq(types::CSeq::new(cseq_num, method)))
             .with_header(TypedHeader::MaxForwards(types::MaxForwards::new(70)))
+    }
+
+    /// Returns the SIP version
+    ///
+    /// # Returns
+    /// A clone of the request's SIP version
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap());
+    /// assert_eq!(request.version(), Version::sip_2_0());
+    /// ```
+    pub fn version(&self) -> Version {
+        self.version.clone()
+    }
+    
+    /// Returns a reference to the request headers
+    ///
+    /// # Returns
+    /// A slice of all TypedHeader objects in the request
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+    ///     .with_header(TypedHeader::CallId(CallId::new("abc123")));
+    ///
+    /// assert_eq!(request.all_headers().len(), 1);
+    /// ```
+    pub fn all_headers(&self) -> &[TypedHeader] {
+        &self.headers
+    }
+    
+    /// Returns a reference to the request body as Bytes
+    ///
+    /// # Returns
+    /// A reference to the request body Bytes
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use bytes::Bytes;
+    ///
+    /// let body_content = "test body";
+    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+    ///     .with_body(Bytes::from(body_content));
+    ///
+    /// assert_eq!(request.body_bytes(), &Bytes::from(body_content));
+    /// ```
+    pub fn body_bytes(&self) -> &Bytes {
+        &self.body
     }
 }
 

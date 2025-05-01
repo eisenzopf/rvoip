@@ -59,6 +59,7 @@ use crate::error::{Error, Result};
 use crate::types::to::To;
 use crate::types::sip_request::Request;
 use crate::types::from::From;
+use crate::types::CSeq;
 
 /// A SIP response message
 ///
@@ -311,27 +312,28 @@ impl Response {
         self.headers.iter().find(|h| h.name() == *name)
     }
 
-    /// Gets the reason phrase for this response (either the custom one or the default)
+    /// Returns the reason phrase for this response
     ///
     /// # Returns
-    /// The reason phrase as a string slice
+    /// A string slice with the reason phrase
     ///
     /// # Examples
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// // Default reason phrase
-    /// let response = Response::new(StatusCode::NotFound);
-    /// assert_eq!(response.reason_phrase(), "Not Found");
+    /// let response = Response::new(StatusCode::Ok);
+    /// assert_eq!(response.reason_phrase(), "OK");
     ///
-    /// // Custom reason phrase
-    /// let response = Response::new(StatusCode::NotFound)
-    ///     .with_reason("Resource Not Available");
-    /// assert_eq!(response.reason_phrase(), "Resource Not Available");
+    /// // With custom reason
+    /// let custom = Response::new(StatusCode::Ok).with_reason("Everything is Awesome");
+    /// assert_eq!(custom.reason_phrase(), "Everything is Awesome");
     /// ```
     pub fn reason_phrase(&self) -> &str {
-        self.reason.as_deref().unwrap_or_else(|| self.status.reason_phrase())
+        match &self.reason {
+            Some(reason) => reason,
+            None => self.status.as_reason()
+        }
     }
     
     /// Retrieves the first header with the specified type, if any.
@@ -360,17 +362,81 @@ impl Response {
     /// Retrieves the From header value, if present
     ///
     /// # Returns
-    /// An optional string reference to the From header value
-    pub fn from(&self) -> Option<&str> {
-        None // Placeholder
+    /// An optional reference to the From header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let from = From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse().unwrap())
+    ///     .with_parameter("tag", "1928301774"));
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_header(TypedHeader::From(from.clone()));
+    ///
+    /// let retrieved = response.from();
+    /// assert!(retrieved.is_some());
+    /// ```
+    pub fn from(&self) -> Option<&From> {
+        if let Some(h) = self.header(&HeaderName::From) {
+            if let TypedHeader::From(from) = h {
+                return Some(from);
+            }
+        }
+        None
     }
     
     /// Retrieves the To header value, if present
     ///
     /// # Returns
-    /// An optional string reference to the To header value
-    pub fn to(&self) -> Option<&str> {
-        None // Placeholder
+    /// An optional reference to the To header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let to = To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()));
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_header(TypedHeader::To(to.clone()));
+    ///
+    /// let retrieved = response.to();
+    /// assert!(retrieved.is_some());
+    /// ```
+    pub fn to(&self) -> Option<&To> {
+        if let Some(h) = self.header(&HeaderName::To) {
+            if let TypedHeader::To(to) = h {
+                return Some(to);
+            }
+        }
+        None
+    }
+    
+    /// Retrieves the CSeq header value, if present
+    ///
+    /// # Returns
+    /// An optional reference to the CSeq header
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let cseq = CSeq::new(1, Method::Invite);
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_header(TypedHeader::CSeq(cseq.clone()));
+    ///
+    /// let retrieved = response.cseq();
+    /// assert!(retrieved.is_some());
+    /// assert_eq!(retrieved.unwrap().method(), Method::Invite);
+    /// ```
+    pub fn cseq(&self) -> Option<&CSeq> {
+        if let Some(h) = self.header(&HeaderName::CSeq) {
+            if let TypedHeader::CSeq(cseq) = h {
+                return Some(cseq);
+            }
+        }
+        None
     }
 
     /// Get all Via headers as structured Via objects
@@ -520,6 +586,99 @@ impl Response {
         }
         
         response
+    }
+
+    /// Returns the SIP version
+    ///
+    /// # Returns
+    /// A clone of the response's SIP version
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = Response::new(StatusCode::Ok);
+    /// assert_eq!(response.version(), Version::sip_2_0());
+    /// ```
+    pub fn version(&self) -> Version {
+        self.version.clone()
+    }
+    
+    /// Returns a reference to the response headers
+    ///
+    /// # Returns
+    /// A slice of all TypedHeader objects in the response
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_header(TypedHeader::CallId(CallId::new("abc123")));
+    ///
+    /// assert_eq!(response.all_headers().len(), 1);
+    /// ```
+    pub fn all_headers(&self) -> &[TypedHeader] {
+        &self.headers
+    }
+    
+    /// Returns the custom reason if set
+    ///
+    /// # Returns
+    /// An optional reference to the custom reason string
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_reason("Everything is Awesome");
+    ///
+    /// assert_eq!(response.reason(), Some("Everything is Awesome"));
+    /// ```
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+    
+    /// Returns a reference to the response body as Bytes
+    ///
+    /// # Returns
+    /// A reference to the response body Bytes
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use bytes::Bytes;
+    ///
+    /// let body_content = "test body";
+    /// let response = Response::new(StatusCode::Ok)
+    ///     .with_body(Bytes::from(body_content));
+    ///
+    /// assert_eq!(response.body_bytes(), &Bytes::from(body_content));
+    /// ```
+    pub fn body_bytes(&self) -> &Bytes {
+        &self.body
+    }
+
+    /// Returns the status code as a u16
+    ///
+    /// # Returns
+    /// The numeric status code value
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = Response::new(StatusCode::Ok);
+    /// assert_eq!(response.status_code(), 200);
+    /// ```
+    pub fn status_code(&self) -> u16 {
+        self.status.as_u16()
     }
 }
 
