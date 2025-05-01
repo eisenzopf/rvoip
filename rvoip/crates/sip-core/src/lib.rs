@@ -211,6 +211,7 @@ pub mod parser;
 pub mod types;
 pub mod sdp;
 pub mod macros;
+pub mod builder;
 
 // Remove these commented out modules - they're now part of types/
 // // pub mod header;
@@ -278,7 +279,7 @@ pub use sdp::parser::{
     parse_bandwidth_line,
     parse_sdp
 };
-pub use types::builder::{RequestBuilder, ResponseBuilder};
+pub use builder::{RequestBuilder, ResponseBuilder};
 pub use sdp::builder::SdpBuilder;
 pub use macros::*;
 
@@ -298,7 +299,7 @@ pub mod prelude {
     pub use crate::parser::parse_message;
     pub use crate::parser::message::parse_message_with_mode;
     pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
-    pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
+    pub use crate::builder::{RequestBuilder, ResponseBuilder};
     pub use crate::types::param::Param;
     pub use crate::types::param::GenericValue;
     pub use crate::types::warning::Warning;

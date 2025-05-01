@@ -165,8 +165,6 @@ pub mod error_info;
 pub mod supported;
 pub mod unsupported;
 
-pub mod builder;
-
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
