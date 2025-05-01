@@ -58,6 +58,7 @@ use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
 use crate::parser::headers::retry_after::{parse_retry_after, RetryParam};
 use crate::types::param::{Param, GenericValue};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// RetryAfter represents a Retry-After header value
 /// Used to indicate how long a service is expected to be unavailable
@@ -516,6 +517,46 @@ impl fmt::Display for RetryAfter {
         }
         
         Ok(())
+    }
+}
+
+// Implement TypedHeaderTrait for RetryAfter
+impl TypedHeaderTrait for RetryAfter {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::RetryAfter
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    RetryAfter::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::RetryAfter(retry_after) => {
+                // Just clone the existing RetryAfter if it's already a typed value
+                Ok(retry_after.clone())
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

@@ -54,6 +54,7 @@ use nom::combinator::all_consuming;
 use serde::{Serialize, Deserialize};
 use std::str::from_utf8;
 use crate::types::uri::Host;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the agent in a Warning header
 /// 
@@ -265,6 +266,42 @@ impl FromStr for Warning {
             Err(e) => Err(Error::ParseError(
                 format!("Failed to parse Warning header: {:?}", e)
             ))
+        }
+    }
+}
+
+// Implement TypedHeaderTrait for Warning
+impl TypedHeaderTrait for Warning {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Warning
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(crate::error::Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    Warning::from_str(s.trim())
+                } else {
+                    Err(crate::error::Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            _ => Err(crate::error::Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
         }
     }
 }

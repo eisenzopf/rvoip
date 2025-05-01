@@ -46,6 +46,7 @@ use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize}; // Add import
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Typed Reply-To header.
 /// 
@@ -500,6 +501,42 @@ impl fmt::Display for ReplyTo {
         }
         
         Ok(())
+    }
+}
+
+// Implement TypedHeaderTrait for ReplyTo
+impl TypedHeaderTrait for ReplyTo {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::ReplyTo
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    ReplyTo::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

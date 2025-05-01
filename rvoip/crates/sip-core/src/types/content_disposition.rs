@@ -48,6 +48,7 @@ use nom::combinator::all_consuming;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 use crate::types::param::GenericValue;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the 'handling' parameter values for Content-Disposition
 ///
@@ -405,6 +406,42 @@ impl FromStr for ContentDisposition {
                 
                 Ok(ContentDisposition { disposition_type: disp_type, params })
             })
+    }
+}
+
+// Implement TypedHeaderTrait for ContentDisposition
+impl TypedHeaderTrait for ContentDisposition {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::ContentDisposition
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    ContentDisposition::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

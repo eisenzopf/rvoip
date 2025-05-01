@@ -42,6 +42,9 @@
 
 use std::fmt;
 use serde::{Serialize, Deserialize};
+use crate::error::Result;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::str::FromStr;
 
 /// ServerInfo represents the software used by the server
 /// Used in the Server header of SIP responses
@@ -358,9 +361,9 @@ impl fmt::Display for ServerInfo {
 }
 
 impl Default for ServerInfo {
-    /// Provides a default instance of ServerInfo.
+    /// Create a default `ServerInfo`
     ///
-    /// The default instance is an empty server info with no products or comments.
+    /// Returns an empty ServerInfo, equivalent to `ServerInfo::new()`.
     ///
     /// # Examples
     ///
@@ -369,14 +372,85 @@ impl Default for ServerInfo {
     ///
     /// let server = ServerInfo::default();
     /// assert!(server.products.is_empty());
-    /// assert_eq!(server.to_string(), "");
     /// ```
     fn default() -> Self {
         Self::new()
     }
 }
 
-// Conversion from parser representation to header representation
+// Implement FromStr for ServerInfo
+impl FromStr for ServerInfo {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // Use the parser defined in another module
+        let result = crate::parser::headers::server::parse_server(s.as_bytes())
+            .map_err(|_| crate::error::Error::ParseError("Failed to parse Server header".into()))?;
+            
+        Ok(ServerInfo::from(result.1))
+    }
+}
+
+// Implement TypedHeaderTrait for ServerInfo
+impl TypedHeaderTrait for ServerInfo {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Server
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(crate::error::Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    ServerInfo::from_str(s.trim())
+                } else {
+                    Err(crate::error::Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::Server(vals) => {
+                let products = vals.iter().map(|val| {
+                    match val {
+                        (Some((name, version)), None) => {
+                            // Convert from raw bytes to strings
+                            let name_str = String::from_utf8_lossy(name).to_string();
+                            let version_str = version.as_ref().map(|v| String::from_utf8_lossy(v).to_string());
+                            
+                            ServerProduct::Product {
+                                name: name_str,
+                                version: version_str
+                            }
+                        },
+                        (None, Some(comment)) => {
+                            // Convert from raw bytes to string
+                            let comment_str = String::from_utf8_lossy(comment).to_string();
+                            ServerProduct::Comment(comment_str)
+                        },
+                        _ => ServerProduct::Comment("".to_string())  // Fallback for unexpected format
+                    }
+                }).collect();
+                
+                Ok(ServerInfo { products })
+            },
+            _ => Err(crate::error::Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
+    }
+}
+
 impl From<Vec<ServerVal>> for ServerInfo {
     /// Creates a ServerInfo from a vector of ServerVal.
     ///

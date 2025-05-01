@@ -55,6 +55,7 @@ use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents a Refer-To header as defined in RFC 3515
 /// 
@@ -348,6 +349,42 @@ impl fmt::Display for ReferTo {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to Address display
+    }
+}
+
+// Implement TypedHeaderTrait for ReferTo
+impl TypedHeaderTrait for ReferTo {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::ReferTo
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    ReferTo::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

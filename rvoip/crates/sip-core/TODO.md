@@ -21,28 +21,28 @@
     - [x] ContentLength
     - [x] ContentType
     - [x] Expires
-    - [ ] Authorization
-    - [ ] WwwAuthenticate
-    - [ ] ProxyAuthenticate
-    - [ ] ProxyAuthorization
-    - [ ] AuthenticationInfo
+    - [x] Authorization
+    - [x] WwwAuthenticate
+    - [x] ProxyAuthenticate
+    - [x] ProxyAuthorization
+    - [x] AuthenticationInfo
     - [x] Accept
     - [x] Allow
-    - [ ] ReplyTo
-    - [ ] ReferTo
-    - [ ] Warning
-    - [ ] ContentDisposition
-    - [ ] AcceptLanguage
-    - [ ] Organization
-    - [ ] Priority
-    - [ ] Subject
-    - [ ] Server
-    - [ ] InReplyTo
-    - [ ] RetryAfter
-    - [ ] ErrorInfo
-    - [ ] CallInfo
-    - [ ] Supported
-    - [ ] Unsupported
+    - [x] ReplyTo
+    - [x] ReferTo
+    - [x] Warning
+    - [x] ContentDisposition
+    - [x] AcceptLanguage
+    - [x] Organization
+    - [x] Priority
+    - [x] Subject
+    - [x] Server
+    - [x] InReplyTo
+    - [x] RetryAfter
+    - [x] ErrorInfo
+    - [x] CallInfo
+    - [x] Supported
+    - [x] Unsupported
 
 ## Extended Functionality
 
