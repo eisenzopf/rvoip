@@ -37,7 +37,8 @@
 //! assert_eq!(to.tag(), Some("1928301774"));
 //! ```
 
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
 use crate::types::address::Address;
 use std::fmt;
 use std::str::FromStr;
@@ -371,6 +372,97 @@ impl Deref for To {
     /// ```
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+/// Implementation of TypedHeaderTrait for To header
+impl TypedHeaderTrait for To {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::To` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::To
+    }
+
+    /// Converts this To header into a generic Header.
+    ///
+    /// Creates a Header instance from this To header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this To header
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::To(self.clone()))
+    }
+
+    /// Creates a To header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a To header.
+    /// This will succeed if the header is a valid To header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed To header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::To {
+            return Err(Error::InvalidHeader(format!(
+                "Expected To header, got {:?}", header.name
+            )));
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::To(value) = &header.value {
+            return Ok(value.clone());
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    Self::from_str(s)
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in To header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for To header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::uri::Uri;
+
+    #[test]
+    fn test_to_typed_header_trait() {
+        // Create a To header
+        let uri = Uri::from_str("sip:bob@example.com").unwrap();
+        let mut address = Address::new_with_display_name("Bob", uri);
+        address.set_tag("87654321");
+        let to = To::new(address);
+
+        // Test header_name()
+        assert_eq!(To::header_name(), HeaderName::To);
+
+        // Test to_header()
+        let header = to.to_header();
+        assert_eq!(header.name, HeaderName::To);
+
+        // Test from_header()
+        let round_trip = To::from_header(&header).unwrap();
+        assert_eq!(round_trip, to);
     }
 }
 

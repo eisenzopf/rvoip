@@ -45,7 +45,8 @@
 //! assert_eq!(from.uri.to_string(), "sip:bob@example.org");
 //! ```
 
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader};
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
 use crate::types::address::Address;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -322,6 +323,97 @@ impl Deref for From {
     /// ```
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+/// Implementation of TypedHeaderTrait for From header
+impl TypedHeaderTrait for From {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::From` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::From
+    }
+
+    /// Converts this From header into a generic Header.
+    ///
+    /// Creates a Header instance from this From header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this From header
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::From(self.clone()))
+    }
+
+    /// Creates a From header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a From header.
+    /// This will succeed if the header is a valid From header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed From header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::From {
+            return Err(Error::InvalidHeader(format!(
+                "Expected From header, got {:?}", header.name
+            )));
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::From(value) = &header.value {
+            return Ok(value.clone());
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    Self::from_str(s)
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in From header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for From header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::uri::Uri;
+
+    #[test]
+    fn test_from_typed_header_trait() {
+        // Create a From header
+        let uri = Uri::from_str("sip:alice@example.com").unwrap();
+        let mut address = Address::new_with_display_name("Alice", uri);
+        address.set_tag("1928301774");
+        let from = From::new(address);
+
+        // Test header_name()
+        assert_eq!(From::header_name(), HeaderName::From);
+
+        // Test to_header()
+        let header = from.to_header();
+        assert_eq!(header.name, HeaderName::From);
+
+        // Test from_header()
+        let round_trip = From::from_header(&header).unwrap();
+        assert_eq!(round_trip, from);
     }
 }
 

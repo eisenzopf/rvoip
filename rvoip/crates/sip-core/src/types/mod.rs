@@ -138,6 +138,7 @@ pub mod expires;
 pub mod from;
 pub mod header;
 pub use header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+pub mod headers;
 pub mod in_reply_to;
 pub mod max_forwards;
 pub mod organization;

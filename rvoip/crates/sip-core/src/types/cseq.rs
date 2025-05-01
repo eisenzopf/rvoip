@@ -55,6 +55,8 @@ use std::str::FromStr;
 use nom::combinator::all_consuming;
 use crate::parser::headers::cseq::{parse_cseq, full_parse_cseq};
 use serde::{Serialize, Deserialize};
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 
 /// Represents the CSeq header field (RFC 3261 Section 8.1.1.5).
 /// 
@@ -359,6 +361,71 @@ impl FromStr for CSeq {
     }
 }
 
+// Add TypedHeaderTrait implementation
+impl TypedHeaderTrait for CSeq {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::CSeq` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::CSeq
+    }
+
+    /// Converts this CSeq header into a generic Header.
+    ///
+    /// Creates a Header instance from this CSeq header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this CSeq header
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::CSeq(self.clone()))
+    }
+
+    /// Creates a CSeq header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a CSeq header.
+    /// This will succeed if the header is a valid CSeq header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed CSeq header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::CSeq {
+            return Err(Error::InvalidHeader(format!(
+                "Expected CSeq header, got {:?}", header.name
+            )));
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::CSeq(value) = &header.value {
+            return Ok(value.clone());
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    s.parse::<CSeq>()
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in CSeq header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for CSeq header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +490,22 @@ mod tests {
         let with_new_method = cseq.increment_with_method(Method::Bye);
         assert_eq!(with_new_method.seq, 102);
         assert_eq!(with_new_method.method, Method::Bye);
+    }
+
+    #[test]
+    fn test_cseq_typed_header_trait() {
+        // Create a CSeq header
+        let cseq = CSeq::new(12345, Method::Register);
+
+        // Test header_name()
+        assert_eq!(CSeq::header_name(), HeaderName::CSeq);
+
+        // Test to_header()
+        let header = cseq.to_header();
+        assert_eq!(header.name, HeaderName::CSeq);
+
+        // Test from_header()
+        let round_trip = CSeq::from_header(&header).unwrap();
+        assert_eq!(round_trip, cseq);
     }
 } 

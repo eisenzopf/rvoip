@@ -72,6 +72,7 @@ use crate::types::Param;
 use crate::types::uri::Host;
 use crate::types::param::GenericValue;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 
 /// A structured representation of a SIP Via header
 ///
@@ -1095,5 +1096,106 @@ impl ViaHeader {
             Param::Lr if name.eq_ignore_ascii_case("lr") => Some(None),
             _ => None,
         })
+    }
+}
+
+// Add TypedHeaderTrait implementation
+impl TypedHeaderTrait for Via {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::Via` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::Via
+    }
+
+    /// Converts this Via header into a generic Header.
+    ///
+    /// Creates a Header instance from this Via header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this Via header
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Via(self.0.clone()))
+    }
+
+    /// Creates a Via header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a Via header.
+    /// This will succeed if the header is a valid Via header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed Via header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::Via {
+            return Err(Error::InvalidHeader(format!(
+                "Expected Via header, got {:?}", header.name
+            )));
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::Via(values) = &header.value {
+            return Ok(Via(values.clone()));
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    s.parse::<Via>()
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in Via header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for Via header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
+// Implement FromStr for Via
+impl FromStr for Via {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match crate::parser::headers::via::parse_via_params_public(s.as_bytes()) {
+            Ok((_, headers)) => Ok(Via(headers)),
+            Err(e) => Err(crate::error::Error::ParseError(format!("Failed to parse Via header: {:?}", e))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_via_typed_header_trait() {
+        // Create a Via header
+        let via_str = "SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds";
+        let via = Via::from_str(via_str).unwrap();
+
+        // Test header_name()
+        assert_eq!(Via::header_name(), HeaderName::Via);
+
+        // Test to_header()
+        let header = via.to_header();
+        assert_eq!(header.name, HeaderName::Via);
+
+        // Test from_header()
+        let round_trip = Via::from_header(&header).unwrap();
+        assert_eq!(round_trip, via);
     }
 }

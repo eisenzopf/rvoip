@@ -57,6 +57,8 @@ use serde::{Deserialize, Serialize};
 use crate::parser::ParseResult;
 use crate::types::param::Param;
 use crate::types::uri::Uri;
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 
 /// Represents the Route header field (RFC 3261 Section 20.34).
 /// Contains a list of route entries (typically Addresses).
@@ -621,6 +623,72 @@ impl From<Address> for Route {
     }
 }
 
+// Add TypedHeaderTrait implementation
+impl TypedHeaderTrait for Route {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::Route` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::Route
+    }
+
+    /// Converts this Route header into a generic Header.
+    ///
+    /// Creates a Header instance from this Route header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this Route header
+    fn to_header(&self) -> Header {
+        // Convert the Route entries into HeaderValue format
+        Header::new(Self::header_name(), HeaderValue::Route(self.0.clone()))
+    }
+
+    /// Creates a Route header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a Route header.
+    /// This will succeed if the header is a valid Route header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed Route header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::Route {
+            return Err(Error::InvalidHeader(format!(
+                "Expected Route header, got {:?}", header.name
+            )));
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::Route(entries) = &header.value {
+            return Ok(Route::new(entries.clone()));
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    s.parse::<Route>()
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in Route header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for Route header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +797,27 @@ mod tests {
         // Test round-trip
         let route2 = Route::from_str(&route_displayed).unwrap();
         assert_eq!(route, route2);
+    }
+
+    #[test]
+    fn test_route_typed_header_trait() {
+        // Create a Route header
+        let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
+        let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
+        let entry1 = ParserRouteValue(Address::new(uri1));
+        let entry2 = ParserRouteValue(Address::new(uri2));
+        let route = Route::new(vec![entry1, entry2]);
+
+        // Test header_name()
+        assert_eq!(Route::header_name(), HeaderName::Route);
+
+        // Test to_header()
+        let header = route.to_header();
+        assert_eq!(header.name, HeaderName::Route);
+
+        // Test from_header()
+        let round_trip = Route::from_header(&header).unwrap();
+        assert_eq!(round_trip.0.len(), route.0.len());
+        assert_eq!(round_trip.to_string(), route.to_string());
     }
 } 

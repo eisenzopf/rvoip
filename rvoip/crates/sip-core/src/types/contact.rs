@@ -53,12 +53,13 @@ use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
 use std::fmt;
 use std::str::FromStr;
-use crate::error::Result;
 use crate::parser::headers::parse_contact; // For FromStr
 use std::ops::Deref;
 use crate::types::param::Param;
 use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
+use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::error::{Error, Result};
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.
@@ -675,3 +676,118 @@ impl FromStr for Contact {
 
 // TODO: Review if ContactParamInfo is the best structure or if Address is sufficient.
 // TODO: Re-evaluate handling of empty Contact header. 
+
+// Add TypedHeaderTrait implementation for Contact header
+impl TypedHeaderTrait for Contact {
+    type Name = HeaderName;
+
+    /// Returns the header name for this header type.
+    ///
+    /// # Returns
+    ///
+    /// The `HeaderName::Contact` enum variant
+    fn header_name() -> Self::Name {
+        HeaderName::Contact
+    }
+
+    /// Converts this Contact header into a generic Header.
+    ///
+    /// Creates a Header instance from this Contact header, which can be used
+    /// when constructing SIP messages.
+    ///
+    /// # Returns
+    ///
+    /// A Header instance representing this Contact header
+    fn to_header(&self) -> Header {
+        // If we have a star contact, create a special *
+        if self.is_star() {
+            return Header::text(Self::header_name(), "*");
+        }
+        
+        // Otherwise use the normal Contact value
+        let contact_values: Vec<ContactValue> = self.0.iter().cloned().collect();
+        Header::new(Self::header_name(), HeaderValue::Contact(contact_values[0].clone()))
+    }
+
+    /// Creates a Contact header from a generic Header.
+    ///
+    /// Attempts to parse and convert a generic Header into a Contact header.
+    /// This will succeed if the header is a valid Contact header.
+    ///
+    /// # Parameters
+    ///
+    /// - `header`: The generic Header to convert
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the parsed Contact header if successful, or an error otherwise
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != HeaderName::Contact {
+            return Err(Error::InvalidHeader(format!(
+                "Expected Contact header, got {:?}", header.name
+            )));
+        }
+
+        // Check for special * value
+        if let HeaderValue::Raw(bytes) = &header.value {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if s.trim() == "*" {
+                    return Ok(Contact::new_star());
+                }
+            }
+        }
+
+        // Try to use the pre-parsed value if available
+        if let HeaderValue::Contact(value) = &header.value {
+            return Ok(Contact(vec![value.clone()]));
+        }
+
+        // Otherwise parse from raw value
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    s.parse::<Contact>()
+                } else {
+                    Err(Error::ParseError("Invalid UTF-8 in Contact header".to_string()))
+                }
+            },
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected value type for Contact header: {:?}", header.value
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::uri::Uri;
+    use crate::types::address::Address;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_contact_typed_header_trait() {
+        // Create a Contact header with an address
+        let uri = Uri::from_str("sip:alice@192.168.1.1:5060").unwrap();
+        let address = Address::new_with_display_name("Alice", uri);
+        let contact_info = ContactParamInfo { address };
+        let contact = Contact::new_params(vec![contact_info]);
+
+        // Test header_name()
+        assert_eq!(Contact::header_name(), HeaderName::Contact);
+
+        // Test to_header()
+        let header = contact.to_header();
+        assert_eq!(header.name, HeaderName::Contact);
+
+        // Test from_header()
+        let round_trip = Contact::from_header(&header).unwrap();
+        assert_eq!(round_trip.to_string(), contact.to_string());
+        
+        // Test star contact
+        let star_contact = Contact::new_star();
+        let star_header = star_contact.to_header();
+        let star_round_trip = Contact::from_header(&star_header).unwrap();
+        assert!(star_round_trip.is_star());
+    }
+} 
