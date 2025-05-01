@@ -184,6 +184,27 @@ impl Address {
         }
     }
     
+    /// Returns a reference to the URI
+    ///
+    /// # Returns
+    ///
+    /// A reference to the URI of this address
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::{Address, Uri};
+    /// use std::str::FromStr;
+    ///
+    /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let addr = Address::new(uri.clone());
+    /// 
+    /// assert_eq!(addr.uri(), &uri);
+    /// ```
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+    
     /// Creates a new Address with both display name and URI.
     ///
     /// The display name will be normalized:

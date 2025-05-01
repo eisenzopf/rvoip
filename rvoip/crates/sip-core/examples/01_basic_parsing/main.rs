@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::types::headers::HeaderAccess;
 use tracing::info;
 
 fn main() {
@@ -61,7 +62,7 @@ fn parse_invite_request() {
         // Display information about these headers
         info!("From: {} <{}>", from.address().display_name().unwrap_or(""), from.address().uri());
         info!("To: {} <{}>", to.address().display_name().unwrap_or(""), to.address().uri());
-        info!("Contact: {}", contact.address().uri());
+        info!("Contact: {}", contact.address().map_or("none".to_string(), |addr| addr.uri().to_string()));
         
         // Get the tag parameter from the From header
         if let Some(tag) = from.tag() {
@@ -165,21 +166,23 @@ fn parse_multiple_headers() {
         
         // Display each Record-Route header
         for (i, rr) in record_routes.iter().enumerate() {
-            info!("Record-Route {}: {}", i + 1, rr.address().uri());
-            
-            // Check for the 'lr' parameter (loose routing)
-            if rr.address().uri().has_parameter("lr") {
-                info!("  Uses loose routing (has 'lr' parameter)");
+            // For each RecordRouteEntry in the RecordRoute
+            for (j, entry) in rr.iter().enumerate() {
+                info!("Record-Route {}.{}: {}", i + 1, j + 1, entry.uri());
+                
+                // Check for the 'lr' parameter (loose routing)
+                if entry.is_loose_routing() {
+                    info!("  Uses loose routing (has 'lr' parameter)");
+                }
             }
         }
         
         // Demonstrate how to access headers by name (string) instead of type
-        if let Some(headers) = request.headers_by_name("record-route") {
-            info!("Found {} Record-Route headers by name", headers.len());
-        }
+        let headers = request.headers_by_name("record-route");
+        info!("Found {} Record-Route headers by name", headers.len());
         
         // Access headers using the raw API
-        let raw_headers = request.headers();
+        let raw_headers = request.all_headers();
         info!("Total number of headers: {}", raw_headers.len());
     }
 } 

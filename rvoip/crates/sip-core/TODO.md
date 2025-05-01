@@ -2,7 +2,7 @@
 
 ## API Consistency Improvements
 
-- [ ] **Standardize Method vs. Field Access**
+- [x] **Standardize Method vs. Field Access**
   - Ensure consistent access patterns across the library (methods preferred over direct field access)
   - Add method wrappers for fields that need to be publicly accessible
   - Fix methods like `version()`, `status_code()`, `uri()` for consistent API
@@ -76,7 +76,7 @@
     - [x] `has_header(name: &HeaderName)` method to check header presence
     - [x] `header_names()` method to list all header names in the message
   - [x] Create HeaderAccess trait to consolidate shared functionality
-  - [ ] Add comprehensive documentation and examples
+  - [x] Add comprehensive documentation and examples
   - [x] Add unit tests for all header access methods
 
 - [ ] **SIP Message Utilities**
