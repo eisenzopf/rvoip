@@ -49,6 +49,7 @@ use crate::parser::headers::parse_expires;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Expires header field (RFC 3261 Section 20.19).
 /// Indicates the duration for which a registration or subscription is valid.
@@ -179,6 +180,45 @@ impl FromStr for Expires {
         all_consuming(parse_expires)(s.as_bytes())
             .map_err(Error::from)
             .map(|(_, value)| Expires(value))
+    }
+}
+
+impl TypedHeaderTrait for Expires {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Expires
+    }
+
+    fn to_header(&self) -> Header {
+        Header::integer(Self::header_name(), self.0 as i64)
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    s.trim().parse::<u32>().map(Expires)
+                        .map_err(|_| Error::InvalidHeader(
+                            format!("Invalid integer value in {} header", Self::header_name())
+                        ))
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::Expires(expires) => Ok(*expires),
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

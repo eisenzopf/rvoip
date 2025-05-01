@@ -16,7 +16,33 @@
     - [x] CSeq
     - [x] RecordRoute
     - [x] Route
-    - [ ] Other standard headers
+    - [x] CallId
+    - [x] MaxForwards
+    - [x] ContentLength
+    - [x] ContentType
+    - [x] Expires
+    - [ ] Authorization
+    - [ ] WwwAuthenticate
+    - [ ] ProxyAuthenticate
+    - [ ] ProxyAuthorization
+    - [ ] AuthenticationInfo
+    - [x] Accept
+    - [x] Allow
+    - [ ] ReplyTo
+    - [ ] ReferTo
+    - [ ] Warning
+    - [ ] ContentDisposition
+    - [ ] AcceptLanguage
+    - [ ] Organization
+    - [ ] Priority
+    - [ ] Subject
+    - [ ] Server
+    - [ ] InReplyTo
+    - [ ] RetryAfter
+    - [ ] ErrorInfo
+    - [ ] CallInfo
+    - [ ] Supported
+    - [ ] Unsupported
 
 ## Extended Functionality
 

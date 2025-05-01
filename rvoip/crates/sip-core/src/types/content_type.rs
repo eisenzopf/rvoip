@@ -50,6 +50,7 @@ use crate::parser;
 use crate::parser::headers::content_type::ContentTypeValue;
 use crate::parser::headers::content_type::parse_content_type_value;
 use serde::{Deserialize, Serialize};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Content-Type header field (RFC 3261 Section 7.3.1).
 /// Describes the media type of the message body.
@@ -216,6 +217,42 @@ impl FromStr for ContentType {
         all_consuming(parse_content_type_value)(s.as_bytes())
             .map_err(Error::from)
             .map(|(_, value)| ContentType(value))
+    }
+}
+
+impl TypedHeaderTrait for ContentType {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::ContentType
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::ContentType(self.clone()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    ContentType::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::ContentType(content_type) => Ok(content_type.clone()),
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

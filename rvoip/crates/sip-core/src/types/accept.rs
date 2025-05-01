@@ -46,6 +46,7 @@ use ordered_float::NotNan;
 use crate::parser::headers::accept::AcceptValue;
 use serde::{Deserialize, Serialize};
 use crate::types::param::Param;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Accept header field (RFC 3261 Section 20.1).
 ///
@@ -300,6 +301,42 @@ impl fmt::Display for AcceptValue {
             s.push_str(&format!(";{}={}", k, v));
         }
         write!(f, "{}", s)
+    }
+}
+
+impl TypedHeaderTrait for Accept {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Accept
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Accept(self.0.clone()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    Accept::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::Accept(accept_values) => Ok(Accept(accept_values.clone())),
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 }
 

@@ -47,6 +47,7 @@ use crate::error::{Result, Error};
 use crate::parser::headers::parse_content_length;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Content-Length header field (RFC 3261 Section 7.3.2).
 /// Indicates the size of the message body in bytes.
@@ -249,6 +250,45 @@ impl FromStr for ContentLength {
         match s.trim().parse::<u32>() {
             Ok(len) => Ok(ContentLength(len)),
             Err(_) => Err(Error::ParseError(format!("Invalid Content-Length value: {}", s)))
+        }
+    }
+}
+
+impl TypedHeaderTrait for ContentLength {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::ContentLength
+    }
+
+    fn to_header(&self) -> Header {
+        Header::integer(Self::header_name(), self.0 as i64)
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    s.trim().parse::<u32>().map(ContentLength)
+                        .map_err(|_| Error::InvalidHeader(
+                            format!("Invalid integer value in {} header", Self::header_name())
+                        ))
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::ContentLength(content_length) => Ok(*content_length),
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
         }
     }
 }

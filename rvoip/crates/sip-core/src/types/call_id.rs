@@ -45,6 +45,7 @@ use std::fmt;
 use std::str::FromStr;
 use crate::error::{Result, Error};
 use crate::parser::headers::parse_call_id;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use uuid::Uuid;
 use std::ops::Deref;
 use nom::combinator::all_consuming;
@@ -185,6 +186,49 @@ impl FromStr for CallId {
         match parse_result {
             Ok((_, call_id)) => Ok(call_id),
             Err(e) => Err(Error::from(e)), 
+        }
+    }
+}
+
+impl TypedHeaderTrait for CallId {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::CallId
+    }
+
+    fn to_header(&self) -> Header {
+        Header::text(Self::header_name(), self.0.clone())
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    Ok(CallId::new(s.trim()))
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::CallId((local_part, host_part)) => {
+                let mut call_id = String::from_utf8(local_part.clone())?;
+                if let Some(host) = host_part {
+                    call_id.push('@');
+                    call_id.push_str(&String::from_utf8(host.clone())?);
+                }
+                Ok(CallId::new(call_id))
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
         }
     }
 }

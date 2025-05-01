@@ -45,6 +45,7 @@ use std::fmt;
 use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Allow header field (RFC 3261 Section 20.5).
 /// Lists the SIP methods supported by the User Agent.
@@ -296,5 +297,65 @@ impl<'a> IntoIterator for &'a mut Allow {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter_mut()
+    }
+}
+
+impl TypedHeaderTrait for Allow {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Allow
+    }
+
+    fn to_header(&self) -> Header {
+        // Convert the Vec<Method> to Vec<Vec<u8>> as expected by HeaderValue::Allow
+        let methods_bytes: Vec<Vec<u8>> = self.0.iter()
+            .map(|method| method.to_string().into_bytes())
+            .collect();
+        
+        Header::new(Self::header_name(), HeaderValue::Allow(methods_bytes))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    Allow::from_str(s.trim())
+                } else {
+                    Err(Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            HeaderValue::Allow(methods_bytes) => {
+                // Convert Vec<Vec<u8>> to Vec<Method>
+                let mut methods = Vec::with_capacity(methods_bytes.len());
+                for method_bytes in methods_bytes {
+                    if let Ok(method_str) = std::str::from_utf8(method_bytes) {
+                        if let Ok(method) = Method::from_str(method_str) {
+                            methods.push(method);
+                        } else {
+                            return Err(Error::InvalidHeader(
+                                format!("Invalid method name: {}", method_str)
+                            ));
+                        }
+                    } else {
+                        return Err(Error::InvalidHeader(
+                            format!("Invalid UTF-8 in method name")
+                        ));
+                    }
+                }
+                Ok(Allow(methods))
+            },
+            _ => Err(Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
     }
 } 
