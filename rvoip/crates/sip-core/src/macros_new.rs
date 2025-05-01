@@ -154,6 +154,10 @@ macro_rules! sip_request {
                             // Handle User-Agent header with custom logic if needed
                             builder = builder.header(TypedHeader::UserAgent(vec![header_value.to_string()]));
                         },
+                        "ContentType" => {
+                            // Special handling for ContentType to use the content_type method
+                            builder = builder.content_type(&header_value);
+                        },
                         _ => {
                             // Generic header handling
                             use $crate::types::header::{HeaderName, HeaderValue};
@@ -360,6 +364,10 @@ macro_rules! sip_response {
                         "Server" => {
                             // Handle Server header
                             builder = builder.header(TypedHeader::Server(vec![header_value.to_string()]));
+                        },
+                        "ContentType" => {
+                            // Special handling for ContentType to use the content_type method
+                            builder = builder.content_type(&header_value);
                         },
                         _ => {
                             // Generic header handling

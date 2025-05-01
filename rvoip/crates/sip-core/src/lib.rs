@@ -210,7 +210,7 @@ pub mod error;
 pub mod parser;
 pub mod types;
 pub mod sdp;
-pub mod macros_new;
+pub mod macros;
 pub mod simple_builder;
 
 // Remove these commented out modules - they're now part of types/
@@ -280,7 +280,7 @@ pub use sdp::parser::{
     parse_sdp
 };
 pub use simple_builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
-pub use macros_new::*;
+pub use macros::*;
 
 /// Re-export of common types and functions for SIP
 pub mod prelude {
@@ -353,7 +353,7 @@ pub mod prelude {
     pub use crate::parser::headers::accept_language::LanguageInfo;
     
     // Also add the macros from macros_new
-    pub use crate::macros_new::*;
+    pub use crate::macros::*;
 }
 
 /// Re-export of common types and functions for SDP
