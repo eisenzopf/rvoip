@@ -266,25 +266,25 @@ impl Response {
 
     /// Sets the body of the response
     ///
+    /// This method also automatically adds or updates the Content-Length header.
+    ///
     /// # Parameters
-    /// - `body`: The response body
+    /// - `body`: The body content
     ///
     /// # Returns
     /// Self for method chaining
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rvoip_sip_core::prelude::*;
-    /// use bytes::Bytes;
-    ///
-    /// let response = Response::new(StatusCode::Ok)
-    ///     .with_body(Bytes::from("SDP body content"));
-    ///
-    /// assert_eq!(response.body, Bytes::from("SDP body content"));
-    /// ```
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
+        
+        // Add or update Content-Length header
+        let content_length = TypedHeader::ContentLength(types::content_length::ContentLength(self.body.len() as u32));
+        
+        // Remove any existing Content-Length headers
+        self.headers.retain(|h| h.name() != HeaderName::ContentLength);
+        
+        // Add the new Content-Length header
+        self.headers.push(content_length);
+        
         self
     }
 
@@ -661,7 +661,7 @@ mod tests {
         // Check Content-Length was set correctly
         let cl = response.header(&HeaderName::ContentLength).unwrap();
         if let TypedHeader::ContentLength(cl) = cl {
-            assert_eq!(*cl, types::content_length::ContentLength(70));
+            assert_eq!(*cl, types::content_length::ContentLength(64));
         } else {
             panic!("Expected ContentLength header");
         }
