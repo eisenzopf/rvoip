@@ -264,6 +264,7 @@ macro_rules! sip_response {
         $(, via_host: $via_host:expr)?
         $(, via_transport: $via_transport:expr)?
         $(, via_branch: $via_branch:expr)?
+        $(, max_forwards: $max_forwards:expr)?
         $(, contact_uri: $contact_uri:expr)?
         $(, contact_name: $contact_name:expr)?
         $(, content_type: $content_type:expr)?
@@ -395,6 +396,12 @@ macro_rules! sip_response {
                                 HeaderValue::text($header_value)
                             ))
                         },
+                        "MaxForwards" => {
+                            builder.header(TypedHeader::Other(
+                                HeaderName::MaxForwards, 
+                                HeaderValue::integer($header_value.parse::<i64>().expect("Invalid Max-Forwards value"))
+                            ))
+                        },
                         header_name => {
                             // Capitalize first letter and handle underscores
                             let mut name = header_name.to_string();
@@ -464,7 +471,9 @@ mod tests {
             via_host: "alice.example.com:5060", 
             via_transport: "UDP", 
             via_branch: "z9hG4bK776asdhds",
-            max_forwards: 70
+            headers: {
+                MaxForwards: "70"
+            }
         };
 
         // Check method and URI
@@ -508,7 +517,8 @@ mod tests {
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
                 ContentType: "application/sdp",
-                ContentLength: "56"
+                ContentLength: "56",
+                MaxForwards: "70"
             },
             body: sdp_body
         };
@@ -534,9 +544,9 @@ mod tests {
                 CallId: "register-123@example.com",
                 CSeq: "1 REGISTER",
                 Via: "SIP/2.0/UDP 192.168.1.2:5060;branch=z9hG4bK-reg",
-                Contact: "<sip:alice@192.168.1.2:5060;transport=udp>"
-            },
-            max_forwards: 70
+                Contact: "<sip:alice@192.168.1.2:5060;transport=udp>",
+                MaxForwards: "70"
+            }
         };
 
         // Check method and URI
@@ -562,9 +572,9 @@ mod tests {
                 CSeq: "100 OPTIONS",
                 Via: "SIP/2.0/TCP system.example.com:5060;branch=z9hG4bK-opts",
                 Accept: "application/sdp",
-                UserAgent: "Test Client/1.0"
-            },
-            max_forwards: 70
+                UserAgent: "Test Client/1.0",
+                MaxForwards: "70"
+            }
         };
 
         // Check custom headers
@@ -588,9 +598,9 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds;received=192.168.1.1;rport=5060"
-            },
-            max_forwards: 70
+                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds;received=192.168.1.1;rport=5060",
+                MaxForwards: "70"
+            }
         };
 
         // Check Via parameters
@@ -619,7 +629,8 @@ mod tests {
             cseq_method: Method::Invite,
             via_host: "alice.example.com:5060", 
             via_transport: "UDP", 
-            via_branch: "z9hG4bK776asdhds"
+            via_branch: "z9hG4bK776asdhds",
+            MaxForwards: "70"
         };
 
         // Check status and reason
@@ -651,7 +662,8 @@ mod tests {
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
                 ContentType: "application/sdp",
-                ContentLength: "56"
+                ContentLength: "56",
+                MaxForwards: "70"
             },
             body: sdp_body
         };
@@ -676,7 +688,8 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds"
+                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
+                MaxForwards: "70"
             }
         };
         
@@ -688,7 +701,8 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds"
+                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
+                MaxForwards: "70"
             }
         };
         
@@ -714,7 +728,8 @@ mod tests {
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
                 Server: "Test Server/1.0",
-                Warning: "399 example.com \"Incompatible parameters\""
+                Warning: "399 example.com \"Incompatible parameters\"",
+                MaxForwards: "70"
             }
         };
         
@@ -740,7 +755,8 @@ mod tests {
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/UDP proxy1.example.com:5060;branch=z9hG4bK-p1",
                 Via: "SIP/2.0/UDP proxy2.example.com:5060;branch=z9hG4bK-p2",
-                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds"
+                Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
+                MaxForwards: "70"
             }
         };
         
@@ -770,9 +786,9 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "abc123@example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1"
-            },
-            max_forwards: 70
+                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1",
+                MaxForwards: "70"
+            }
         };
         
         let request2 = sip_request! {
@@ -783,9 +799,9 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "abc123@example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1"
-            },
-            max_forwards: 70
+                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1",
+                MaxForwards: "70"
+            }
         };
         
         let request3 = sip_request! {
@@ -796,9 +812,9 @@ mod tests {
                 To: "Bob <sip:bob@example.com>",
                 CallId: "abc123@example.com",
                 CSeq: "1 INVITE",
-                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1"
-            },
-            max_forwards: 70
+                Via: "SIP/2.0/UDP example.com;branch=z9hG4bK1234;received=192.168.1.1",
+                MaxForwards: "70"
+            }
         };
         
         // Check the same tag values are present regardless of syntax
@@ -822,9 +838,9 @@ mod tests {
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/TCP alice.example.com:5060;branch=z9hG4bK776asdhds",
-                Contact: "<sip:alice@alice.example.com;transport=tcp>"
-            },
-            max_forwards: 70
+                Contact: "<sip:alice@alice.example.com;transport=tcp>",
+                MaxForwards: "70"
+            }
         };
 
         // Check params in URIs
@@ -951,7 +967,8 @@ mod tests {
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
                 Via: "SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds",
-                Contact: "<sip:bob@192.168.1.2>"
+                Contact: "<sip:bob@192.168.1.2>",
+                MaxForwards: "70"
             }
         };
         
@@ -964,7 +981,8 @@ mod tests {
                 From: "Alice <sip:alice@example.com>;tag=1928301774",
                 To: "Bob <sip:bob@example.com>;tag=as83kd9bs",
                 CSeq: "1 INVITE",
-                Contact: "<sip:bob@192.168.1.2>"
+                Contact: "<sip:bob@192.168.1.2>",
+                MaxForwards: "70"
             }
         };
         
@@ -978,7 +996,8 @@ mod tests {
                 CallId: "a84b4c76e66710@pc33.atlanta.example.com",
                 CSeq: "1 INVITE",
                 Contact: "<sip:bob@192.168.1.2>",
-                Server: "Test Server/1.0"
+                Server: "Test Server/1.0",
+                MaxForwards: "70"
             }
         };
         

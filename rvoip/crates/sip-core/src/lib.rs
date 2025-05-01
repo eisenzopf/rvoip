@@ -212,6 +212,7 @@ pub mod types;
 pub mod sdp;
 pub mod macros;
 pub mod builder;
+pub mod simple_builder;
 
 // Remove these commented out modules - they're now part of types/
 // // pub mod header;
@@ -352,6 +353,7 @@ pub mod prelude {
     pub use crate::types::call_info::{CallInfo, CallInfoValue, InfoPurpose};
     pub use crate::types::AcceptLanguage;
     pub use crate::parser::headers::accept_language::LanguageInfo;
+    pub use crate::simple_builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 }
 
 /// Re-export of common types and functions for SDP
