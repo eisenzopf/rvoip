@@ -273,28 +273,8 @@ impl Request {
         &self.uri
     }
     
-    /// Retrieves a strongly-typed header value
-    ///
-    /// # Type Parameters
-    /// - `T`: The expected header type
-    ///
-    /// # Returns
-    /// The typed header if found and correctly typed, or None
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rvoip_sip_core::prelude::*;
-    ///
-    /// let call_id = CallId::new("abc123");
-    /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-    ///     .with_header(TypedHeader::CallId(call_id.clone()));
-    ///
-    /// let retrieved = request.typed_header::<CallId>();
-    /// assert!(retrieved.is_some());
-    /// assert_eq!(retrieved.unwrap().value(), "abc123");
-    /// ```
-    pub fn typed_header<T: TypedHeaderTrait>(&self) -> Option<&T> {
+    /// Retrieves the first header with the specified type, if any.
+    pub fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> {
         for header in &self.headers {
             if let Some(typed) = try_as_typed_header::<T>(header) {
                 return Some(typed);
@@ -658,18 +638,8 @@ impl HeaderAccess for Request {
 }
 
 // Helper function to try casting a TypedHeader to a specific type
-fn try_as_typed_header<T: TypedHeaderTrait>(header: &TypedHeader) -> Option<&T> {
-    if header.name() == T::header_name().into() {
-        // This is unsafe, but necessary for downcasting
-        // The safety is maintained by checking the header name first
-        unsafe {
-            let ptr = header as *const TypedHeader;
-            let ptr_any = ptr as *const dyn std::any::Any;
-            let ptr_t = ptr_any as *const T;
-            return Some(&*ptr_t);
-        }
-    }
-    None
+fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedHeader) -> Option<&'a T> {
+    header.as_typed_ref::<T>()
 }
 
 #[cfg(test)]
