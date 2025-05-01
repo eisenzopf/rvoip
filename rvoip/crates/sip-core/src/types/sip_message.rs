@@ -58,6 +58,7 @@ use crate::types::sip_request::Request;
 use crate::types::sip_response::Response;
 use crate::types::to::To;
 use crate::types::from::From;
+use crate::types::param::Param;
 
 /// Represents either a SIP request or response
 ///
@@ -401,7 +402,11 @@ impl Message {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let via = Via::new("UDP", "example.com", 5060);
+    /// let via = Via::new(
+    ///     "SIP", "2.0", "UDP",
+    ///     "example.com", Some(5060),
+    ///     vec![Param::branch("z9hG4bK123456")]
+    /// ).unwrap();
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::Via(via.clone()));
     /// let message: Message = response.into();
@@ -436,7 +441,11 @@ impl Message {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let via = Via::new("UDP", "example.com", 5060);
+    /// let via = Via::new(
+    ///     "SIP", "2.0", "UDP",
+    ///     "example.com", Some(5060),
+    ///     vec![Param::branch("z9hG4bK123456")]
+    /// ).unwrap();
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::Via(via.clone()));
     /// let message: Message = response.into();
@@ -537,11 +546,14 @@ impl Message {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use std::convert::From;
     ///
     /// // Add a header to a request message
     /// let request = Request::new(Method::Invite, Uri::sip("bob@example.com"));
-    /// let message = Message::from(request)
-    ///     .with_header(TypedHeader::CallId(CallId::new("test-call-id")));
+    /// // Convert Request to Message using From trait
+    /// let message: Message = From::from(request);
+    /// // Add header to the message
+    /// let message = message.with_header(TypedHeader::CallId(CallId::new("test-call-id")));
     /// ```
     pub fn with_header(self, header: TypedHeader) -> Self {
         match self {
@@ -584,14 +596,33 @@ impl Message {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    /// use rvoip_sip_core::types::param::Param;
+    ///
+    /// // Create addresses for From and To
+    /// let alice_uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let alice_addr = Address::new_with_display_name("Alice", alice_uri);
+    /// let mut from = From::new(alice_addr);
+    /// from.set_tag("1928301774");
+    ///
+    /// let bob_uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let bob_addr = Address::new_with_display_name("Bob", bob_uri);
+    /// let to = To::new(bob_addr);
+    ///
+    /// // Create a Via header
+    /// let via = Via::new(
+    ///     "SIP", "2.0", "UDP",
+    ///     "example.com", Some(5060),
+    ///     vec![Param::branch("z9hG4bK123456")]
+    /// ).unwrap();
     ///
     /// // Create a message with an SDP body
     /// let msg = Message::new()
-    ///     .with_header(TypedHeader::From(From::new("Alice", "sip:alice@example.com").with_tag("1928301774")))
-    ///     .with_header(TypedHeader::To(To::new("Bob", "sip:bob@example.com")))
+    ///     .with_header(TypedHeader::From(from))
+    ///     .with_header(TypedHeader::To(to))
     ///     .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.example.com")))
     ///     .with_header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
-    ///     .with_header(TypedHeader::Via(Via::new_simple("UDP", "example.com", 5060).expect("Failed to create Via")))
+    ///     .with_header(TypedHeader::Via(via))
     ///     .with_body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n");
     ///
     /// // The Content-Length header should be automatically set
@@ -780,7 +811,11 @@ mod tests {
 
     #[test]
     fn test_via_headers() {
-        let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via");
+        let via = Via::new(
+            "SIP", "2.0", "UDP",
+            "example.com", Some(5060),
+            vec![Param::branch("z9hG4bK123456")]
+        ).unwrap();
         let request = Request::new(Method::Invite, "sip:alice@example.com".parse().unwrap())
             .with_header(TypedHeader::Via(via.clone()));
         

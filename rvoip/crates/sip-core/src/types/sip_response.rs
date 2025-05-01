@@ -60,6 +60,8 @@ use crate::types::to::To;
 use crate::types::sip_request::Request;
 use crate::types::from::From;
 use crate::types::CSeq;
+use crate::types::address::Address;
+use crate::types::uri::Uri;
 
 /// A SIP response message
 ///
@@ -368,9 +370,17 @@ impl Response {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
     ///
-    /// let from = From::new(Address::new_with_display_name("Alice", "sip:alice@atlanta.com".parse().unwrap())
-    ///     .with_parameter("tag", "1928301774"));
+    /// // Create a URI for the address
+    /// let uri = Uri::from_str("sip:alice@atlanta.com").unwrap();
+    /// // Create an address with display name
+    /// let address = Address::new_with_display_name("Alice", uri);
+    /// // Create a From header with the address
+    /// let mut from = From::new(address);
+    /// // Add a tag parameter
+    /// from.set_tag("1928301774");
+    /// 
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::From(from.clone()));
     ///
@@ -428,7 +438,7 @@ impl Response {
     ///
     /// let retrieved = response.cseq();
     /// assert!(retrieved.is_some());
-    /// assert_eq!(retrieved.unwrap().method(), Method::Invite);
+    /// assert_eq!(retrieved.unwrap().method().clone(), Method::Invite);
     /// ```
     pub fn cseq(&self) -> Option<&CSeq> {
         if let Some(h) = self.header(&HeaderName::CSeq) {
@@ -449,7 +459,11 @@ impl Response {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let via = Via::new("UDP", "example.com", 5060);
+    /// let via = Via::new(
+    ///     "SIP", "2.0", "UDP",
+    ///     "example.com", Some(5060),
+    ///     vec![Param::branch("z9hG4bK123456")]
+    /// ).unwrap();
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::Via(via.clone()));
     ///
@@ -459,9 +473,7 @@ impl Response {
     pub fn via_headers(&self) -> Vec<Via> {
         let mut result = Vec::new();
         for header in &self.headers {
-            // Directly match the TypedHeader::Via variant
             if let TypedHeader::Via(via_data) = header {
-                // Via is already a Vec<ViaHeader> wrapper
                 result.push(via_data.clone());
             }
         }
@@ -478,7 +490,11 @@ impl Response {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let via = Via::new("UDP", "example.com", 5060);
+    /// let via = Via::new(
+    ///     "SIP", "2.0", "UDP",
+    ///     "example.com", Some(5060),
+    ///     vec![Param::branch("z9hG4bK123456")]
+    /// ).unwrap();
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::Via(via.clone()));
     ///
@@ -553,12 +569,23 @@ impl Response {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::headers::HeaderAccess;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a URI for the addresses
+    /// let alice_uri = Uri::from_str("sip:alice@example.com").unwrap();
+    /// let alice_addr = Address::new(alice_uri);
+    /// let from = From::new(alice_addr);
+    ///
+    /// let bob_uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let bob_addr = Address::new(bob_uri);
+    /// let to = To::new(bob_addr);
     ///
     /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-    ///     .with_header(TypedHeader::From(types::from::From::new(types::Address::new("sip:alice@example.com".parse().unwrap()))))
-    ///     .with_header(TypedHeader::To(types::To::new(types::Address::new("sip:bob@example.com".parse().unwrap()))))
-    ///     .with_header(TypedHeader::CallId(types::CallId::new("abc123")))
-    ///     .with_header(TypedHeader::CSeq(types::CSeq::new(1, Method::Invite)));
+    ///     .with_header(TypedHeader::From(from))
+    ///     .with_header(TypedHeader::To(to))
+    ///     .with_header(TypedHeader::CallId(CallId::new("abc123")))
+    ///     .with_header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)));
     ///
     /// let response = Response::from_request(StatusCode::Ok, &request);
     ///

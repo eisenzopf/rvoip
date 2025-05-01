@@ -63,6 +63,7 @@
 //!
 //! ```no_run
 //! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::{sip_request, sip_response};
 //!
 //! // Create a SIP request with the sip_request! macro
 //! let request = sip_request! {
