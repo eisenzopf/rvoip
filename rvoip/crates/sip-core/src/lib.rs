@@ -210,8 +210,7 @@ pub mod error;
 pub mod parser;
 pub mod types;
 pub mod sdp;
-pub mod macros;
-pub mod builder;
+pub mod macros_new;
 pub mod simple_builder;
 
 // Remove these commented out modules - they're now part of types/
@@ -280,9 +279,8 @@ pub use sdp::parser::{
     parse_bandwidth_line,
     parse_sdp
 };
-pub use builder::{RequestBuilder, ResponseBuilder};
-pub use sdp::builder::SdpBuilder;
-pub use macros::*;
+pub use simple_builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
+pub use macros_new::*;
 
 /// Re-export of common types and functions for SIP
 pub mod prelude {
@@ -300,7 +298,7 @@ pub mod prelude {
     pub use crate::parser::parse_message;
     pub use crate::parser::message::parse_message_with_mode;
     pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
-    pub use crate::builder::{RequestBuilder, ResponseBuilder};
+    pub use crate::simple_builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
     pub use crate::types::param::Param;
     pub use crate::types::param::GenericValue;
     pub use crate::types::warning::Warning;
@@ -353,7 +351,9 @@ pub mod prelude {
     pub use crate::types::call_info::{CallInfo, CallInfoValue, InfoPurpose};
     pub use crate::types::AcceptLanguage;
     pub use crate::parser::headers::accept_language::LanguageInfo;
-    pub use crate::simple_builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+    
+    // Also add the macros from macros_new
+    pub use crate::macros_new::*;
 }
 
 /// Re-export of common types and functions for SDP

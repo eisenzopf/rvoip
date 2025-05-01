@@ -7,13 +7,14 @@
 
 use crate::simple_builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{Method, StatusCode, TypedHeader, uri::Uri};
+use std::str::FromStr;
 
 /// Helper macro to convert optional parameters to Option<T>
 #[macro_export]
 #[doc(hidden)]
-macro_rules! option_expr {
-    () => { None };
-    ($expr:expr) => { Some($expr) };
+macro_rules! option_expr_new {
+    () => { None::<String> };
+    ($expr:expr) => { Some($expr.to_string()) };
 }
 
 /// Macro for creating SIP request messages with a concise syntax.
@@ -77,55 +78,65 @@ macro_rules! sip_request {
             
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($from_name)?), 
-                option_expr!($($from_uri)?)
+                option_expr_new!($($from_name)?), 
+                option_expr_new!($($from_uri)?)
             ) {
-                let tag = option_expr!($($from_tag)?);
-                builder = builder.from(name, uri, tag);
+                let tag = option_expr_new!($($from_tag)?);
+                builder = builder.from(&name, &uri, tag.as_deref());
             }
             
             // Add To header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($to_name)?), 
-                option_expr!($($to_uri)?)
+                option_expr_new!($($to_name)?), 
+                option_expr_new!($($to_uri)?)
             ) {
-                let tag = option_expr!($($to_tag)?);
-                builder = builder.to(name, uri, tag);
+                let tag = option_expr_new!($($to_tag)?);
+                builder = builder.to(&name, &uri, tag.as_deref());
             }
             
             // Add Call-ID if provided
-            if let Some(call_id) = option_expr!($($call_id)?) {
-                builder = builder.call_id(call_id);
+            if let Some(call_id) = option_expr_new!($($call_id)?) {
+                builder = builder.call_id(&call_id);
             }
             
             // Add CSeq if provided
-            if let Some(cseq) = option_expr!($($cseq)?) {
-                builder = builder.cseq(cseq);
+            if let Some(cseq_str) = option_expr_new!($($cseq)?) {
+                // Convert string to u32 if needed
+                let cseq_num = match cseq_str.parse::<u32>() {
+                    Ok(num) => num,
+                    Err(_) => 0, // Fallback value
+                };
+                builder = builder.cseq(cseq_num);
             }
             
             // Add Via if required parts are provided
             if let (Some(host), Some(transport)) = (
-                option_expr!($($via_host)?), 
-                option_expr!($($via_transport)?)
+                option_expr_new!($($via_host)?), 
+                option_expr_new!($($via_transport)?)
             ) {
-                let branch = option_expr!($($via_branch)?);
-                builder = builder.via(host, transport, branch);
+                let branch = option_expr_new!($($via_branch)?);
+                builder = builder.via(&host, &transport, branch.as_deref());
             }
             
             // Add Max-Forwards if provided
-            if let Some(max_forwards) = option_expr!($($max_forwards)?) {
-                builder = builder.max_forwards(max_forwards);
+            if let Some(max_forwards_str) = option_expr_new!($($max_forwards)?) {
+                // Convert string to u32 if needed
+                let max_forwards_num = match max_forwards_str.parse::<u32>() {
+                    Ok(num) => num,
+                    Err(_) => 70, // Default fallback value
+                };
+                builder = builder.max_forwards(max_forwards_num);
             }
             
             // Add Contact if provided
-            if let Some(uri) = option_expr!($($contact_uri)?) {
-                let name = option_expr!($($contact_name)?);
-                builder = builder.contact(uri, name);
+            if let Some(uri) = option_expr_new!($($contact_uri)?) {
+                let name = option_expr_new!($($contact_name)?);
+                builder = builder.contact(&uri, name.as_deref());
             }
             
             // Add Content-Type if provided
-            if let Some(content_type) = option_expr!($($content_type)?) {
-                builder = builder.content_type(content_type);
+            if let Some(content_type) = option_expr_new!($($content_type)?) {
+                builder = builder.content_type(&content_type);
             }
             
             // Add custom headers if provided
@@ -179,7 +190,7 @@ macro_rules! sip_request {
             )?
             
             // Add body if provided
-            if let Some(body) = option_expr!($($body)?) {
+            if let Some(body) = option_expr_new!($($body)?) {
                 builder = builder.body(body);
             }
             
@@ -248,69 +259,85 @@ macro_rules! sip_response {
             use std::str::FromStr;
             
             // Create the builder with status and optional reason
-            let reason = option_expr!($($reason)?);
-            let mut builder = SimpleResponseBuilder::new($status, reason);
+            let reason = option_expr_new!($($reason)?);
+            let mut builder = SimpleResponseBuilder::new($status, reason.as_deref());
             
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($from_name)?), 
-                option_expr!($($from_uri)?)
+                option_expr_new!($($from_name)?), 
+                option_expr_new!($($from_uri)?)
             ) {
-                let tag = option_expr!($($from_tag)?);
-                builder = builder.from(name, uri, tag);
+                let tag = option_expr_new!($($from_tag)?);
+                builder = builder.from(&name, &uri, tag.as_deref());
             }
             
             // Add To header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($to_name)?), 
-                option_expr!($($to_uri)?)
+                option_expr_new!($($to_name)?), 
+                option_expr_new!($($to_uri)?)
             ) {
-                let tag = option_expr!($($to_tag)?);
-                builder = builder.to(name, uri, tag);
+                let tag = option_expr_new!($($to_tag)?);
+                builder = builder.to(&name, &uri, tag.as_deref());
             }
             
             // Add Call-ID if provided
-            if let Some(call_id) = option_expr!($($call_id)?) {
-                builder = builder.call_id(call_id);
+            if let Some(call_id) = option_expr_new!($($call_id)?) {
+                builder = builder.call_id(&call_id);
             }
             
             // Add CSeq if all required parts are provided
-            if let (Some(seq), Some(method)) = (
-                option_expr!($($cseq)?),
-                option_expr!($($cseq_method)?)
+            if let (Some(seq_str), Some(method_str)) = (
+                option_expr_new!($($cseq)?),
+                option_expr_new!($($cseq_method)?)
             ) {
-                builder = builder.cseq(seq, method);
+                // Convert string to u32 if needed
+                let cseq_num = match seq_str.parse::<u32>() {
+                    Ok(num) => num,
+                    Err(_) => 0, // Fallback value
+                };
+                
+                // Parse the method string to a Method enum
+                let method_enum = Method::from_str(&method_str)
+                    .unwrap_or(Method::Invite); // Default fallback
+                
+                builder = builder.cseq(cseq_num, method_enum);
             }
             
             // Add Via if required parts are provided
             if let (Some(host), Some(transport)) = (
-                option_expr!($($via_host)?), 
-                option_expr!($($via_transport)?)
+                option_expr_new!($($via_host)?), 
+                option_expr_new!($($via_transport)?)
             ) {
-                let branch = option_expr!($($via_branch)?);
-                builder = builder.via(host, transport, branch);
+                let branch = option_expr_new!($($via_branch)?);
+                builder = builder.via(&host, &transport, branch.as_deref());
             }
             
             // Add Max-Forwards if provided
-            if let Some(max_forwards) = option_expr!($($max_forwards)?) {
+            if let Some(max_forwards_str) = option_expr_new!($($max_forwards)?) {
+                // Convert string to u8 if needed
+                let max_forwards_num = match max_forwards_str.parse::<u8>() {
+                    Ok(num) => num,
+                    Err(_) => 70, // Default fallback value
+                };
+                
                 // Headers are added with the header() method in response
                 use $crate::types::header::{HeaderName, HeaderValue};
                 use $crate::types::max_forwards::MaxForwards;
                 
                 builder = builder.header(TypedHeader::MaxForwards(
-                    MaxForwards::new(max_forwards as u8)
+                    MaxForwards::new(max_forwards_num)
                 ));
             }
             
             // Add Contact if provided
-            if let Some(uri) = option_expr!($($contact_uri)?) {
-                let name = option_expr!($($contact_name)?);
-                builder = builder.contact(uri, name);
+            if let Some(uri) = option_expr_new!($($contact_uri)?) {
+                let name = option_expr_new!($($contact_name)?);
+                builder = builder.contact(&uri, name.as_deref());
             }
             
             // Add Content-Type if provided
-            if let Some(content_type) = option_expr!($($content_type)?) {
-                builder = builder.content_type(content_type);
+            if let Some(content_type) = option_expr_new!($($content_type)?) {
+                builder = builder.content_type(&content_type);
             }
             
             // Add custom headers if provided
@@ -370,7 +397,7 @@ macro_rules! sip_response {
             )?
             
             // Add body if provided
-            if let Some(body) = option_expr!($($body)?) {
+            if let Some(body) = option_expr_new!($($body)?) {
                 builder = builder.body(body);
             }
             
