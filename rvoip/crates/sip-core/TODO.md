@@ -7,7 +7,7 @@
   - Add method wrappers for fields that need to be publicly accessible
   - Fix methods like `version()`, `status_code()`, `uri()` for consistent API
 
-- [ ] **Complete TypedHeaderTrait Implementations**
+- [x] **Complete TypedHeaderTrait Implementations**
   - Implement `TypedHeaderTrait` for all common SIP headers:
     - [x] From
     - [x] To
@@ -43,6 +43,16 @@
     - [x] CallInfo
     - [x] Supported
     - [x] Unsupported
+    - [x] AcceptEncoding
+    - [x] AlertInfo
+    - [x] ContentEncoding
+    - [x] ContentLanguage
+    - [x] Date
+    - [x] MinExpires
+    - [x] MimeVersion
+    - [x] ProxyRequire
+    - [x] Timestamp
+    - [x] UserAgent
 
 ## Extended Functionality
 
