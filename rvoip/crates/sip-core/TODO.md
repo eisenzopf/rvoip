@@ -56,10 +56,28 @@
 
 ## Extended Functionality
 
-- [ ] **Header Access Utilities**
-  - [ ] Add `typed_headers<T>()` method to get multiple headers of the same type
-  - [ ] Implement `headers_by_name(name: &str)` for string-based header access
-  - [ ] Ensure consistent raw header access methods
+- [x] **Header Access Utilities**
+  - [x] Implement in Request struct:
+    - [x] `typed_headers<T>()` method to get multiple headers of the same type
+    - [x] `headers_by_name(name: &str)` method for string-based header access
+    - [x] `raw_header_value(name: &HeaderName)` method for raw header access
+    - [x] `has_header(name: &HeaderName)` method to check header presence
+    - [x] `header_names()` method to list all header names in the message
+  - [x] Implement in Response struct:
+    - [x] `typed_headers<T>()` method to get multiple headers of the same type
+    - [x] `headers_by_name(name: &str)` method for string-based header access
+    - [x] `raw_header_value(name: &HeaderName)` method for raw header access
+    - [x] `has_header(name: &HeaderName)` method to check header presence
+    - [x] `header_names()` method to list all header names in the message
+  - [x] Implement in Message enum:
+    - [x] `typed_headers<T>()` method to get multiple headers of the same type
+    - [x] `headers_by_name(name: &str)` method for string-based header access
+    - [x] `raw_header_value(name: &HeaderName)` method for raw header access
+    - [x] `has_header(name: &HeaderName)` method to check header presence
+    - [x] `header_names()` method to list all header names in the message
+  - [x] Create HeaderAccess trait to consolidate shared functionality
+  - [ ] Add comprehensive documentation and examples
+  - [x] Add unit tests for all header access methods
 
 - [ ] **SIP Message Utilities**
   - [ ] Add convenience methods for common operations

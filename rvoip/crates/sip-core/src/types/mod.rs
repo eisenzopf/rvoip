@@ -102,7 +102,11 @@ pub mod status;
 pub use status::StatusCode;
 
 pub mod sip_message;
-pub use sip_message::{Request, Response, Message};
+pub mod sip_request;
+pub mod sip_response;
+pub use sip_message::Message;
+pub use sip_request::Request;
+pub use sip_response::Response;
 
 pub mod param;
 pub use param::Param;

@@ -9,7 +9,7 @@ use nom::error::{Error as NomError, ErrorKind};
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in SIP protocol handling
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum Error {
     /// Invalid SIP method
     #[error("Invalid SIP method")]
@@ -101,8 +101,8 @@ pub enum Error {
     IncompleteParse(String),
 
     /// Input/output error
-    #[error("I/O error: {0}")]
-    Io(String),
+    #[error("I/O Error: {0}")]
+    IoError(String),
     
     /// Line too long in SIP message
     #[error("Line too long: {0} characters")]
@@ -123,10 +123,6 @@ pub enum Error {
     /// Invalid input value
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-
-    /// I/O error
-    #[error("I/O Error: {0}")]
-    IoError(#[from] io::Error),
 
     /// SDP generation error
     #[error("SDP Generation Error: {0}")]
@@ -248,5 +244,11 @@ impl From<nom::Err<NomError<Vec<u8>>>> for Error {
     fn from(err: nom::Err<NomError<Vec<u8>>>) -> Self {
         // We lose positional info here as Vec<u8> doesn't track original input slice easily
         Error::ParseError(format!("Nom parsing error (owned): {:?}", err))
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::IoError(err.to_string())
     }
 } 

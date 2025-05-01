@@ -738,6 +738,10 @@ pub enum TypedHeader {
     Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
     Subject(Subject), // Use types::Subject instead of String
+    
+    // Add Event and SubscriptionState headers
+    Event(String), // Placeholder for Event header type
+    SubscriptionState(String), // Placeholder for SubscriptionState header type
 
     // Placeholder Types (replace with actual types from types/* where available)
     // These might still need Serialize/Deserialize if not using a types::* struct
@@ -815,7 +819,61 @@ impl TypedHeader {
             TypedHeader::ErrorInfo(_) => HeaderName::ErrorInfo,
             TypedHeader::AlertInfo(_) => HeaderName::AlertInfo,
             TypedHeader::CallInfo(_) => HeaderName::CallInfo,
+            TypedHeader::Event(_) => HeaderName::Event,
+            TypedHeader::SubscriptionState(_) => HeaderName::SubscriptionState,
             TypedHeader::Other(name, _) => name.clone(),
+        }
+    }
+
+    /// Try to convert this TypedHeader to a reference of a specific header type
+    /// 
+    /// This method is used internally by the HeaderAccess trait implementations
+    /// to provide type-safe access to headers.
+    pub fn as_typed_ref<'a, T: TypedHeaderTrait + 'static>(&'a self) -> Option<&'a T> {
+        // First check if the header name matches what we expect
+        if self.name() != T::header_name().into() {
+            return None;
+        }
+        
+        // A simpler approach that doesn't need to list every variant:
+        // Cast based on the enum variant and check using TypeId
+        let type_id = std::any::TypeId::of::<T>();
+        
+        match self {
+            TypedHeader::CallId(h) if type_id == std::any::TypeId::of::<crate::types::CallId>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::From(h) if type_id == std::any::TypeId::of::<crate::types::from::From>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::To(h) if type_id == std::any::TypeId::of::<crate::types::to::To>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::Via(h) if type_id == std::any::TypeId::of::<crate::types::via::Via>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::CSeq(h) if type_id == std::any::TypeId::of::<crate::types::CSeq>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::ContentLength(h) if type_id == std::any::TypeId::of::<crate::types::content_length::ContentLength>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::MaxForwards(h) if type_id == std::any::TypeId::of::<crate::types::MaxForwards>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::Contact(h) if type_id == std::any::TypeId::of::<crate::types::contact::Contact>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::ContentType(h) if type_id == std::any::TypeId::of::<crate::types::content_type::ContentType>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::Require(h) if type_id == std::any::TypeId::of::<crate::types::require::Require>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::Supported(h) if type_id == std::any::TypeId::of::<crate::types::supported::Supported>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            _ => None,
         }
     }
 }
@@ -969,6 +1027,8 @@ impl fmt::Display for TypedHeader {
             TypedHeader::CallInfo(call_info) => {
                 write!(f, "{}", call_info)
             },
+            TypedHeader::Event(_) => write!(f, "{}: Event", HeaderName::Event),
+            TypedHeader::SubscriptionState(_) => write!(f, "{}: SubscriptionState", HeaderName::SubscriptionState),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }

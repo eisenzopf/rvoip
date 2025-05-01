@@ -152,6 +152,54 @@ impl Via {
         Ok(Self(vec![via_header]))
     }
 
+    /// Create a new Via header with simplified parameters.
+    ///
+    /// This is a convenience constructor that creates a SIP/2.0 Via header
+    /// with the given transport, host, and port.
+    ///
+    /// # Parameters
+    ///
+    /// - `protocol_name`: Protocol name (usually "SIP")
+    /// - `protocol_version`: Protocol version (usually "2.0") 
+    /// - `transport`: Transport protocol (e.g., "UDP", "TCP", "TLS")
+    /// - `host`: Host or IP address
+    /// - `port`: Optional port number
+    /// - `params`: Optional additional parameters
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new Via header, or an error if the host is invalid
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", None, vec![]).expect("Failed to create Via");
+    /// ```
+    pub fn new_simple(
+        protocol_name: impl Into<String>,
+        protocol_version: impl Into<String>,
+        transport: impl Into<String>,
+        host: impl Into<String>,
+        port: Option<u16>,
+        params: Vec<Param>,
+    ) -> Result<Self> {
+        // Create a basic branch parameter with a random ID if none is provided
+        let mut all_params = params;
+        if !all_params.iter().any(|p| matches!(p, Param::Branch(_))) {
+            let branch = format!("z9hG4bK{}", uuid::Uuid::new_v4().simple());
+            all_params.push(Param::branch(branch));
+        }
+        
+        // Use the full constructor and propagate any errors
+        Self::new(
+            protocol_name, protocol_version, transport,
+            host, port,
+            all_params
+        )
+    }
+
     /// Get the branch parameter value from the first Via entry.
     ///
     /// The branch parameter uniquely identifies a transaction in SIP

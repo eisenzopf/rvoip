@@ -34,7 +34,7 @@ macro_rules! sip_request {
             use $crate::types::TypedHeader;
             use $crate::types::uri::{Uri, Host, Scheme};
             use $crate::types::Method;
-            use $crate::types::sip_message::Request;
+            use $crate::types::sip_request::Request;
             use $crate::types::Version;
             
             let builder = if $method == Method::Options && $uri == "*" {
@@ -701,7 +701,7 @@ mod tests {
         types::{
             Method, StatusCode, uri::Uri, uri::Scheme,
             TypedHeader, header::{HeaderName, HeaderValue},
-            sip_message::{Request, Response},
+            sip_request::Request, sip_response::Response,
         },
     };
 

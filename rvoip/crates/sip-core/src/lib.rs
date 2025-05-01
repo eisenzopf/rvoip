@@ -239,17 +239,17 @@ pub use types::{
     MaxForwards, 
     MediaType, 
     sip_message::Message,
-    sip_message::Request,
-    sip_message::Response,
+    sip_request::Request,
+    sip_response::Response,
     sdp::SdpSession,
     TypedHeader, 
     TypedHeaderTrait,
     via::Via,
     Warning,
     warning::{WarnAgent, WarningValue},
-    sdp::MediaDescription, 
+    sdp::MediaDescription,
     sdp::Origin,
-    sdp::ConnectionData, 
+    sdp::ConnectionData,
     sdp::TimeDescription,
     auth::*,
     sdp::ParsedAttribute,
@@ -288,7 +288,9 @@ pub mod prelude {
     pub use crate::types::uri::{Uri, Host, Scheme}; // Use the original URI Scheme
     pub use crate::types::Method;
     pub use crate::types::StatusCode;
-    pub use crate::types::sip_message::{Request, Response, Message};
+    pub use crate::types::sip_message::Message;
+    pub use crate::types::sip_request::Request;
+    pub use crate::types::sip_response::Response;
     pub use crate::types::via::Via;
     pub use crate::types::Version; // Added Version
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE, ParseMode};
@@ -296,10 +298,6 @@ pub mod prelude {
     pub use crate::parser::message::parse_message_with_mode;
     pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
     pub use crate::types::builder::{RequestBuilder, ResponseBuilder};
-    pub use crate::sip_request;
-    pub use crate::sip_response;
-    
-    // Add missing types needed for doc tests
     pub use crate::types::param::Param;
     pub use crate::types::param::GenericValue;
     pub use crate::types::warning::Warning;

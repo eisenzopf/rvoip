@@ -141,6 +141,26 @@ impl CallId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Returns the Call-ID value.
+    ///
+    /// This method returns the Call-ID value as a string.
+    ///
+    /// # Returns
+    ///
+    /// A string containing the Call-ID value
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let call_id = CallId::new("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+    /// assert_eq!(call_id.value(), "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
+    /// ```
+    pub fn value(&self) -> String {
+        self.0.clone()
+    }
 }
 
 impl FromStr for CallId {
