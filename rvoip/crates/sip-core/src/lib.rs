@@ -198,11 +198,11 @@
 
 // Declare modules
 pub mod error;
-pub mod parser;
 pub mod types;
 pub mod sdp;
 pub mod macros;
 pub mod builder;
+pub mod parser;
 
 // Re-export key public items
 pub use error::{Error, Result};

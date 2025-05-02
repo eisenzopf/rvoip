@@ -25,6 +25,7 @@ serde_bytes = "0.11"
 # Utilities
 bytes = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, version = "1.7", features = ["v4"] }
+base64 = "0.21"
 # Parsing
 nom = "7.1"
 rand = "0.8"
