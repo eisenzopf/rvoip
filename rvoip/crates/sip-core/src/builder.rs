@@ -43,32 +43,80 @@ use crate::types::{
 ///
 /// 4. **Simplified Parameter Passing**: Takes all parameters for a header in a single method call.
 ///
+/// 5. **Graceful Error Recovery**: When parsing URIs and other inputs fails, the builder 
+///    attempts to create a reasonable fallback rather than aborting with an error.
+///
+/// 6. **Macro Friendly**: The simplified pattern makes it much easier to implement macros
+///    that generate SIP messages in a declarative way.
+///
+/// ## When to Use Builders vs Macros
+///
+/// **Use the Builder Pattern When:**
+/// - You need more control over the construction process
+/// - You're building messages programmatically (e.g., in response to events)
+/// - You need to conditionally include headers based on complex logic
+/// - You're working with dynamic data where a declarative approach is less suitable
+/// - You want to reuse and modify builders across different parts of your code
+///
+/// **Use Macros When:**
+/// - You want a more declarative, configuration-style approach
+/// - You're creating messages with mostly static or simple dynamic content
+/// - You want to improve code readability with named parameters
+/// - You prefer a more concise syntax that focuses on the message content
+/// - You want to avoid deeply nested method calls
+///
+/// Both approaches use the same underlying implementation, so choose based on your specific needs and coding style preferences.
+///
+/// ## Error Handling
+/// 
+/// The builders provide graceful error handling for most operations. When URI parsing fails, it
+/// will still attempt to continue with a fallback approach:
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::types::Method;
+///
+/// // First URI must be valid for the builder to instantiate
+/// if let Ok(builder) = SimpleRequestBuilder::new(Method::Invite, "sip:valid@example.com") {
+///     // These won't fail - they use fallbacks for invalid URIs
+///     let request = builder
+///         .from("Alice", "invalid:from:uri", None)
+///         .to("Bob", "invalid:to:uri", None)
+///         .build();
+///     
+///     // Message is created even with invalid URIs in From/To
+///     assert_eq!(request.method(), Method::Invite);
+/// }
+/// ```
+///
 /// ## Example Usage
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+/// use rvoip_sip_core::types::{Method, StatusCode};
 ///
-/// // Creating a request with the SimpleRequestBuilder
-/// let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+/// // Creating a request with the builder
+/// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .to("Bob", "sip:bob@example.com", None)
 ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
 ///     .cseq(314159)
 ///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 ///     .max_forwards(70)
-///     .contact("sip:alice@pc33.atlanta.com", None)
-///     .content_type("application/sdp")
-///     .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
 ///     .build();
 ///
-/// // Creating a response with the SimpleResponseBuilder
-/// let response = ResponseBuilder::new(StatusCode::Ok, Some("OK"))
+/// assert_eq!(request.method(), Method::Invite);
+///
+/// // Creating a response with the builder
+/// let response = SimpleResponseBuilder::new(StatusCode::Ok, Some("OK"))
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
 ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
 ///     .cseq(1, Method::Invite)
 ///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 ///     .build();
+///
+/// assert_eq!(response.status_code(), 200);
 /// ```
 
 /// A simplified builder for SIP requests with improved method chaining.
@@ -79,7 +127,8 @@ use crate::types::{
 /// # Example
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::types::Method;
 ///
 /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
@@ -88,10 +137,9 @@ use crate::types::{
 ///     .cseq(314159)
 ///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 ///     .max_forwards(70)
-///     .contact("sip:alice@pc33.atlanta.com", None)
-///     .content_type("application/sdp")
-///     .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
 ///     .build();
+///
+/// assert_eq!(request.method(), Method::Invite);
 /// ```
 pub struct SimpleRequestBuilder {
     request: Request,
@@ -391,26 +439,82 @@ impl SimpleRequestBuilder {
     }
 }
 
+/// The SimpleRequestBuilder provides a streamlined approach to creating SIP request messages.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a basic INVITE request
+/// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+///     .unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@example.com", None)
+///     .call_id("a84b4c76e66710")
+///     .cseq(1)
+///     .via("alice.example.com", "UDP", Some("z9hG4bK776asdhds"))
+///     .max_forwards(70)
+///     .build();
+///
+/// assert_eq!(request.method(), Method::Invite);
+/// ```
+///
+/// You can also add a message body:
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::types::Method;
+///
+/// let sdp_body = "v=0\r\no=alice 2890844526 2890844526 IN IP4 alice.example.org\r\ns=SIP Call\r\nt=0 0\r\n";
+///
+/// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+///     .unwrap()
+///     .content_type("application/sdp")
+///     .body(sdp_body)
+///     .build();
+///
+/// assert_eq!(request.method(), Method::Invite);
+/// ```
+
 /// A simplified builder for SIP responses with improved method chaining.
 ///
 /// This builder approach avoids returning different builder types for specific headers,
 /// allowing for more straightforward method chaining and making it easier to use in macros.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::types::{StatusCode, Method};
 ///
+/// // Create a 200 OK response
 /// let response = SimpleResponseBuilder::new(StatusCode::Ok, Some("OK"))
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
-///     .call_id("a84b4c76e66710@pc33.atlanta.com")
-///     .cseq(1, Method::Invite)
+///     .call_id("a84b4c76e66710")
+///     .cseq(314159, Method::Invite)
 ///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
-///     .contact("sip:bob@192.168.1.2", None)
-///     .content_type("application/sdp")
-///     .body("v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n")
 ///     .build();
+///
+/// assert_eq!(response.status_code(), 200);
+/// ```
+/// 
+/// Creating a response with SDP content:
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::types::StatusCode;
+///
+/// let sdp_body = "v=0\r\no=alice 2890844526 2890844526 IN IP4 alice.example.org\r\ns=SIP Call\r\nt=0 0\r\n";
+///
+/// let response = SimpleResponseBuilder::new(StatusCode::Ok, Some("OK"))
+///     .content_type("application/sdp")
+///     .body(sdp_body)
+///     .build();
+///
+/// assert_eq!(response.status_code(), 200);
 /// ```
 pub struct SimpleResponseBuilder {
     response: Response,

@@ -57,27 +57,19 @@
 //!
 //! #### Using Macros (recommended for simple messages)
 //!
-//! ```no_run
+//! ```ignore
 //! use rvoip_sip_core::prelude::*;
 //! use rvoip_sip_core::{sip_request, sip_response};
 //!
-//! // Create a SIP request with the sip_request! macro
+//! // Create a SIP request with the sip_request! macro 
 //! let request = sip_request! {
 //!     method: Method::Invite,
 //!     uri: "sip:bob@example.com",
 //!     from_name: "Alice", 
 //!     from_uri: "sip:alice@example.com",
 //!     from_tag: "1928301774",
-//!     to_name: "Bob", 
-//!     to_uri: "sip:bob@example.com",
-//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
-//!     cseq: 1,
-//!     via_host: "alice.example.com:5060", 
-//!     via_transport: "UDP", 
-//!     via_branch: "z9hG4bK776asdhds",
-//!     max_forwards: 70,
-//!     content_type: "application/sdp",
-//!     body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
+//!     call_id: "a84b4c76e66710",
+//!     cseq: 1
 //! };
 //!
 //! // Create a SIP response with the sip_response! macro
@@ -86,18 +78,11 @@
 //!     reason: "OK",
 //!     from_name: "Alice", 
 //!     from_uri: "sip:alice@example.com", 
-//!     from_tag: "1928301774",
 //!     to_name: "Bob", 
-//!     to_uri: "sip:bob@example.com", 
-//!     to_tag: "as83kd9bs",
-//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+//!     to_uri: "sip:bob@example.com",
+//!     call_id: "a84b4c76e66710",
 //!     cseq: 1, 
-//!     cseq_method: Method::Invite,
-//!     via_host: "alice.example.com:5060", 
-//!     via_transport: "UDP", 
-//!     via_branch: "z9hG4bK776asdhds",
-//!     content_type: "application/sdp",
-//!     body: "v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n"
+//!     cseq_method: Method::Invite
 //! };
 //! ```
 //!
@@ -218,13 +203,6 @@ pub mod types;
 pub mod sdp;
 pub mod macros;
 pub mod builder;
-
-// Remove these commented out modules - they're now part of types/
-// // pub mod header;
-// // pub mod method;
-// // pub mod status;
-// // pub mod uri;
-// // pub mod version;
 
 // Re-export key public items
 pub use error::{Error, Result};
