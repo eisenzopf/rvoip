@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::types::{
     auth::{
-        Authorization, 
+        ProxyAuthorization, 
         Credentials,
         DigestParam,
         AuthScheme, 
@@ -16,9 +16,9 @@ use crate::types::{
 use base64::engine::{general_purpose, Engine};
 use super::HeaderSetter;
 
-/// Extension trait for adding Authorization header building capabilities
-pub trait AuthorizationExt {
-    /// Add a Digest Authorization header to the request
+/// Extension trait for adding Proxy-Authorization header building capabilities
+pub trait ProxyAuthorizationExt {
+    /// Add a Digest Proxy-Authorization header to the request
     ///
     /// # Arguments
     ///
@@ -40,14 +40,14 @@ pub trait AuthorizationExt {
     /// # Example
     ///
     /// ```rust
-    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AuthorizationExt};
+    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ProxyAuthorizationExt};
     /// 
     /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", None)
     ///     .to("Alice", "sip:alice@example.com", None)
-    ///     .authorization_digest(
+    ///     .proxy_authorization_digest(
     ///         "alice",
-    ///         "example.com", 
+    ///         "proxy.example.com", 
     ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
     ///         "sip:example.com", 
     ///         "a2ea68c230e5fea1ca715740fb14db97",
@@ -59,7 +59,7 @@ pub trait AuthorizationExt {
     ///     )
     ///     .build();
     /// ```
-    fn authorization_digest(
+    fn proxy_authorization_digest(
         self,
         username: &str,
         realm: &str,
@@ -73,7 +73,7 @@ pub trait AuthorizationExt {
         nc: Option<&str>,
     ) -> Self;
     
-    /// Add a Basic Authorization header to the request
+    /// Add a Basic Proxy-Authorization header to the request
     ///
     /// # Arguments
     ///
@@ -87,22 +87,22 @@ pub trait AuthorizationExt {
     /// # Example
     ///
     /// ```rust
-    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AuthorizationExt};
+    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ProxyAuthorizationExt};
     /// 
     /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", None)
     ///     .to("Alice", "sip:alice@example.com", None)
-    ///     .authorization_basic("alice", "secret-password")
+    ///     .proxy_authorization_basic("alice", "secret-password")
     ///     .build();
     /// ```
-    fn authorization_basic(self, username: &str, password: &str) -> Self;
+    fn proxy_authorization_basic(self, username: &str, password: &str) -> Self;
 }
 
-impl<T> AuthorizationExt for T 
+impl<T> ProxyAuthorizationExt for T 
 where 
     T: HeaderSetter,
 {
-    fn authorization_digest(
+    fn proxy_authorization_digest(
         self,
         username: &str,
         realm: &str,
@@ -171,17 +171,17 @@ where
             }
         }
         
-        // Create the Authorization header
-        let auth = Authorization(Credentials::Digest { params });
+        // Create the Proxy-Authorization header
+        let auth = ProxyAuthorization(Credentials::Digest { params });
         self.set_header(auth)
     }
     
-    fn authorization_basic(self, username: &str, password: &str) -> Self {
+    fn proxy_authorization_basic(self, username: &str, password: &str) -> Self {
         let credentials = format!("{}:{}", username, password);
         let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
         
-        // Create the Authorization header with Basic scheme
-        let auth = Authorization(Credentials::Basic { token: encoded });
+        // Create the Proxy-Authorization header with Basic scheme
+        let auth = ProxyAuthorization(Credentials::Basic { token: encoded });
         self.set_header(auth)
     }
 }
@@ -194,13 +194,13 @@ mod tests {
     use crate::types::header::HeaderName;
     
     #[test]
-    fn test_authorization_digest() {
+    fn test_proxy_authorization_digest() {
         let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
-            .authorization_digest(
+            .proxy_authorization_digest(
                 "alice",
-                "example.com", 
+                "proxy.example.com", 
                 "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
                 "sip:example.com", 
                 "a2ea68c230e5fea1ca715740fb14db97",
@@ -212,13 +212,13 @@ mod tests {
             )
             .build();
             
-        // Check if Authorization header exists and has correct values
-        let header = request.header(&HeaderName::Authorization);
-        assert!(header.is_some(), "Authorization header not found");
+        // Check if Proxy-Authorization header exists and has correct values
+        let header = request.header(&HeaderName::ProxyAuthorization);
+        assert!(header.is_some(), "Proxy-Authorization header not found");
         
-        if let Some(TypedHeader::Authorization(Authorization(Credentials::Digest { params }))) = header {
+        if let Some(TypedHeader::ProxyAuthorization(ProxyAuthorization(Credentials::Digest { params }))) = header {
             assert!(params.contains(&DigestParam::Username("alice".to_string())));
-            assert!(params.contains(&DigestParam::Realm("example.com".to_string())));
+            assert!(params.contains(&DigestParam::Realm("proxy.example.com".to_string())));
             assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())));
             assert!(params.contains(&DigestParam::Response("a2ea68c230e5fea1ca715740fb14db97".to_string())));
             assert!(params.iter().any(|p| matches!(p, DigestParam::Uri(_))));
@@ -228,18 +228,18 @@ mod tests {
     }
     
     #[test]
-    fn test_authorization_basic() {
+    fn test_proxy_authorization_basic() {
         let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
-            .authorization_basic("alice", "secret-password")
+            .proxy_authorization_basic("alice", "secret-password")
             .build();
             
-        // Check if Authorization header exists and has correct values
-        let header = request.header(&HeaderName::Authorization);
-        assert!(header.is_some(), "Authorization header not found");
+        // Check if Proxy-Authorization header exists and has correct values
+        let header = request.header(&HeaderName::ProxyAuthorization);
+        assert!(header.is_some(), "Proxy-Authorization header not found");
         
-        if let Some(TypedHeader::Authorization(Authorization(Credentials::Basic { token }))) = header {
+        if let Some(TypedHeader::ProxyAuthorization(ProxyAuthorization(Credentials::Basic { token }))) = header {
             // For Basic auth, token should contain base64 encoded username:password
             let expected_encoded = general_purpose::STANDARD.encode("alice:secret-password".as_bytes());
             assert_eq!(token, &expected_encoded);
