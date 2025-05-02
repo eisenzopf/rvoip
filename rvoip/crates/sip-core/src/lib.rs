@@ -30,32 +30,28 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a SIP request with the RequestBuilder
-//! let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-//! let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
-//! let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
-//! 
-//! let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
-//!     .unwrap()
-//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri.clone()))))
-//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
-//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
-//!     .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-//!     .header(TypedHeader::Contact(Contact::new_params(vec![ContactParamInfo { 
-//!         address: Address::new(contact_uri)
-//!     }])))
-//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
+//! let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+//!     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+//!     .to("Bob", "sip:bob@example.com", None)
+//!     .call_id("a84b4c76e66710@pc33.atlanta.com")
+//!     .cseq(314159)
+//!     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+//!     .max_forwards(70)
+//!     .contact("sip:alice@pc33.atlanta.com", None)
+//!     .content_type("application/sdp")
+//!     .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
 //!     .build();
 //!
 //! // Create a SIP response with the ResponseBuilder
-//! let response = ResponseBuilder::new(StatusCode::Ok)
-//!     .header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", alice_uri))))
-//!     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri))))
-//!     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-//!     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-//!     .header(TypedHeader::Via(Via::new("SIP", "2.0", "UDP", "pc33.atlanta.com", None, vec![Param::branch("z9hG4bK776asdhds")]).unwrap()))
-//!     .header(TypedHeader::ContentLength(ContentLength::new(0)))
+//! let response = ResponseBuilder::new(StatusCode::Ok, Some("OK"))
+//!     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+//!     .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+//!     .call_id("a84b4c76e66710@pc33.atlanta.com")
+//!     .cseq(1, Method::Invite)
+//!     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+//!     .contact("sip:bob@192.168.1.2", None)
+//!     .content_type("application/sdp")
+//!     .body("v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n")
 //!     .build();
 //! ```
 //!
@@ -69,29 +65,39 @@
 //! let request = sip_request! {
 //!     method: Method::Invite,
 //!     uri: "sip:bob@example.com",
-//!     headers: {
-//!         From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
-//!         To: "Bob <sip:bob@example.com>",
-//!         CallId: "a84b4c76e66710@pc33.atlanta.com",
-//!         CSeq: "314159 INVITE",
-//!         Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
-//!         MaxForwards: "70",
-//!         Contact: "<sip:alice@pc33.atlanta.com>",
-//!         ContentLength: "0"
-//!     }
+//!     from_name: "Alice", 
+//!     from_uri: "sip:alice@example.com",
+//!     from_tag: "1928301774",
+//!     to_name: "Bob", 
+//!     to_uri: "sip:bob@example.com",
+//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+//!     cseq: 1,
+//!     via_host: "alice.example.com:5060", 
+//!     via_transport: "UDP", 
+//!     via_branch: "z9hG4bK776asdhds",
+//!     max_forwards: 70,
+//!     content_type: "application/sdp",
+//!     body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
 //! };
 //!
 //! // Create a SIP response with the sip_response! macro
 //! let response = sip_response! {
 //!     status: StatusCode::Ok,
-//!     headers: {
-//!         From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
-//!         To: "Bob <sip:bob@example.com>",
-//!         CallId: "a84b4c76e66710@pc33.atlanta.com",
-//!         CSeq: "314159 INVITE",
-//!         Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
-//!         ContentLength: "0"
-//!     }
+//!     reason: "OK",
+//!     from_name: "Alice", 
+//!     from_uri: "sip:alice@example.com", 
+//!     from_tag: "1928301774",
+//!     to_name: "Bob", 
+//!     to_uri: "sip:bob@example.com", 
+//!     to_tag: "as83kd9bs",
+//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+//!     cseq: 1, 
+//!     cseq_method: Method::Invite,
+//!     via_host: "alice.example.com:5060", 
+//!     via_transport: "UDP", 
+//!     via_branch: "z9hG4bK776asdhds",
+//!     content_type: "application/sdp",
+//!     body: "v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n"
 //! };
 //! ```
 //!
@@ -211,7 +217,7 @@ pub mod parser;
 pub mod types;
 pub mod sdp;
 pub mod macros;
-pub mod simple_builder;
+pub mod builder;
 
 // Remove these commented out modules - they're now part of types/
 // // pub mod header;
@@ -279,7 +285,7 @@ pub use sdp::parser::{
     parse_bandwidth_line,
     parse_sdp
 };
-pub use simple_builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
+pub use builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
 pub use macros::*;
 
 /// Re-export of common types and functions for SIP
@@ -298,7 +304,7 @@ pub mod prelude {
     pub use crate::parser::parse_message;
     pub use crate::parser::message::parse_message_with_mode;
     pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
-    pub use crate::simple_builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
+    pub use crate::builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
     pub use crate::types::param::Param;
     pub use crate::types::param::GenericValue;
     pub use crate::types::warning::Warning;
@@ -352,7 +358,7 @@ pub mod prelude {
     pub use crate::types::AcceptLanguage;
     pub use crate::parser::headers::accept_language::LanguageInfo;
     
-    // Also add the macros from macros_new
+    // Also add the macros
     pub use crate::macros::*;
 }
 

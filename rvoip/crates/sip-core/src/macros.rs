@@ -2,10 +2,88 @@
 //!
 //! This module provides macros for creating SIP messages with a more concise syntax.
 //!
-//! The macros use the SimpleRequestBuilder and SimpleResponseBuilder internally
-//! to create properly formatted SIP requests and responses.
+//! The macros make it easy to create SIP requests and responses with a declarative syntax,
+//! while handling all the underlying complexity of properly formatting headers and parameters.
+//!
+//! ## Features
+//!
+//! - **Declarative Syntax**: Create requests and responses with a clear, readable format
+//! - **Simple Parameter Handling**: Specify fields like `from_name`, `from_uri`, etc. directly
+//! - **Sensible Defaults**: Optional parameters can be omitted
+//! - **Robust Error Handling**: Fallbacks for parsing failures
+//! - **Full Header Support**: Add both standard and custom headers
+//!
+//! ## Usage
+//!
+//! ### Creating a SIP Request
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::sip_request;
+//!
+//! let request = sip_request! {
+//!     method: Method::Invite,
+//!     uri: "sip:bob@example.com",
+//!     from_name: "Alice", 
+//!     from_uri: "sip:alice@example.com", 
+//!     from_tag: "1928301774",
+//!     to_name: "Bob", 
+//!     to_uri: "sip:bob@example.com",
+//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+//!     cseq: 1,
+//!     via_host: "alice.example.com:5060", 
+//!     via_transport: "UDP", 
+//!     via_branch: "z9hG4bK776asdhds",
+//!     max_forwards: 70,
+//!     body: "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
+//! };
+//! ```
+//!
+//! ### Creating a SIP Response
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::sip_response;
+//!
+//! let response = sip_response! {
+//!     status: StatusCode::Ok,
+//!     reason: "OK",
+//!     from_name: "Alice", 
+//!     from_uri: "sip:alice@example.com", 
+//!     from_tag: "1928301774",
+//!     to_name: "Bob", 
+//!     to_uri: "sip:bob@example.com", 
+//!     to_tag: "a6c85cf",
+//!     call_id: "a84b4c76e66710@pc33.atlanta.example.com",
+//!     cseq: 314159, 
+//!     cseq_method: Method::Invite,
+//!     via_host: "pc33.atlanta.com", 
+//!     via_transport: "UDP", 
+//!     via_branch: "z9hG4bK776asdhds"
+//! };
+//! ```
+//!
+//! ### Adding Custom Headers
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::sip_request;
+//!
+//! let request = sip_request! {
+//!     method: Method::Invite,
+//!     uri: "sip:bob@example.com",
+//!     from_name: "Alice", 
+//!     from_uri: "sip:alice@example.com",
+//!     headers: {
+//!         UserAgent: "My SIP Client 1.0",
+//!         Subject: "Important Call",
+//!         Priority: "urgent",
+//!         CustomHeader: "Custom Value"
+//!     }
+//! };
+//! ```
 
-use crate::simple_builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{Method, StatusCode, TypedHeader, uri::Uri};
 use std::str::FromStr;
 
@@ -68,7 +146,7 @@ macro_rules! sip_request {
         $(,)?
     ) => {
         {
-            use $crate::simple_builder::SimpleRequestBuilder;
+            use $crate::builder::SimpleRequestBuilder;
             use $crate::types::TypedHeader;
             use std::str::FromStr;
 
@@ -258,7 +336,7 @@ macro_rules! sip_response {
         $(,)?
     ) => {
         {
-            use $crate::simple_builder::SimpleResponseBuilder;
+            use $crate::builder::SimpleResponseBuilder;
             use $crate::types::TypedHeader;
             use std::str::FromStr;
             

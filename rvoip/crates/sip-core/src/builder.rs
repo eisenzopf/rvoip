@@ -6,7 +6,6 @@ use crate::types::{
     Method, 
     StatusCode, 
     Version,
-    sip_message::Message,
     sip_request::Request,
     sip_response::Response,
     uri::{Uri, Host, Scheme},
@@ -14,7 +13,7 @@ use crate::types::{
     from::From,
     call_id::CallId,
     cseq::CSeq,
-    contact::{Contact, ContactParamInfo},
+    contact::{Contact, ContactParamInfo, ContactValue},
     content_type::ContentType,
     content_length::ContentLength,
     via::{Via, ViaHeader, SentProtocol},
@@ -23,250 +22,211 @@ use crate::types::{
     Param,
     max_forwards::MaxForwards,
 };
-use crate::parser::uri::parse_uri_lenient;
 
-/// Builder for SIP request messages
+/// # SIP Builders
 ///
-/// The `RequestBuilder` provides a fluent API for constructing SIP requests with
-/// proper headers and parameters according to RFC 3261. Each builder method returns
-/// either the builder itself or a specialized builder for constructing complex headers.
+/// This module provides builder patterns for creating SIP messages.
 ///
-/// # Examples
+/// ## SimpleRequestBuilder and SimpleResponseBuilder
+///
+/// These builders provide a streamlined approach to creating SIP messages with a fluent API.
+/// The design offers several advantages over more complex builder patterns:
+///
+/// 1. **Consistent Method Chaining**: All methods return `Self`, avoiding the need to deal with
+///    different builder types for different headers.
+///
+/// 2. **Intuitive API**: Methods like `from()`, `to()`, `via()` directly accept common parameters
+///    rather than requiring explicit header construction.
+///
+/// 3. **Better Error Handling**: Provides fallbacks for parsing failures, making the API more
+///    forgiving of minor errors.
+///
+/// 4. **Simplified Parameter Passing**: Takes all parameters for a header in a single method call.
+///
+/// ## Example Usage
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
-/// use std::str::FromStr;
 ///
-/// // Create a basic INVITE request
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-///     .from("Alice", "sip:alice@atlanta.com")
-///         .with_tag("1928301774")
-///         .done()
-///     .to("Bob", "sip:bob@example.com")
-///         .done()
+/// // Creating a request with the SimpleRequestBuilder
+/// let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@example.com", None)
 ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
 ///     .cseq(314159)
+///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 ///     .max_forwards(70)
-///     .via("pc33.atlanta.com", "UDP")
-///         .with_branch("z9hG4bK776asdhds")
-///         .done()
-///     .contact("sip:alice@pc33.atlanta.com").unwrap()
+///     .contact("sip:alice@pc33.atlanta.com", None)
+///     .content_type("application/sdp")
+///     .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
+///     .build();
+///
+/// // Creating a response with the SimpleResponseBuilder
+/// let response = ResponseBuilder::new(StatusCode::Ok, Some("OK"))
+///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+///     .cseq(1, Method::Invite)
+///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 ///     .build();
 /// ```
-pub struct RequestBuilder {
+
+/// A simplified builder for SIP requests with improved method chaining.
+///
+/// This builder approach avoids returning different builder types for specific headers,
+/// allowing for more straightforward method chaining and making it easier to use in macros.
+///
+/// # Example
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@example.com", None)
+///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+///     .cseq(314159)
+///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+///     .max_forwards(70)
+///     .contact("sip:alice@pc33.atlanta.com", None)
+///     .content_type("application/sdp")
+///     .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
+///     .build();
+/// ```
+pub struct SimpleRequestBuilder {
     request: Request,
 }
 
-impl RequestBuilder {
-    /// Create a new RequestBuilder with the specified method and URI
+impl SimpleRequestBuilder {
+    /// Create a new SimpleRequestBuilder with the specified method and URI
+    ///
+    /// # Parameters
+    /// - `method`: The SIP method (INVITE, REGISTER, etc.)
+    /// - `uri`: The target URI as a string
+    ///
+    /// # Returns
+    /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     pub fn new(method: Method, uri: &str) -> Result<Self> {
-        // First try parsing as a standard URI
         match Uri::from_str(uri) {
             Ok(uri) => {
-                let mut request = Request::new(method, uri);
-                request.version = Version::new(2, 0); // Default to SIP/2.0
+                let request = Request::new(method, uri);
                 Ok(Self { request })
             },
-            Err(_) => {
-                // Use our lenient parser for non-standard schemes like in RFC compliance tests
-                match parse_uri_lenient(uri.as_bytes()) {
-                    Ok((_, uri)) => {
-                        let mut request = Request::new(method, uri);
-                        request.version = Version::new(2, 0); // Default to SIP/2.0
-                        Ok(Self { request })
-                    },
-                    Err(_) => {
-                        // If not even the lenient parser works, check if it has a colon
-                        if uri.contains(':') {
-                            // Just create a custom URI that preserves the raw string
-                            let uri = Uri::custom(uri);
-                            let mut request = Request::new(method, uri);
-                            request.version = Version::new(2, 0); // Default to SIP/2.0
-                            Ok(Self { request })
-                        } else {
-                            // It's not a valid URI and doesn't have a scheme, so report error
-                            Err(Error::InvalidUri("URI missing scheme".to_string()))
-                        }
-                    }
-                }
-            }
+            Err(e) => Err(Error::InvalidUri(format!("Invalid URI: {}", e))),
         }
     }
     
-    /// Create a RequestBuilder from an existing Request
-    ///
-    /// # Parameters
-    /// - `request`: An existing Request object to build upon
-    ///
-    /// # Returns
-    /// A new RequestBuilder containing the provided request
+    /// Create from an existing Request object
     pub fn from_request(request: Request) -> Self {
         Self { request }
     }
-
+    
     /// Create an INVITE request
-    ///
-    /// The INVITE method is used to establish a media session between user agents.
-    ///
-    /// # Parameters
-    /// - `uri`: The target URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
     pub fn invite(uri: &str) -> Result<Self> {
         Self::new(Method::Invite, uri)
     }
-
+    
     /// Create a REGISTER request
-    ///
-    /// The REGISTER method is used by a user agent to register its address with a SIP server.
-    ///
-    /// # Parameters
-    /// - `uri`: The registrar URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
     pub fn register(uri: &str) -> Result<Self> {
         Self::new(Method::Register, uri)
     }
-
-    /// Create an OPTIONS request
-    ///
-    /// The OPTIONS method is used to query the capabilities of a server.
-    ///
-    /// # Parameters
-    /// - `uri`: The target URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
-    pub fn options(uri: &str) -> Result<Self> {
-        Self::new(Method::Options, uri)
-    }
-
+    
     /// Create a BYE request
-    ///
-    /// The BYE method is used to terminate a SIP dialog.
-    ///
-    /// # Parameters
-    /// - `uri`: The target URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
     pub fn bye(uri: &str) -> Result<Self> {
         Self::new(Method::Bye, uri)
     }
-
+    
+    /// Create an OPTIONS request
+    pub fn options(uri: &str) -> Result<Self> {
+        Self::new(Method::Options, uri)
+    }
+    
     /// Create an ACK request
-    ///
-    /// The ACK method is used to acknowledge receipt of a final response to an INVITE.
-    ///
-    /// # Parameters
-    /// - `uri`: The target URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
     pub fn ack(uri: &str) -> Result<Self> {
         Self::new(Method::Ack, uri)
     }
-
+    
     /// Create a CANCEL request
-    ///
-    /// The CANCEL method is used to cancel a pending INVITE request.
-    ///
-    /// # Parameters
-    /// - `uri`: The target URI as a string
-    ///
-    /// # Returns
-    /// A Result containing the RequestBuilder or an error if the URI is invalid
     pub fn cancel(uri: &str) -> Result<Self> {
         Self::new(Method::Cancel, uri)
     }
 
-    /// Set the SIP version (default is 2.0)
+    /// Add a From header with optional tag parameter
     ///
     /// # Parameters
-    /// - `major`: Major version number
-    /// - `minor`: Minor version number
+    /// - `display_name`: The display name for the From header
+    /// - `uri`: The URI for the From header
+    /// - `tag`: Optional tag parameter
     ///
     /// # Returns
     /// Self for method chaining
-    pub fn version(mut self, major: u8, minor: u8) -> Self {
-        self.request.version = Version::new(major, minor);
-        self
+    pub fn from(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                let mut address = Address::new_with_display_name(display_name, uri);
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.request = self.request.with_header(TypedHeader::From(From::new(address)));
+                self
+            },
+            Err(_) => {
+                // Best effort - if URI parsing fails, still try to continue with a simple string
+                let uri_str = uri.to_string();
+                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.request = self.request.with_header(TypedHeader::From(From::new(address)));
+                self
+            }
+        }
     }
-
-    /// Add a Via header
-    ///
-    /// Returns a specialized builder for constructing the Via header.
-    ///
-    /// # Parameters
-    /// - `host`: The host or IP address
-    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
-    ///
-    /// # Returns
-    /// A ViaBuilder for configuring the Via header
-    pub fn via(self, host: &str, transport: &str) -> ViaBuilder<Self> {
-        ViaBuilder::new(self, host, transport)
-    }
-
-    /// Add a From header
-    ///
-    /// Returns a specialized builder for constructing the From header.
-    ///
-    /// # Parameters
-    /// - `display_name`: The display name for the From header
-    /// - `uri`: The URI for the From header
-    ///
-    /// # Returns
-    /// An AddressBuilder for configuring the From header
-    pub fn from(self, display_name: &str, uri: &str) -> AddressBuilder<Self, FromHeader> {
-        AddressBuilder::new(self, display_name, uri, FromHeader)
-    }
-
-    /// Add a To header
-    ///
-    /// Returns a specialized builder for constructing the To header.
+    
+    /// Add a To header with optional tag parameter
     ///
     /// # Parameters
     /// - `display_name`: The display name for the To header
     /// - `uri`: The URI for the To header
+    /// - `tag`: Optional tag parameter
     ///
     /// # Returns
-    /// An AddressBuilder for configuring the To header
-    pub fn to(self, display_name: &str, uri: &str) -> AddressBuilder<Self, ToHeader> {
-        AddressBuilder::new(self, display_name, uri, ToHeader)
+    /// Self for method chaining
+    pub fn to(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                let mut address = Address::new_with_display_name(display_name, uri);
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.request = self.request.with_header(TypedHeader::To(To::new(address)));
+                self
+            },
+            Err(_) => {
+                // Best effort - if URI parsing fails, still try to continue with a simple string
+                let uri_str = uri.to_string();
+                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.request = self.request.with_header(TypedHeader::To(To::new(address)));
+                self
+            }
+        }
     }
-
-    /// Add a simple To header without parameters
-    ///
-    /// # Parameters
-    /// - `display_name`: The display name for the To header
-    /// - `uri`: The URI for the To header
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn simple_to(mut self, display_name: &str, uri: &str) -> Result<Self> {
-        let uri = Uri::from_str(uri)?;
-        let to_addr = Address::new_with_display_name(display_name, uri);
-        self.request = self.request.with_header(TypedHeader::To(To(to_addr)));
-        Ok(self)
-    }
-
-    /// Add a simple From header without parameters
-    ///
-    /// # Parameters
-    /// - `display_name`: The display name for the From header
-    /// - `uri`: The URI for the From header
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn simple_from(mut self, display_name: &str, uri: &str) -> Result<Self> {
-        let uri = Uri::from_str(uri)?;
-        let from_addr = Address::new_with_display_name(display_name, uri);
-        self.request = self.request.with_header(TypedHeader::From(From(from_addr)));
-        Ok(self)
-    }
-
+    
     /// Add a Call-ID header
     ///
     /// # Parameters
@@ -275,15 +235,11 @@ impl RequestBuilder {
     /// # Returns
     /// Self for method chaining
     pub fn call_id(mut self, call_id: &str) -> Self {
-        self.request = self.request.with_header(TypedHeader::CallId(
-            CallId(call_id.to_string())
-        ));
+        self.request = self.request.with_header(TypedHeader::CallId(CallId::new(call_id)));
         self
     }
-
-    /// Add a CSeq header
-    ///
-    /// Automatically uses the same method as the request.
+    
+    /// Add a CSeq header for requests
     ///
     /// # Parameters
     /// - `seq`: The sequence number
@@ -292,306 +248,307 @@ impl RequestBuilder {
     /// Self for method chaining
     pub fn cseq(mut self, seq: u32) -> Self {
         let method = self.request.method.clone();
-        self.request = self.request.with_header(TypedHeader::CSeq(
-            CSeq::new(seq, method)
-        ));
+        self.request = self.request.with_header(
+            TypedHeader::CSeq(CSeq::new(seq, method))
+        );
         self
     }
-
+    
+    /// Add a Via header with optional branch parameter
+    ///
+    /// # Parameters
+    /// - `host`: The host or IP address
+    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
+    /// - `branch`: Optional branch parameter (should be prefixed with z9hG4bK per RFC 3261)
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
+        let mut params = Vec::new();
+        
+        // Add branch parameter if provided
+        if let Some(branch_value) = branch {
+            params.push(Param::branch(branch_value));
+        }
+        
+        // Parse host to separate hostname and port
+        let (hostname, port) = if host.contains(':') {
+            let parts: Vec<&str> = host.split(':').collect();
+            if parts.len() == 2 {
+                if let Ok(port_num) = parts[1].parse::<u16>() {
+                    (parts[0].to_string(), Some(port_num))
+                } else {
+                    (host.to_string(), None)
+                }
+            } else {
+                (host.to_string(), None)
+            }
+        } else {
+            (host.to_string(), None)
+        };
+        
+        // Create Via header
+        if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
+            self.request = self.request.with_header(TypedHeader::Via(via));
+        }
+        
+        self
+    }
+    
     /// Add a Max-Forwards header
     ///
     /// # Parameters
-    /// - `value`: The maximum number of hops
+    /// - `value`: The Max-Forwards value (typically 70)
     ///
     /// # Returns
     /// Self for method chaining
     pub fn max_forwards(mut self, value: u32) -> Self {
-        self.request = self.request.with_header(TypedHeader::MaxForwards(
-            MaxForwards(value as u8)
-        ));
+        self.request = self.request.with_header(
+            TypedHeader::MaxForwards(MaxForwards::new(value as u8))
+        );
         self
     }
-
+    
     /// Add a Contact header
     ///
     /// # Parameters
-    /// - `uri`: The URI for the Contact header (e.g., "sip:alice@192.168.1.1")
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn contact(mut self, uri: &str) -> Result<Self> {
-        let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(contact_uri);
-        let contact_param = ContactParamInfo { address: contact_address };
-        self.request = self.request.with_header(TypedHeader::Contact(
-            Contact::new_params(vec![contact_param])
-        ));
-        Ok(self)
-    }
-
-    /// Add a contact header with display name
-    ///
-    /// # Parameters
-    /// - `display_name`: The display name for the Contact header
-    /// - `uri`: The URI for the Contact header
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn contact_with_name(mut self, display_name: &str, uri: &str) -> Result<Self> {
-        let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new_with_display_name(display_name, contact_uri);
-        let contact_param = ContactParamInfo { address: contact_address };
-        self.request = self.request.with_header(TypedHeader::Contact(
-            Contact::new_params(vec![contact_param])
-        ));
-        Ok(self)
-    }
-
-    /// Add a Content-Type header
-    ///
-    /// # Parameters
-    /// - `content_type`: The content type string (e.g., "application/sdp")
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the content type is invalid
-    pub fn content_type(mut self, content_type: &str) -> Result<Self> {
-        self.request = self.request.with_header(TypedHeader::ContentType(
-            ContentType::from_str(content_type)?
-        ));
-        Ok(self)
-    }
-
-    /// Add body content
-    ///
-    /// Automatically adds a Content-Length header based on the body length.
-    ///
-    /// # Parameters
-    /// - `body`: The message body as a string
+    /// - `uri`: The contact URI as a string
+    /// - `display_name`: Optional display name
     ///
     /// # Returns
     /// Self for method chaining
-    pub fn body(mut self, body: &str) -> Self {
-        let content_length = body.len() as u32;
-        self.request = self.request.with_header(TypedHeader::ContentLength(
-            ContentLength(content_length)
-        ));
-        self.request.body = Bytes::from(body.to_string());
+    pub fn contact(mut self, uri: &str, display_name: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                // Create an address with or without display name
+                let address = match display_name {
+                    Some(name) => Address::new_with_display_name(name, uri),
+                    None => Address::new(uri)
+                };
+                
+                // Create a contact param with the address
+                let contact_param = ContactParamInfo { address };
+                let contact = Contact::new_params(vec![contact_param]);
+                
+                self.request = self.request.with_header(TypedHeader::Contact(contact));
+            },
+            Err(_) => {
+                // Silently fail - contact is not critical
+            }
+        }
         self
     }
-
-    /// Add a custom header
+    
+    /// Add a Content-Type header
+    ///
+    /// # Parameters
+    /// - `content_type`: The content type (e.g., "application/sdp")
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn content_type(mut self, content_type: &str) -> Self {
+        match ContentType::from_str(content_type) {
+            Ok(ct) => {
+                self.request = self.request.with_header(TypedHeader::ContentType(ct));
+            },
+            Err(_) => {
+                // Silently fail - content-type is not critical
+            }
+        }
+        self
+    }
+    
+    /// Add a generic header
     ///
     /// # Parameters
     /// - `header`: The typed header to add
     ///
     /// # Returns
     /// Self for method chaining
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rvoip_sip_core::prelude::*;
-    ///
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-    ///     .header(TypedHeader::UserAgent(vec!["MyAgent/1.0".to_string()]))
-    ///     .build();
-    /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
         self.request = self.request.with_header(header);
         self
     }
-
-    /// Build the final SIP request
+    
+    /// Add body content and update Content-Length
+    ///
+    /// # Parameters
+    /// - `body`: The body content
     ///
     /// # Returns
-    /// The constructed Request object
+    /// Self for method chaining
+    pub fn body(mut self, body: impl Into<Bytes>) -> Self {
+        self.request = self.request.with_body(body);
+        self
+    }
+    
+    /// Build the final Request
+    ///
+    /// # Returns
+    /// The constructed Request
     pub fn build(self) -> Request {
         self.request
     }
-
-    /// Internal method to update the request - used by sub-builders
-    fn update_request(&mut self, request: Request) {
-        self.request = request;
-    }
 }
 
-/// Builder for SIP response messages
+/// A simplified builder for SIP responses with improved method chaining.
 ///
-/// Provides a fluent API for creating SIP responses with proper headers and parameters.
-/// The builder takes care of setting appropriate defaults and simplifies constructing
-/// complex messages that comply with RFC 3261.
+/// This builder approach avoids returning different builder types for specific headers,
+/// allowing for more straightforward method chaining and making it easier to use in macros.
 ///
-/// # Examples
+/// # Example
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 ///
-/// let response = ResponseBuilder::ok()
-///     .from("Alice", "sip:alice@example.com")
-///         .with_tag("1928301774")
-///         .done()
-///     .to("Bob", "sip:bob@example.com")
-///         .with_tag("a6c85cf")
-///         .done()
-///     .call_id("a84b4c76e66710")
+/// let response = SimpleResponseBuilder::new(StatusCode::Ok, Some("OK"))
+///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+///     .call_id("a84b4c76e66710@pc33.atlanta.com")
 ///     .cseq(1, Method::Invite)
+///     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+///     .contact("sip:bob@192.168.1.2", None)
+///     .content_type("application/sdp")
+///     .body("v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n")
 ///     .build();
 /// ```
-pub struct ResponseBuilder {
+pub struct SimpleResponseBuilder {
     response: Response,
 }
 
-impl ResponseBuilder {
-    /// Create a new ResponseBuilder with the specified status code
+impl SimpleResponseBuilder {
+    /// Create a new SimpleResponseBuilder with the specified status code and optional reason phrase
     ///
     /// # Parameters
-    /// - `status`: The SIP status code for the response
+    /// - `status`: The SIP status code
+    /// - `reason`: Optional custom reason phrase (if None, the default for the status code will be used)
     ///
     /// # Returns
-    /// A new ResponseBuilder with the specified status
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rvoip_sip_core::prelude::*;
-    ///
-    /// let builder = ResponseBuilder::new(StatusCode::Ok);
-    /// ```
-    pub fn new(status: StatusCode) -> Self {
+    /// A new SimpleResponseBuilder
+    pub fn new(status: StatusCode, reason: Option<&str>) -> Self {
         let mut response = Response::new(status);
-        response.version = Version::new(2, 0); // Default to SIP/2.0
         
-        // Set default reason phrase based on status code
-        let reason = match status {
-            StatusCode::Ok => "OK",
-            StatusCode::Trying => "Trying",
-            StatusCode::Ringing => "Ringing",
-            StatusCode::BadRequest => "Bad Request",
-            StatusCode::Unauthorized => "Unauthorized",
-            StatusCode::NotFound => "Not Found",
-            StatusCode::ServerInternalError => "Internal Server Error",
-            _ => "",
-        };
-        response.reason = if !reason.is_empty() { Some(reason.to_string()) } else { None };
+        if let Some(reason_text) = reason {
+            response = response.with_reason(reason_text);
+        }
         
         Self { response }
     }
-
-    /// Create a 200 OK response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 200 OK
-    pub fn ok() -> Self {
-        Self::new(StatusCode::Ok)
-    }
-
-    /// Create a 100 Trying response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 100 Trying
-    pub fn trying() -> Self {
-        Self::new(StatusCode::Trying)
-    }
-
-    /// Create a 180 Ringing response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 180 Ringing
-    pub fn ringing() -> Self {
-        Self::new(StatusCode::Ringing)
-    }
-
-    /// Create a 400 Bad Request response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 400 Bad Request
-    pub fn bad_request() -> Self {
-        Self::new(StatusCode::BadRequest)
-    }
-
-    /// Create a 404 Not Found response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 404 Not Found
-    pub fn not_found() -> Self {
-        Self::new(StatusCode::NotFound)
-    }
-
-    /// Create a 500 Internal Server Error response
-    ///
-    /// # Returns
-    /// A new ResponseBuilder with status 500 Internal Server Error
-    pub fn server_error() -> Self {
-        Self::new(StatusCode::ServerInternalError)
+    
+    /// Create from an existing Response object
+    pub fn from_response(response: Response) -> Self {
+        Self { response }
     }
     
-    /// Set the SIP version (default is 2.0)
-    ///
-    /// # Parameters
-    /// - `major`: Major version number
-    /// - `minor`: Minor version number
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn version(mut self, major: u8, minor: u8) -> Self {
-        self.response.version = Version::new(major, minor);
-        self
+    /// Create a 200 OK response
+    pub fn ok() -> Self {
+        let response = Response::ok();
+        Self { response }
+    }
+    
+    /// Create a 100 Trying response
+    pub fn trying() -> Self {
+        let response = Response::trying();
+        Self { response }
+    }
+    
+    /// Create a 180 Ringing response
+    pub fn ringing() -> Self {
+        let response = Response::ringing();
+        Self { response }
+    }
+    
+    /// Create a 400 Bad Request response
+    pub fn bad_request() -> Self {
+        Self::new(StatusCode::BadRequest, None)
+    }
+    
+    /// Create a 404 Not Found response
+    pub fn not_found() -> Self {
+        Self::new(StatusCode::NotFound, None)
+    }
+    
+    /// Create a 500 Server Error response
+    pub fn server_error() -> Self {
+        Self::new(StatusCode::ServerInternalError, None)
     }
 
-    /// Set the response reason phrase
-    ///
-    /// # Parameters
-    /// - `reason`: The custom reason phrase
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn reason(mut self, reason: &str) -> Self {
-        self.response.reason = Some(reason.to_string());
-        self
-    }
-
-    /// Add a From header
-    ///
-    /// Returns a specialized builder for constructing the From header.
+    /// Add a From header with optional tag parameter
     ///
     /// # Parameters
     /// - `display_name`: The display name for the From header
     /// - `uri`: The URI for the From header
+    /// - `tag`: Optional tag parameter
     ///
     /// # Returns
-    /// An AddressBuilder for configuring the From header
-    pub fn from(self, display_name: &str, uri: &str) -> AddressBuilder<Self, FromHeader> {
-        AddressBuilder::new(self, display_name, uri, FromHeader)
+    /// Self for method chaining
+    pub fn from(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                let mut address = Address::new_with_display_name(display_name, uri);
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.response = self.response.with_header(TypedHeader::From(From::new(address)));
+                self
+            },
+            Err(_) => {
+                // Best effort - if URI parsing fails, still try to continue with a simple string
+                let uri_str = uri.to_string();
+                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.response = self.response.with_header(TypedHeader::From(From::new(address)));
+                self
+            }
+        }
     }
-
-    /// Add a To header
-    ///
-    /// Returns a specialized builder for constructing the To header.
+    
+    /// Add a To header with optional tag parameter
     ///
     /// # Parameters
     /// - `display_name`: The display name for the To header
     /// - `uri`: The URI for the To header
+    /// - `tag`: Optional tag parameter
     ///
     /// # Returns
-    /// An AddressBuilder for configuring the To header
-    pub fn to(self, display_name: &str, uri: &str) -> AddressBuilder<Self, ToHeader> {
-        AddressBuilder::new(self, display_name, uri, ToHeader)
+    /// Self for method chaining
+    pub fn to(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                let mut address = Address::new_with_display_name(display_name, uri);
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.response = self.response.with_header(TypedHeader::To(To::new(address)));
+                self
+            },
+            Err(_) => {
+                // Best effort - if URI parsing fails, still try to continue with a simple string
+                let uri_str = uri.to_string();
+                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+                
+                // Add tag if provided
+                if let Some(tag_value) = tag {
+                    address.params.push(Param::tag(tag_value));
+                }
+                
+                self.response = self.response.with_header(TypedHeader::To(To::new(address)));
+                self
+            }
+        }
     }
-
-    /// Add a Via header
-    ///
-    /// Returns a specialized builder for constructing the Via header.
-    ///
-    /// # Parameters
-    /// - `host`: The host or IP address
-    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
-    ///
-    /// # Returns
-    /// A ViaBuilder for configuring the Via header
-    pub fn via(self, host: &str, transport: &str) -> ViaBuilder<Self> {
-        ViaBuilder::new(self, host, transport)
-    }
-
+    
     /// Add a Call-ID header
     ///
     /// # Parameters
@@ -600,95 +557,116 @@ impl ResponseBuilder {
     /// # Returns
     /// Self for method chaining
     pub fn call_id(mut self, call_id: &str) -> Self {
-        self.response = self.response.with_header(TypedHeader::CallId(
-            CallId(call_id.to_string())
-        ));
+        self.response = self.response.with_header(TypedHeader::CallId(CallId::new(call_id)));
         self
     }
-
-    /// Add a CSeq header
+    
+    /// Add a CSeq header for responses (requires method)
     ///
     /// # Parameters
     /// - `seq`: The sequence number
-    /// - `method`: The SIP method for the CSeq
+    /// - `method`: The method in the CSeq header
     ///
     /// # Returns
     /// Self for method chaining
     pub fn cseq(mut self, seq: u32, method: Method) -> Self {
-        self.response = self.response.with_header(TypedHeader::CSeq(
-            CSeq::new(seq, method)
-        ));
+        self.response = self.response.with_header(
+            TypedHeader::CSeq(CSeq::new(seq, method))
+        );
         self
     }
-
-    /// Add a Contact header
+    
+    /// Add a Via header with optional branch parameter
     ///
     /// # Parameters
-    /// - `uri`: The URI for the Contact header
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn contact(mut self, uri: &str) -> Result<Self> {
-        let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new(contact_uri);
-        let contact_param = ContactParamInfo { address: contact_address };
-        self.response = self.response.with_header(TypedHeader::Contact(
-            Contact::new_params(vec![contact_param])
-        ));
-        Ok(self)
-    }
-
-    /// Add a contact header with display name
-    ///
-    /// # Parameters
-    /// - `display_name`: The display name for the Contact header
-    /// - `uri`: The URI for the Contact header
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the URI is invalid
-    pub fn contact_with_name(mut self, display_name: &str, uri: &str) -> Result<Self> {
-        let contact_uri = Uri::from_str(uri)?;
-        let contact_address = Address::new_with_display_name(display_name, contact_uri);
-        let contact_param = ContactParamInfo { address: contact_address };
-        self.response = self.response.with_header(TypedHeader::Contact(
-            Contact::new_params(vec![contact_param])
-        ));
-        Ok(self)
-    }
-
-    /// Add a Content-Type header
-    ///
-    /// # Parameters
-    /// - `content_type`: The content type string (e.g., "application/sdp")
-    ///
-    /// # Returns
-    /// A Result containing Self for method chaining, or an error if the content type is invalid
-    pub fn content_type(mut self, content_type: &str) -> Result<Self> {
-        self.response = self.response.with_header(TypedHeader::ContentType(
-            ContentType::from_str(content_type)?
-        ));
-        Ok(self)
-    }
-
-    /// Add body content
-    ///
-    /// Automatically adds a Content-Length header based on the body length.
-    ///
-    /// # Parameters
-    /// - `body`: The message body as a string
+    /// - `host`: The host or IP address
+    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
+    /// - `branch`: Optional branch parameter (should be prefixed with z9hG4bK per RFC 3261)
     ///
     /// # Returns
     /// Self for method chaining
-    pub fn body(mut self, body: &str) -> Self {
-        let content_length = body.len() as u32;
-        self.response = self.response.with_header(TypedHeader::ContentLength(
-            ContentLength(content_length)
-        ));
-        self.response.body = Bytes::from(body.to_string());
+    pub fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
+        let mut params = Vec::new();
+        
+        // Add branch parameter if provided
+        if let Some(branch_value) = branch {
+            params.push(Param::branch(branch_value));
+        }
+        
+        // Parse host to separate hostname and port
+        let (hostname, port) = if host.contains(':') {
+            let parts: Vec<&str> = host.split(':').collect();
+            if parts.len() == 2 {
+                if let Ok(port_num) = parts[1].parse::<u16>() {
+                    (parts[0].to_string(), Some(port_num))
+                } else {
+                    (host.to_string(), None)
+                }
+            } else {
+                (host.to_string(), None)
+            }
+        } else {
+            (host.to_string(), None)
+        };
+        
+        // Create Via header
+        if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
+            self.response = self.response.with_header(TypedHeader::Via(via));
+        }
+        
         self
     }
-
-    /// Add a custom header
+    
+    /// Add a Contact header
+    ///
+    /// # Parameters
+    /// - `uri`: The contact URI as a string
+    /// - `display_name`: Optional display name
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn contact(mut self, uri: &str, display_name: Option<&str>) -> Self {
+        match Uri::from_str(uri) {
+            Ok(uri) => {
+                // Create an address with or without display name
+                let address = match display_name {
+                    Some(name) => Address::new_with_display_name(name, uri),
+                    None => Address::new(uri)
+                };
+                
+                // Create a contact param with the address
+                let contact_param = ContactParamInfo { address };
+                let contact = Contact::new_params(vec![contact_param]);
+                
+                self.response = self.response.with_header(TypedHeader::Contact(contact));
+            },
+            Err(_) => {
+                // Silently fail - contact is not critical
+            }
+        }
+        self
+    }
+    
+    /// Add a Content-Type header
+    ///
+    /// # Parameters
+    /// - `content_type`: The content type (e.g., "application/sdp")
+    ///
+    /// # Returns
+    /// Self for method chaining
+    pub fn content_type(mut self, content_type: &str) -> Self {
+        match ContentType::from_str(content_type) {
+            Ok(ct) => {
+                self.response = self.response.with_header(TypedHeader::ContentType(ct));
+            },
+            Err(_) => {
+                // Silently fail - content-type is not critical
+            }
+        }
+        self
+    }
+    
+    /// Add a generic header
     ///
     /// # Parameters
     /// - `header`: The typed header to add
@@ -699,366 +677,153 @@ impl ResponseBuilder {
         self.response = self.response.with_header(header);
         self
     }
-
-    /// Build the final SIP response
-    ///
-    /// # Returns
-    /// The constructed Response object
-    pub fn build(self) -> Response {
-        self.response
-    }
-
-    /// Internal method to update the response - used by sub-builders
-    fn update_response(&mut self, response: Response) {
-        self.response = response;
-    }
-}
-
-// Builder for Via header
-/// Builder for Via header
-///
-/// The Via header provides information about the path taken by the SIP request
-/// and the path that should be followed for responses.
-///
-/// # Examples
-///
-/// ```rust
-/// use rvoip_sip_core::prelude::*;
-///
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-///     .via("192.168.1.1", "UDP")
-///         .with_branch("z9hG4bK776asdhds")
-///         .with_rport()
-///         .done()
-///     .build();
-/// ```
-pub struct ViaBuilder<P> {
-    parent: P,
-    protocol: SentProtocol,
-    host: String,
-    port: Option<u16>,
-    params: Vec<Param>,
-}
-
-impl<P> ViaBuilder<P> {
-    /// Creates a new ViaBuilder with the given host and transport
+    
+    /// Add body content and update Content-Length
     ///
     /// # Parameters
-    /// - `parent`: The parent builder to return to when done
-    /// - `host`: The host or IP address
-    /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
-    ///
-    /// # Returns
-    /// A new ViaBuilder
-    fn new(parent: P, host: &str, transport: &str) -> Self {
-        let protocol = SentProtocol {
-            name: "SIP".to_string(),
-            version: "2.0".to_string(),
-            transport: transport.to_uppercase(),
-        };
-        
-        Self {
-            parent,
-            protocol,
-            host: host.to_string(),
-            port: None,
-            params: Vec::new(),
-        }
-    }
-
-    /// Adds a branch parameter
-    ///
-    /// The branch parameter is a unique identifier for the SIP transaction.
-    ///
-    /// # Parameters
-    /// - `branch`: The branch identifier (should start with "z9hG4bK" for RFC 3261 compliance)
+    /// - `body`: The body content
     ///
     /// # Returns
     /// Self for method chaining
-    pub fn with_branch(mut self, branch: &str) -> Self {
-        self.params.push(Param::Branch(branch.to_string()));
-        self
-    }
-
-    /// Adds a received parameter
-    ///
-    /// The received parameter indicates the source IP address from which the message was received.
-    ///
-    /// # Parameters
-    /// - `ip`: The IP address from which the request was received
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_received(mut self, ip: std::net::IpAddr) -> Self {
-        self.params.push(Param::Received(ip));
-        self
-    }
-
-    /// Adds a rport parameter
-    ///
-    /// The rport parameter with no value enables response routing back through NAT.
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_rport(mut self) -> Self {
-        self.params.push(Param::Rport(None));
-        self
-    }
-
-    /// Adds a rport parameter with value
-    ///
-    /// The rport parameter with a value indicates the port from which the request was sent.
-    ///
-    /// # Parameters
-    /// - `port`: The port number
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_rport_value(mut self, port: u16) -> Self {
-        self.params.push(Param::Rport(Some(port)));
-        self
-    }
-
-    /// Adds a ttl parameter
-    ///
-    /// The ttl parameter indicates the time-to-live value for multicast messages.
-    ///
-    /// # Parameters
-    /// - `ttl`: The time-to-live value
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_ttl(mut self, ttl: u8) -> Self {
-        self.params.push(Param::Ttl(ttl));
-        self
-    }
-
-    /// Adds a maddr parameter
-    ///
-    /// The maddr parameter indicates the multicast address.
-    ///
-    /// # Parameters
-    /// - `maddr`: The multicast address
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_maddr(mut self, maddr: &str) -> Self {
-        self.params.push(Param::Maddr(maddr.to_string()));
+    pub fn body(mut self, body: impl Into<Bytes>) -> Self {
+        self.response = self.response.with_body(body);
         self
     }
     
-    /// Adds a generic parameter 
-    ///
-    /// # Parameters
-    /// - `name`: The parameter name
-    /// - `value`: The optional parameter value
+    /// Build the final Response
     ///
     /// # Returns
-    /// Self for method chaining
-    pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
-        let param = match value {
-            Some(val) => Param::Other(name.to_string(), Some(val.into())),
-            None => Param::Other(name.to_string(), None),
-        };
-        self.params.push(param);
-        self
+    /// The constructed Response
+    pub fn build(self) -> Response {
+        self.response
     }
 }
 
-// Via builder for Request
-impl ViaBuilder<RequestBuilder> {
-    /// Finishes building the Via header and returns to the RequestBuilder
-    ///
-    /// # Returns
-    /// The parent RequestBuilder with the Via header added
-    pub fn done(self) -> RequestBuilder {
-        let sent_by_host = match self.host.parse() {
-            Ok(host) => host,
-            Err(_) => Host::Domain(self.host.clone()), // Fallback to domain
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_simple_request_builder() {
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+            .from("Alice", "sip:alice@example.com", Some("1928301774"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id("a84b4c76e66710@pc33.atlanta.com")
+            .cseq(314159)
+            .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+            .max_forwards(70)
+            .build();
+            
+        assert_eq!(request.method, Method::Invite);
+        assert_eq!(request.uri.to_string(), "sip:bob@example.com");
         
-        let via_header = ViaHeader {
-            sent_protocol: self.protocol,
-            sent_by_host,
-            sent_by_port: self.port,
-            params: self.params,
-        };
+        // Check From header
+        let from = request.from().unwrap();
+        assert_eq!(from.address().display_name(), Some("Alice"));
+        assert_eq!(from.address().uri.to_string(), "sip:alice@example.com");
+        assert_eq!(from.tag(), Some("1928301774"));
         
-        let mut parent = self.parent;
-        let via = TypedHeader::Via(Via(vec![via_header]));
-        parent.request = parent.request.with_header(via);
-        parent
-    }
-}
-
-// Via builder for Response
-impl ViaBuilder<ResponseBuilder> {
-    /// Finishes building the Via header and returns to the ResponseBuilder
-    ///
-    /// # Returns
-    /// The parent ResponseBuilder with the Via header added
-    pub fn done(self) -> ResponseBuilder {
-        let sent_by_host = match self.host.parse() {
-            Ok(host) => host,
-            Err(_) => Host::Domain(self.host.clone()), // Fallback to domain
-        };
+        // Check To header
+        let to = request.to().unwrap();
+        assert_eq!(to.address().display_name(), Some("Bob"));
+        assert_eq!(to.address().uri.to_string(), "sip:bob@example.com");
+        assert_eq!(to.tag(), None);
         
-        let via_header = ViaHeader {
-            sent_protocol: self.protocol,
-            sent_by_host,
-            sent_by_port: self.port,
-            params: self.params,
-        };
+        // Check Call-ID header
+        let call_id = request.call_id().unwrap();
+        assert_eq!(call_id.value(), "a84b4c76e66710@pc33.atlanta.com");
         
-        let mut parent = self.parent;
-        let via = TypedHeader::Via(Via(vec![via_header]));
-        parent.response = parent.response.with_header(via);
-        parent
-    }
-}
-
-// Marker traits for From/To header types
-
-/// Builder for address-based headers like From and To
-///
-/// The `AddressBuilder` provides a fluent API for constructing address-based headers
-/// such as From and To, with support for parameters like tags.
-///
-/// # Type Parameters
-/// - `P`: Parent builder type (RequestBuilder or ResponseBuilder)
-/// - `T`: Header type marker (FromHeader or ToHeader)
-///
-/// # Examples
-///
-/// ```rust
-/// use rvoip_sip_core::prelude::*;
-///
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
-///     .from("Alice", "sip:alice@atlanta.com")
-///         .with_tag("1928301774")
-///         .done()
-///     .build();
-/// ```
-pub struct AddressBuilder<P, T> {
-    parent: P,
-    address: Address,
-    _marker: std::marker::PhantomData<T>,
-}
-
-impl<P, T> AddressBuilder<P, T> {
-    /// Creates a new AddressBuilder
-    ///
-    /// # Parameters
-    /// - `parent`: The parent builder
-    /// - `display_name`: The display name for the address
-    /// - `uri`: The URI string
-    /// - `_marker`: Type marker for the header type
-    ///
-    /// # Returns
-    /// A new AddressBuilder
-    fn new(parent: P, display_name: &str, uri: &str, _marker: T) -> Self {
-        // Parse URI (using lenient approach for examples)
-        let uri = match Uri::from_str(uri) {
-            Ok(uri) => uri,
-            Err(_) => {
-                // If standard parsing fails, try the lenient parser
-                match parse_uri_lenient(uri.as_bytes()) {
-                    Ok((_, uri)) => uri,
-                    Err(_) => {
-                        // For examples, create a simple SIP URI
-                        Uri::sip("example.com")
-                    }
-                }
-            }
-        };
+        // Check CSeq header
+        let cseq = request.cseq().unwrap();
+        assert_eq!(cseq.sequence(), 314159);
+        assert_eq!(*cseq.method(), Method::Invite);
         
-        let address = Address::new_with_display_name(display_name, uri);
+        // Check Via header
+        let via = request.first_via().unwrap();
+        assert_eq!(via.0[0].sent_protocol.transport, "UDP");
+        assert_eq!(via.0[0].sent_by_host.to_string(), "pc33.atlanta.com");
+        assert!(via.branch().is_some());
+        assert_eq!(via.branch().unwrap(), "z9hG4bK776asdhds");
         
-        Self {
-            parent,
-            address,
-            _marker: std::marker::PhantomData,
-        }
+        // Check Max-Forwards header
+        let max_forwards = request.typed_header::<MaxForwards>().unwrap();
+        assert_eq!(max_forwards.0, 70);
     }
-
-    /// Adds a tag parameter
-    ///
-    /// The tag parameter is used to identify dialogs.
-    ///
-    /// # Parameters
-    /// - `tag`: The tag value
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.address.params.push(Param::Tag(tag.to_string()));
-        self
+    
+    #[test]
+    fn test_simple_response_builder() {
+        let response = SimpleResponseBuilder::new(StatusCode::Ok, Some("OK"))
+            .from("Alice", "sip:alice@example.com", Some("1928301774"))
+            .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+            .call_id("a84b4c76e66710@pc33.atlanta.com")
+            .cseq(1, Method::Invite)
+            .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+            .build();
+            
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.reason, Some("OK".to_string()));
+        
+        // Check From header
+        let from = response.from().unwrap();
+        assert_eq!(from.address().display_name(), Some("Alice"));
+        assert_eq!(from.address().uri.to_string(), "sip:alice@example.com");
+        assert_eq!(from.tag(), Some("1928301774"));
+        
+        // Check To header
+        let to = response.to().unwrap();
+        assert_eq!(to.address().display_name(), Some("Bob"));
+        assert_eq!(to.address().uri.to_string(), "sip:bob@example.com");
+        assert_eq!(to.tag(), Some("a6c85cf"));
+        
+        // Check Call-ID header
+        let call_id = response.call_id().unwrap();
+        assert_eq!(call_id.value(), "a84b4c76e66710@pc33.atlanta.com");
+        
+        // Check CSeq header
+        let cseq = response.cseq().unwrap();
+        assert_eq!(cseq.sequence(), 1);
+        assert_eq!(*cseq.method(), Method::Invite);
+        
+        // Check Via header
+        let via = response.first_via().unwrap();
+        assert_eq!(via.0[0].sent_protocol.transport, "UDP");
+        assert_eq!(via.0[0].sent_by_host.to_string(), "pc33.atlanta.com");
+        assert!(via.branch().is_some());
+        assert_eq!(via.branch().unwrap(), "z9hG4bK776asdhds");
     }
-
-    /// Adds a generic parameter
-    ///
-    /// # Parameters
-    /// - `name`: The parameter name
-    /// - `value`: The optional parameter value
-    ///
-    /// # Returns
-    /// Self for method chaining
-    pub fn with_param(mut self, name: &str, value: Option<&str>) -> Self {
-        let param = match value {
-            Some(val) => Param::Other(name.to_string(), Some(val.into())),
-            None => Param::Other(name.to_string(), None),
-        };
-        self.address.params.push(param);
-        self
+    
+    #[test]
+    fn test_with_body_and_content_type() {
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+            .content_type("application/sdp")
+            .body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n")
+            .build();
+            
+        // Check Content-Type header
+        let content_type = request.typed_header::<ContentType>().unwrap();
+        assert_eq!(content_type.to_string(), "application/sdp");
+        
+        // Check body
+        assert_eq!(
+            String::from_utf8_lossy(&request.body),
+            "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n"
+        );
+        
+        // Check Content-Length header
+        let content_length = request.typed_header::<ContentLength>().unwrap();
+        assert_eq!(content_length.0 as usize, request.body.len());
     }
-}
-
-// Implementation for RequestBuilder
-impl AddressBuilder<RequestBuilder, FromHeader> {
-    /// Completes the From header and returns to the RequestBuilder
-    pub fn done(self) -> RequestBuilder {
-        let mut parent = self.parent;
-        parent.request = parent.request.with_header(TypedHeader::From(From(self.address)));
-        parent
+    
+    #[test]
+    fn test_uri_parsing_error_handling() {
+        // Test with invalid URI
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+            .from("Alice", "invalid-uri", Some("1928301774"))
+            .to("Bob", "another-invalid-uri", None)
+            .build();
+            
+        // The builder should still create headers with best effort parsing
+        assert!(request.from().is_some());
+        assert!(request.to().is_some());
     }
-}
-
-impl AddressBuilder<RequestBuilder, ToHeader> {
-    /// Completes the To header and returns to the RequestBuilder
-    pub fn done(self) -> RequestBuilder {
-        let mut parent = self.parent;
-        parent.request = parent.request.with_header(TypedHeader::To(To(self.address)));
-        parent
-    }
-}
-
-// Implementation for ResponseBuilder
-impl AddressBuilder<ResponseBuilder, FromHeader> {
-    /// Completes the From header and returns to the ResponseBuilder
-    pub fn done(self) -> ResponseBuilder {
-        let mut parent = self.parent;
-        parent.response = parent.response.with_header(TypedHeader::From(From(self.address)));
-        parent
-    }
-}
-
-impl AddressBuilder<ResponseBuilder, ToHeader> {
-    /// Completes the To header and returns to the ResponseBuilder
-    pub fn done(self) -> ResponseBuilder {
-        let mut parent = self.parent;
-        parent.response = parent.response.with_header(TypedHeader::To(To(self.address)));
-        parent
-    }
-}
-
-/// Marker trait for From header in AddressBuilder
-///
-/// This is used as a type parameter in the AddressBuilder to indicate
-/// that it's building a From header.
-pub struct FromHeader;
-
-/// Marker trait for To header in AddressBuilder
-///
-/// This is used as a type parameter in the AddressBuilder to indicate
-/// that it's building a To header.
-pub struct ToHeader; 
+} 
