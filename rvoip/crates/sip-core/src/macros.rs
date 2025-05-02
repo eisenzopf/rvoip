@@ -470,8 +470,8 @@ macro_rules! sip_request {
                         "ContentType" => {
                             // Special handling for ContentType to use the content_type method
                             builder = builder.content_type(&header_value);
-                        },
-                        _ => {
+                    },
+                    _ => {
                             // Generic header handling
                             use $crate::types::header::{HeaderName, HeaderValue};
                             
@@ -488,7 +488,7 @@ macro_rules! sip_request {
                                     })
                                     .collect::<Vec<_>>()
                                     .join("-")
-                            } else {
+                                    } else {
                                 // Just capitalize the first letter
                                 let mut chars = header_name.chars();
                                 match chars.next() {
@@ -496,14 +496,14 @@ macro_rules! sip_request {
                                     None => String::new()
                                 }
                             };
-                            
-                            builder = builder.header(TypedHeader::Other(
-                                HeaderName::Other(name),
+                        
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Other(name),
                                 HeaderValue::text(header_value)
-                            ));
-                        }
+                        ));
                     }
-                )*
+                }
+            )*
             )?
             
             // Add body if provided
@@ -699,8 +699,8 @@ macro_rules! sip_response {
                             
                             builder = builder.header(TypedHeader::MaxForwards(
                                 MaxForwards::new(header_value.parse::<u8>().expect("Invalid Max-Forwards value"))
-                            ));
-                        },
+                        ));
+                    },
                         "Server" => {
                             // Handle Server header
                             builder = builder.header(TypedHeader::Server(vec![header_value.to_string()]));
@@ -708,8 +708,8 @@ macro_rules! sip_response {
                         "ContentType" => {
                             // Special handling for ContentType to use the content_type method
                             builder = builder.content_type(&header_value);
-                        },
-                        _ => {
+                    },
+                    _ => {
                             // Generic header handling
                             use $crate::types::header::{HeaderName, HeaderValue};
                             
@@ -726,7 +726,7 @@ macro_rules! sip_response {
                                     })
                                     .collect::<Vec<_>>()
                                     .join("-")
-                            } else {
+                                    } else {
                                 // Just capitalize the first letter
                                 let mut chars = header_name.chars();
                                 match chars.next() {
@@ -734,14 +734,14 @@ macro_rules! sip_response {
                                     None => String::new()
                                 }
                             };
-                            
-                            builder = builder.header(TypedHeader::Other(
-                                HeaderName::Other(name),
+                        
+                        builder = builder.header(TypedHeader::Other(
+                            HeaderName::Other(name),
                                 HeaderValue::text(header_value)
-                            ));
-                        }
+                        ));
                     }
-                )*
+                }
+            )*
             )?
             
             // Add body if provided
@@ -760,7 +760,7 @@ mod tests {
     use super::*;
     use crate::types::{
         Method, StatusCode, uri::Uri, Address, TypedHeader, header::{HeaderName, HeaderValue},
-        sip_request::Request, sip_response::Response,
+            sip_request::Request, sip_response::Response,
     };
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
         
         assert_eq!(String::from_utf8_lossy(request.body()), body_content);
     }
-    
+
     #[test]
     fn test_sip_response_basic() {
         let response = sip_response! {
@@ -892,7 +892,7 @@ mod tests {
             panic!("Missing CSeq header");
         }
     }
-    
+
     #[test]
     fn test_sip_response_with_body() {
         let body_content = "v=0\r\no=bob 123 456 IN IP4 192.168.1.2\r\ns=A call\r\nt=0 0\r\n";
@@ -922,7 +922,7 @@ mod tests {
         
         assert_eq!(String::from_utf8_lossy(response.body()), body_content);
     }
-    
+
     #[test]
     fn test_request_with_custom_headers() {
         let request = sip_request! {
@@ -971,7 +971,7 @@ mod tests {
             panic!("Missing custom header");
         }
     }
-    
+
     #[test]
     fn test_error_handling_for_invalid_uris() {
         // The macro should still work even with an invalid URI in the from/to fields
@@ -1003,7 +1003,7 @@ mod tests {
             println!("Missing To header despite invalid URI - known issue");
         }
     }
-    
+
     #[test]
     fn test_no_parameters_provided() {
         // The macro should work with minimal parameters
