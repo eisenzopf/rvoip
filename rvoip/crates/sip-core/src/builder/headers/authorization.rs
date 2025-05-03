@@ -1,61 +1,97 @@
-use crate::error::{Error, Result};
+//! Authorization header builder
+//!
+//! This module provides builder methods for adding Authorization headers to SIP requests,
+//! used for providing authentication credentials as defined in RFC 3261 Section 22.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//!
+//! // Create a request with a Digest Authorization
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//!     .authorization_digest(
+//!         "alice",                 // username
+//!         "sip.example.com",       // realm
+//!         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+//!         "5ccc069c403ebaf9f0171e9517f40e41",   // response
+//!         Some("0a4f113b"),        // cnonce 
+//!         Some("auth"),            // qop
+//!         Some("00000001"),        // nc
+//!         Some("REGISTER"),        // method
+//!         Some("sip:example.com"), // uri
+//!         Some("MD5"),             // algorithm
+//!         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+//!     )
+//!     .build();
+//!
+//! // Create a request with a Basic Authorization
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//!     .authorization_basic("alice", "password123")
+//!     .build();
+//! ```
+
+use base64::{Engine as _, engine::general_purpose};
+use crate::error::Result;
 use crate::types::{
     auth::{
-        Authorization, 
-        Credentials,
+        Authorization,
+        Challenge,
         DigestParam,
-        AuthScheme, 
-        Algorithm, 
-        Qop
+        AuthParam,
+        Algorithm,
+        Qop,
+        Credentials,
     },
     TypedHeader,
-    header::TypedHeaderTrait,
-    Uri,
+    header::{TypedHeaderTrait, Header, HeaderName},
     headers::header_access::HeaderAccess,
 };
-use base64::engine::{general_purpose, Engine};
 use super::HeaderSetter;
 
 /// Extension trait for adding Authorization header building capabilities
 pub trait AuthorizationExt {
     /// Add a Digest Authorization header to the request
     ///
-    /// # Arguments
+    /// This method adds an Authorization header with a Digest authentication response
+    /// to a SIP request. This is typically used in response to a 401 Unauthorized challenge.
     ///
-    /// * `username` - The username for authentication
-    /// * `realm` - The authentication realm
-    /// * `nonce` - The server nonce value
-    /// * `uri` - The URI being accessed
-    /// * `response` - The hashed response value
+    /// # Parameters
+    ///
+    /// * `username` - The authentication username (mandatory)
+    /// * `realm` - The authentication realm (mandatory)
+    /// * `nonce` - The server-provided nonce value (mandatory)
+    /// * `response` - The computed response hash (mandatory)
+    /// * `cnonce` - Optional client nonce (required for qop=auth/auth-int)
+    /// * `qop` - Optional quality of protection (auth, auth-int)
+    /// * `nc` - Optional nonce count (required for qop=auth/auth-int)
+    /// * `method` - Optional method for proper response calculation
+    /// * `uri` - Optional URI for proper response calculation
     /// * `algorithm` - Optional algorithm (defaults to MD5 if None)
-    /// * `cnonce` - Optional client nonce for auth-int and auth-qop
-    /// * `opaque` - Optional opaque value to be returned unchanged to the server
-    /// * `qop` - Optional quality of protection
-    /// * `nc` - Optional nonce count for auth-int and auth-qop
+    /// * `opaque` - Optional opaque value to be returned unchanged
     ///
     /// # Returns
     ///
-    /// Self for method chaining
+    /// The builder with the Authorization header added
     ///
     /// # Example
     ///
     /// ```rust
-    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AuthorizationExt};
-    /// 
-    /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-    ///     .from("Alice", "sip:alice@example.com", None)
-    ///     .to("Alice", "sip:alice@example.com", None)
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let request = RequestBuilder::new(Method::Register, "sip:example.com")
     ///     .authorization_digest(
     ///         "alice",
-    ///         "example.com", 
-    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
-    ///         "sip:example.com", 
-    ///         "a2ea68c230e5fea1ca715740fb14db97",
-    ///         None,
-    ///         None,
-    ///         None,
-    ///         None,
-    ///         None
+    ///         "sip.example.com",
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+    ///         "5ccc069c403ebaf9f0171e9517f40e41",
+    ///         Some("0a4f113b"),
+    ///         Some("auth"),
+    ///         Some("00000001"),
+    ///         Some("REGISTER"),
+    ///         Some("sip:example.com"),
+    ///         Some("MD5"),
+    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"),
     ///     )
     ///     .build();
     /// ```
@@ -64,42 +100,44 @@ pub trait AuthorizationExt {
         username: &str,
         realm: &str,
         nonce: &str,
-        uri_str: &str,
         response: &str,
-        algorithm: Option<&str>,
         cnonce: Option<&str>,
-        opaque: Option<&str>,
         qop: Option<&str>,
         nc: Option<&str>,
+        method: Option<&str>,
+        uri: Option<&str>,
+        algorithm: Option<&str>,
+        opaque: Option<&str>,
     ) -> Self;
-    
+
     /// Add a Basic Authorization header to the request
     ///
-    /// # Arguments
+    /// This method adds an Authorization header with a Basic authentication response
+    /// to a SIP request. Basic authentication simply base64-encodes the username and password.
     ///
-    /// * `username` - The username for authentication
-    /// * `password` - The password for authentication
+    /// # Parameters
+    ///
+    /// * `username` - The authentication username
+    /// * `password` - The authentication password
     ///
     /// # Returns
     ///
-    /// Self for method chaining
+    /// The builder with the Authorization header added
     ///
     /// # Example
     ///
     /// ```rust
-    /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AuthorizationExt};
-    /// 
-    /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-    ///     .from("Alice", "sip:alice@example.com", None)
-    ///     .to("Alice", "sip:alice@example.com", None)
-    ///     .authorization_basic("alice", "secret-password")
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let request = RequestBuilder::new(Method::Register, "sip:example.com")
+    ///     .authorization_basic("alice", "password123")
     ///     .build();
     /// ```
     fn authorization_basic(self, username: &str, password: &str) -> Self;
 }
 
-impl<T> AuthorizationExt for T 
-where 
+impl<T> AuthorizationExt for T
+where
     T: HeaderSetter,
 {
     fn authorization_digest(
@@ -107,30 +145,39 @@ where
         username: &str,
         realm: &str,
         nonce: &str,
-        uri_str: &str,
         response: &str,
-        algorithm: Option<&str>,
         cnonce: Option<&str>,
-        opaque: Option<&str>,
         qop: Option<&str>,
         nc: Option<&str>,
+        method: Option<&str>,
+        uri: Option<&str>,
+        algorithm: Option<&str>,
+        opaque: Option<&str>,
     ) -> Self {
-        // Try to parse the URI
-        let uri = match Uri::try_from(uri_str) {
-            Ok(u) => u,
-            Err(_) => return self,
-        };
-
-        // Create digest params
+        // Create the params starting with mandatory fields
         let mut params = vec![
             DigestParam::Username(username.to_string()),
             DigestParam::Realm(realm.to_string()),
             DigestParam::Nonce(nonce.to_string()),
-            DigestParam::Uri(uri),
             DigestParam::Response(response.to_string()),
         ];
-        
-        // Add optional parameters
+
+        // Add the URI if provided
+        if let Some(uri_value) = uri {
+            // Try to parse the URI, but fallback to a string value if needed
+            match crate::types::uri::Uri::try_from(uri_value) {
+                Ok(parsed_uri) => params.push(DigestParam::Uri(parsed_uri)),
+                Err(_) => {
+                    // If we can't parse it as a URI, use a generic parameter
+                    params.push(DigestParam::Param(AuthParam {
+                        name: "uri".to_string(),
+                        value: uri_value.to_string(),
+                    }));
+                }
+            }
+        }
+
+        // Add algorithm if provided
         if let Some(alg) = algorithm {
             // Convert string to Algorithm enum
             let algorithm = match alg.to_lowercase().as_str() {
@@ -144,44 +191,52 @@ where
             };
             params.push(DigestParam::Algorithm(algorithm));
         }
-        
-        if let Some(cn) = cnonce {
-            params.push(DigestParam::Cnonce(cn.to_string()));
-        }
-        
-        if let Some(op) = opaque {
-            params.push(DigestParam::Opaque(op.to_string()));
-        }
-        
-        if let Some(q) = qop {
-            // Parse QOP type
-            let qop_type = match q.to_lowercase().as_str() {
+
+        // Add qop if provided
+        if let Some(qop_value) = qop {
+            let qop_type = match qop_value.to_lowercase().as_str() {
                 "auth" => Qop::Auth,
                 "auth-int" => Qop::AuthInt,
-                _ => Qop::Other(q.to_string()),
+                _ => Qop::Other(qop_value.to_string()),
             };
             params.push(DigestParam::MsgQop(qop_type));
-            
-            // If QOP is specified, nonce count is required
-            if let Some(count) = nc {
-                // Try to parse the nonce count as a hexadecimal number
-                if let Ok(nc_val) = u32::from_str_radix(count.trim_start_matches("0x"), 16) {
-                    params.push(DigestParam::NonceCount(nc_val));
-                }
+        }
+
+        // Add cnonce if provided
+        if let Some(cnonce_value) = cnonce {
+            params.push(DigestParam::Cnonce(cnonce_value.to_string()));
+        }
+
+        // Add nonce count if provided
+        if let Some(nc_value) = nc {
+            // Try to parse the nonce count as a hexadecimal number
+            if let Ok(nc_val) = u32::from_str_radix(nc_value.trim_start_matches("0x"), 16) {
+                params.push(DigestParam::NonceCount(nc_val));
             }
         }
+
+        // Add opaque if provided
+        if let Some(opaque_value) = opaque {
+            params.push(DigestParam::Opaque(opaque_value.to_string()));
+        }
+
+        // Create the digest challenge response
+        let credentials = Credentials::Digest { params };
+        let header_value = Authorization(credentials);
         
-        // Create the Authorization header
-        let auth = Authorization(Credentials::Digest { params });
-        self.set_header(auth)
+        // Use the HeaderSetter trait to set the header
+        self.set_header(header_value)
     }
-    
+
     fn authorization_basic(self, username: &str, password: &str) -> Self {
+        // Create the credentials string and base64 encode it
         let credentials = format!("{}:{}", username, password);
-        let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
+        let encoded = general_purpose::STANDARD.encode(credentials);
         
-        // Create the Authorization header with Basic scheme
+        // Create a Basic authorization with the encoded credentials
         let auth = Authorization(Credentials::Basic { token: encoded });
+        
+        // Use the HeaderSetter trait to set the header
         self.set_header(auth)
     }
 }
@@ -191,60 +246,108 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::Method;
-    use crate::types::header::HeaderName;
     
     #[test]
     fn test_authorization_digest() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-            .from("Alice", "sip:alice@example.com", None)
-            .to("Alice", "sip:alice@example.com", None)
+        // Create a request with a Digest Authorization
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
+            .expect("Failed to create request builder")
             .authorization_digest(
                 "alice",
-                "example.com", 
-                "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
-                "sip:example.com", 
-                "a2ea68c230e5fea1ca715740fb14db97",
-                None,
-                None,
-                None,
-                None,
-                None
+                "sip.example.com",
+                "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+                "5ccc069c403ebaf9f0171e9517f40e41",
+                Some("0a4f113b"),
+                Some("auth"),
+                Some("00000001"),
+                Some("REGISTER"),
+                Some("sip:example.com"),
+                Some("MD5"),
+                Some("5ccc069c403ebaf9f0171e9517f40e41"),
             )
             .build();
             
+        // Print all header names for debugging
+        let header_names = request.header_names();
+        println!("Request headers: {:?}", header_names);
+        
         // Check if Authorization header exists and has correct values
         let header = request.header(&HeaderName::Authorization);
+        println!("Authorization header: {:?}", header);
+        
         assert!(header.is_some(), "Authorization header not found");
         
-        if let Some(TypedHeader::Authorization(Authorization(Credentials::Digest { params }))) = header {
-            assert!(params.contains(&DigestParam::Username("alice".to_string())));
-            assert!(params.contains(&DigestParam::Realm("example.com".to_string())));
-            assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())));
-            assert!(params.contains(&DigestParam::Response("a2ea68c230e5fea1ca715740fb14db97".to_string())));
-            assert!(params.iter().any(|p| matches!(p, DigestParam::Uri(_))));
+        if let Some(TypedHeader::Authorization(Authorization(credentials))) = header {
+            if let Credentials::Digest { params } = credentials {
+                println!("Digest params: {:?}", params);
+                
+                // Check mandatory parameters
+                assert!(params.contains(&DigestParam::Username("alice".to_string())),
+                      "Username parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Realm("sip.example.com".to_string())),
+                      "Realm parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())),
+                      "Nonce parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Response("5ccc069c403ebaf9f0171e9517f40e41".to_string())),
+                      "Response parameter not found or incorrect");
+                
+                // Check optional parameters
+                // URI could be either a parsed URI or a generic Param
+                let has_uri = params.iter().any(|p| match p {
+                    DigestParam::Uri(uri) => uri.to_string().contains("sip:example.com"),
+                    DigestParam::Param(param) => param.name == "uri" && param.value == "sip:example.com",
+                    _ => false,
+                });
+                assert!(has_uri, "URI parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Algorithm(Algorithm::Md5)),
+                      "Algorithm parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())),
+                      "Opaque parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::MsgQop(Qop::Auth)),
+                      "QoP parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Cnonce("0a4f113b".to_string())),
+                      "Cnonce parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::NonceCount(1)),
+                      "Nonce count parameter not found or incorrect");
+            } else {
+                panic!("Expected Digest challenge response");
+            }
         } else {
-            panic!("Expected Digest credentials");
+            panic!("Failed to get Authorization header or wrong type");
         }
     }
     
     #[test]
     fn test_authorization_basic() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-            .from("Alice", "sip:alice@example.com", None)
-            .to("Alice", "sip:alice@example.com", None)
-            .authorization_basic("alice", "secret-password")
+        // Create a request with a Basic Authorization
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
+            .expect("Failed to create request builder")
+            .authorization_basic("alice", "password123")
             .build();
             
         // Check if Authorization header exists and has correct values
         let header = request.header(&HeaderName::Authorization);
         assert!(header.is_some(), "Authorization header not found");
         
-        if let Some(TypedHeader::Authorization(Authorization(Credentials::Basic { token }))) = header {
-            // For Basic auth, token should contain base64 encoded username:password
-            let expected_encoded = general_purpose::STANDARD.encode("alice:secret-password".as_bytes());
-            assert_eq!(token, &expected_encoded);
+        if let Some(TypedHeader::Authorization(Authorization(credentials))) = header {
+            if let Credentials::Basic { token } = credentials {
+                // Verify that the token is properly base64 encoded
+                let decoded = general_purpose::STANDARD.decode(token).unwrap();
+                let decoded_str = String::from_utf8(decoded).unwrap();
+                assert_eq!(decoded_str, "alice:password123");
+            } else {
+                panic!("Expected Basic challenge response");
+            }
         } else {
-            panic!("Expected Basic credentials");
+            panic!("Failed to get Authorization header or wrong type");
         }
     }
 } 

@@ -482,6 +482,15 @@ impl TryFrom<Header> for TypedHeader {
     fn try_from(header: Header) -> Result<Self> {
         // Special case for pre-parsed HeaderValue variants
         match &header.value {
+            HeaderValue::Authorization(auth) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::Authorization {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the Authorization directly without parsing
+                return Ok(TypedHeader::Authorization(auth.clone()));
+            },
             HeaderValue::WwwAuthenticate(www_auth) => {
                 // Only process if the header name is correct
                 if header.name != HeaderName::WwwAuthenticate {
@@ -809,9 +818,18 @@ impl TryFrom<Header> for TypedHeader {
                     .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
                     .map_err(Error::from)
             },
-            HeaderName::Authorization => all_consuming(parser::headers::parse_authorization)(value_bytes)
-                .map(|(_, v)| TypedHeader::Authorization(v))
-                .map_err(Error::from),
+            HeaderName::Authorization => {
+                // Check if we're already dealing with a HeaderValue::Authorization
+                // This case should have been handled earlier in the special cases
+                if let HeaderValue::Authorization(_) = &header.value {
+                    return Err(Error::InternalError("HeaderValue::Authorization should have been handled in special cases".to_string()));
+                }
+                
+                // Otherwise parse from raw bytes
+                all_consuming(parser::headers::parse_authorization)(value_bytes)
+                    .map(|(_, v)| TypedHeader::Authorization(v))
+                    .map_err(Error::from)
+            },
             HeaderName::ProxyAuthenticate => all_consuming(parser::headers::parse_proxy_authenticate)(value_bytes)
                 .map(|(_, v)| TypedHeader::ProxyAuthenticate(ProxyAuthenticate(v)))
                 .map_err(Error::from),

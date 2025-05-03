@@ -116,7 +116,7 @@ pub enum HeaderValue {
     InReplyTo(InReplyTo),
 
     // === Authentication (Placeholders) ===
-    Authorization(Vec<u8>), // Placeholder
+    Authorization(crate::types::auth::Authorization), // Use proper type instead of Vec<u8>
     ProxyAuthorization(Vec<u8>), // Placeholder
     WwwAuthenticate(crate::types::auth::WwwAuthenticate), // Use proper type instead of Vec<u8>
     ProxyAuthenticate(Vec<u8>), // Placeholder
