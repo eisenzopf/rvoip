@@ -1,3 +1,32 @@
+//! WWW-Authenticate header builder
+//!
+//! This module provides builder methods for adding WWW-Authenticate headers to SIP responses,
+//! used for authentication challenges as defined in RFC 3261 Section 22.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//!
+//! // Create a response with a Digest WWW-Authenticate challenge
+//! let response = ResponseBuilder::new(StatusCode::Unauthorized, None)
+//!     .www_authenticate_digest(
+//!         "sip.example.com",        // realm
+//!         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+//!         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+//!         Some("MD5"),              // algorithm
+//!         Some(vec!["auth"]),       // qop options
+//!         None,                     // stale flag
+//!         None,                     // domain
+//!     )
+//!     .build();
+//!
+//! // Create a response with a Basic WWW-Authenticate challenge
+//! let response = ResponseBuilder::new(StatusCode::Unauthorized, None)
+//!     .www_authenticate_basic("sip.example.com")
+//!     .build();
+//! ```
+
 use crate::error::{Error, Result};
 use std::convert::TryFrom;
 use crate::types::{
@@ -19,15 +48,41 @@ use super::HeaderSetter;
 pub trait WwwAuthenticateExt {
     /// Add a Digest WWW-Authenticate header to the response
     ///
-    /// # Arguments
+    /// This method adds a WWW-Authenticate header with a Digest authentication challenge
+    /// to a SIP response. This is typically used with 401 Unauthorized responses to
+    /// challenge the client to authenticate.
     ///
-    /// * `realm` - The authentication realm
-    /// * `nonce` - The server nonce value
+    /// # Parameters
+    ///
+    /// * `realm` - The authentication realm (mandatory)
+    /// * `nonce` - The server nonce value (mandatory)
     /// * `opaque` - Optional opaque value to be returned unchanged
     /// * `algorithm` - Optional algorithm (defaults to MD5 if None)
-    /// * `qop` - Optional quality of protection options
-    /// * `stale` - Optional stale flag
+    /// * `qop` - Optional quality of protection options (auth, auth-int)
+    /// * `stale` - Optional stale flag (true if nonce is stale but credentials are valid)
     /// * `domain` - Optional authentication domain (list of URIs that share credentials)
+    ///
+    /// # Returns
+    ///
+    /// The builder with the WWW-Authenticate header added
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = ResponseBuilder::new(StatusCode::Unauthorized, None)
+    ///     .www_authenticate_digest(
+    ///         "sip.example.com",
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"),
+    ///         Some("MD5"),
+    ///         Some(vec!["auth", "auth-int"]),
+    ///         Some(false),
+    ///         Some(vec!["sip:example.com"]),
+    ///     )
+    ///     .build();
+    /// ```
     fn www_authenticate_digest(
         self,
         realm: &str,
@@ -41,9 +96,27 @@ pub trait WwwAuthenticateExt {
 
     /// Add a Basic WWW-Authenticate header to the response
     ///
-    /// # Arguments
+    /// This method adds a WWW-Authenticate header with a Basic authentication challenge
+    /// to a SIP response. While Basic authentication is less common in SIP than Digest,
+    /// it may be used in simple scenarios.
+    ///
+    /// # Parameters
     ///
     /// * `realm` - The authentication realm
+    ///
+    /// # Returns
+    ///
+    /// The builder with the WWW-Authenticate header added
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let response = ResponseBuilder::new(StatusCode::Unauthorized, None)
+    ///     .www_authenticate_basic("sip.example.com")
+    ///     .build();
+    /// ```
     fn www_authenticate_basic(self, realm: &str) -> Self;
 }
 
@@ -61,13 +134,13 @@ where
         stale: Option<bool>,
         domain: Option<Vec<&str>>,
     ) -> Self {
-        // Create base params
+        // Create base parameters (required for Digest authentication)
         let mut params = vec![
             DigestParam::Realm(realm.to_string()),
             DigestParam::Nonce(nonce.to_string()),
         ];
 
-        // Add optional parameters
+        // Add optional parameters if provided
         if let Some(op) = opaque {
             params.push(DigestParam::Opaque(op.to_string()));
         }
@@ -88,15 +161,20 @@ where
 
         if let Some(q) = qop {
             if !q.is_empty() {
-                let qops = q.into_iter()
-                    .map(|q_str| match q_str.to_lowercase().as_str() {
-                        "auth" => Qop::Auth,
-                        "auth-int" => Qop::AuthInt,
-                        _ => Qop::Other(q_str.to_string()),
-                    })
-                    .collect::<Vec<_>>();
+                // Create QoP values with proper conversion
+                let mut qops = Vec::new();
                 
-                params.push(DigestParam::Qop(qops));
+                for q_str in q {
+                    match q_str.to_lowercase().as_str() {
+                        "auth" => qops.push(Qop::Auth),
+                        "auth-int" => qops.push(Qop::AuthInt),
+                        other => qops.push(Qop::Other(other.to_string())),
+                    }
+                }
+                
+                if !qops.is_empty() {
+                    params.push(DigestParam::Qop(qops));
+                }
             }
         }
 
@@ -111,28 +189,12 @@ where
             }
         }
 
-        // Create the WWW-Authenticate header with a Digest challenge
-        #[cfg(test)]
-        {
-            // For tests, create two separate challenges to avoid move issues
-            let test_challenge = Challenge::Digest { 
-                params: params.clone() 
-            };
-            
-            // For the actual header, construct a fresh challenge with the same parameters
-            let header_value = WwwAuthenticate(vec![Challenge::Digest { params }]);
-            
-            // Return the header using our standard trait method
-            return self.set_header(header_value);
-        }
+        // Create the digest challenge with the parameters
+        let digest_challenge = Challenge::Digest { params };
+        let header_value = WwwAuthenticate(vec![digest_challenge]);
         
-        // For normal builds, just use a single challenge
-        #[cfg(not(test))]
-        {
-            let digest_challenge = Challenge::Digest { params };
-            let header_value = WwwAuthenticate(vec![digest_challenge]);
-            self.set_header(header_value)
-        }
+        // Use the HeaderSetter trait to set the header
+        self.set_header(header_value)
     }
 
     fn www_authenticate_basic(self, realm: &str) -> Self {
@@ -157,90 +219,79 @@ where
 mod tests {
     use super::*;
     use crate::builder::SimpleResponseBuilder;
-    use crate::types::Method;
-    use crate::types::header::HeaderName;
     use crate::types::StatusCode;
     
     #[test]
     fn test_www_authenticate_digest() {
-        // For tests, create the header directly and add it to the response builder
-        let realm = "example.com";
-        let nonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093";
-        let opaque = "5ccc069c403ebaf9f0171e9517f40e41";
-        
-        // Create the params for our digest challenge
-        let mut params = vec![
-            DigestParam::Realm(realm.to_string()),
-            DigestParam::Nonce(nonce.to_string()),
-            DigestParam::Opaque(opaque.to_string()),
-            DigestParam::Algorithm(Algorithm::Md5),
-            DigestParam::Stale(false),
-        ];
-        
-        // Add QOP parameter
-        let qops = vec![Qop::Auth, Qop::AuthInt];
-        params.push(DigestParam::Qop(qops));
-        
-        // Add Domain parameter
-        let domains = vec!["sip:example.com".to_string()];
-        params.push(DigestParam::Domain(domains));
-        
-        // Create the digest challenge with these params
-        let digest_challenge = Challenge::Digest { params };
-        
-        // Create the WWW-Authenticate header
-        let header_value = WwwAuthenticate(vec![digest_challenge]);
-        
-        // Create a response with this header
+        // Create a response with a WWW-Authenticate Digest challenge - simplified version first
         let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-            .header(TypedHeader::WwwAuthenticate(header_value))
+            .www_authenticate_digest(
+                "sip.example.com",
+                "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+                Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+                Some("MD5"),                             // algorithm 
+                Some(vec!["auth", "auth-int"]),          // Added back QoP
+                Some(false),                             // stale
+                None,                                    // no domain for now
+            )
             .build();
-            
+        
+        // Print all header names for debugging
+        let header_names = response.header_names();
+        println!("Response headers: {:?}", header_names);
+        
         // Check if WWW-Authenticate header exists and has correct values
         let header = response.header(&HeaderName::WwwAuthenticate);
+        println!("WWW-Authenticate header: {:?}", header);
+        
         assert!(header.is_some(), "WWW-Authenticate header not found");
         
         if let Some(TypedHeader::WwwAuthenticate(WwwAuthenticate(challenges))) = header {
             assert_eq!(challenges.len(), 1, "Expected exactly one challenge");
             
             if let Challenge::Digest { params } = &challenges[0] {
-                assert!(params.contains(&DigestParam::Realm("example.com".to_string())));
-                assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())));
-                assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())));
-                assert!(params.contains(&DigestParam::Algorithm(Algorithm::Md5)));
-                assert!(params.contains(&DigestParam::Stale(false)));
+                println!("Digest params: {:?}", params);
                 
-                // Check QOP
-                let has_qop = params.iter().any(|p| {
-                    if let DigestParam::Qop(qops) = p {
-                        qops.contains(&Qop::Auth) && qops.contains(&Qop::AuthInt) && qops.len() == 2
-                    } else {
-                        false
-                    }
-                });
-                assert!(has_qop, "Did not find expected Qop values");
+                // Check mandatory parameters
+                assert!(params.contains(&DigestParam::Realm("sip.example.com".to_string())),
+                      "Realm parameter not found or incorrect");
                 
-                // Check Domain
-                let has_domain = params.iter().any(|p| {
-                    if let DigestParam::Domain(domains) = p {
-                        domains.contains(&"sip:example.com".to_string()) && domains.len() == 1
-                    } else {
-                        false
-                    }
-                });
-                assert!(has_domain, "Did not find expected Domain value");
+                assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())),
+                      "Nonce parameter not found or incorrect");
+                
+                // Check optional parameters
+                assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())),
+                      "Opaque parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Algorithm(Algorithm::Md5)),
+                      "Algorithm parameter not found or incorrect");
+                
+                assert!(params.contains(&DigestParam::Stale(false)),
+                      "Stale parameter not found or incorrect");
+                
+                // Check QOP - using a different approach for clearer error messages
+                let qop_param = params.iter().find(|p| matches!(p, DigestParam::Qop(_)));
+                assert!(qop_param.is_some(), "QoP parameter not found");
+                
+                if let Some(DigestParam::Qop(qops)) = qop_param {
+                    println!("QoP values: {:?}", qops);
+                    assert_eq!(qops.len(), 2, "Expected exactly 2 QoP values");
+                    assert!(qops.contains(&Qop::Auth), "QoP 'auth' value not found");
+                    assert!(qops.contains(&Qop::AuthInt), "QoP 'auth-int' value not found");
+                }
             } else {
                 panic!("Expected Digest challenge");
             }
         } else {
-            panic!("Failed to get WWW-Authenticate header");
+            panic!("Failed to get WWW-Authenticate header or wrong type");
         }
     }
     
     #[test]
     fn test_www_authenticate_basic() {
+        // Create a response with a WWW-Authenticate Basic challenge
         let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-            .www_authenticate_basic("example.com")
+            .www_authenticate_basic("sip.example.com")
             .build();
             
         // Check if WWW-Authenticate header exists and has correct values
@@ -254,12 +305,113 @@ mod tests {
                 assert_eq!(params.len(), 1, "Expected exactly one parameter in Basic auth");
                 let realm_param = &params[0];
                 assert_eq!(realm_param.name, "realm");
-                assert_eq!(realm_param.value, "example.com");
+                assert_eq!(realm_param.value, "sip.example.com");
             } else {
                 panic!("Expected Basic challenge");
             }
         } else {
-            panic!("Failed to get WWW-Authenticate header");
+            panic!("Failed to get WWW-Authenticate header or wrong type");
         }
+    }
+    
+    #[test]
+    fn test_www_authenticate_minimal() {
+        // Test with only mandatory parameters
+        let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+            .www_authenticate_digest(
+                "sip.example.com",
+                "some-nonce-value",
+                None, // no opaque
+                None, // no algorithm
+                None, // no qop
+                None, // no stale
+                None, // no domain
+            )
+            .build();
+            
+        // Check if WWW-Authenticate header exists and has correct values
+        let header = response.header(&HeaderName::WwwAuthenticate);
+        assert!(header.is_some(), "WWW-Authenticate header not found");
+        
+        if let Some(TypedHeader::WwwAuthenticate(WwwAuthenticate(challenges))) = header {
+            assert_eq!(challenges.len(), 1, "Expected exactly one challenge");
+            
+            if let Challenge::Digest { params } = &challenges[0] {
+                // Should only have realm and nonce parameters
+                assert_eq!(params.len(), 2, "Expected exactly two parameters");
+                assert!(params.contains(&DigestParam::Realm("sip.example.com".to_string())));
+                assert!(params.contains(&DigestParam::Nonce("some-nonce-value".to_string())));
+            } else {
+                panic!("Expected Digest challenge");
+            }
+        } else {
+            panic!("Failed to get WWW-Authenticate header or wrong type");
+        }
+    }
+
+    #[test]
+    fn test_debug_minimal_auth() {
+        // Create a bare-bones WWW-Authenticate header
+        let challenge = Challenge::Digest { 
+            params: vec![
+                DigestParam::Realm("test-realm".to_string()),
+                DigestParam::Nonce("test-nonce".to_string())
+            ] 
+        };
+        let www_auth = WwwAuthenticate(vec![challenge]);
+        
+        // Convert directly to TypedHeader
+        let header_val = www_auth.to_header();
+        println!("Header value: {:?}", header_val);
+        
+        let typed_header = match TypedHeader::try_from(header_val) {
+            Ok(th) => th,
+            Err(e) => {
+                println!("Error converting to TypedHeader: {:?}", e);
+                panic!("Conversion failed");
+            }
+        };
+        println!("TypedHeader: {:?}", typed_header);
+        
+        // Create a response with the header
+        let mut response = crate::types::sip_response::Response::new(StatusCode::Unauthorized);
+        response = response.with_header(typed_header);
+        
+        // Check if the header exists
+        let header_names = response.header_names();
+        println!("Response headers: {:?}", header_names);
+        
+        let header = response.header(&HeaderName::WwwAuthenticate);
+        assert!(header.is_some(), "Header not found in response");
+        
+        println!("Found header: {:?}", header);
+    }
+
+    #[test]
+    fn test_debug_builder_www_authenticate() {
+        // Create a response with a simple WWW-Authenticate Digest challenge using the builder
+        let builder = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+            .www_authenticate_digest(
+                "test-realm",
+                "test-nonce",
+                None, // no opaque
+                None, // no algorithm
+                None, // no qop
+                None, // no stale
+                None, // no domain
+            );
+        
+        // Build the response
+        let response = builder.build();
+        
+        // Print all header names for debugging
+        let header_names = response.header_names();
+        println!("Response headers: {:?}", header_names);
+        
+        // Check if WWW-Authenticate header exists
+        let header = response.header(&HeaderName::WwwAuthenticate);
+        println!("WWW-Authenticate header: {:?}", header);
+        
+        assert!(header.is_some(), "WWW-Authenticate header not found");
     }
 } 

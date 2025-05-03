@@ -233,7 +233,7 @@ impl TypedHeaderTrait for WwwAuthenticate {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(Self::header_name(), HeaderValue::WwwAuthenticate(self.clone()))
     }
 
     fn from_header(header: &Header) -> Result<Self> {

@@ -100,7 +100,7 @@
     - Add SDP handling
 
 - [ ] **Authentication Headers**
-  - [ ] **WWW-Authenticate**: Ensure integrated access in Response
+  - [x] **WWW-Authenticate**: Ensure integrated access in Response
   - [ ] **Authorization**: Ensure integrated access in Request
   - [ ] **Proxy-Authenticate**: Add helper methods 
   - [ ] **Proxy-Authorization**: Add helper methods 

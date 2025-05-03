@@ -482,6 +482,15 @@ impl TryFrom<Header> for TypedHeader {
     fn try_from(header: Header) -> Result<Self> {
         // Special case for pre-parsed HeaderValue variants
         match &header.value {
+            HeaderValue::WwwAuthenticate(www_auth) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::WwwAuthenticate {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the WwwAuthenticate directly without parsing
+                return Ok(TypedHeader::WwwAuthenticate(www_auth.clone()));
+            },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
                 // Only process if the header name is correct
                 if header.name != HeaderName::ContentDisposition {
@@ -788,9 +797,18 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(value_bytes)
                 .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into())))
                 .map_err(Error::from),
-            HeaderName::WwwAuthenticate => all_consuming(parser::headers::parse_www_authenticate)(value_bytes)
-                .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
-                .map_err(Error::from),
+            HeaderName::WwwAuthenticate => {
+                // Check if we're already dealing with a HeaderValue::WwwAuthenticate
+                // This case should have been handled earlier in the special cases
+                if let HeaderValue::WwwAuthenticate(_) = &header.value {
+                    return Err(Error::InternalError("HeaderValue::WwwAuthenticate should have been handled in special cases".to_string()));
+                }
+                
+                // Otherwise parse from raw bytes
+                all_consuming(parser::headers::parse_www_authenticate)(value_bytes)
+                    .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
+                    .map_err(Error::from)
+            },
             HeaderName::Authorization => all_consuming(parser::headers::parse_authorization)(value_bytes)
                 .map(|(_, v)| TypedHeader::Authorization(v))
                 .map_err(Error::from),
