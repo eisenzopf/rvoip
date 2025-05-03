@@ -1072,6 +1072,15 @@ impl TryFrom<Header> for TypedHeader {
                     params,
                 }));
             },
+            HeaderValue::Accept(values) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::Accept {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Convert vector of AcceptValue to Accept
+                return Ok(TypedHeader::Accept(Accept::from_media_types(values.clone())));
+            },
             _ => {} // Continue with normal processing
         }
         
