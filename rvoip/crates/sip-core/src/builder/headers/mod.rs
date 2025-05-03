@@ -12,17 +12,9 @@ pub trait HeaderSetter {
 impl HeaderSetter for crate::builder::SimpleRequestBuilder {
     fn set_header<H: TypedHeaderTrait>(self, header: H) -> Self {
         let header_val = header.to_header();
-        eprintln!("Converting header to TypedHeader: {:?}", header_val);
-        
         match TypedHeader::try_from(header_val) {
-            Ok(typed_header) => {
-                eprintln!("Successfully converted to TypedHeader: {:?}", typed_header);
-                self.header(typed_header)
-            },
-            Err(e) => {
-                eprintln!("Failed to convert to TypedHeader: {:?}", e);
-                self
-            }
+            Ok(typed_header) => self.header(typed_header),
+            Err(_) => self
         }
     }
 }
@@ -49,6 +41,12 @@ pub mod content_disposition;
 pub mod accept;
 pub mod accept_encoding;
 pub mod accept_language;
+pub mod record_route;
+pub mod route;
+pub mod allow;
+pub mod supported;
+pub mod unsupported;
+pub mod require;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -61,4 +59,10 @@ pub use content_language::ContentLanguageExt;
 pub use content_disposition::ContentDispositionExt;
 pub use accept::AcceptExt;
 pub use accept_encoding::AcceptEncodingExt;
-pub use accept_language::AcceptLanguageExt; 
+pub use accept_language::AcceptLanguageExt;
+pub use record_route::RecordRouteBuilderExt;
+pub use route::RouteBuilderExt;
+pub use allow::AllowBuilderExt;
+pub use supported::SupportedBuilderExt;
+pub use unsupported::UnsupportedBuilderExt;
+pub use require::RequireBuilderExt; 

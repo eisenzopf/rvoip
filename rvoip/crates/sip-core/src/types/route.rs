@@ -645,8 +645,9 @@ impl TypedHeaderTrait for Route {
     ///
     /// A Header instance representing this Route header
     fn to_header(&self) -> Header {
-        // Convert the Route entries into HeaderValue format
-        Header::new(Self::header_name(), HeaderValue::Route(self.0.clone()))
+        let value_string = self.to_string();
+        let value = crate::types::headers::HeaderValue::Raw(value_string.into_bytes());
+        Header::new(Self::header_name(), value)
     }
 
     /// Creates a Route header from a generic Header.
@@ -663,29 +664,25 @@ impl TypedHeaderTrait for Route {
     /// A Result containing the parsed Route header if successful, or an error otherwise
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Route {
-            return Err(Error::InvalidHeader(format!(
-                "Expected Route header, got {:?}", header.name
-            )));
+            return Err(Error::InvalidHeader(format!("Expected Route header, got {}", header.name)));
         }
-
-        // Try to use the pre-parsed value if available
-        if let HeaderValue::Route(entries) = &header.value {
-            return Ok(Route::new(entries.clone()));
-        }
-
-        // Otherwise parse from raw value
-        match &header.value {
-            HeaderValue::Raw(bytes) => {
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    s.parse::<Route>()
-                } else {
-                    Err(Error::ParseError("Invalid UTF-8 in Route header".to_string()))
-                }
-            },
-            _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for Route header: {:?}", header.value
-            ))),
-        }
+        
+        // Use the parser to convert the header value into a Route
+        use crate::parser::headers::parse_route;
+        use nom::combinator::all_consuming;
+        
+        // Get the raw bytes from the header value
+        let bytes = match &header.value {
+            crate::types::headers::HeaderValue::Raw(bytes) => bytes,
+            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+        };
+        
+        // Parse the header value
+        let route = all_consuming(parse_route)(bytes)
+            .map_err(Error::from)
+            .map(|(_, v)| v)?;
+        
+        Ok(route)
     }
 }
 

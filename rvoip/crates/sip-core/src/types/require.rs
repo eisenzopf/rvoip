@@ -307,16 +307,9 @@ impl TypedHeaderTrait for Require {
     /// assert_eq!(header.name, HeaderName::Require);
     /// ```
     fn to_header(&self) -> Header {
-        // Convert Vec<String> to Vec<Vec<u8>> for HeaderValue::Require
-        let option_tags_bytes: Vec<Vec<u8>> = self.option_tags
-            .iter()
-            .map(|tag| tag.as_bytes().to_vec())
-            .collect();
-
-        Header::new(
-            Self::header_name(),
-            HeaderValue::Require(option_tags_bytes),
-        )
+        let value_string = self.to_string();
+        let value = crate::types::headers::HeaderValue::Raw(value_string.into_bytes());
+        Header::new(Self::header_name(), value)
     }
 
     /// Creates a Require header from a generic Header.
@@ -349,28 +342,26 @@ impl TypedHeaderTrait for Require {
     /// assert_eq!(require.option_tags[1], "precondition");
     /// ```
     fn from_header(header: &Header) -> Result<Self> {
-        match &header.value {
-            HeaderValue::Require(option_tags) => {
-                // Convert Vec<Vec<u8>> to Vec<String>
-                let string_tags = option_tags.iter().map(|tag| {
-                    String::from_utf8_lossy(tag).to_string()
-                }).collect();
-                
-                Ok(Self {
-                    option_tags: string_tags,
-                })
-            },
-            HeaderValue::Raw(raw) => {
-                // Parse raw value using the parser
-                let (_, parsed) = 
-                    crate::parser::headers::require::parse_require(raw)
-                        .map_err(|e| crate::error::Error::ParseError(format!("Failed to parse Require header: {:?}", e)))?;
-                Ok(Self { option_tags: parsed })
-            }
-            _ => Err(crate::error::Error::ParseError(
-                "Invalid header value type for Require".to_string(),
-            )),
+        if header.name != HeaderName::Require {
+            return Err(crate::error::Error::InvalidHeader(format!("Expected Require header, got {}", header.name)));
         }
+        
+        // Use the parser to convert the header value into a Require header
+        use crate::parser::headers::require::parse_require;
+        use nom::combinator::all_consuming;
+        
+        // Get the raw bytes from the header value
+        let bytes = match &header.value {
+            crate::types::headers::HeaderValue::Raw(bytes) => bytes,
+            _ => return Err(crate::error::Error::InvalidHeader("Expected raw header value".to_string())),
+        };
+        
+        // Parse the header value
+        let require = all_consuming(parse_require)(bytes)
+            .map_err(crate::error::Error::from)
+            .map(|(_, v)| Require::new(v))?;
+            
+        Ok(require)
     }
 }
 
@@ -417,14 +408,14 @@ mod tests {
     fn test_require_to_header() {
         let require = Require::new(vec!["100rel".to_string(), "precondition".to_string()]);
         let header = require.to_header();
+        
         assert_eq!(header.name, HeaderName::Require);
         match header.value {
-            HeaderValue::Require(tags) => {
-                assert_eq!(tags.len(), 2);
-                assert_eq!(String::from_utf8_lossy(&tags[0]), "100rel");
-                assert_eq!(String::from_utf8_lossy(&tags[1]), "precondition");
+            HeaderValue::Raw(bytes) => {
+                let value_string = String::from_utf8_lossy(&bytes).to_string();
+                assert_eq!(value_string, "100rel, precondition");
             }
-            _ => panic!("Expected HeaderValue::Require"),
+            _ => panic!("Expected HeaderValue::Raw"),
         }
     }
 

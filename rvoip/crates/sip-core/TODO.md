@@ -70,15 +70,14 @@
       - [x] Accept (`.accept()`)
       - [x] AcceptEncoding (`.accept_encoding()`)
       - [x] AcceptLanguage (`.accept_language()`)
-    - [ ] **Routing Headers**:
-      - [ ] RecordRoute (`.record_route()`)
-      - [ ] Route (`.route()`)
-    - [ ] **Feature/Capability Headers**:
-      - [ ] Allow (`.allow()`)
-      - [ ] Supported (`.supported()`)
-      - [ ] Unsupported (`.unsupported()`)
-      - [ ] Require (`.require()`)
-      - [ ] ProxyRequire (`.proxy_require()`)
+    - [x] **Routing Headers**:
+      - [x] RecordRoute (`.record_route()`)
+      - [x] Route (`.route()`)
+    - [x] **Feature/Capability Headers**:
+      - [x] Allow (`.allow()`)
+      - [x] Supported (`.supported()`)
+      - [x] Unsupported (`.unsupported()`)
+      - [x] Require (`.require()`)
     - [ ] **Informational Headers**:
       - [ ] UserAgent (`.user_agent()`)
       - [ ] Server (`.server()`)

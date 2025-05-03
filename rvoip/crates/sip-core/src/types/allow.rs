@@ -308,54 +308,31 @@ impl TypedHeaderTrait for Allow {
     }
 
     fn to_header(&self) -> Header {
-        // Convert the Vec<Method> to Vec<Vec<u8>> as expected by HeaderValue::Allow
-        let methods_bytes: Vec<Vec<u8>> = self.0.iter()
-            .map(|method| method.to_string().into_bytes())
-            .collect();
-        
-        Header::new(Self::header_name(), HeaderValue::Allow(methods_bytes))
+        let value_string = self.to_string();
+        let value = crate::types::headers::HeaderValue::Raw(value_string.into_bytes());
+        Header::new(Self::header_name(), value)
     }
 
     fn from_header(header: &Header) -> Result<Self> {
-        if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+        if header.name != HeaderName::Allow {
+            return Err(Error::InvalidHeader(format!("Expected Allow header, got {}", header.name)));
         }
-
-        match &header.value {
-            HeaderValue::Raw(bytes) => {
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    Allow::from_str(s.trim())
-                } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
-                }
-            },
-            HeaderValue::Allow(methods_bytes) => {
-                // Convert Vec<Vec<u8>> to Vec<Method>
-                let mut methods = Vec::with_capacity(methods_bytes.len());
-                for method_bytes in methods_bytes {
-                    if let Ok(method_str) = std::str::from_utf8(method_bytes) {
-                        if let Ok(method) = Method::from_str(method_str) {
-                            methods.push(method);
-                        } else {
-                            return Err(Error::InvalidHeader(
-                                format!("Invalid method name: {}", method_str)
-                            ));
-                        }
-                    } else {
-                        return Err(Error::InvalidHeader(
-                            format!("Invalid UTF-8 in method name")
-                        ));
-                    }
-                }
-                Ok(Allow(methods))
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
-        }
+        
+        // Use the parser to convert the header value into an Allow header
+        use crate::parser::headers::allow::parse_allow;
+        use nom::combinator::all_consuming;
+        
+        // Get the raw bytes from the header value
+        let bytes = match &header.value {
+            crate::types::headers::HeaderValue::Raw(bytes) => bytes,
+            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+        };
+        
+        // Parse the header value
+        let allow = all_consuming(parse_allow)(bytes)
+            .map_err(Error::from)
+            .map(|(_, v)| v)?;
+        
+        Ok(allow)
     }
 } 

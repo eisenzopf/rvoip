@@ -417,15 +417,9 @@ impl TypedHeaderTrait for Unsupported {
     /// // The header value contains the option tags
     /// ```
     fn to_header(&self) -> Header {
-        let tags_bytes: Vec<Vec<u8>> = self.option_tags
-            .iter()
-            .map(|tag| tag.as_bytes().to_vec())
-            .collect();
-
-        Header {
-            name: HeaderName::Unsupported,
-            value: HeaderValue::Unsupported(tags_bytes),
-        }
+        let value_string = self.to_string();
+        let value = crate::types::headers::HeaderValue::Raw(value_string.into_bytes());
+        Header::new(Self::header_name(), value)
     }
 
     /// Creates an Unsupported header from a generic Header.
@@ -459,20 +453,27 @@ impl TypedHeaderTrait for Unsupported {
     /// assert!(unsupported.has_option_tag("timer"));
     /// assert!(unsupported.has_option_tag("100rel"));
     /// ```
-    fn from_header(header: &Header) -> std::result::Result<Self, Error> {
-        match &header.value {
-            HeaderValue::Unsupported(tags) => {
-                let option_tags = tags
-                    .iter()
-                    .filter_map(|tag| String::from_utf8(tag.clone()).ok())
-                    .collect();
-                
-                Ok(Unsupported {
-                    option_tags,
-                })
-            }
-            _ => Err(Error::InvalidHeader("Expected Unsupported header".to_string())),
+    fn from_header(header: &Header) -> crate::error::Result<Self> {
+        if header.name != HeaderName::Unsupported {
+            return Err(Error::InvalidHeader(format!("Expected Unsupported header, got {}", header.name)));
         }
+        
+        // Use the parser to convert the header value into an Unsupported header
+        use crate::parser::headers::unsupported::parse_unsupported;
+        use nom::combinator::all_consuming;
+        
+        // Get the raw bytes from the header value
+        let bytes = match &header.value {
+            crate::types::headers::HeaderValue::Raw(bytes) => bytes,
+            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+        };
+        
+        // Parse the header value
+        let option_tags = all_consuming(parse_unsupported)(bytes)
+            .map_err(Error::from)
+            .map(|(_, v)| v)?;
+            
+        Ok(Unsupported::with_tags(option_tags))
     }
 }
 
@@ -547,29 +548,26 @@ mod tests {
 
     #[test]
     fn test_unsupported_to_header() {
-        let mut unsupported = Unsupported::new();
-        unsupported.add_option_tag("timer");
-        unsupported.add_option_tag("100rel");
-        
+        let unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
         let header = unsupported.to_header();
-        assert_eq!(header.name, HeaderName::Unsupported);
         
+        assert_eq!(header.name, HeaderName::Unsupported);
         match &header.value {
-            HeaderValue::Unsupported(tags) => {
-                assert_eq!(tags.len(), 2);
-                assert_eq!(tags[0], b"timer".to_vec());
-                assert_eq!(tags[1], b"100rel".to_vec());
+            crate::types::headers::HeaderValue::Raw(bytes) => {
+                let value_string = String::from_utf8_lossy(bytes).to_string();
+                assert_eq!(value_string, "timer, 100rel");
             },
-            _ => panic!("Expected HeaderValue::Unsupported"),
+            _ => panic!("Expected HeaderValue::Raw"),
         }
     }
 
     #[test]
     fn test_unsupported_from_header() {
-        let tags = vec![b"timer".to_vec(), b"100rel".to_vec()];
+        // Create the header with a raw string
+        let raw_value = "timer, 100rel".as_bytes().to_vec();
         let header = Header {
             name: HeaderName::Unsupported,
-            value: HeaderValue::Unsupported(tags),
+            value: crate::types::headers::HeaderValue::Raw(raw_value),
         };
         
         let unsupported = Unsupported::from_header(&header).unwrap();
@@ -585,5 +583,16 @@ mod tests {
         let roundtrip = Unsupported::from_header(&header).unwrap();
         
         assert_eq!(original, roundtrip);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serialization() {
+        let unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
+        let json = serde_json::to_string(&unsupported).unwrap();
+        
+        // Convert to header
+        let header = unsupported.to_header();
+        let header = unsupported.to_header(); // Just for the test, don't need to manipulate raw value
     }
 } 
