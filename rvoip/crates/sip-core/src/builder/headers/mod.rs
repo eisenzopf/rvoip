@@ -53,6 +53,7 @@ pub mod path;
 pub mod proxy_require;
 pub mod content;
 pub mod call_id;
+pub mod in_reply_to;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -77,4 +78,5 @@ pub use server::ServerBuilderExt;
 pub use path::PathBuilderExt;
 pub use proxy_require::ProxyRequireBuilderExt;
 pub use content::ContentBuilderExt;
-pub use call_id::CallIdBuilderExt; 
+pub use call_id::CallIdBuilderExt;
+pub use in_reply_to::InReplyToBuilderExt; 

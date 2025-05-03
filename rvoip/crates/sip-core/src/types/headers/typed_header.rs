@@ -260,6 +260,9 @@ impl TypedHeader {
             TypedHeader::ContentDisposition(h) if type_id == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
                 
+            TypedHeader::InReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
             _ => None,
         }
     }
@@ -345,14 +348,7 @@ impl fmt::Display for TypedHeader {
                 Ok(())
             },
             TypedHeader::InReplyTo(in_reply_to) => {
-                write!(f, "{}: ", HeaderName::InReplyTo)?;
-                for (i, reply) in in_reply_to.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", reply)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::InReplyTo, in_reply_to)
             },
             TypedHeader::RetryAfter(retry_after) => write!(f, "{}: {:?}", HeaderName::RetryAfter, retry_after),
             TypedHeader::ErrorInfo(error_info) => {
@@ -544,6 +540,15 @@ impl TryFrom<Header> for TypedHeader {
                 
                 // Use the ContentType directly without parsing
                 return Ok(TypedHeader::ContentType(content_type.clone()));
+            },
+            HeaderValue::InReplyTo(in_reply_to) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::InReplyTo {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the InReplyTo directly without parsing
+                return Ok(TypedHeader::InReplyTo(in_reply_to.clone()));
             },
             _ => {} // Continue with normal processing
         }

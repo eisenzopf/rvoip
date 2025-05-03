@@ -373,7 +373,7 @@ impl TypedHeaderTrait for InReplyTo {
     fn to_header(&self) -> Header {
         Header::new(
             Self::header_name(), 
-            HeaderValue::Raw(self.to_string().into_bytes())
+            HeaderValue::InReplyTo(self.clone())
         )
     }
     
