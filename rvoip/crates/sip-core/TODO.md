@@ -36,7 +36,6 @@
     - [x] Organization
     - [x] Priority
     - [x] Subject
-    - [x] Server
     - [x] InReplyTo
     - [x] RetryAfter
     - [x] ErrorInfo
@@ -54,56 +53,102 @@
     - [x] Timestamp
     - [x] UserAgent
 
-- [ ] **Enhance Builder Patterns for All Headers**
-  - Add convenient builder methods for all header types, rather than relying on generic `header()` method:
-    - [x] **Authentication Headers**:
-      - [x] Authorization (`.authorization()` or `.auth_digest()`)
-      - [x] WwwAuthenticate (`.www_authenticate()`)
-      - [x] ProxyAuthenticate (`.proxy_authenticate()`)
-      - [x] ProxyAuthorization (`.proxy_authorization()`)
-      - [x] AuthenticationInfo (`.auth_info()`)
-    - [x] **Content-Related Headers**:
-      - [x] ContentEncoding (`.content_encoding()`)
-      - [x] ContentLanguage (`.content_language()`)
-      - [x] ContentDisposition (`.content_disposition()`)
-    - [x] **Accept Headers**:
-      - [x] Accept (`.accept()`)
-      - [x] AcceptEncoding (`.accept_encoding()`)
-      - [x] AcceptLanguage (`.accept_language()`)
-    - [x] **Routing Headers**:
-      - [x] RecordRoute (`.record_route()`)
-      - [x] Route (`.route()`)
-    - [x] **Feature/Capability Headers**:
-      - [x] Allow (`.allow()`)
-      - [x] Supported (`.supported()`)
-      - [x] Unsupported (`.unsupported()`)
-      - [x] Require (`.require()`)
-    - [ ] **Informational Headers**:
-      - [ ] UserAgent (`.user_agent()`)
-      - [ ] Server (`.server()`)
-      - [ ] Warning (`.warning()`)
-      - [ ] Date (`.date()`)
-      - [ ] Timestamp (`.timestamp()`)
-      - [ ] Organization (`.organization()`)
-      - [ ] Subject (`.subject()`)
-      - [ ] Priority (`.priority()`)
-      - [ ] MimeVersion (`.mime_version()`)
-    - [ ] **Session Management Headers**:
-      - [ ] Expires (`.expires()`)
-      - [ ] MinExpires (`.min_expires()`)
-      - [ ] RetryAfter (`.retry_after()`)
-    - [ ] **Reference/Redirection Headers**:
-      - [ ] ReplyTo (`.reply_to()`)
-      - [ ] ReferTo (`.refer_to()`)
-      - [ ] InReplyTo (`.in_reply_to()`)
-      - [ ] ErrorInfo (`.error_info()`)
-      - [ ] CallInfo (`.call_info()`)
-      - [ ] AlertInfo (`.alert_info()`)
-  - Each builder method should:
-    - Accept appropriate parameters based on the header's structure
-    - Handle reasonable error cases gracefully
-    - Return self for method chaining
-    - Include comprehensive documentation and examples
+- [x] **Builder Patterns**
+  - [x] Implement `SimpleRequestBuilder` to create requests more easily
+  - [x] Implement `SimpleResponseBuilder` to create responses more easily
+  - [x] Fix `HeaderSetter` trait usage for consistency
+  - [x] Enable method chaining for all builders
+
+- [ ] **Routing Headers**
+  - [x] **RecordRoute**:
+    - Add RecordRoute entry manipulation methods
+    - Add RecordRoute to request and response builders
+  - [x] **Route**:
+    - Add Route manipulation methods for UAC/UAS processing
+    - Add Route to request and response builders
+  - [ ] **Path**:
+    - Implement TypedHeaderTrait
+    - Add to request and response builders
+
+- [ ] **Feature/Capability Headers**
+  - [x] **Require**: Add builder helpers
+  - [x] **Supported**: Add builder helpers
+  - [x] **Unsupported**: Add builder helpers
+  - [ ] **ProxyRequire**: Add builder helpers
+
+- [ ] **Information Headers**
+  - [x] **User-Agent**: 
+    - Add builder methods for User-Agent
+    - Add helper variants for common values
+  - [ ] **Server**: 
+    - Add builder methods for Server header
+    - Add helper variants for common values
+
+- [ ] **Session/Status Info Headers**
+  - [ ] **CallID**: Ensure access and manipulation is consistent
+  - [ ] **InReplyTo**: Add builder methods
+  - [ ] **ReplyTo**: Add builder methods
+
+- [ ] **Media/Content Headers**
+  - [x] **Accept Headers**:
+    - Implement `accept()` method on builders
+    - Add helper methods for common types
+  - [ ] **Content Headers**:
+    - Implement content type handler helpers
+    - Add multipart content generation
+    - Add text/plain shortcuts
+    - Add SDP handling
+
+- [ ] **Authentication Headers**
+  - [ ] **WWW-Authenticate**: Ensure integrated access in Response
+  - [ ] **Authorization**: Ensure integrated access in Request
+  - [ ] **Proxy-Authenticate**: Add helper methods 
+  - [ ] **Proxy-Authorization**: Add helper methods 
+  - [ ] **Authentication-Info**: Add helper methods
+
+## Feature Improvements
+
+- [ ] **SDP Integration**
+  - [ ] Complete SDP building API improvements:
+    - Easier creation of typical audio/video configs
+    - Default values for common formats 
+    - WebRTC BUNDLE configuration
+  - [ ] Add SDP/SIP interoperability functions
+    - Map SDP connection data to SIP Contact
+    - Auto-generate o-line from SIP fields 
+  - [ ] Add multimedia session convenience helpers
+
+- [ ] **Serialization Format Support**
+  - [ ] Add serde support for core types
+  - [ ] Add JSON format conversion
+  - [ ] Add structured logging of messages
+
+- [ ] **Parsing Improvements**
+  - [ ] Enhance ABNF compliance in corner cases
+  - [ ] Better error reporting for malformed messages
+  - [ ] Support more extensions and custom headers
+
+- [ ] **Authentication Support**
+  - [ ] Complete Digest authentication
+  - [ ] Add NTLM authentication 
+  - [ ] Add Basic authentication
+  - [ ] Add auth challenges helper
+
+## Documentation
+
+- [ ] **Add more examples**
+  - [ ] Basic REGISTER transaction  
+  - [ ] INVITE dialog with SDP negotiation
+  - [ ] Authentication flow example
+  - [ ] Proxy routing example
+  - [ ] B2BUA example
+  - [ ] Message parsing example
+
+- [ ] **Improve documentation**
+  - [ ] Add more doc tests
+  - [ ] Add architecture overview  
+  - [ ] Add SIP protocol reference links
+  - [ ] Explain RFC compliance details
 
 ## Extended Functionality
 

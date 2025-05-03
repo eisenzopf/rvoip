@@ -47,6 +47,7 @@ pub mod allow;
 pub mod supported;
 pub mod unsupported;
 pub mod require;
+pub mod user_agent;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -65,4 +66,5 @@ pub use route::RouteBuilderExt;
 pub use allow::AllowBuilderExt;
 pub use supported::SupportedBuilderExt;
 pub use unsupported::UnsupportedBuilderExt;
-pub use require::RequireBuilderExt; 
+pub use require::RequireBuilderExt;
+pub use user_agent::UserAgentBuilderExt; 

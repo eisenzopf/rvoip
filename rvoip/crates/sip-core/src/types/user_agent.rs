@@ -337,13 +337,39 @@ impl TypedHeaderTrait for UserAgent {
                     ))
                 }
             },
-            HeaderValue::UserAgent(products) => {
-                let products = products
-                    .iter()
-                    .filter_map(|product| {
-                        std::str::from_utf8(product).ok().map(|s| s.to_string())
-                    })
-                    .collect();
+            HeaderValue::UserAgent(server_vals) => {
+                // Convert the complex server values into strings
+                let mut products = Vec::new();
+                
+                for val in server_vals {
+                    let (product_opt, comment_opt) = val;
+                    
+                    // Handle product if present
+                    if let Some(product) = product_opt {
+                        let (name_bytes, version_opt) = product;
+                        if let Ok(name) = std::str::from_utf8(&name_bytes) {
+                            let mut product_str = name.to_string();
+                            
+                            // Add version if present
+                            if let Some(version_bytes) = version_opt {
+                                if let Ok(version) = std::str::from_utf8(&version_bytes) {
+                                    product_str.push('/');
+                                    product_str.push_str(version);
+                                }
+                            }
+                            
+                            products.push(product_str);
+                        }
+                    }
+                    
+                    // Handle comment if present
+                    if let Some(comment_bytes) = comment_opt {
+                        if let Ok(comment) = std::str::from_utf8(&comment_bytes) {
+                            products.push(format!("({})", comment));
+                        }
+                    }
+                }
+                
                 Ok(UserAgent { products })
             },
             _ => Err(Error::InvalidHeader(

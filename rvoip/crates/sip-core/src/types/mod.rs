@@ -425,3 +425,6 @@ impl AsRef<Message> for Message {
         self
     }
 }
+
+// Add user_agent module declaration
+pub mod user_agent;

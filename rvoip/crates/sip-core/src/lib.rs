@@ -336,6 +336,29 @@ pub mod prelude {
     pub use crate::types::AcceptLanguage;
     pub use crate::parser::headers::accept_language::LanguageInfo;
     
+    // Header builder extension traits
+    pub use crate::builder::headers::{
+        HeaderSetter,
+        AllowBuilderExt,
+        AuthorizationExt,
+        WwwAuthenticateExt,
+        ProxyAuthenticateExt,
+        ProxyAuthorizationExt,
+        AuthenticationInfoExt,
+        ContentEncodingExt,
+        ContentLanguageExt,
+        ContentDispositionExt,
+        AcceptExt,
+        AcceptEncodingExt,
+        AcceptLanguageExt,
+        RecordRouteBuilderExt,
+        RouteBuilderExt,
+        SupportedBuilderExt,
+        UnsupportedBuilderExt,
+        RequireBuilderExt,
+        UserAgentBuilderExt
+    };
+    
     // Also add the macros
     pub use crate::macros::*;
 }
