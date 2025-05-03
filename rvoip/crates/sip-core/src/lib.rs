@@ -206,7 +206,8 @@ pub mod parser;
 
 // Re-export key public items
 pub use error::{Error, Result};
-pub use types::header::{Header, HeaderName, HeaderValue};
+pub use types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait};
+pub use types::headers::HeaderName;
 pub use types::Method;
 pub use parser::parse_message;
 pub use parser::message::parse_message_with_mode;
@@ -228,9 +229,7 @@ pub use types::{
     sip_request::Request,
     sip_response::Response,
     sdp::SdpSession,
-    TypedHeader, 
-    TypedHeaderTrait,
-    via::Via,
+    Via,  // Changed from via::Via
     Warning,
     warning::{WarnAgent, WarningValue},
     sdp::MediaDescription,
@@ -269,14 +268,15 @@ pub use macros::*;
 /// Re-export of common types and functions for SIP
 pub mod prelude {
     pub use crate::error::{Error, Result};
-    pub use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
+    pub use crate::types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
+    pub use crate::types::headers::HeaderName; // Use the new HeaderName
     pub use crate::types::uri::{Uri, Host, Scheme}; // Use the original URI Scheme
     pub use crate::types::Method;
     pub use crate::types::StatusCode;
     pub use crate::types::sip_message::Message;
     pub use crate::types::sip_request::Request;
     pub use crate::types::sip_response::Response;
-    pub use crate::types::via::Via;
+    pub use crate::types::Via;
     pub use crate::types::Version; // Added Version
     pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE, ParseMode};
     pub use crate::parser::parse_message;

@@ -4,10 +4,10 @@
 // Each header type is implemented in its own file.
 
 use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait};
 
-// Re-export header types
-// These will be expanded as we implement each header file
+// Define sub-modules
+pub mod header_name;
 pub mod common;
 pub mod header_access;
 
@@ -17,4 +17,5 @@ mod tests;
 
 // Re-export common types for convenience
 pub use common::*;
-pub use header_access::*; 
+pub use header_access::*;
+pub use header_name::HeaderName; 
