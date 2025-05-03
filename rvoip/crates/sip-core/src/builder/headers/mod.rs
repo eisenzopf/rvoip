@@ -52,6 +52,7 @@ pub mod server;
 pub mod path;
 pub mod proxy_require;
 pub mod content;
+pub mod call_id;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -75,4 +76,5 @@ pub use user_agent::UserAgentBuilderExt;
 pub use server::ServerBuilderExt;
 pub use path::PathBuilderExt;
 pub use proxy_require::ProxyRequireBuilderExt;
-pub use content::ContentBuilderExt; 
+pub use content::ContentBuilderExt;
+pub use call_id::CallIdBuilderExt; 

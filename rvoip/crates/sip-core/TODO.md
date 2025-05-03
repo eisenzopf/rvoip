@@ -85,7 +85,7 @@
     - Add helper variants for common values
 
 - [ ] **Session/Status Info Headers**
-  - [ ] **CallID**: Ensure access and manipulation is consistent
+  - [x] **CallID**: Ensure access and manipulation is consistent
   - [ ] **InReplyTo**: Add builder methods
   - [ ] **ReplyTo**: Add builder methods
 

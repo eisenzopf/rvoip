@@ -122,6 +122,54 @@ impl CallId {
         Self(id.into())
     }
     
+    /// Generate a random Call-ID value.
+    ///
+    /// This method creates a Call-ID with a random UUID, providing a high probability
+    /// of global uniqueness without requiring a host part.
+    ///
+    /// # Returns
+    ///
+    /// A new `CallId` instance with a random UUID value
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let call_id = CallId::random();
+    /// println!("Generated Call-ID: {}", call_id);
+    /// // Output will be a UUID, e.g.: "550e8400-e29b-41d4-a716-446655440000"
+    /// ```
+    pub fn random() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+    
+    /// Generate a random Call-ID value with a host part.
+    ///
+    /// This method creates a Call-ID with a random UUID and appends a host part,
+    /// which improves global uniqueness in accordance with RFC 3261 recommendations.
+    ///
+    /// # Parameters
+    ///
+    /// - `host`: The host part to append (e.g., a domain name or IP address)
+    ///
+    /// # Returns
+    ///
+    /// A new `CallId` instance with format "random-uuid@host"
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let call_id = CallId::random_with_host("example.com");
+    /// println!("Generated Call-ID: {}", call_id);
+    /// // Output will be a UUID with host, e.g.: "550e8400-e29b-41d4-a716-446655440000@example.com"
+    /// ```
+    pub fn random_with_host(host: impl AsRef<str>) -> Self {
+        Self(format!("{}@{}", Uuid::new_v4().to_string(), host.as_ref()))
+    }
+    
     /// Get a reference to the inner string value.
     ///
     /// This method provides access to the underlying string value of the Call-ID.

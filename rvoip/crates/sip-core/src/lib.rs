@@ -361,7 +361,8 @@ pub mod prelude {
         ServerBuilderExt,
         PathBuilderExt,
         ProxyRequireBuilderExt,
-        ContentBuilderExt
+        ContentBuilderExt,
+        CallIdBuilderExt
     };
     
     // Also add the macros
