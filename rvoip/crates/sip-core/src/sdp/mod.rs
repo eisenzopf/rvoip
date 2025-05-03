@@ -334,14 +334,15 @@ pub mod media;
 pub mod attributes;
 pub mod macros;
 pub mod builder;
+pub mod integration;  // New module for SIP/SDP integration helpers
 
 #[cfg(test)]
 mod tests;
 
 pub use parser::parse_sdp;
 pub use parser::validate_sdp;
-pub use macros::*;
 pub use builder::SdpBuilder;
+pub use crate::sdp; // Directly use the sdp macro
 
 // For backward compatibility
 pub mod media_parser {
@@ -356,4 +357,19 @@ pub mod session_parser {
 // For backward compatibility
 pub mod time_parser {
     pub use crate::sdp::parser::time_parser::*;
+}
+
+// Re-exports
+pub use attributes::MediaDirection;
+pub use integration::*;  // Re-export integration helpers
+
+/// Prelude module
+///
+/// Import common SDP types and functions.
+pub mod prelude {
+    pub use super::SdpBuilder;
+    pub use super::parse_sdp;
+    pub use super::attributes::MediaDirection;
+    pub use crate::sdp; // Use the sdp macro from crate root
+    pub use super::integration::*;  // Make integration helpers available in prelude
 } 

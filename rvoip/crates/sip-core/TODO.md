@@ -59,7 +59,7 @@
   - [x] Fix `HeaderSetter` trait usage for consistency
   - [x] Enable method chaining for all builders
 
-- [ ] **Routing Headers**
+- [x] **Routing Headers**
   - [x] **RecordRoute**:
     - Add RecordRoute entry manipulation methods
     - Add RecordRoute to request and response builders
@@ -70,13 +70,13 @@
     - Implement TypedHeaderTrait
     - Add to request and response builders
 
-- [ ] **Feature/Capability Headers**
+- [x] **Feature/Capability Headers**
   - [x] **Require**: Add builder helpers
   - [x] **Supported**: Add builder helpers
   - [x] **Unsupported**: Add builder helpers
   - [x] **ProxyRequire**: Add builder helpers
 
-- [ ] **Information Headers**
+- [x] **Information Headers**
   - [x] **User-Agent**: 
     - Add builder methods for User-Agent
     - Add helper variants for common values
@@ -84,12 +84,12 @@
     - Add builder methods for Server header
     - Add helper variants for common values
 
-- [ ] **Session/Status Info Headers**
+- [x] **Session/Status Info Headers**
   - [x] **CallID**: Ensure access and manipulation is consistent
   - [x] **InReplyTo**: Add builder methods
   - [x] **ReplyTo**: Add builder methods
 
-- [ ] **Media/Content Headers**
+- [x] **Media/Content Headers**
   - [x] **Accept Headers**:
     - Implement `accept()` method on builders
     - Add helper methods for common types
@@ -99,7 +99,7 @@
     - Add text/plain shortcuts
     - Add SDP handling
 
-- [ ] **Authentication Headers**
+- [x] **Authentication Headers**
   - [x] **WWW-Authenticate**: Ensure integrated access in Response
   - [x] **Authorization**: Ensure integrated access in Request
   - [x] **Proxy-Authenticate**: Add helper methods 
@@ -108,15 +108,15 @@
 
 ## Feature Improvements
 
-- [ ] **SDP Integration**
-  - [ ] Complete SDP building API improvements:
+- [x] **SDP Integration**
+  - [x] Complete SDP building API improvements:
     - Easier creation of typical audio/video configs
     - Default values for common formats 
     - WebRTC BUNDLE configuration
-  - [ ] Add SDP/SIP interoperability functions
+  - [x] Add SDP/SIP interoperability functions
     - Map SDP connection data to SIP Contact
     - Auto-generate o-line from SIP fields 
-  - [ ] Add multimedia session convenience helpers
+  - [x] Add multimedia session convenience helpers
 
 - [ ] **Serialization Format Support**
   - [ ] Add serde support for core types
@@ -181,10 +181,10 @@
 
 ## Documentation and Examples
 
-- [ ] **Update Tutorial Examples**
-  - [ ] Fix existing examples to work with current API
-  - [ ] Add examples demonstrating best practices
-  - [ ] Ensure examples follow consistent patterns
+- [x] **Update Tutorial Examples**
+  - [x] Fix existing examples to work with current API
+  - [x] Add examples demonstrating best practices
+  - [x] Ensure examples follow consistent patterns
 
 - [ ] **API Documentation**
   - [ ] Complete documentation for all public methods and types

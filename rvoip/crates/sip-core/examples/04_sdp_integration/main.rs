@@ -4,7 +4,7 @@
 //! for media negotiation within SIP sessions.
 
 use bytes::Bytes;
-use rvoip_sip_core::{prelude::*, sdp_prelude::*};
+use rvoip_sip_core::{prelude::*, sdp_prelude::*, builder::headers::ContentBuilderExt};
 use tracing::{debug, info};
 
 fn main() {
@@ -24,6 +24,12 @@ fn main() {
     
     // Example 4: Offer/Answer model
     sdp_offer_answer_example();
+    
+    // Example 5: Integrated SIP/SDP building
+    sip_sdp_integration_example();
+    
+    // Example 6: Advanced SIP/SDP integration with automatic profiles
+    sip_sdp_advanced_example();
     
     info!("All examples completed successfully!");
 }
@@ -53,7 +59,8 @@ fn create_sdp_with_builder() {
             .rtpmap("31", "H261/90000")
             .direction(MediaDirection::SendRecv)
             .done()
-        .build();
+        .build()
+        .expect("Failed to build SDP");
     
     // Convert to string and display
     let sdp_str = sdp.to_string();
@@ -277,5 +284,236 @@ fn sdp_offer_answer_example() {
     if alice_video.direction() == MediaDirection::SendRecv && 
        bob_video.direction() == MediaDirection::SendRecv {
         info!("Video is bidirectional");
+    }
+}
+
+/// Example 5: Integrated SIP/SDP building
+fn sip_sdp_integration_example() {
+    info!("Example 5: Integrated SIP/SDP building");
+    
+    // Scenario: Creating a SIP INVITE with SDP offer and 200 OK with SDP answer
+    
+    // Step 1: Create SIP INVITE with SDP
+    info!("Step 1: Creating SIP INVITE with SDP");
+    
+    // First create the SDP content using the builder
+    let sdp_offer = SdpBuilder::new("Audio Call")
+        .origin("alice", "12345", "1", "IN", "IP4", "192.168.1.100")
+        .connection("IN", "IP4", "192.168.1.100")
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-16")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()
+        .expect("Failed to build SDP offer");
+        
+    // Now create the SIP request and add the SDP body
+    let invite = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        .header(TypedHeader::From(From::new(
+            Address::new_with_display_name("Alice", 
+                Uri::from_str("sip:alice@atlanta.com").unwrap())
+            .with_parameter("tag", "1928301774")
+        )))
+        .header(TypedHeader::To(To::new(
+            Address::new_with_display_name("Bob", 
+                Uri::from_str("sip:bob@example.com").unwrap())
+        )))
+        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+        .header(TypedHeader::Via(
+            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
+        ))
+        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
+        .header(TypedHeader::Contact(Contact::new(
+            Address::new(Uri::from_str("sip:alice@pc33.atlanta.com").unwrap())
+        )))
+        // Use the ContentBuilderExt trait to add the SDP
+        .sdp_body(&sdp_offer)
+        .build();
+    
+    info!("Created SIP INVITE with SDP body");
+    info!("Message snippet:\n{}", invite.start_line());
+    
+    // Step 2: Create SIP 200 OK response with SDP answer
+    info!("Step 2: Creating SIP 200 OK with SDP answer");
+    
+    // Create the SDP answer
+    let sdp_answer = SdpBuilder::new("Bob's Answer")
+        .origin("bob", "67890", "1", "IN", "IP4", "192.168.1.200")
+        .connection("IN", "IP4", "192.168.1.200")
+        .time("0", "0")
+        .media_audio(49180, "RTP/AVP")
+            .formats(&["0", "101"])  // Only supporting PCMU
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-16")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()
+        .expect("Failed to build SDP answer");
+    
+    // Create the 200 OK response
+    let ok_response = ResponseBuilder::new(StatusCode::OK).unwrap()
+        .header(TypedHeader::From(From::new(
+            Address::new_with_display_name("Alice", 
+                Uri::from_str("sip:alice@atlanta.com").unwrap())
+            .with_parameter("tag", "1928301774")
+        )))
+        .header(TypedHeader::To(To::new(
+            Address::new_with_display_name("Bob", 
+                Uri::from_str("sip:bob@example.com").unwrap())
+            .with_parameter("tag", "a6c85cf")
+        )))
+        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
+        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
+        .header(TypedHeader::Via(
+            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
+        ))
+        .header(TypedHeader::Contact(Contact::new(
+            Address::new(Uri::from_str("sip:bob@biloxi.com").unwrap())
+        )))
+        // Use the ContentBuilderExt trait to add the SDP
+        .sdp_body(&sdp_answer)
+        .build();
+    
+    info!("Created SIP 200 OK with SDP answer");
+    info!("Message snippet:\n{} {}", ok_response.status_code(), ok_response.reason_phrase());
+    
+    // Step 3: Demonstrate extracting SDP from SIP messages
+    info!("Step 3: Extracting SDP from SIP messages");
+    
+    // Extract SDP from INVITE
+    if let Some(body) = invite.body() {
+        let invite_sdp = parse_sdp(&Bytes::from(body)).expect("Failed to parse SDP from INVITE");
+        info!("Extracted SDP from INVITE: {} media streams", invite_sdp.media().len());
+        
+        // Extract audio media details
+        if let Some(audio) = invite_sdp.media().iter().find(|m| m.media_type() == "audio") {
+            info!("Audio codecs in INVITE: {:?}", audio.formats());
+        }
+    }
+    
+    // Extract SDP from 200 OK
+    if let Some(body) = ok_response.body() {
+        let answer_sdp = parse_sdp(&Bytes::from(body)).expect("Failed to parse SDP from 200 OK");
+        info!("Extracted SDP from 200 OK: {} media streams", answer_sdp.media().len());
+        
+        // Extract audio media details
+        if let Some(audio) = answer_sdp.media().iter().find(|m| m.media_type() == "audio") {
+            info!("Audio codecs in 200 OK: {:?}", audio.formats());
+        }
+    }
+}
+
+/// Example 6: Advanced SIP/SDP integration with automatic profiles
+fn sip_sdp_advanced_example() {
+    info!("Example 6: Advanced SIP/SDP integration with automatic profiles");
+    
+    // The new ContentBuilderExt trait has methods for automatically generating 
+    // SDP content from SIP message information
+    
+    // Step 1: Create SIP INVITE with automatic audio-only SDP
+    info!("Step 1: Creating SIP INVITE with auto-generated audio SDP");
+    
+    // Create the SIP INVITE and auto-generate the SDP
+    let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@biloxi.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@biloxi.com", None)
+        .call_id("a84b4c76e66710")
+        .cseq(314159)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .contact("Alice", "sip:alice@pc33.atlanta.com", None)
+        .max_forwards(70)
+        // Automatically generate an audio SDP with default codecs
+        .auto_sdp_audio_body(Some("Audio Call"), 49170, None)
+        .build();
+    
+    info!("Created SIP INVITE with auto-generated audio SDP");
+    
+    // Display the SDP body
+    if let Some(body) = invite.body() {
+        let body_str = std::str::from_utf8(body).unwrap();
+        info!("Generated SDP:\n{}", body_str);
+    }
+    
+    // Step 2: Create SIP INVITE with automatic audio+video SDP
+    info!("Step 2: Creating SIP INVITE with auto-generated audio+video SDP");
+    
+    // Create the SIP INVITE and auto-generate the SDP with audio and video
+    let invite_av = SimpleRequestBuilder::new(Method::Invite, "sip:bob@biloxi.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@biloxi.com", None)
+        .call_id("a84b4c76e66710")
+        .cseq(314159)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .contact("Alice", "sip:alice@pc33.atlanta.com", None)
+        .max_forwards(70)
+        // Automatically generate an audio+video SDP with default codecs
+        .auto_sdp_av_body(
+            Some("Audio/Video Call"), 
+            49170,  // Audio port 
+            49180,  // Video port
+            Some(&["0", "8", "101"]),  // Audio codecs
+            Some(&["96", "97"])        // Video codecs
+        )
+        .build();
+    
+    info!("Created SIP INVITE with auto-generated audio+video SDP");
+    
+    // Step 3: Create SIP 200 OK with auto-generated SDP answer
+    info!("Step 3: Creating SIP 200 OK with auto-generated SDP answer");
+    
+    // Create a 200 OK response with auto-generated SDP
+    let ok_response = SimpleResponseBuilder::new(StatusCode::OK, None)
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@biloxi.com", Some("a6c85cf"))
+        .call_id("a84b4c76e66710")
+        .cseq(314159, Method::Invite)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .contact("Bob", "sip:bob@192.168.1.2", None)
+        // Automatically generate an audio-only SDP answer
+        .auto_sdp_audio_body(Some("Bob's Answer"), 49180, Some(&["0"]))
+        .build();
+    
+    info!("Created SIP 200 OK with auto-generated SDP answer");
+    
+    // Display the SDP body
+    if let Some(body) = ok_response.body() {
+        let body_str = std::str::from_utf8(body).unwrap();
+        info!("Generated SDP answer:\n{}", body_str);
+    }
+    
+    // Step 4: WebRTC example with ICE and DTLS
+    info!("Step 4: Creating SIP INVITE with WebRTC SDP");
+    
+    // Create a SIP INVITE with WebRTC SDP (ICE and DTLS)
+    let invite_webrtc = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        .from("Alice", "sip:alice@example.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id("webrtc-call-1")
+        .cseq(1)
+        .via("example.com", "UDP", Some("z9hG4bKwebrtc"))
+        .contact("Alice", "sip:alice@example.com", None)
+        // Add WebRTC SDP with ICE and DTLS parameters
+        .auto_sdp_webrtc_body(
+            Some("WebRTC Session"),
+            "F7gI",                              // ICE ufrag
+            "x9cml/YzichV2+XlhiMu8g",            // ICE pwd
+            "D2:FA:0E:C3:22:59:5E:14:95:69:92:3D:13:B4:84:24", // DTLS fingerprint
+            true                                 // Include video
+        )
+        .build();
+        
+    info!("Created SIP INVITE with WebRTC SDP");
+    
+    // Display the WebRTC SDP body
+    if let Some(body) = invite_webrtc.body() {
+        let body_str = std::str::from_utf8(body).unwrap();
+        info!("Generated WebRTC SDP:\n{}", body_str);
     }
 } 

@@ -9,7 +9,8 @@ This example demonstrates how to use Session Description Protocol (SDP) with SIP
 - How the SDP offer/answer model works for media negotiation
 - How to analyze and determine the negotiated media parameters
 - How to work with codecs, formats, and their parameters
-- How to interpret media directions (sendrecv, recvonly, etc.)
+- How to integrate SDP with SIP messages using the new integration helpers
+- How to automatically generate SDP content from SIP message headers
 
 ## Running the Example
 
@@ -23,7 +24,7 @@ RUST_LOG=debug cargo run --example 04_sdp_integration
 
 ## Code Walkthrough
 
-The example is divided into four parts:
+The example is divided into six parts:
 
 1. **Creating SDP with the Builder Pattern**
    - Demonstrates building an SDP session step-by-step
@@ -50,6 +51,18 @@ The example is divided into four parts:
    - Illustrates how to analyze the negotiation results
    - Shows the algorithm for finding common codecs
 
+5. **Integrated SIP/SDP Building**
+   - Demonstrates how to use the SDP builder together with the SIP builder
+   - Shows how to add an SDP body to SIP requests using the ContentBuilderExt trait
+   - Illustrates creating a complete INVITE with SDP offer and 200 OK with answer
+   - Shows how to extract and process SDP from SIP messages
+
+6. **Advanced SIP/SDP Integration with Automatic Profiles**
+   - Shows how to automatically generate SDP content from SIP message headers
+   - Demonstrates creating audio-only, audio+video, and WebRTC SDPs
+   - Illustrates how to use predefined media profiles for common configurations
+   - Shows how the integration functions extract information from SIP to populate SDP
+
 ## Key Concepts
 
 ### SDP Structure
@@ -71,6 +84,15 @@ The offer/answer model is the basis for SIP media negotiation:
 3. **Negotiation**: Both sides determine the intersection of supported formats
 4. **Media establishment**: Media flows using the negotiated parameters
 
+### SIP-SDP Integration
+
+The example demonstrates several approaches to integrating SDP with SIP:
+
+1. **Manual Integration**: Manually creating both SIP and SDP and combining them
+2. **Helper Methods**: Using the `sdp_body` method to attach an SDP session to a SIP message
+3. **Automatic Profiles**: Using methods like `auto_sdp_audio_body` to generate SDP from SIP information
+4. **WebRTC Integration**: Using special helpers for WebRTC-compatible SDP generation
+
 ### Common Media Types and Codecs
 
 - **Audio**: PCMU (G.711 μ-law), PCMA (G.711 A-law), telephone-event (DTMF)
@@ -83,6 +105,26 @@ The offer/answer model is the basis for SIP media negotiation:
 - **sendonly**: Sender will transmit but not receive
 - **recvonly**: Sender will receive but not transmit
 - **inactive**: No media flows in either direction
+
+## Implementation Details
+
+### Integration Module Highlights
+
+The example showcases the new integration module that provides:
+
+1. **Header Extraction**: Automatically extracts SIP headers to populate SDP fields
+2. **Common Profiles**: Predefined audio, video, and WebRTC profiles
+3. **Builder Extensions**: Convenience methods for SIP-SDP integration
+4. **Auto-Generation**: Smart generation of SDP based on SIP message context
+
+### ContentBuilderExt Trait Methods
+
+The example uses several methods from the ContentBuilderExt trait:
+
+- `sdp_body(sdp)`: Adds an SDP session to a SIP message
+- `auto_sdp_audio_body(name, port, codecs)`: Generates an audio SDP and adds it
+- `auto_sdp_av_body(name, audio_port, video_port, audio_codecs, video_codecs)`: Generates an audio+video SDP
+- `auto_sdp_webrtc_body(name, ice_ufrag, ice_pwd, fingerprint, include_video)`: Generates a WebRTC SDP
 
 ## Next Steps
 
