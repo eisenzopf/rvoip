@@ -513,7 +513,7 @@ impl TypedHeaderTrait for ReplyTo {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(Self::header_name(), HeaderValue::ReplyTo(self.clone()))
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -533,6 +533,7 @@ impl TypedHeaderTrait for ReplyTo {
                     ))
                 }
             },
+            HeaderValue::ReplyTo(reply_to) => Ok(reply_to.clone()),
             _ => Err(Error::InvalidHeader(
                 format!("Unexpected header value type for {}", Self::header_name())
             )),

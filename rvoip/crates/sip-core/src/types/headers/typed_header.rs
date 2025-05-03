@@ -263,6 +263,9 @@ impl TypedHeader {
             TypedHeader::InReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
                 
+            TypedHeader::ReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
             _ => None,
         }
     }
@@ -549,6 +552,15 @@ impl TryFrom<Header> for TypedHeader {
                 
                 // Use the InReplyTo directly without parsing
                 return Ok(TypedHeader::InReplyTo(in_reply_to.clone()));
+            },
+            HeaderValue::ReplyTo(reply_to) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ReplyTo {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ReplyTo directly without parsing
+                return Ok(TypedHeader::ReplyTo(reply_to.clone()));
             },
             _ => {} // Continue with normal processing
         }

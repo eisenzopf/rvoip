@@ -86,8 +86,8 @@
 
 - [ ] **Session/Status Info Headers**
   - [x] **CallID**: Ensure access and manipulation is consistent
-  - [ ] **InReplyTo**: Add builder methods
-  - [ ] **ReplyTo**: Add builder methods
+  - [x] **InReplyTo**: Add builder methods
+  - [x] **ReplyTo**: Add builder methods
 
 - [ ] **Media/Content Headers**
   - [x] **Accept Headers**:

@@ -10,6 +10,7 @@ use crate::types::to::To as ToHeaderValue;
 use crate::parser::headers::route::RouteEntry;
 use crate::types::record_route::RecordRouteEntry;
 use crate::parser::headers::reply_to::ReplyToValue;
+use crate::types::reply_to::ReplyTo;
 use crate::types::refer_to::ReferTo;
 use crate::types::via::ViaHeader;
 use crate::types::cseq::CSeq;
@@ -66,7 +67,7 @@ pub enum HeaderValue {
     To(ToHeaderValue),
     Route(Vec<RouteEntry>),
     RecordRoute(Vec<RecordRouteEntry>),
-    ReplyTo(ReplyToValue),
+    ReplyTo(ReplyTo),
     ReferTo(ReferTo), // Add ReferTo variant
 
     // === Request/Response Info ===
