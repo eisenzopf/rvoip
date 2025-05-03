@@ -518,6 +518,15 @@ impl TryFrom<Header> for TypedHeader {
                 // Use the ProxyAuthorization directly without parsing
                 return Ok(TypedHeader::ProxyAuthorization(proxy_auth.clone()));
             },
+            HeaderValue::AuthenticationInfo(auth_info) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::AuthenticationInfo {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the AuthenticationInfo directly without parsing
+                return Ok(TypedHeader::AuthenticationInfo(auth_info.clone()));
+            },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
                 // Only process if the header name is correct
                 if header.name != HeaderName::ContentDisposition {

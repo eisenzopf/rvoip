@@ -138,7 +138,7 @@ impl TypedHeaderTrait for AuthenticationInfo {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(Self::header_name(), HeaderValue::AuthenticationInfo(self.clone()))
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -149,6 +149,9 @@ impl TypedHeaderTrait for AuthenticationInfo {
         }
 
         match &header.value {
+            HeaderValue::AuthenticationInfo(auth_info) => {
+                Ok(auth_info.clone())
+            },
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     AuthenticationInfo::from_str(s.trim())

@@ -120,7 +120,7 @@ pub enum HeaderValue {
     ProxyAuthorization(crate::types::auth::ProxyAuthorization), // Use proper type instead of Vec<u8>
     WwwAuthenticate(crate::types::auth::WwwAuthenticate), // Use proper type instead of Vec<u8>
     ProxyAuthenticate(crate::types::auth::ProxyAuthenticate), // Use proper type instead of Vec<u8>
-    AuthenticationInfo(Vec<u8>), // Placeholder
+    AuthenticationInfo(crate::types::auth::AuthenticationInfo), // Use proper type instead of Vec<u8>
 
     // === Other ===
     /// Raw value for unknown or unparsed headers

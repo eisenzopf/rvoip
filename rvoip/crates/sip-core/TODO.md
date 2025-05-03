@@ -104,7 +104,7 @@
   - [x] **Authorization**: Ensure integrated access in Request
   - [x] **Proxy-Authenticate**: Add helper methods 
   - [x] **Proxy-Authorization**: Add helper methods 
-  - [ ] **Authentication-Info**: Add helper methods
+  - [x] **Authentication-Info**: Add helper methods
 
 ## Feature Improvements
 
