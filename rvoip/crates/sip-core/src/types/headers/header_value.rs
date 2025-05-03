@@ -117,9 +117,9 @@ pub enum HeaderValue {
 
     // === Authentication (Placeholders) ===
     Authorization(crate::types::auth::Authorization), // Use proper type instead of Vec<u8>
-    ProxyAuthorization(Vec<u8>), // Placeholder
+    ProxyAuthorization(crate::types::auth::ProxyAuthorization), // Use proper type instead of Vec<u8>
     WwwAuthenticate(crate::types::auth::WwwAuthenticate), // Use proper type instead of Vec<u8>
-    ProxyAuthenticate(Vec<u8>), // Placeholder
+    ProxyAuthenticate(crate::types::auth::ProxyAuthenticate), // Use proper type instead of Vec<u8>
     AuthenticationInfo(Vec<u8>), // Placeholder
 
     // === Other ===

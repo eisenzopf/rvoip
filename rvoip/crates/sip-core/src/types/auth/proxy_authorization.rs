@@ -54,7 +54,7 @@ impl TypedHeaderTrait for ProxyAuthorization {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(Self::header_name(), HeaderValue::ProxyAuthorization(self.clone()))
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -65,6 +65,9 @@ impl TypedHeaderTrait for ProxyAuthorization {
         }
 
         match &header.value {
+            HeaderValue::ProxyAuthorization(proxy_auth) => {
+                Ok(proxy_auth.clone())
+            },
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ProxyAuthorization::from_str(s.trim())

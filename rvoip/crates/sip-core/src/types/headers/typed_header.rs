@@ -500,6 +500,24 @@ impl TryFrom<Header> for TypedHeader {
                 // Use the WwwAuthenticate directly without parsing
                 return Ok(TypedHeader::WwwAuthenticate(www_auth.clone()));
             },
+            HeaderValue::ProxyAuthenticate(proxy_auth) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ProxyAuthenticate {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ProxyAuthenticate directly without parsing
+                return Ok(TypedHeader::ProxyAuthenticate(proxy_auth.clone()));
+            },
+            HeaderValue::ProxyAuthorization(proxy_auth) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ProxyAuthorization {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ProxyAuthorization directly without parsing
+                return Ok(TypedHeader::ProxyAuthorization(proxy_auth.clone()));
+            },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
                 // Only process if the header name is correct
                 if header.name != HeaderName::ContentDisposition {

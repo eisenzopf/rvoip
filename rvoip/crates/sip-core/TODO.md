@@ -101,9 +101,9 @@
 
 - [ ] **Authentication Headers**
   - [x] **WWW-Authenticate**: Ensure integrated access in Response
-  - [ ] **Authorization**: Ensure integrated access in Request
-  - [ ] **Proxy-Authenticate**: Add helper methods 
-  - [ ] **Proxy-Authorization**: Add helper methods 
+  - [x] **Authorization**: Ensure integrated access in Request
+  - [x] **Proxy-Authenticate**: Add helper methods 
+  - [x] **Proxy-Authorization**: Add helper methods 
   - [ ] **Authentication-Info**: Add helper methods
 
 ## Feature Improvements
