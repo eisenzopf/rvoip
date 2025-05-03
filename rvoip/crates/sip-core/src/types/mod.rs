@@ -380,6 +380,9 @@ pub mod retry_after;
 pub mod error_info;
 pub mod supported;
 pub mod unsupported;
+pub mod content_encoding;
+pub mod content_language;
+pub mod accept_encoding;
 
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
@@ -404,6 +407,9 @@ pub use subject::Subject;
 pub use warning::Warning;
 pub use multipart::{MultipartBody, MimePart, ParsedBody};
 pub use refer_to::ReferTo;
+pub use content_encoding::ContentEncoding;
+pub use content_language::ContentLanguage;
+pub use accept_encoding::AcceptEncoding;
 
 // Add missing pub use * directives
 pub use priority::*;

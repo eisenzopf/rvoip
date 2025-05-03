@@ -35,6 +35,53 @@ pub struct EncodingInfo {
     pub params: Vec<Param>,
 }
 
+impl EncodingInfo {
+    // Get effective q-value (defaults to 1.0 if not specified)
+    pub fn q_value(&self) -> f32 {
+        for param in &self.params {
+            if let Param::Q(q) = param {
+                return q.into_inner();
+            }
+        }
+        1.0 // Default q-value per RFC 3261
+    }
+}
+
+impl std::fmt::Display for EncodingInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.coding)?;
+        
+        for param in &self.params {
+            match param {
+                Param::Q(q) => write!(f, ";q={:.3}", q)?,
+                Param::Other(name, None) => write!(f, ";{}", name)?,
+                Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) => 
+                    write!(f, ";{}={}", name, value)?,
+                Param::Other(name, Some(crate::types::param::GenericValue::Quoted(value))) => 
+                    write!(f, ";{}=\"{}\"", name, value)?,
+                _ => {} // Other param types not expected in Accept-Encoding
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+impl std::cmp::Ord for EncodingInfo {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Sort by q-value (highest first), then by coding string for stable ordering
+        other.q_value().partial_cmp(&self.q_value())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.coding.cmp(&other.coding))
+    }
+}
+
+impl std::cmp::PartialOrd for EncodingInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 // codings = content-coding / "*"
 // content-coding = token
 // Returns coding as String

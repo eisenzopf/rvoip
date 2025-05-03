@@ -241,6 +241,69 @@ impl Accept {
             // TODO: Parameter matching (like q values)
         })
     }
+
+    /// Checks if this Accept header accepts a specific media type by type and subtype strings.
+    ///
+    /// # Arguments
+    ///
+    /// * `type_str` - The media type (e.g., "application")
+    /// * `subtype_str` - The media subtype (e.g., "sdp")
+    ///
+    /// # Returns
+    ///
+    /// `true` if the specified media type is acceptable, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::Accept;
+    /// use std::str::FromStr;
+    ///
+    /// let accept = Accept::from_str("application/sdp;q=0.9, application/json;q=0.5").unwrap();
+    /// assert!(accept.accepts_type("application", "sdp"));
+    /// assert!(accept.accepts_type("application", "json"));
+    /// assert!(!accept.accepts_type("text", "plain"));
+    /// ```
+    pub fn accepts_type(&self, type_str: &str, subtype_str: &str) -> bool {
+        // Check if the media type is in the Accept header
+        for accept_val in &self.0 {
+            if (accept_val.m_type == "*" || accept_val.m_type.eq_ignore_ascii_case(type_str)) &&
+                (accept_val.m_subtype == "*" || accept_val.m_subtype.eq_ignore_ascii_case(subtype_str)) {
+                // Check q value - if q=0, then the media type is not acceptable
+                if let Some(q) = accept_val.q {
+                    if q.into_inner() <= 0.0 {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        
+        // If no explicit match, check for wildcard
+        for accept_val in &self.0 {
+            if accept_val.m_type == "*" && accept_val.m_subtype == "*" {
+                // Check q value - if q=0, then the media type is not acceptable
+                if let Some(q) = accept_val.q {
+                    if q.into_inner() <= 0.0 {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        
+        // Default behavior: if Not mentioned and no wildcard, return false
+        false
+    }
+
+    /// Returns a list of media types defined in this Accept header.
+    ///
+    /// # Returns
+    ///
+    /// A vector of media types with their parameters
+    pub fn media_types(&self) -> &[AcceptValue] {
+        &self.0
+    }
 }
 
 impl fmt::Display for Accept {
@@ -250,19 +313,45 @@ impl fmt::Display for Accept {
     }
 }
 
+// Helper function for the FromStr implementation
+fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<AcceptValue>> {
+    // Check if the input starts with "Accept:" and strip it if present
+    let bytes_to_parse = if bytes.len() > 8 && 
+        bytes[0..6].eq_ignore_ascii_case(b"Accept") && 
+        bytes[6] == b':' {
+        // Skip the header name and colon, and any leading whitespace
+        let mut i = 7;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        &bytes[i..]
+    } else {
+        &bytes
+    };
+
+    match all_consuming(parse_accept)(bytes_to_parse) {
+        Ok((_, accept)) => Ok(accept.0),
+        Err(e) => Err(Error::ParseError(
+            format!("Failed to parse Accept header: {:?}", e)
+        ))
+    }
+}
+
 impl FromStr for Accept {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        use crate::parser::headers::accept::parse_accept;
-
-        // Convert &str to &[u8] and use all_consuming
-        match all_consuming(parse_accept)(s.as_bytes()) {
-            Ok((_, accept_header)) => Ok(accept_header),
-            Err(e) => Err(Error::ParseError(
-                format!("Failed to parse Accept header: {:?}", e)
-            ))
-        }
+        // Handle the case of just the header without the name
+        // (e.g., "application/sdp;q=0.8" instead of "Accept: application/sdp;q=0.8")
+        let input_bytes = if !s.contains(':') {
+            format!("Accept: {}", s).into_bytes()
+        } else {
+            s.as_bytes().to_vec()
+        };
+        
+        // Parse using our helper function that takes ownership of the bytes
+        parse_from_owned_bytes(input_bytes)
+            .map(Accept::from_media_types)
     }
 }
 
@@ -294,12 +383,19 @@ impl FromStr for Accept {
 impl fmt::Display for AcceptValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = format!("{}/{}", self.m_type, self.m_subtype);
+        
+        // First output params other than 'q'
+        for (k, v) in &self.params {
+            if k != "q" {
+                s.push_str(&format!(";{}={}", k, v));
+            }
+        }
+        
+        // Then output q parameter if it exists
         if let Some(q) = self.q {
             s.push_str(&format!(";q={}", q));
         }
-        for (k, v) in &self.params {
-            s.push_str(&format!(";{}={}", k, v));
-        }
+        
         write!(f, "{}", s)
     }
 }
@@ -339,5 +435,3 @@ impl TypedHeaderTrait for Accept {
         }
     }
 }
-
-// TODO: Implement methods (e.g., for checking acceptable types)

@@ -81,16 +81,13 @@ use crate::types::auth::{Authorization, WwwAuthenticate, ProxyAuthenticate, Prox
 use crate::types::reply_to::ReplyTo;
 use crate::parser::headers::reply_to::ReplyToValue; // Import from parser
 use crate::types::warning::{Warning, WarnAgent}; // Add WarnAgent import
-use crate::types::content_disposition::{ContentDisposition, DispositionType}; // Import ContentDisposition
+use crate::types::content_disposition::{ContentDisposition, DispositionType, DispositionParam, Handling}; // Import ContentDisposition
 use crate::types::method::Method; // Needed for Allow parsing
 use crate::types::priority::Priority; // Import Priority type
 use crate::types::require::Require; // Import Require type
 use crate::parser::headers::content_type::parse_content_type_value;
 use crate::types::retry_after::RetryAfter;
 use crate::types::subject::Subject; // Import Subject type
-// CSeqValue doesn't seem to exist, CSeq struct is used directly
-// use crate::types::cseq::CSeqValue;
-use crate::parser::headers::accept_encoding::EncodingInfo as AcceptEncodingValue; // Use EncodingInfo from parser
 use crate::types::accept_language::AcceptLanguage; // Use our new AcceptLanguage type
 use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
 use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
@@ -98,6 +95,15 @@ use crate::types::refer_to::ReferTo; // Add ReferTo import
 use crate::types::call_info::{CallInfo, CallInfoValue};
 use crate::types::supported::Supported; // Import Supported type
 use crate::types::unsupported::Unsupported; // Import Unsupported type
+use crate::types::accept_encoding::AcceptEncoding;
+use crate::types::content_encoding::ContentEncoding;
+use crate::types::content_language::ContentLanguage;
+use crate::parser::headers::accept_encoding::EncodingInfo;
+use crate::prelude::GenericValue;
+
+// Add log for debug printing
+extern crate log;
+use log::debug;
 
 // Helper From implementation for Error
 impl From<FromUtf8Error> for Error {
@@ -426,7 +432,7 @@ pub enum HeaderValue {
 
     // === Content Negotiation ===
     Accept(Vec<AcceptValue>),
-    AcceptEncoding(Vec<AcceptEncodingValue>),
+    AcceptEncoding(Vec<EncodingInfo>),
     AcceptLanguage(Vec<AcceptLanguage>),
 
     // === Body Info ===
@@ -745,9 +751,9 @@ pub enum TypedHeader {
 
     // Placeholder Types (replace with actual types from types/* where available)
     // These might still need Serialize/Deserialize if not using a types::* struct
-    ContentEncoding(Vec<String>),
-    ContentLanguage(Vec<String>),
-    AcceptEncoding(Vec<AcceptEncodingValue>), // Use alias for parser type
+    ContentEncoding(ContentEncoding),
+    ContentLanguage(ContentLanguage),
+    AcceptEncoding(AcceptEncoding), // Use our AcceptEncoding type
     AcceptLanguage(AcceptLanguage), // Use our new AcceptLanguage type instead of Vec<AcceptLanguageValue>
     MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
@@ -873,6 +879,9 @@ impl TypedHeader {
             TypedHeader::Supported(h) if type_id == std::any::TypeId::of::<crate::types::supported::Supported>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
                 
+            TypedHeader::ContentDisposition(h) if type_id == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
             _ => None,
         }
     }
@@ -915,34 +924,13 @@ impl fmt::Display for TypedHeader {
             },
             TypedHeader::ContentDisposition(content_disposition) => write!(f, "{}: {}", HeaderName::ContentDisposition, content_disposition),
             TypedHeader::ContentEncoding(content_encoding) => {
-                write!(f, "{}: ", HeaderName::ContentEncoding)?;
-                for (i, encoding) in content_encoding.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", encoding)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::ContentEncoding, content_encoding)
             },
             TypedHeader::ContentLanguage(content_language) => {
-                write!(f, "{}: ", HeaderName::ContentLanguage)?;
-                for (i, language) in content_language.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", language)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::ContentLanguage, content_language)
             },
             TypedHeader::AcceptEncoding(accept_encoding) => {
-                write!(f, "{}: ", HeaderName::AcceptEncoding)?;
-                for (i, encoding) in accept_encoding.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", encoding)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::AcceptEncoding, accept_encoding)
             },
             TypedHeader::AcceptLanguage(accept_language) => {
                 write!(f, "{}: {}", HeaderName::AcceptLanguage, accept_language)
@@ -1038,6 +1026,55 @@ impl TryFrom<Header> for TypedHeader {
     type Error = Error;
 
     fn try_from(header: Header) -> Result<Self> {
+        // Special case for pre-parsed HeaderValue variants
+        match &header.value {
+            HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ContentDisposition {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Convert bytes to string
+                let disp_type_str = match std::str::from_utf8(disp_type_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return Ok(TypedHeader::Other(header.name.clone(), header.value.clone())),
+                };
+                
+                // Parse disposition type
+                let disposition_type = match disp_type_str.to_lowercase().as_str() {
+                    "session" => DispositionType::Session,
+                    "render" => DispositionType::Render,
+                    "icon" => DispositionType::Icon,
+                    "alert" => DispositionType::Alert,
+                    _ => DispositionType::Other(disp_type_str),
+                };
+                
+                // Convert params to HashMap
+                let mut params = HashMap::new();
+                for param in params_vec {
+                    match param {
+                        Param::Other(name, Some(GenericValue::Token(value))) => {
+                            params.insert(name.clone(), value.clone());
+                        },
+                        Param::Other(name, Some(GenericValue::Quoted(value))) => {
+                            params.insert(name.clone(), value.clone());
+                        },
+                        Param::Other(name, None) => {
+                            // Flag parameter without value
+                            params.insert(name.clone(), "".to_string());
+                        },
+                        _ => {} // Skip other parameter types
+                    }
+                }
+                
+                return Ok(TypedHeader::ContentDisposition(ContentDisposition {
+                    disposition_type,
+                    params,
+                }));
+            },
+            _ => {} // Continue with normal processing
+        }
+        
         // We need the unfolded, raw value bytes here.
         // The message_header parser now puts Vec<u8> into HeaderValue::Raw.
         let value_bytes = match &header.value { // Borrow header.value
@@ -1075,7 +1112,7 @@ impl TryFrom<Header> for TypedHeader {
                         }
                     }
                 }
-            },
+            }
             HeaderName::Route => all_consuming(parser::headers::parse_route)(value_bytes)
                 .map(|(_, v)| TypedHeader::Route(v))
                 .map_err(Error::from),
@@ -1105,9 +1142,16 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(value_bytes)
                 .map(|(_, cseq_struct)| TypedHeader::CSeq(cseq_struct))
                 .map_err(Error::from),
-            HeaderName::Accept => all_consuming(parser::headers::accept::parse_accept)(value_bytes)
-                .map(|(_, v)| TypedHeader::Accept(v))
-                .map_err(Error::from),
+            HeaderName::Accept => {
+                if let HeaderValue::Accept(values) = &header.value {
+                    Ok(TypedHeader::Accept(Accept::from_media_types(values.clone())))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    let accept = Accept::from_str(std::str::from_utf8(bytes)?)?;
+                    Ok(TypedHeader::Accept(accept))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::Accept)))
+                }
+            },
             HeaderName::ContentType => all_consuming(parse_content_type_value)(value_bytes)
                 .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
                 .map_err(Error::from),
@@ -1118,33 +1162,130 @@ impl TryFrom<Header> for TypedHeader {
                     Ok(TypedHeader::ContentLength(ContentLength(length)))
                 }),
             HeaderName::ContentDisposition => {
+                debug!("ContentDisposition header: {:?}", header);
                 match all_consuming(parser::headers::content_disposition::parse_content_disposition)(value_bytes) {
-                    Ok((_, (disp_type_bytes, params_vec))) => {
-                        let disposition_type = DispositionType::from_str(&disp_type_bytes)?;
-                        let params: HashMap<String, String> = HashMap::new(); // Simplified for now
-                        Ok(TypedHeader::ContentDisposition(ContentDisposition { disposition_type, params }))
+                    Ok((_, (disp_type_str, params_vec))) => {
+                        // Parse disposition type from string
+                        let disposition_type = match disp_type_str.to_lowercase().as_str() {
+                            "session" => DispositionType::Session,
+                            "render" => DispositionType::Render,
+                            "icon" => DispositionType::Icon,
+                            "alert" => DispositionType::Alert,
+                            _ => DispositionType::Other(disp_type_str),
+                        };
+                        
+                        // Convert disposition params to HashMap
+                        let mut params = HashMap::new();
+                        for param in params_vec {
+                            match param {
+                                DispositionParam::Handling(handling) => {
+                                    let value = match handling {
+                                        Handling::Optional => "optional".to_string(),
+                                        Handling::Required => "required".to_string(),
+                                        Handling::Other(s) => s.clone(),
+                                    };
+                                    params.insert("handling".to_string(), value);
+                                },
+                                DispositionParam::Generic(Param::Other(name, Some(GenericValue::Token(value)))) => {
+                                    params.insert(name, value);
+                                },
+                                DispositionParam::Generic(Param::Other(name, Some(GenericValue::Quoted(value)))) => {
+                                    params.insert(name, value);
+                                },
+                                DispositionParam::Generic(Param::Other(name, None)) => {
+                                    params.insert(name, "".to_string());
+                                },
+                                _ => {} // Skip other parameter types
+                            }
+                        }
+                        
+                        debug!("Created ContentDisposition: {:?}", ContentDisposition {
+                            disposition_type: disposition_type.clone(),
+                            params: params.clone(),
+                        });
+                        
+                        Ok(TypedHeader::ContentDisposition(ContentDisposition {
+                            disposition_type,
+                            params,
+                        }))
                     },
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
-            }
-            HeaderName::ContentEncoding => all_consuming(parser::headers::parse_content_encoding)(value_bytes)
-                .map(|(_, strings)| TypedHeader::ContentEncoding(strings))
-                .map_err(Error::from),
-            HeaderName::ContentLanguage => all_consuming(parser::headers::parse_content_language)(value_bytes)
-                .map(|(_, strings)| TypedHeader::ContentLanguage(strings))
-                .map_err(Error::from),
-            HeaderName::AcceptEncoding => all_consuming(parser::headers::parse_accept_encoding)(value_bytes)
-                .map(|(_, v)| TypedHeader::AcceptEncoding(v))
-                .map_err(Error::from),
-            HeaderName::AcceptLanguage => all_consuming(parser::headers::parse_accept_language)(value_bytes)
-                .map(|(_, languages)| TypedHeader::AcceptLanguage(AcceptLanguage(languages)))
-                .map_err(Error::from),
+            },
+            HeaderName::ContentEncoding => {
+                if let HeaderValue::ContentEncoding(values) = &header.value {
+                    // Convert Vec<Vec<u8>> to Vec<String>
+                    let encodings = values.iter()
+                        .filter_map(|v| String::from_utf8(v.clone()).ok())
+                        .collect::<Vec<_>>();
+                    
+                    Ok(TypedHeader::ContentEncoding(ContentEncoding::with_encodings(&encodings)))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    let content_encoding = ContentEncoding::from_str(std::str::from_utf8(bytes)?)?;
+                    Ok(TypedHeader::ContentEncoding(content_encoding))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::ContentEncoding)))
+                }
+            },
+            HeaderName::ContentLanguage => {
+                if let HeaderValue::ContentLanguage(values) = &header.value {
+                    // Convert Vec<Vec<u8>> to Vec<String>
+                    let languages = values.iter()
+                        .filter_map(|v| String::from_utf8(v.clone()).ok())
+                        .collect::<Vec<_>>();
+                    
+                    Ok(TypedHeader::ContentLanguage(ContentLanguage::with_languages(&languages)))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    let content_language = ContentLanguage::from_str(std::str::from_utf8(bytes)?)?;
+                    Ok(TypedHeader::ContentLanguage(content_language))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::ContentLanguage)))
+                }
+            },
+            HeaderName::AcceptEncoding => {
+                if let HeaderValue::AcceptEncoding(values) = &header.value {
+                    let mut encoding_infos = Vec::new();
+                    
+                    // Convert raw Values to EncodingInfo, preserving q values
+                    for value in values {
+                        encoding_infos.push(value.clone());
+                    }
+                    
+                    Ok(TypedHeader::AcceptEncoding(AcceptEncoding(encoding_infos)))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    let accept_encoding = AcceptEncoding::from_str(std::str::from_utf8(bytes)?)?;
+                    Ok(TypedHeader::AcceptEncoding(accept_encoding))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::AcceptEncoding)))
+                }
+            },
+            HeaderName::AcceptLanguage => {
+                if let HeaderValue::AcceptLanguage(values) = &header.value {
+                    // Need to extract LanguageInfo objects from the Vec<AcceptLanguage>
+                    // and create a single AcceptLanguage with all the language infos
+                    let mut language_infos = Vec::new();
+                    
+                    // Flatten all language infos from all AcceptLanguage values
+                    for accept_lang in values {
+                        if let crate::types::accept_language::AcceptLanguage(langs) = accept_lang {
+                            language_infos.extend_from_slice(&langs);
+                        }
+                    }
+                    
+                    Ok(TypedHeader::AcceptLanguage(AcceptLanguage(language_infos)))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    let accept_language = AcceptLanguage::from_str(std::str::from_utf8(bytes)?)?;
+                    Ok(TypedHeader::AcceptLanguage(accept_language))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::AcceptLanguage)))
+                }
+            },
             HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)(value_bytes)
-                 .map_err(Error::from)
-                 .and_then(|(_, v_u32)| {
-                    let forwards = v_u32.try_into().map_err(|_| Error::ParseError("Invalid Max-Forwards value (overflow)".into()))?;
-                    Ok(TypedHeader::MaxForwards(MaxForwards(forwards)))
-                 }),
+                .map_err(Error::from)
+                .and_then(|(_, v_u32)| {
+                   let forwards = v_u32.try_into().map_err(|_| Error::ParseError("Invalid Max-Forwards value (overflow)".into()))?;
+                   Ok(TypedHeader::MaxForwards(MaxForwards(forwards)))
+                }),
             HeaderName::Expires => all_consuming(parser::headers::parse_expires)(value_bytes)
                 .map(|(_, v)| TypedHeader::Expires(Expires(v)))
                 .map_err(Error::from),
@@ -1402,6 +1543,12 @@ impl From<&TypedHeader> for HeaderName {
             TypedHeader::Server(_) => HeaderName::Server,
             TypedHeader::UserAgent(_) => HeaderName::UserAgent,
             TypedHeader::InReplyTo(_) => HeaderName::InReplyTo,
+            TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
+            TypedHeader::Accept(_) => HeaderName::Accept,
+            TypedHeader::AcceptLanguage(_) => HeaderName::AcceptLanguage,
+            TypedHeader::AcceptEncoding(_) => HeaderName::AcceptEncoding,
+            TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
+            TypedHeader::ContentLanguage(_) => HeaderName::ContentLanguage,
             _ => header.name(),
         }
     }

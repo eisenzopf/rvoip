@@ -35,6 +35,7 @@ use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::param::Param;
 
 /// Represents the Accept-Encoding header field (RFC 3261 Section 20.2).
 ///
@@ -258,7 +259,21 @@ impl fmt::Display for AcceptEncoding {
 
 // Helper function to parse from owned bytes
 fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<EncodingInfo>> {
-    match all_consuming(parse_accept_encoding)(bytes.as_slice()) {
+    // Check if the input starts with "Accept-Encoding:" and strip it if present
+    let bytes_to_parse = if bytes.len() > 16 && 
+        bytes[0..15].eq_ignore_ascii_case(b"Accept-Encoding") && 
+        bytes[15] == b':' {
+        // Skip the header name and colon, and any leading whitespace
+        let mut i = 16;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        &bytes[i..]
+    } else {
+        &bytes
+    };
+
+    match all_consuming(parse_accept_encoding)(bytes_to_parse) {
         Ok((_, encodings)) => Ok(encodings),
         Err(e) => Err(Error::ParseError(
             format!("Failed to parse Accept-Encoding header: {:?}", e)
@@ -350,23 +365,24 @@ mod tests {
     
     #[test]
     fn test_accepts() {
-        // Create test encodings
+        // Create test encodings with q param in params vector
+        let mut gzip_params = Vec::new();
+        gzip_params.push(Param::Q(NotNan::new(0.8).unwrap()));
         let gzip = EncodingInfo {
             coding: "gzip".to_string(),
-            q: Some(NotNan::new(0.8).unwrap()),
-            params: vec![],
+            params: gzip_params,
         };
         
         let identity = EncodingInfo {
             coding: "identity".to_string(),
-            q: None, // Default 1.0
-            params: vec![],
+            params: vec![],  // Empty params means q=1.0 by default
         };
         
+        let mut wildcard_params = Vec::new();
+        wildcard_params.push(Param::Q(NotNan::new(0.1).unwrap()));
         let wildcard = EncodingInfo {
             coding: "*".to_string(),
-            q: Some(NotNan::new(0.1).unwrap()),
-            params: vec![],
+            params: wildcard_params,
         };
         
         // Test with encodings
@@ -382,10 +398,11 @@ mod tests {
         assert!(accept_enc_wildcard.accepts("compress"), "Should accept any encoding with wildcard");
         
         // Test with zero q-value
+        let mut wildcard_zero_params = Vec::new();
+        wildcard_zero_params.push(Param::Q(NotNan::new(0.0).unwrap()));
         let wildcard_zero = EncodingInfo {
             coding: "*".to_string(),
-            q: Some(NotNan::new(0.0).unwrap()),
-            params: vec![],
+            params: wildcard_zero_params,
         };
         
         let accept_enc_zero = AcceptEncoding(vec![gzip.clone(), wildcard_zero]);
@@ -402,16 +419,16 @@ mod tests {
     #[test]
     fn test_display() {
         // Create test encodings
+        let mut gzip_params = Vec::new();
+        gzip_params.push(Param::Q(NotNan::new(0.8).unwrap()));
         let gzip = EncodingInfo {
             coding: "gzip".to_string(),
-            q: Some(NotNan::new(0.8).unwrap()),
-            params: vec![],
+            params: gzip_params,
         };
         
         let identity = EncodingInfo {
             coding: "identity".to_string(),
-            q: None, // Default 1.0
-            params: vec![],
+            params: vec![],  // Empty params means q=1.0 by default
         };
         
         // Test display
@@ -425,16 +442,17 @@ mod tests {
     #[test]
     fn test_typed_header_trait() {
         // Create and convert to Header
+        let mut gzip_params = Vec::new();
+        gzip_params.push(Param::Q(NotNan::new(0.8).unwrap()));
+        
         let accept_enc = AcceptEncoding(vec![
             EncodingInfo {
                 coding: "gzip".to_string(),
-                q: Some(NotNan::new(0.8).unwrap()),
-                params: vec![],
+                params: gzip_params,
             },
             EncodingInfo {
                 coding: "identity".to_string(),
-                q: None, // Default 1.0
-                params: vec![],
+                params: vec![],  // Empty params means q=1.0 by default
             },
         ]);
         

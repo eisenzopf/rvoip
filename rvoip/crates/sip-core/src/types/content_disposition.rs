@@ -418,7 +418,24 @@ impl TypedHeaderTrait for ContentDisposition {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        // Format the disposition type and parameters as they would appear in a SIP header
+        let disp_type_str = self.disposition_type.to_string();
+        
+        // Convert the HashMap of parameters to a list of Param structs
+        let mut params = Vec::new();
+        for (name, value) in &self.params {
+            if value.is_empty() {
+                params.push(Param::Other(name.clone(), None));
+            } else {
+                params.push(Param::Other(name.clone(), Some(GenericValue::Token(value.clone()))));
+            }
+        }
+        
+        // Create the ContentDisposition header value
+        Header::new(
+            Self::header_name(), 
+            HeaderValue::ContentDisposition((disp_type_str.into_bytes(), params))
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -437,6 +454,43 @@ impl TypedHeaderTrait for ContentDisposition {
                         format!("Invalid UTF-8 in {} header", Self::header_name())
                     ))
                 }
+            },
+            HeaderValue::ContentDisposition((dtype_bytes, params_vec)) => {
+                // Convert bytes to string
+                let dtype_str = std::str::from_utf8(dtype_bytes)
+                    .map_err(|_| Error::InvalidHeader(format!("Invalid disposition type in {} header", Self::header_name())))?;
+                
+                // Parse disposition type
+                let disposition_type = match dtype_str.to_lowercase().as_str() {
+                    "session" => DispositionType::Session,
+                    "render" => DispositionType::Render,
+                    "icon" => DispositionType::Icon,
+                    "alert" => DispositionType::Alert,
+                    _ => DispositionType::Other(dtype_str.to_string()),
+                };
+                
+                // Convert params to HashMap
+                let mut params_map = HashMap::new();
+                for param in params_vec {
+                    match param {
+                        Param::Other(name, Some(GenericValue::Token(value))) => {
+                            params_map.insert(name.clone(), value.clone());
+                        },
+                        Param::Other(name, Some(GenericValue::Quoted(value))) => {
+                            params_map.insert(name.clone(), value.clone());
+                        },
+                        Param::Other(name, None) => {
+                            // Flag parameter without value
+                            params_map.insert(name.clone(), "".to_string());
+                        },
+                        _ => {} // Skip other parameter types
+                    }
+                }
+                
+                Ok(ContentDisposition {
+                    disposition_type,
+                    params: params_map,
+                })
             },
             _ => Err(Error::InvalidHeader(
                 format!("Unexpected header value type for {}", Self::header_name())

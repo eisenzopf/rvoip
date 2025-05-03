@@ -56,20 +56,20 @@
 
 - [ ] **Enhance Builder Patterns for All Headers**
   - Add convenient builder methods for all header types, rather than relying on generic `header()` method:
-    - [ ] **Authentication Headers**:
+    - [x] **Authentication Headers**:
       - [x] Authorization (`.authorization()` or `.auth_digest()`)
-      - [ ] WwwAuthenticate (`.www_authenticate()`)
-      - [ ] ProxyAuthenticate (`.proxy_authenticate()`)
-      - [ ] ProxyAuthorization (`.proxy_authorization()`)
-      - [ ] AuthenticationInfo (`.auth_info()`)
-    - [ ] **Content-Related Headers**:
-      - [ ] ContentEncoding (`.content_encoding()`)
-      - [ ] ContentLanguage (`.content_language()`)
-      - [ ] ContentDisposition (`.content_disposition()`)
-    - [ ] **Accept Headers**:
-      - [ ] Accept (`.accept()`)
-      - [ ] AcceptEncoding (`.accept_encoding()`)
-      - [ ] AcceptLanguage (`.accept_language()`)
+      - [x] WwwAuthenticate (`.www_authenticate()`)
+      - [x] ProxyAuthenticate (`.proxy_authenticate()`)
+      - [x] ProxyAuthorization (`.proxy_authorization()`)
+      - [x] AuthenticationInfo (`.auth_info()`)
+    - [x] **Content-Related Headers**:
+      - [x] ContentEncoding (`.content_encoding()`)
+      - [x] ContentLanguage (`.content_language()`)
+      - [x] ContentDisposition (`.content_disposition()`)
+    - [x] **Accept Headers**:
+      - [x] Accept (`.accept()`)
+      - [x] AcceptEncoding (`.accept_encoding()`)
+      - [x] AcceptLanguage (`.accept_language()`)
     - [ ] **Routing Headers**:
       - [ ] RecordRoute (`.record_route()`)
       - [ ] Route (`.route()`)
