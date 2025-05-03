@@ -142,6 +142,32 @@ impl ProxyRequire {
         }
     }
 
+    /// Creates a Proxy-Require header from a vector of strings.
+    ///
+    /// # Parameters
+    ///
+    /// - `strings`: A vector of option tag strings
+    ///
+    /// # Returns
+    ///
+    /// A new `ProxyRequire` instance with the specified options
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::ProxyRequire;
+    ///
+    /// let strings = vec!["foo".to_string(), "bar".to_string()];
+    /// let proxy_require = ProxyRequire::from_strings(strings);
+    /// assert!(proxy_require.has_option("foo"));
+    /// assert!(proxy_require.has_option("bar"));
+    /// ```
+    pub fn from_strings(strings: Vec<String>) -> Self {
+        ProxyRequire {
+            options: strings,
+        }
+    }
+
     /// Adds an option tag to the list.
     ///
     /// # Parameters

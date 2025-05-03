@@ -372,6 +372,8 @@ pub mod subject;
 pub mod to;
 pub mod warning;
 pub mod multipart;
+pub mod path;
+pub mod proxy_require;
 
 // Modules missing re-exports - Add them
 pub mod priority;
@@ -410,6 +412,8 @@ pub use refer_to::ReferTo;
 pub use content_encoding::ContentEncoding;
 pub use content_language::ContentLanguage;
 pub use accept_encoding::AcceptEncoding;
+pub use path::Path;
+pub use proxy_require::ProxyRequire;
 
 // Add missing pub use * directives
 pub use priority::*;

@@ -133,6 +133,8 @@ pub enum HeaderName {
     Server,
     /// Unsupported: Features not supported by the UA
     Unsupported,
+    /// Path: Path header (RFC 3327) for registration routing
+    Path,
 }
 
 impl HeaderName {
@@ -188,6 +190,7 @@ impl HeaderName {
             HeaderName::ProxyRequire => "Proxy-Require",
             HeaderName::Server => "Server",
             HeaderName::Unsupported => "Unsupported",
+            HeaderName::Path => "Path",
             HeaderName::Other(s) => s,
         }
     }
@@ -203,6 +206,11 @@ impl FromStr for HeaderName {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
+        // Return an error for empty header names
+        if s.is_empty() {
+            return Err(Error::ParseError("Empty header name is not allowed".to_string()));
+        }
+        
         let lower_s = s.to_lowercase();
         match lower_s.as_str() {
             "call-id" | "i" => Ok(HeaderName::CallId),
@@ -254,8 +262,8 @@ impl FromStr for HeaderName {
             "error-info" => Ok(HeaderName::ErrorInfo),
             "proxy-require" => Ok(HeaderName::ProxyRequire),
             "unsupported" => Ok(HeaderName::Unsupported),
-            _ if !s.is_empty() => Ok(HeaderName::Other(s.to_string())),
-            _ => Err(Error::InvalidHeader("Empty header name".to_string())),
+            "path" => Ok(HeaderName::Path),
+            _ => Ok(HeaderName::Other(s.to_string())),
         }
     }
 }

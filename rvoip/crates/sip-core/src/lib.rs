@@ -315,6 +315,7 @@ pub mod prelude {
     pub use crate::types::retry_after::RetryAfter; // Add RetryAfter type for doctests
     pub use crate::parser::headers::route::RouteEntry as ParserRouteValue; // Add ParserRouteValue for doctests
     pub use crate::types::route::Route; // Add Route type for doctests
+    pub use crate::types::path::Path; // Add Path type for doctests
     
     // Server-related types needed for doc tests
     pub use crate::types::server::{ServerInfo, ServerProduct, Product, ServerVal};
@@ -356,11 +357,18 @@ pub mod prelude {
         SupportedBuilderExt,
         UnsupportedBuilderExt,
         RequireBuilderExt,
-        UserAgentBuilderExt
+        UserAgentBuilderExt,
+        ServerBuilderExt,
+        PathBuilderExt,
+        ProxyRequireBuilderExt,
+        ContentBuilderExt
     };
     
     // Also add the macros
     pub use crate::macros::*;
+
+    // Add ProxyRequire type
+    pub use crate::types::ProxyRequire;
 }
 
 /// Re-export of common types and functions for SDP

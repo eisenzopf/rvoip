@@ -135,7 +135,7 @@ pub enum TypedHeader {
     MimeVersion((u32, u32)), // Keep tuple if no types::* yet
     Supported(Supported), // Use types::Supported instead of Vec<String>
     Unsupported(Unsupported), // Use types::Unsupported instead of Vec<String>
-    ProxyRequire(Vec<String>),
+    ProxyRequire(crate::types::proxy_require::ProxyRequire),
     Date(DateTime<FixedOffset>), // Use imported chrono types
     Timestamp((NotNan<f32>, Option<NotNan<f32>>)), // Use imported NotNan
     Organization(crate::types::Organization), // Use our new Organization type
@@ -147,6 +147,7 @@ pub enum TypedHeader {
     ErrorInfo(Vec<ErrorInfoValue>), // Use imported parser type
     AlertInfo(Vec<AlertInfoValue>), // Use imported parser type
     CallInfo(CallInfo), // Use our new CallInfo type
+    Path(crate::types::path::Path), // Add Path header variant
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -203,6 +204,7 @@ impl TypedHeader {
             TypedHeader::CallInfo(_) => HeaderName::CallInfo,
             TypedHeader::Event(_) => HeaderName::Event,
             TypedHeader::SubscriptionState(_) => HeaderName::SubscriptionState,
+            TypedHeader::Path(_) => HeaderName::Path, // Add Path header case
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -315,14 +317,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::Unsupported, unsupported)
             },
             TypedHeader::ProxyRequire(proxy_require) => {
-                write!(f, "{}: ", HeaderName::ProxyRequire)?;
-                for (i, requirement) in proxy_require.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", requirement)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::ProxyRequire, proxy_require)
             },
             TypedHeader::Date(date) => write!(f, "{}: {}", HeaderName::Date, date),
             TypedHeader::Timestamp(timestamp) => write!(f, "{}: {:?}", HeaderName::Timestamp, timestamp),
@@ -385,6 +380,9 @@ impl fmt::Display for TypedHeader {
             },
             TypedHeader::Event(_) => write!(f, "{}: Event", HeaderName::Event),
             TypedHeader::SubscriptionState(_) => write!(f, "{}: SubscriptionState", HeaderName::SubscriptionState),
+            TypedHeader::Path(path) => {
+                write!(f, "{}: {}", HeaderName::Path, path)
+            },
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -472,6 +470,7 @@ impl From<&TypedHeader> for HeaderName {
             TypedHeader::AcceptEncoding(_) => HeaderName::AcceptEncoding,
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
             TypedHeader::ContentLanguage(_) => HeaderName::ContentLanguage,
+            TypedHeader::Path(_) => HeaderName::Path,
             _ => header.name(),
         }
     }
@@ -536,6 +535,15 @@ impl TryFrom<Header> for TypedHeader {
                 
                 // Convert vector of AcceptValue to Accept
                 return Ok(TypedHeader::Accept(Accept::from_media_types(values.clone())));
+            },
+            HeaderValue::ContentType(content_type) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ContentType {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ContentType directly without parsing
+                return Ok(TypedHeader::ContentType(content_type.clone()));
             },
             _ => {} // Continue with normal processing
         }
@@ -617,9 +625,12 @@ impl TryFrom<Header> for TypedHeader {
                     Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::Accept)))
                 }
             },
-            HeaderName::ContentType => all_consuming(parse_content_type_value)(value_bytes)
-                .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
-                .map_err(Error::from),
+            HeaderName::ContentType => {
+                // The HeaderValue::ContentType case is already handled at the beginning of the function
+                all_consuming(parse_content_type_value)(value_bytes)
+                    .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
+                    .map_err(Error::from)
+            },
             HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)(value_bytes)
                 .map_err(Error::from)
                 .and_then(|(_, v_u64)| {
@@ -790,7 +801,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, strings)| TypedHeader::Unsupported(Unsupported::with_tags(strings)))
                 .map_err(Error::from),
             HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)(value_bytes)
-                .map(|(_, strings)| TypedHeader::ProxyRequire(strings))
+                .map(|(_, strings)| TypedHeader::ProxyRequire(crate::types::proxy_require::ProxyRequire::from_strings(strings)))
                 .map_err(Error::from),
             HeaderName::Date => all_consuming(parser::headers::parse_date)(value_bytes)
                 .map(|(_, v)| TypedHeader::Date(v))
@@ -925,6 +936,21 @@ impl TryFrom<Header> for TypedHeader {
                     )))
                 }
             }
+            HeaderName::Path => {
+                if let HeaderValue::Raw(bytes) = &header.value {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        let path = crate::types::path::Path::from_str(s.trim())?;
+                        Ok(TypedHeader::Path(path))
+                    } else {
+                        Err(Error::InvalidHeader(format!("Invalid UTF-8 in Path header")))
+                    }
+                } else if let HeaderValue::Route(entries) = &header.value {
+                    // Reuse Route header format for Path
+                    Ok(TypedHeader::Path(crate::types::path::Path(entries.clone())))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid Path header")))
+                }
+            },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
         

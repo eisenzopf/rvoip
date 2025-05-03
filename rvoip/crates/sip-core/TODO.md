@@ -66,7 +66,7 @@
   - [x] **Route**:
     - Add Route manipulation methods for UAC/UAS processing
     - Add Route to request and response builders
-  - [ ] **Path**:
+  - [x] **Path**:
     - Implement TypedHeaderTrait
     - Add to request and response builders
 
@@ -74,13 +74,13 @@
   - [x] **Require**: Add builder helpers
   - [x] **Supported**: Add builder helpers
   - [x] **Unsupported**: Add builder helpers
-  - [ ] **ProxyRequire**: Add builder helpers
+  - [x] **ProxyRequire**: Add builder helpers
 
 - [ ] **Information Headers**
   - [x] **User-Agent**: 
     - Add builder methods for User-Agent
     - Add helper variants for common values
-  - [ ] **Server**: 
+  - [x] **Server**: 
     - Add builder methods for Server header
     - Add helper variants for common values
 
@@ -93,7 +93,7 @@
   - [x] **Accept Headers**:
     - Implement `accept()` method on builders
     - Add helper methods for common types
-  - [ ] **Content Headers**:
+  - [x] **Content Headers**:
     - Implement content type handler helpers
     - Add multipart content generation
     - Add text/plain shortcuts
