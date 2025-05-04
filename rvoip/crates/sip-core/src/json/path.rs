@@ -252,54 +252,48 @@ fn delete_path_internal(value: &mut SipValue, parts: &[PathPart]) -> SipJsonResu
 
 /// Parse a path string into parts
 fn parse_path(path: &str) -> Vec<PathPart> {
-    let mut parts = Vec::new();
-    let mut current_field = String::new();
+    let mut result = Vec::new();
     
-    let chars: Vec<char> = path.chars().collect();
-    let mut i = 0;
+    if path.is_empty() {
+        return result;
+    }
     
-    while i < chars.len() {
-        match chars[i] {
-            '.' => {
-                if !current_field.is_empty() {
-                    parts.push(PathPart::Field(current_field));
-                    current_field = String::new();
-                }
-                i += 1;
-            }
-            '[' => {
-                if !current_field.is_empty() {
-                    parts.push(PathPart::Field(current_field));
-                    current_field = String::new();
-                }
-                
-                // Parse array index
-                i += 1;
-                let start = i;
-                while i < chars.len() && chars[i] != ']' {
-                    i += 1;
-                }
-                
-                if i < chars.len() {
-                    let index_str = chars[start..i].iter().collect::<String>();
-                    if let Ok(index) = i32::from_str(&index_str) {
-                        parts.push(PathPart::Index(index));
+    // Split by dots, but handle array indexing
+    let parts = path.split('.');
+    
+    for part in parts {
+        // Check if this part has an array index
+        if let Some(bracket_pos) = part.find('[') {
+            if let Some(close_pos) = part.find(']') {
+                if bracket_pos < close_pos {
+                    // Get the field name (part before the bracket)
+                    let field = &part[0..bracket_pos];
+                    if !field.is_empty() {
+                        result.push(PathPart::Field(field.to_string()));
                     }
-                    i += 1;
+                    
+                    // Get the index value
+                    let index_str = &part[bracket_pos + 1..close_pos];
+                    if let Ok(index) = index_str.parse::<i32>() {
+                        result.push(PathPart::Index(index));
+                    }
+                    
+                    // Debug output for parsed path parts
+                    println!("Parsed path part: field={}, index={}", field, &part[bracket_pos+1..close_pos]);
+                    
+                    continue;
                 }
-            }
-            _ => {
-                current_field.push(chars[i]);
-                i += 1;
             }
         }
+        
+        // Regular field name
+        result.push(PathPart::Field(part.to_string()));
+        println!("Parsed path part: field={}", part);
     }
     
-    if !current_field.is_empty() {
-        parts.push(PathPart::Field(current_field));
-    }
+    println!("Complete path parsing for '{}' resulted in {} parts", path, result.len());
     
-    parts
+    result
 }
 
 /// A part of a path

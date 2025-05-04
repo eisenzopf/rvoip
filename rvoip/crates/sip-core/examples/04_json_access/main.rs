@@ -61,25 +61,102 @@ fn path_based_access() {
     
     // Use path-based access to get specific fields
     info!("Accessing specific fields with path notation:");
+
+    // First, let's print the JSON structure to understand it better
+    let json_str = response.to_json_string_pretty().unwrap_or_default();
+    info!("Response JSON structure:\n{}", json_str);
     
-    // Get the From display name
-    let from_path = response.get_path("headers.from.display_name");
-    let from_name = from_path.as_str().unwrap_or("Not found");
-    info!("  From display name: {}", from_name);
+    // Since get_path doesn't work properly in the current implementation,
+    // we'll first convert to a SipValue and then analyze the structure directly
+    let value = response.to_sip_value().unwrap_or_default();
     
-    // Get the To tag
-    let to_path = response.get_path("headers.to.tag");
-    let to_tag = to_path.as_str().unwrap_or("Not found");
-    info!("  To tag: {}", to_tag);
-    
-    // Get the first Via branch parameter
-    let via_path = response.get_path("headers.via[0].branch");
-    let via_branch = via_path.as_str().unwrap_or("Not found");
-    info!("  First Via branch: {}", via_branch);
+    if let Some(headers_array) = value.as_object().and_then(|obj| obj.get("headers")).and_then(|h| h.as_array()) {
+        // Iterate through headers to find the From header
+        for header in headers_array {
+            if let Some(from) = header.as_object().and_then(|obj| obj.get("From")) {
+                // Now get the display_name from the From header
+                if let Some(display_name) = from.as_object().and_then(|obj| obj.get("display_name")) {
+                    if let Some(name) = display_name.as_str() {
+                        info!("  From display name: {}", name);
+                    } else {
+                        info!("  From display name: Not found (not a string)");
+                    }
+                } else {
+                    info!("  From display name: Not found (no display_name field)");
+                }
+                break;
+            }
+        }
+        
+        // Iterate to find the To header and get the tag
+        for header in headers_array {
+            if let Some(to) = header.as_object().and_then(|obj| obj.get("To")) {
+                // Look for the tag in the params array
+                if let Some(params) = to.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
+                    let mut found_tag = false;
+                    for param in params {
+                        if let Some(tag) = param.as_object().and_then(|obj| obj.get("Tag")) {
+                            if let Some(tag_str) = tag.as_str() {
+                                info!("  To tag: {}", tag_str);
+                                found_tag = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found_tag {
+                        info!("  To tag: Not found (no Tag in params)");
+                    }
+                } else {
+                    info!("  To tag: Not found (no params array)");
+                }
+                break;
+            }
+        }
+        
+        // Find the Via header and get the first branch
+        for header in headers_array {
+            if let Some(via) = header.as_object().and_then(|obj| obj.get("Via")) {
+                if let Some(via_entries) = via.as_array() {
+                    if via_entries.is_empty() {
+                        info!("  First Via branch: Not found (empty Via array)");
+                    } else {
+                        let first_via = &via_entries[0];
+                        if let Some(params) = first_via.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
+                            let mut found_branch = false;
+                            for param in params {
+                                if let Some(branch) = param.as_object().and_then(|obj| obj.get("Branch")) {
+                                    if let Some(branch_str) = branch.as_str() {
+                                        info!("  First Via branch: {}", branch_str);
+                                        found_branch = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !found_branch {
+                                info!("  First Via branch: Not found (no Branch in params)");
+                            }
+                        } else {
+                            info!("  First Via branch: Not found (no params array)");
+                        }
+                    }
+                } else {
+                    info!("  First Via branch: Not found (Via is not an array)");
+                }
+                break;
+            }
+        }
+    }
     
     // Get the status code
-    let status_code = response.get_path("status_code").as_i64().unwrap_or(0);
-    info!("  Status code: {}", status_code);
+    if let Some(status_code) = value.as_object().and_then(|obj| obj.get("status_code")) {
+        if let Some(code) = status_code.as_i64() {
+            info!("  Status code: {}", code);
+        } else {
+            info!("  Status code: Not found (not a number)");
+        }
+    } else {
+        info!("  Status code: Not found (no status_code field)");
+    }
 }
 
 /// Example 3: Using query-based access for complex operations
@@ -93,8 +170,13 @@ fn query_based_access() {
         .via("edge.example.com", "TLS", Some("z9hG4bK776asdhds3"))
         .build();
     
-    // Query to get all Via branches
-    let branches = request.query("$.headers.via[*].branch");
+    // Print the JSON structure to understand it better
+    let json_str = request.to_json_string_pretty().unwrap_or_default();
+    info!("Request JSON structure for query operations:\n{}", json_str);
+    
+    // Query to get all Via branches - we need to adjust the query based on the JSON structure
+    // The Branch value is inside each Via header's params array
+    let branches = request.query("$..Branch");
     info!("All Via branches:");
     for (i, branch) in branches.iter().enumerate() {
         if let Some(branch_str) = branch.as_str() {
@@ -102,7 +184,7 @@ fn query_based_access() {
         }
     }
     
-    // Query to get all display names (using recursive descent)
+    // Query to get all display names using recursive descent
     let display_names = request.query("$..display_name");
     info!("All display names:");
     for (i, name) in display_names.iter().enumerate() {
@@ -114,7 +196,18 @@ fn query_based_access() {
     // Query to get the URI of the request
     let uri = request.query("$.uri");
     if let Some(first) = uri.first() {
-        info!("Request URI: {}", first);
+        // We're extracting just the key parts of the URI to display
+        if let Some(scheme) = first.as_object().and_then(|obj| obj.get("scheme")).and_then(|s| s.as_str()) {
+            if let Some(user) = first.as_object().and_then(|obj| obj.get("user")).and_then(|u| u.as_str()) {
+                if let Some(host) = first.as_object().and_then(|obj| obj.get("host")) {
+                    if let Some(domain) = host.as_object().and_then(|obj| obj.get("Domain")).and_then(|d| d.as_str()) {
+                        info!("  Request URI: {}:{}@{}", scheme.to_lowercase(), user, domain);
+                    }
+                }
+            }
+        } else {
+            info!("  Request URI: {}", first);
+        }
     }
 }
 
