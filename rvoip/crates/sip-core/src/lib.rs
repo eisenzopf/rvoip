@@ -199,10 +199,18 @@
 // Declare modules
 pub mod error;
 pub mod types;
-pub mod sdp;
-pub mod macros;
 pub mod builder;
 pub mod parser;
+pub mod macros;
+#[cfg(feature = "sdp")]
+pub mod sdp;
+/// JSON representation and access layer for SIP types
+pub mod json;
+/// Prelude module that exports commonly used types and traits
+pub mod prelude;
+/// SDP prelude module that exports SDP-related types and traits
+#[cfg(feature = "sdp")]
+pub mod sdp_prelude;
 
 // Re-export key public items
 pub use error::{Error, Result};
@@ -250,7 +258,9 @@ pub use types::{
     CallInfo,
 };
 pub use types::uri::{Uri, Host};
+#[cfg(feature = "sdp")]
 pub use sdp::attributes::MediaDirection;
+#[cfg(feature = "sdp")]
 pub use sdp::parser::{
     validate_sdp,
     validate_network_type,
@@ -264,135 +274,6 @@ pub use sdp::parser::{
 };
 pub use builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
 pub use macros::*;
-
-/// Re-export of common types and functions for SIP
-pub mod prelude {
-    pub use crate::error::{Error, Result};
-    pub use crate::types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait}; // Updated path
-    pub use crate::types::headers::HeaderName; // Use the new HeaderName
-    pub use crate::types::uri::{Uri, Host, Scheme}; // Use the original URI Scheme
-    pub use crate::types::Method;
-    pub use crate::types::StatusCode;
-    pub use crate::types::sip_message::Message;
-    pub use crate::types::sip_request::Request;
-    pub use crate::types::sip_response::Response;
-    pub use crate::types::Via;
-    pub use crate::types::Version; // Added Version
-    pub use crate::parser::message::{MAX_LINE_LENGTH, MAX_HEADER_COUNT, MAX_BODY_SIZE, ParseMode};
-    pub use crate::parser::parse_message;
-    pub use crate::parser::message::parse_message_with_mode;
-    pub use crate::types::multipart::{MultipartBody, MimePart, ParsedBody}; // Add multipart types
-    pub use crate::builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
-    pub use crate::types::param::Param;
-    pub use crate::types::param::GenericValue;
-    pub use crate::types::warning::Warning;
-    pub use crate::types::warning::{WarnAgent, WarningValue};
-    pub use crate::types::address::Address;
-    pub use crate::types::from::From;
-    pub use crate::types::to::To;
-    pub use crate::types::call_id::CallId;
-    pub use crate::types::cseq::CSeq;
-    pub use crate::types::content_length::ContentLength;
-    pub use crate::types::content_type::ContentType;
-    pub use crate::parser::headers::content_type::ContentTypeValue;
-    pub use crate::types::max_forwards::MaxForwards;
-    pub use crate::types::contact::Contact;
-    pub use crate::types::contact::{ContactParamInfo, ContactValue}; // Add Contact-related types
-    pub use crate::types::supported::Supported;
-    pub use crate::types::unsupported::Unsupported;
-    pub use crate::types::content_disposition::{ContentDisposition, DispositionType, DispositionParam, Handling}; // Add ContentDisposition-related types
-    pub use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList}; // Add Error-Info related types
-    pub use crate::types::expires::Expires; // Add Expires type
-    pub use crate::types::in_reply_to::InReplyTo; // Add In-Reply-To type
-    pub use crate::types::MediaType; // Add MediaType for MIME content types
-    pub use crate::types::organization::Organization; // Add Organization type
-    pub use crate::types::priority::Priority; // Add Priority type
-    pub use crate::types::record_route::RecordRoute; // Add RecordRoute type
-    pub use crate::types::record_route::RecordRouteEntry; // Add RecordRouteEntry type
-    pub use crate::types::refer_to::ReferTo; // Add ReferTo type for doctests
-    pub use crate::types::reply_to::ReplyTo; // Add ReplyTo type for doctests
-    pub use crate::types::require::Require; // Add Require type for doctests
-    pub use crate::types::retry_after::RetryAfter; // Add RetryAfter type for doctests
-    pub use crate::parser::headers::route::RouteEntry as ParserRouteValue; // Add ParserRouteValue for doctests
-    pub use crate::types::route::Route; // Add Route type for doctests
-    pub use crate::types::path::Path; // Add Path type for doctests
-    
-    // Server-related types needed for doc tests
-    pub use crate::types::server::{ServerInfo, ServerProduct, Product, ServerVal};
-    
-    // Authentication-related types needed for doc tests
-    pub use crate::types::auth::{
-        AuthParam, AuthenticationInfo, AuthenticationInfoParam, Authorization,
-        Challenge, Credentials, DigestParam, ProxyAuthenticate, ProxyAuthorization,
-        WwwAuthenticate, AuthScheme
-    };
-    pub use crate::types::{Algorithm, Qop};
-    
-    // Additional header types previously missing
-    pub use crate::types::Allow;
-    pub use crate::types::Accept;
-    pub use crate::parser::headers::accept::AcceptValue;
-    pub use crate::types::Subject;
-    pub use crate::types::call_info::{CallInfo, CallInfoValue, InfoPurpose};
-    pub use crate::types::AcceptLanguage;
-    pub use crate::parser::headers::accept_language::LanguageInfo;
-    
-    // Header builder extension traits
-    pub use crate::builder::headers::{
-        HeaderSetter,
-        AllowBuilderExt,
-        AuthorizationExt,
-        WwwAuthenticateExt,
-        ProxyAuthenticateExt,
-        ProxyAuthorizationExt,
-        AuthenticationInfoExt,
-        ContentEncodingExt,
-        ContentLanguageExt,
-        ContentDispositionExt,
-        AcceptExt,
-        AcceptEncodingExt,
-        AcceptLanguageExt,
-        RecordRouteBuilderExt,
-        RouteBuilderExt,
-        SupportedBuilderExt,
-        UnsupportedBuilderExt,
-        RequireBuilderExt,
-        UserAgentBuilderExt,
-        ServerBuilderExt,
-        PathBuilderExt,
-        ProxyRequireBuilderExt,
-        ContentBuilderExt,
-        CallIdBuilderExt,
-        InReplyToBuilderExt
-    };
-    
-    // Also add the macros
-    pub use crate::macros::*;
-
-    // Add ProxyRequire type
-    pub use crate::types::ProxyRequire;
-}
-
-/// Re-export of common types and functions for SDP
-pub mod sdp_prelude {
-    pub use crate::types::sdp::{SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription};
-    pub use crate::types::sdp::{ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute, SsrcAttribute, RepeatTime};
-    pub use crate::sdp::attributes::MediaDirection;
-    pub use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
-    pub use crate::sdp::parser::{
-        validate_sdp,
-        validate_network_type,
-        validate_address_type,
-        is_valid_address,
-        is_valid_ipv4,
-        is_valid_ipv6,
-        is_valid_hostname,
-        parse_bandwidth_line,
-        parse_sdp
-    };
-    pub use crate::sdp::builder::SdpBuilder;
-    pub use crate::sdp;  // For the macro
-}
 
 #[cfg(test)]
 mod tests {

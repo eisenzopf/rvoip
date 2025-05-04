@@ -204,13 +204,21 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
     if let Some(ct) = content_type {
         let ct_lowercase = ct.to_lowercase();
         
+        // Check for specific MIME types and parse them
         if ct_lowercase.starts_with("application/sdp") {
-             match crate::sdp::parser::parse_sdp(raw_content) {
-                Ok(sdp_session) => Some(ParsedBody::Sdp(sdp_session)),
-                Err(_) => {
-                    // Keep raw content, return Other
-                    Some(ParsedBody::Other(raw_content.clone()))
+            #[cfg(feature = "sdp")]
+            {
+                match crate::sdp::parser::parse_sdp(raw_content) {
+                    Ok(sdp_session) => Some(ParsedBody::Sdp(sdp_session)),
+                    Err(_) => {
+                        // Keep raw content, return Other
+                        Some(ParsedBody::Other(raw_content.clone()))
+                    }
                 }
+            }
+            #[cfg(not(feature = "sdp"))]
+            {
+                Some(ParsedBody::Other(raw_content.clone()))
             }
         } else if ct_lowercase.starts_with("text/") {
             match String::from_utf8(raw_content.to_vec()) {
@@ -237,11 +245,11 @@ fn parse_part_content(headers: &[Header], raw_content: &Bytes) -> Option<ParsedB
             Some(ParsedBody::Other(raw_content.clone()))
         } else {
             // Other content types, return raw bytes
-             Some(ParsedBody::Other(raw_content.clone()))
+            Some(ParsedBody::Other(raw_content.clone()))
         }
     } else {
         // If no Content-Type header, treat as raw bytes
-         Some(ParsedBody::Other(raw_content.clone()))
+        Some(ParsedBody::Other(raw_content.clone()))
     }
 }
 

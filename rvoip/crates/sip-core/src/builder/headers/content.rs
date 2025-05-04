@@ -4,17 +4,18 @@
 
 use crate::error::{Error, Result};
 use crate::types::{
-    header::{Header, HeaderName},
-    headers::TypedHeader,
+    header::Header,
+    headers::{HeaderName, typed_header::TypedHeaderTrait},
+    TypedHeader,
     content_type::ContentType,
+    content_length::ContentLength,
+    sdp::SdpSession,
 };
 use crate::parser::headers::content_type::ContentTypeValue;
-use crate::types::headers::typed_header::TypedHeaderTrait;
 use crate::builder::headers::HeaderSetter;
+use crate::{RequestBuilder, ResponseBuilder};
+#[cfg(feature = "sdp")]
 use crate::sdp::{SdpBuilder, integration};
-use crate::types::sdp::SdpSession;
-use crate::RequestBuilder;
-use crate::ResponseBuilder;
 use bytes::Bytes;
 
 /// Extension trait that adds content-related building capabilities to request and response builders

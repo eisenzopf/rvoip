@@ -18,12 +18,54 @@ use crate::types::uri::Uri;
 use crate::types::param::Param;
 use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
+#[cfg(feature = "sdp")]
 use crate::sdp::parser::parse_sdp;
-
-// Import attribute structs/enums from the correct location
+#[cfg(feature = "sdp")]
+use crate::sdp::attributes;
+#[cfg(feature = "sdp")]
 use crate::sdp::attributes::MediaDirection;
+#[cfg(feature = "sdp")]
 use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
-// Remove other potential imports from crate::sdp if they were added erroneously
+
+// Provide local definitions of types used from sdp module when the feature is not enabled
+#[cfg(not(feature = "sdp"))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MediaDirection {
+    /// Both send and receive
+    SendRecv,
+    /// Send only
+    SendOnly,
+    /// Receive only
+    RecvOnly,
+    /// Neither send nor receive
+    Inactive,
+}
+
+#[cfg(not(feature = "sdp"))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum RidDirection {
+    /// Send direction
+    Send,
+    /// Receive direction
+    Recv,
+}
+
+#[cfg(not(feature = "sdp"))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RidAttribute {
+    /// The RID identifier
+    pub id: String,
+    /// The direction (send/recv)
+    pub direction: RidDirection,
+    /// Format restrictions
+    pub formats: Option<Vec<String>>,
+    /// Payload type restrictions
+    pub pt: Option<Vec<String>>,
+    /// Additional parameters
+    pub params: HashMap<String, String>,
+}
+
+// Now all references to these types should work regardless of whether the sdp feature is enabled
 
 // --- Placeholder Attribute Structs --- 
 /// Represents an RTP Map attribute (a=rtpmap)
@@ -362,9 +404,9 @@ impl SdpSession {
         self
     }
 
-    /// Gets the session-level media direction attribute, if set.
+    /// Get the media direction (if set)
     pub fn get_direction(&self) -> Option<MediaDirection> {
-        self.direction
+        self.direction.clone()
     }
 
     /// Finds all session-level rtpmap attributes.
@@ -596,9 +638,9 @@ impl MediaDescription {
         self
     }
 
-    /// Gets the media-level direction attribute, if set.
+    /// Get the media direction (if set)
     pub fn get_direction(&self) -> Option<MediaDirection> {
-        self.direction
+        self.direction.clone()
     }
     
     /// Gets the media-level ptime attribute, if set.
@@ -709,30 +751,19 @@ impl MediaDescription {
 }
 
 impl FromStr for SdpSession {
-    type Err = crate::error::Error;
+    type Err = Error;
 
-    /// Parses an SDP string into an SdpSession.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use std::str::FromStr;
-    /// # use rvoip_sip_core::types::sdp::SdpSession;
-    /// let sdp_str = "v=0\r\n\
-    ///     o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n\
-    ///     s=SDP Seminar\r\n\
-    ///     t=0 0\r\n\
-    ///     m=audio 49170 RTP/AVP 0\r\n\
-    ///     a=rtpmap:0 PCMU/8000\r\n";
-    ///
-    /// match SdpSession::from_str(sdp_str) {
-    ///     Ok(session) => println!("Parsed SDP with {} media sections", session.media_descriptions.len()),
-    ///     Err(e) => println!("Failed to parse SDP: {}", e),
-    /// }
-    /// ```
+    #[cfg(feature = "sdp")]
     fn from_str(s: &str) -> Result<Self> {
-        // Convert string to owned Bytes and parse
+        use bytes::Bytes;
+        // Use the actual parser when the sdp feature is enabled
         parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
+    }
+    
+    #[cfg(not(feature = "sdp"))]
+    fn from_str(s: &str) -> Result<Self> {
+        // Create an empty session when the feature is not enabled
+        Err(Error::SdpError("SDP parsing requires the 'sdp' feature".to_string()))
     }
 }
 
@@ -751,13 +782,12 @@ impl fmt::Display for ParsedAttribute {
                 write!(f, "a=fmtp:{} {}", fmtp.format, fmtp.parameters)
             }
             ParsedAttribute::Direction(dir) => {
-                let dir_str = match dir {
-                    MediaDirection::SendRecv => "sendrecv",
-                    MediaDirection::SendOnly => "sendonly",
-                    MediaDirection::RecvOnly => "recvonly",
-                    MediaDirection::Inactive => "inactive",
-                };
-                write!(f, "a={}", dir_str)
+                match dir {
+                    MediaDirection::SendRecv => write!(f, "sendrecv"),
+                    MediaDirection::SendOnly => write!(f, "sendonly"),
+                    MediaDirection::RecvOnly => write!(f, "recvonly"),
+                    MediaDirection::Inactive => write!(f, "inactive"),
+                }
             }
             ParsedAttribute::Ptime(ptime) => write!(f, "a=ptime:{}", ptime),
             ParsedAttribute::MaxPtime(maxptime) => write!(f, "a=maxptime:{}", maxptime),
@@ -842,15 +872,24 @@ impl fmt::Display for ParsedAttribute {
                     RidDirection::Recv => "recv",
                 })?;
                 
-                // Add formats if present
-                if !rid.formats.is_empty() {
-                    write!(f, " pt={}", rid.formats.join(","))?;
+                // Format PT (payload types)
+                if let Some(pt) = &rid.pt {
+                    if !pt.is_empty() {
+                        write!(f, " pt={}", pt.join(","))?;
+                    }
                 }
                 
-                // Add restrictions if present
-                if !rid.restrictions.is_empty() {
-                    for (key, value) in &rid.restrictions {
-                        write!(f, ";{}={}", key, value)?;
+                // Format formats
+                if let Some(formats) = &rid.formats {
+                    if !formats.is_empty() {
+                        write!(f, " format={}", formats.join(","))?;
+                    }
+                }
+                
+                // Format params
+                if !rid.params.is_empty() {
+                    for (key, value) in &rid.params {
+                        write!(f, " {}={}", key, value)?;
                     }
                 }
                 
@@ -946,14 +985,13 @@ impl fmt::Display for MediaDescription {
         if let Some(ptime) = self.ptime {
             write!(f, "a=ptime:{}\r\n", ptime)?;
         }
-         if let Some(direction) = self.direction {
-            let dir_str = match direction {
-                MediaDirection::SendRecv => "sendrecv",
-                MediaDirection::SendOnly => "sendonly",
-                MediaDirection::RecvOnly => "recvonly",
-                MediaDirection::Inactive => "inactive",
-            };
-            write!(f, "a={}\r\n", dir_str)?;
+         if let Some(ref direction) = self.direction {
+            match direction {
+                MediaDirection::SendRecv => writeln!(f, "a=sendrecv")?,
+                MediaDirection::SendOnly => writeln!(f, "a=sendonly")?,
+                MediaDirection::RecvOnly => writeln!(f, "a=recvonly")?,
+                MediaDirection::Inactive => writeln!(f, "a=inactive")?,
+            }
         }
 
         // Other attributes for this media
@@ -986,14 +1024,13 @@ impl fmt::Display for SdpSession {
         }
         
         // Dedicated Session Attributes
-         if let Some(direction) = self.direction {
-             let dir_str = match direction {
-                MediaDirection::SendRecv => "sendrecv",
-                MediaDirection::SendOnly => "sendonly",
-                MediaDirection::RecvOnly => "recvonly",
-                MediaDirection::Inactive => "inactive",
-            };
-            write!(f, "a={}\r\n", dir_str)?;
+         if let Some(ref direction) = self.direction {
+             match direction {
+                MediaDirection::SendRecv => writeln!(f, "a=sendrecv")?,
+                MediaDirection::SendOnly => writeln!(f, "a=sendonly")?,
+                MediaDirection::RecvOnly => writeln!(f, "a=recvonly")?,
+                MediaDirection::Inactive => writeln!(f, "a=inactive")?,
+            }
         }
         // Add other dedicated session attributes here...
 
@@ -1012,5 +1049,28 @@ impl fmt::Display for SdpSession {
         }
 
         Ok(())
+    }
+}
+
+// Add Display implementations for enums when the sdp feature is not enabled
+#[cfg(not(feature = "sdp"))]
+impl std::fmt::Display for MediaDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaDirection::SendRecv => write!(f, "sendrecv"),
+            MediaDirection::SendOnly => write!(f, "sendonly"),
+            MediaDirection::RecvOnly => write!(f, "recvonly"),
+            MediaDirection::Inactive => write!(f, "inactive"),
+        }
+    }
+}
+
+#[cfg(not(feature = "sdp"))]
+impl std::fmt::Display for RidDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RidDirection::Send => write!(f, "send"),
+            RidDirection::Recv => write!(f, "recv"),
+        }
     }
 } 

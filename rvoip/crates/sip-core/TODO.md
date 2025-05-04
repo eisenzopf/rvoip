@@ -127,9 +127,37 @@
   - [x] Add multimedia session convenience helpers
 
 - [ ] **Serialization Format Support**
-  - [ ] Add serde support for core types
-  - [ ] Add JSON format conversion
-  - [ ] Add structured logging of messages
+  - [ ] **JSON Representation & Accessors**
+    - [ ] Define canonical JSON schema for SIP messages and headers
+    - [ ] Implement `Serialize`/`Deserialize` traits for all SIP types
+    - [ ] Create a `SipValue` enum similar to `serde_json::Value` for dynamic access
+    - [ ] Add `to_json()` methods to convert any SIP entity to a JSON structure
+    - [ ] Implement `TryFrom<Value>` to create SIP messages from JSON
+    - [ ] Add path-based field accessors: `get_path("headers.from.tag")`
+    - [ ] Support array indexing in paths: `get_path("headers.via[0].branch")`
+    - [ ] Create query interface for complex selectors: `query("$.headers.via[*].branch")`
+    - [ ] Implement immutable update methods with path syntax: `with_path("headers.from.tag", value)`
+    - [ ] Add builder extensions for JSON construction: `SimpleRequestBuilder::from_json(json)`
+    - [ ] Create examples demonstrating JSON conversion patterns
+  
+  - [ ] **Bidirectional Conversion**
+    - [ ] Create mapping functions between SIP/SDP and JSON formats
+    - [ ] Add helper methods for common transformations
+    - [ ] Support partial JSON to SIP conversion (missing fields get defaults)
+    - [ ] Add validation for JSON to SIP conversion
+    - [ ] Implement macros for JSON-based SIP message creation
+
+- [ ] **Web and API Integration**
+  - [ ] **Web and API Integration**
+    - [ ] Create RESTful API representation of SIP messages
+    - [ ] Add OpenAPI schema definitions
+    - [ ] Provide JSON-RPC style interfaces for SIP operations
+    - [ ] Implement WebSocket-friendly message formats
+  
+  - [ ] **Structured Logging**
+    - [ ] Add structured logging output for SIP messages
+    - [ ] Create log formatters for common logging systems
+    - [ ] Add sampling and filtering options for high-volume logging
 
 - [ ] **Parsing Improvements**
   - [ ] Enhance ABNF compliance in corner cases
