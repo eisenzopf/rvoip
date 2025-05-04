@@ -1,6 +1,6 @@
 # Example 1: Basic SIP Message Parsing
 
-This example demonstrates how to parse raw SIP messages into structured types and how to access the various components of a SIP message.
+This example demonstrates how to parse raw SIP messages into structured types, how to access the various components of a SIP message, and how to create SIP messages with SDP content using the builder pattern.
 
 ## What You'll Learn
 
@@ -9,7 +9,8 @@ This example demonstrates how to parse raw SIP messages into structured types an
 - How to access typed headers using the `typed_header` and `typed_headers` methods
 - How to extract parameters from headers (e.g., tags, branch parameters)
 - How to handle messages with multiple headers of the same type
-- Basic structure of SIP requests and responses
+- How to create SIP messages with SDP content using the builder pattern
+- How to build and parse SDP sessions
 
 ## Running the Example
 
@@ -23,7 +24,7 @@ RUST_LOG=debug cargo run --example 01_basic_parsing
 
 ## Code Walkthrough
 
-The example is divided into three parts:
+The example is divided into four parts:
 
 1. **Parsing a SIP INVITE Request**
    - Demonstrates parsing a basic SIP INVITE request
@@ -40,6 +41,12 @@ The example is divided into three parts:
    - Shows how to work with multiple headers of the same type (Record-Route)
    - Demonstrates iterating through headers and checking for parameters
    - Shows alternative ways to access headers (by name vs. by type)
+
+4. **Creating SIP Messages with SDP Content**
+   - Demonstrates how to use the builder pattern to create SIP messages
+   - Shows how to build SDP sessions with the SdpBuilder
+   - Illustrates how to attach SDP content to SIP messages
+   - Shows how to parse SDP from a SIP message body
 
 ## Key Concepts
 
@@ -58,7 +65,18 @@ SIP defines two main message types:
 - **Call-ID**: Unique identifier for the call
 - **Contact**: Contains a URI for direct communication
 - **Record-Route**: Used by proxies to stay in the signaling path
+- **Content-Type**: Specifies the type of the message body (e.g., application/sdp)
+
+### SDP Integration
+
+SDP (Session Description Protocol) is commonly used with SIP for describing media sessions. Key concepts include:
+
+- **SdpBuilder**: Fluent API for creating SDP sessions
+- **SDP Session Structure**: v=, o=, s=, c=, t=, m= lines and their meanings
+- **Media Descriptions**: Define the type, port, protocol, and formats for each media stream
+- **Media Attributes**: Additional information about media (rtpmap, fmtp, direction, etc.)
+- **Content Integration**: How to attach SDP to SIP messages using Content-Type headers
 
 ### Next Steps
 
-Once you're comfortable with parsing SIP messages, you can move on to the next example which demonstrates how to create SIP messages using both the builder pattern and macros. 
+Once you're comfortable with parsing SIP messages and creating them with SDP content, you can move on to more advanced examples that demonstrate dialog management, transactions, and full call flows. 

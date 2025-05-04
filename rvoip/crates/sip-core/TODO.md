@@ -59,6 +59,14 @@
   - [x] Fix `HeaderSetter` trait usage for consistency
   - [x] Enable method chaining for all builders
 
+- [ ] **Builder Update Patterns**
+  - [ ] Create simpler syntax for updating existing SIP requests and responses
+  - [ ] Add extension traits for common header updates (e.g., `with_subject()`, `with_priority()`)
+  - [ ] Implement `RequestUpdater` and `ResponseUpdater` classes for builder-like updating
+  - [ ] Add header-specific update methods (e.g., `update_from()`, `update_via()`)
+  - [ ] Create "modified copy" capabilities for builders
+  - [ ] Add batch operation support for more efficient multiple updates
+
 - [x] **Routing Headers**
   - [x] **RecordRoute**:
     - Add RecordRoute entry manipulation methods

@@ -2,9 +2,16 @@
 //! 
 //! This example demonstrates how to create SIP requests and responses
 //! using both the builder pattern and the more concise macro syntax.
+//! It also shows how to create SDP content and integrate it with SIP messages.
 
 use bytes::Bytes;
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use rvoip_sip_core::sdp::{SdpBuilder, attributes::MediaDirection};
+use rvoip_sip_core::types::sdp::SdpSession;
+use rvoip_sip_core::builder::headers::ContentBuilderExt;
+use rvoip_sip_core::{sip_request, sip_response, option_expr};
+use std::str::FromStr;
 use tracing::info;
 
 fn main() {
@@ -25,6 +32,9 @@ fn main() {
     // Example 4: Creating messages with complex bodies
     create_message_with_body();
     
+    // Example 5: Using the SDP integration with the builder pattern
+    create_message_with_sdp_integration();
+    
     info!("All examples completed successfully!");
 }
 
@@ -32,41 +42,24 @@ fn main() {
 fn create_request_with_builder() {
     info!("Example 1: Creating a SIP request using the builder pattern");
     
-    // Create URIs for the request
-    let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-    let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
-    let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
-    
-    // Build the INVITE request
-    let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
-        .unwrap()
-        .header(TypedHeader::From(From::new(
-            Address::new_with_display_name("Alice", alice_uri)
-                .with_parameter("tag", "1928301774")
-        )))
-        .header(TypedHeader::To(To::new(
-            Address::new_with_display_name("Bob", bob_uri)
-        )))
-        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-        .header(TypedHeader::Via(
-            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
-        ))
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::Contact(Contact::new(
-            Address::new(contact_uri)
-        )))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+    // Build the INVITE request with SimpleRequestBuilder
+    let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.com", None)
         .build();
     
-    // Convert to bytes and display
-    let message_bytes = request.to_bytes();
-    info!("Created SIP request:\n{}", std::str::from_utf8(&message_bytes).unwrap());
+    // Convert to string and display
+    info!("Created SIP request:\n{}", request);
     
     // Demonstrate how to update parts of a request
     let updated_request = request
         .with_header(TypedHeader::Subject(Subject::new("Urgent call")))
-        .with_header(TypedHeader::Priority(Priority::new(PriorityValue::Urgent)));
+        .with_header(TypedHeader::Priority(Priority::Urgent));
     
     info!("Added Subject and Priority headers");
     
@@ -76,7 +69,7 @@ fn create_request_with_builder() {
     }
     
     if let Some(priority) = updated_request.typed_header::<Priority>() {
-        info!("Priority was set to: {}", priority.value());
+        info!("Priority was set to: {}", priority);
     }
 }
 
@@ -84,77 +77,39 @@ fn create_request_with_builder() {
 fn create_response_with_builder() {
     info!("Example 2: Creating a SIP response using the builder pattern");
     
-    // Create URIs for the response
-    let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-    let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
-    let contact_uri = "sip:bob@192.0.2.4".parse::<Uri>().unwrap();
-    
-    // Build a 200 OK response to an INVITE
-    let response = ResponseBuilder::new(StatusCode::OK)
-        .unwrap()
-        .header(TypedHeader::Via(
-            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
-        ))
-        .header(TypedHeader::From(From::new(
-            Address::new_with_display_name("Alice", alice_uri)
-                .with_parameter("tag", "1928301774")
-        )))
-        .header(TypedHeader::To(To::new(
-            Address::new_with_display_name("Bob", bob_uri)
-                .with_parameter("tag", "a6c85cf")
-        )))
-        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-        .header(TypedHeader::Contact(Contact::new(
-            Address::new(contact_uri)
-        )))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+    // Build a 200 OK response to an INVITE using SimpleResponseBuilder
+    let response = SimpleResponseBuilder::ok()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159, Method::Invite)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .contact("sip:bob@192.0.2.4", None)
         .build();
     
-    // Convert to bytes and display
-    let message_bytes = response.to_bytes();
-    info!("Created SIP response:\n{}", std::str::from_utf8(&message_bytes).unwrap());
+    // Convert to string and display
+    info!("Created SIP response:\n{}", response);
     
     // Create other common response types
     
     // 180 Ringing - typical intermediate response
-    let ringing_response = ResponseBuilder::new(StatusCode::Ringing)
-        .unwrap()
-        .header(TypedHeader::Via(
-            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
-        ))
-        .header(TypedHeader::From(From::new(
-            Address::new_with_display_name("Alice", alice_uri.clone())
-                .with_parameter("tag", "1928301774")
-        )))
-        .header(TypedHeader::To(To::new(
-            Address::new_with_display_name("Bob", bob_uri.clone())
-                .with_parameter("tag", "a6c85cf")
-        )))
-        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+    let ringing_response = SimpleResponseBuilder::ringing()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159, Method::Invite)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
         .build();
     
     info!("Created 180 Ringing response");
     
     // 404 Not Found - error response
-    let not_found_response = ResponseBuilder::new(StatusCode::NotFound)
-        .unwrap()
-        .header(TypedHeader::Via(
-            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
-        ))
-        .header(TypedHeader::From(From::new(
-            Address::new_with_display_name("Alice", alice_uri)
-                .with_parameter("tag", "1928301774")
-        )))
-        .header(TypedHeader::To(To::new(
-            Address::new_with_display_name("Bob", bob_uri)
-                .with_parameter("tag", "a6c85cf")
-        )))
-        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+    let not_found_response = SimpleResponseBuilder::not_found()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159, Method::Invite)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
         .build();
     
     info!("Created 404 Not Found response");
@@ -167,29 +122,28 @@ fn create_response_with_builder() {
 fn create_message_with_macros() {
     info!("Example 3: Using macros for concise message creation");
     
-    // Create a SIP request with the sip! macro
-    let request = sip! {
+    // Create a SIP request with the sip_request! macro
+    let request = sip_request! {
         method: Method::Invite,
         uri: "sip:bob@example.com",
         headers: {
             Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
-            MaxForwards: 70,
+            MaxForwards: "70",
             To: "Bob <sip:bob@example.com>",
             From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
             CallId: "a84b4c76e66710@pc33.atlanta.com",
             CSeq: "314159 INVITE",
             Contact: "<sip:alice@pc33.atlanta.com>",
-            ContentLength: 0
+            ContentLength: "0"
         }
     };
     
-    // Convert to bytes and display
-    let message_bytes = request.to_bytes();
-    info!("Created SIP request using macro:\n{}", std::str::from_utf8(&message_bytes).unwrap());
+    // Display as string
+    info!("Created SIP request using macro:\n{}", request);
     
-    // Create a SIP response with the sip! macro
-    let response = sip! {
-        status: StatusCode::OK,
+    // Create a SIP response with the sip_response! macro
+    let response = sip_response! {
+        status: StatusCode::Ok,
         headers: {
             Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
             To: "Bob <sip:bob@example.com>;tag=a6c85cf",
@@ -197,13 +151,12 @@ fn create_message_with_macros() {
             CallId: "a84b4c76e66710@pc33.atlanta.com",
             CSeq: "314159 INVITE",
             Contact: "<sip:bob@192.0.2.4>",
-            ContentLength: 0
+            ContentLength: "0"
         }
     };
     
-    // Convert to bytes and display
-    let message_bytes = response.to_bytes();
-    info!("Created SIP response using macro:\n{}", std::str::from_utf8(&message_bytes).unwrap());
+    // Display as string
+    info!("Created SIP response using macro:\n{}", response);
 }
 
 /// Example 4: Creating messages with complex bodies
@@ -221,61 +174,49 @@ fn create_message_with_body() {
          a=rtpmap:0 PCMU/8000\r\n";
     
     // Create a SIP INVITE with SDP body
-    let invite_with_sdp = sip! {
+    let invite_with_sdp = sip_request! {
         method: Method::Invite,
         uri: "sip:bob@example.com",
         headers: {
             Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
-            MaxForwards: 70,
+            MaxForwards: "70",
             To: "Bob <sip:bob@example.com>",
             From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
             CallId: "a84b4c76e66710@pc33.atlanta.com",
             CSeq: "314159 INVITE",
             Contact: "<sip:alice@pc33.atlanta.com>",
             ContentType: "application/sdp",
-            ContentLength: sdp_body.len()
+            ContentLength: format!("{}", sdp_body.len())
         },
         body: sdp_body
     };
     
-    // Convert to bytes and display
-    let message_bytes = invite_with_sdp.to_bytes();
-    info!("Created SIP INVITE with SDP body:\n{}", std::str::from_utf8(&message_bytes).unwrap());
+    // Display as string
+    info!("Created SIP INVITE with SDP body:\n{}", invite_with_sdp);
     
     // Alternative way to set the body using builder
-    let bob_uri = "sip:bob@example.com".parse::<Uri>().unwrap();
-    let alice_uri = "sip:alice@atlanta.com".parse::<Uri>().unwrap();
-    let contact_uri = "sip:alice@pc33.atlanta.com".parse::<Uri>().unwrap();
-    
-    let invite_with_builder = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
-        .unwrap()
-        .header(TypedHeader::From(From::new(
-            Address::new_with_display_name("Alice", alice_uri)
-                .with_parameter("tag", "1928301774")
-        )))
-        .header(TypedHeader::To(To::new(
-            Address::new_with_display_name("Bob", bob_uri)
-        )))
-        .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
-        .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-        .header(TypedHeader::Via(
-            Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()
-        ))
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::Contact(Contact::new(
-            Address::new(contact_uri)
-        )))
-        .header(TypedHeader::ContentType(ContentType::new("application/sdp")))
-        .header(TypedHeader::ContentLength(ContentLength::new(sdp_body.len())))
-        .body(Bytes::from(sdp_body))
+    let invite_with_builder = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.com", None)
+        .content_type("application/sdp")
+        .body(sdp_body)
         .build();
     
     info!("Created SIP INVITE with SDP body using builder");
     
     // Parse the SIP message and extract the body
-    let parsed_message = parse_message(&invite_with_builder.to_bytes()).unwrap();
+    let serialized = invite_with_builder.to_string();
+    let bytes = Bytes::from(serialized);
+    let parsed_message = parse_message(&bytes).unwrap();
+    
     if let Message::Request(request) = parsed_message {
-        if let Some(body) = request.body() {
+        let body = request.body();
+        if !body.is_empty() {
             info!("Extracted body from parsed message:\n{}", std::str::from_utf8(body).unwrap());
             
             // Check content type
@@ -286,4 +227,121 @@ fn create_message_with_body() {
             info!("No body found in parsed message");
         }
     }
+}
+
+/// Example 5: Using the SDP integration with the builder pattern
+fn create_message_with_sdp_integration() {
+    info!("Example 5: Using the SDP integration with the builder pattern");
+    
+    // Create a simple INVITE request using SimpleRequestBuilder
+    let invite_req = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.com", None);
+    
+    // Create an SDP session describing an audio call
+    let sdp = SdpBuilder::new("Audio Call")
+        .origin("alice", "12345", "12345", "IN", "IP4", "pc33.atlanta.com")
+        .connection("IN", "IP4", "pc33.atlanta.com")
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&["0", "8"]) // PCMU and PCMA
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()
+        .expect("Valid SDP");
+    
+    // Add SDP to the INVITE request using the ContentBuilderExt trait
+    let invite_with_sdp = invite_req.content_type_sdp().sdp_body(&sdp).build();
+    
+    // Log the full message to see the result
+    info!("INVITE with SDP using ContentBuilderExt: \n{}", invite_with_sdp);
+    
+    // Now create a 200 OK response with SDP answer
+    let response = SimpleResponseBuilder::ok()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
+        .call_id("a84b4c76e66710@pc33.atlanta.com")
+        .cseq(314159, Method::Invite)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .contact("sip:bob@192.0.2.4", None);
+    
+    // Create an SDP answer
+    let sdp_answer = SdpBuilder::new("Audio Answer")
+        .origin("bob", "54321", "54321", "IN", "IP4", "192.0.2.4")
+        .connection("IN", "IP4", "192.0.2.4")
+        .time("0", "0")
+        .media_audio(51372, "RTP/AVP")
+            .formats(&["0"]) // Just PCMU
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()
+        .expect("Valid SDP answer");
+    
+    // Add SDP to the 200 OK response using the ContentBuilderExt trait
+    let ok_with_sdp = response.content_type_sdp().sdp_body(&sdp_answer).build();
+    
+    // Log the full message to see the result
+    info!("200 OK with SDP using ContentBuilderExt: \n{}", ok_with_sdp);
+    
+    // Parse the SDP from the response body to demonstrate extraction
+    let body = ok_with_sdp.body();
+    if let Ok(parsed_sdp) = SdpSession::from_str(std::str::from_utf8(body).unwrap()) {
+        info!("Parsed SDP session name: {}", parsed_sdp.session_name);
+        info!("Media description count: {}", parsed_sdp.media_descriptions.len());
+        
+        if let Some(media) = parsed_sdp.media_descriptions.first() {
+            info!("Media type: {}", media.media);
+            info!("Media port: {}", media.port);
+            info!("Media protocol: {}", media.protocol);
+            info!("Media formats: {}", media.formats.join(", "));
+        }
+    }
+    
+    // Demonstrate adding different media types
+    
+    // Create an audio+video SDP
+    let av_sdp = SdpBuilder::new("Audio+Video Call")
+        .origin("alice", "12345", "12345", "IN", "IP4", "pc33.atlanta.com")
+        .connection("IN", "IP4", "pc33.atlanta.com")
+        .time("0", "0")
+        // Add audio media
+        .media_audio(49170, "RTP/AVP")
+            .formats(&["0", "8"]) // PCMU and PCMA
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        // Add video media
+        .media_video(49180, "RTP/AVP")
+            .formats(&["96", "97"]) // VP8 and H264
+            .rtpmap("96", "VP8/90000")
+            .rtpmap("97", "H264/90000")
+            .fmtp("97", "profile-level-id=42e01f")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()
+        .expect("Valid A/V SDP");
+    
+    // Create an INVITE with the A/V SDP
+    let av_invite = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id("a84b4c76e66711@pc33.atlanta.com")
+        .cseq(314160)
+        .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.com", None)
+        .content_type_sdp()  // Set Content-Type to application/sdp
+        .sdp_body(&av_sdp)   // Add the SDP body
+        .build();
+    
+    info!("INVITE with audio+video SDP: \n{}", av_invite);
 } 
