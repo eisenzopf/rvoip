@@ -124,7 +124,28 @@ where
     /// Get a string value at the given path
     fn path_str(&self, path: impl AsRef<str>) -> Option<String> {
         self.path(path)
-            .and_then(|v| v.as_str().map(String::from))
+            .map(|v| {
+                // Handle different value types by converting them to strings
+                if let Some(s) = v.as_str() {
+                    // Handle string values directly
+                    String::from(s)
+                } else if let Some(n) = v.as_i64() {
+                    // Handle integer values
+                    n.to_string()
+                } else if let Some(f) = v.as_f64() {
+                    // Handle floating point values
+                    f.to_string()
+                } else if v.is_bool() {
+                    // Handle boolean values
+                    v.as_bool().unwrap().to_string()
+                } else if v.is_null() {
+                    // Handle null values
+                    "null".to_string()
+                } else {
+                    // Fallback for other value types (arrays, objects)
+                    format!("{}", v)
+                }
+            })
     }
     
     /// Get a string value at the given path, or return the default value if not found

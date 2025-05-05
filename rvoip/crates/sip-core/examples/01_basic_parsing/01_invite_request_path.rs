@@ -2,6 +2,21 @@
 //! 
 //! This example demonstrates how to parse a basic SIP INVITE request
 //! and extract common header fields using JSON path accessors.
+//!
+//! There are two main path accessor methods:
+//! 
+//! 1. path() - Returns Option<SipValue>
+//!    - Preserves the original type (number, bool, object, etc.)
+//!    - You must manually handle the Option and conversion
+//!    - Use when you need the original type (not just a string)
+//!    - Use when you need to check if a path exists
+//!
+//! 2. path_str_or() - Returns String
+//!    - Automatically converts to string
+//!    - Takes a default value to use if path not found
+//!    - More concise for simple string values (most common case)
+//!    - Use for simple string access with default values
+//!    - Works with all value types (strings, numbers, booleans, etc.)
 
 use bytes::Bytes;
 use rvoip_sip_core::prelude::*;
@@ -36,20 +51,71 @@ fn main() {
     
     // Check if it's a request (it should be!)
     if let Message::Request(request) = message {
-        // Get basic information about the request
+        // Get basic information about the request using native methods
         info!("Method: {}", request.method());
         info!("URI: {}", request.uri());
         info!("SIP Version: {}", request.version());
         
-        // ---------- Using JSON path accessors ----------
-        info!("\n---------- Using JSON path accessors ----------");
+        // ---------- Comparing path() and path_str_or() ----------
+        info!("\n---------- Comparing path() and path_str_or() ----------");
         
-        // Extract basic information with our simpler API
+        // Using path() - Returns Option<SipValue>, preserves type
+        info!("\n----- Using path() -----");
+        
+        // Method
+        match request.path("method") {
+            Some(val) => info!("Method (path): {}", val),
+            None => info!("Method not found"),
+        }
+        
+        // From display name
+        match request.path("headers.From.display_name") {
+            Some(val) => info!("From display name (path): {}", val),
+            None => info!("From display name not found"),
+        }
+        
+        // CSeq (numeric value)
+        match request.path("headers.CSeq.seq") {
+            Some(val) => {
+                // Debug: Print the type of the value
+                info!("CSeq number debug: is_number={}, is_string={}, raw={:?}", 
+                      val.is_number(), val.is_string(), val);
+                
+                // Convert to number and handle type appropriately
+                if let Some(num) = val.as_i64() {
+                    info!("CSeq number (path): {} (numeric value)", num);
+                } else {
+                    info!("CSeq number found but not a number: {}", val);
+                }
+            },
+            None => info!("CSeq number not found"),
+        }
+        
+        // Using path_str_or() - Returns String directly with default
+        info!("\n----- Using path_str_or() -----");
+        
+        // Method - Same field as above but with path_str_or
         let method = request.path_str_or("method", "(none)");
-        info!("Method (path): {}", method);
+        info!("Method (path_str_or): {}", method);
         
-        // The most basic approach (using path_str_or directly):
-        info!("\n----- Path-based access (one-liners) -----");
+        // From display name - Same field as above but with path_str_or
+        let from_display = request.path_str_or("headers.From.display_name", "(unknown)");
+        info!("From display name (path_str_or): {}", from_display);
+        
+        // CSeq - Same field as above but with path_str_or
+        // path_str_or handles all value types including numbers
+        let cseq_num_str = request.path_str_or("headers.CSeq.seq", "0");
+        info!("CSeq number (path_str_or): {} (converted to string)", cseq_num_str);
+        
+        // Alternative approach for numeric values - use path() when you need the original numeric type
+        let cseq_num_as_number = match request.path("headers.CSeq.seq") {
+            Some(val) => val.as_i64().unwrap_or(0),
+            None => 0,
+        };
+        info!("CSeq number (as numeric type): {} (can perform arithmetic)", cseq_num_as_number);
+        
+        // ---------- Full SIP message example with path_str_or ----------
+        info!("\n---------- Full SIP message example (one-liners) ----------");
         
         // From header - using path_str_or for direct, concise access
         let from_display = request.path_str_or("headers.From.display_name", "(unknown)");
@@ -60,7 +126,7 @@ fn main() {
         
         info!("From: {} <{}>; tag={}", from_display, from_uri, from_tag);
         
-        // To header - even more concise
+        // To header
         info!("To: {} <sip:{}@{}>", 
             request.path_str_or("headers.To.display_name", "(unknown)"),
             request.path_str_or("headers.To.uri.user", "unknown"),
@@ -77,11 +143,11 @@ fn main() {
             request.path_str_or("headers.Contact[0].Params[0].address.uri.user", "unknown"),
             request.path_str_or("headers.Contact[0].Params[0].address.uri.host.Domain", "unknown"));
         
-        // Call-ID - fix the path to match the actual structure (CallId directly contains the value)
+        // Call-ID
         info!("Call-ID: {}", request.path_str_or("headers.CallId", "(none)"));
         
-        // CSeq - fix to match actual structure (seq instead of sequence_number)
-        // Try to access as integer directly
+        // CSeq - Special case with type conversion
+        // For CSeq, we want to handle the numeric value properly
         let cseq_num = match request.path("headers.CSeq.seq") {
             Some(val) => val.as_i64().unwrap_or(0).to_string(),
             None => "0".to_string(),
@@ -92,21 +158,3 @@ fn main() {
         panic!("Expected a request, got a response!");
     }
 }
-
-// Note: With the enhanced path parser, we no longer need this helper function
-// since we can access headers directly by name
-//
-// fn find_header_index<T: SipJsonExt>(sip_object: &T, header_name: &str) -> Option<usize> {
-//     if let Some(headers) = sip_object.path("headers") {
-//         if let Some(headers_array) = headers.as_array() {
-//             for (i, header) in headers_array.iter().enumerate() {
-//                 if let Some(obj) = header.as_object() {
-//                     if obj.contains_key(header_name) {
-//                         return Some(i);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     None
-// } 
