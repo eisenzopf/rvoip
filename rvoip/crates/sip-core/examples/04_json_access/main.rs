@@ -1,5 +1,6 @@
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::headers::HeaderAccess;
+use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use tracing::{info, Level};
 use tracing_subscriber;
 use serde_json;
@@ -26,7 +27,7 @@ fn main() {
 /// Example 1: Creating a SIP message and converting to JSON
 fn create_and_convert_to_json() {
     // Create a SIP request with multiple headers
-    let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
         .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
         .to("Bob", "sip:bob@example.com", None)
         .call_id("a84b4c76e66710@pc33.atlanta.com")
@@ -51,7 +52,7 @@ fn create_and_convert_to_json() {
 /// Example 2: Using path-based access to SIP message fields
 fn path_based_access() {
     // Create a SIP response
-    let response = ResponseBuilder::ok()
+    let response = SimpleResponseBuilder::ok()
         .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
         .to("Bob", "sip:bob@example.com", Some("a6c85cf"))
         .call_id("a84b4c76e66710@pc33.atlanta.com")
@@ -128,7 +129,7 @@ fn path_based_access() {
 /// Example 3: Using query-based access for complex operations
 fn query_based_access() {
     // Create a request with multiple Via headers
-    let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
         .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
         .to("Bob", "sip:bob@example.com", None)
         .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
@@ -180,7 +181,7 @@ fn query_based_access() {
 /// Example 4: JSON Round-trip conversion
 fn json_round_trip() {
     // Create an original request
-    let original_request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    let original_request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
         .from("Alice", "sip:alice@atlanta.com", Some("1928301774"))
         .to("Bob", "sip:bob@example.com", None)
         .call_id("a84b4c76e66710@pc33.atlanta.com")
