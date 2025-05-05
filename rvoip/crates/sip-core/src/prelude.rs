@@ -98,7 +98,6 @@ pub use crate::builder::headers::{
     ServerBuilderExt,
     PathBuilderExt,
     ProxyRequireBuilderExt,
-    ContentBuilderExt,
     CallIdBuilderExt,
     InReplyToBuilderExt
 };
@@ -108,9 +107,9 @@ pub use crate::types::ProxyRequire;
 
 // SDP Integration
 #[cfg(feature = "sdp")]
-pub use crate::sdp::{SdpBuilder, SdpSession};
+pub use crate::sdp::SdpBuilder;
 #[cfg(feature = "sdp")]
-pub use crate::builder::headers::ContentBuilderExt;
+pub use crate::types::sdp::SdpSession;
 #[cfg(feature = "sdp")]
 pub use crate::sdp::attributes::MediaDirection;
 

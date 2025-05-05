@@ -872,24 +872,15 @@ impl fmt::Display for ParsedAttribute {
                     RidDirection::Recv => "recv",
                 })?;
                 
-                // Format PT (payload types)
-                if let Some(pt) = &rid.pt {
-                    if !pt.is_empty() {
-                        write!(f, " pt={}", pt.join(","))?;
-                    }
+                // Format payload types
+                if !rid.formats.is_empty() {
+                    write!(f, " pt={}", rid.formats.join(","))?;
                 }
                 
-                // Format formats
-                if let Some(formats) = &rid.formats {
-                    if !formats.is_empty() {
-                        write!(f, " format={}", formats.join(","))?;
-                    }
-                }
-                
-                // Format params
-                if !rid.params.is_empty() {
-                    for (key, value) in &rid.params {
-                        write!(f, " {}={}", key, value)?;
+                // Format restrictions
+                if !rid.restrictions.is_empty() {
+                    for (key, value) in &rid.restrictions {
+                        write!(f, ";{}={}", key, value)?;
                     }
                 }
                 

@@ -509,6 +509,7 @@ mod tests {
         }
     }
     
+    #[cfg(feature = "sdp")]
     #[test]
     fn test_request_sdp_body() {
         // Create a basic SIP request

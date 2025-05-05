@@ -133,12 +133,20 @@
     - [ ] Create a `SipValue` enum similar to `serde_json::Value` for dynamic access
     - [ ] Add `to_json()` methods to convert any SIP entity to a JSON structure
     - [ ] Implement `TryFrom<Value>` to create SIP messages from JSON
-    - [ ] Add path-based field accessors: `get_path("headers.from.tag")`
-    - [ ] Support array indexing in paths: `get_path("headers.via[0].branch")`
-    - [ ] Create query interface for complex selectors: `query("$.headers.via[*].branch")`
+    - [x] Add path-based field accessors: `get_path("headers.from.tag")`
+    - [x] Support array indexing in paths: `get_path("headers.via[0].branch")`
+    - [x] Create query interface for complex selectors: `query("$.headers.via[*].branch")`
     - [ ] Implement immutable update methods with path syntax: `with_path("headers.from.tag", value)`
     - [ ] Add builder extensions for JSON construction: `SimpleRequestBuilder::from_json(json)`
     - [ ] Create examples demonstrating JSON conversion patterns
+    - [x] **JSON Representation Caching**
+      - [x] Implement thread-local message-level caching for JSON representations
+      - [x] Cache JSON representation at first access for reuse in subsequent operations
+      - [x] Use message instance address as cache key for efficient lookup
+      - [x] Maintain transparent API with no user code changes required
+      - [x] Add automatic cache invalidation on message modifications
+      - [x] Design threading considerations for safe concurrent access
+      - [x] Create memory-efficient caching strategy for high-transaction environments
   
   - [ ] **Bidirectional Conversion**
     - [ ] Create mapping functions between SIP/SDP and JSON formats

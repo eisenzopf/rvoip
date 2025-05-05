@@ -11,8 +11,9 @@ warnings = "allow"
 
 # Features
 [features]
-default = []
+default = ["sdp"]  # Include sdp in the default features
 lenient_parsing = []  # More lenient parsing for torture tests
+sdp = []  # Session Description Protocol support
 
 [dependencies]
 # Error handling
