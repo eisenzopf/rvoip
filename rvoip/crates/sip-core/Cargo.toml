@@ -53,8 +53,8 @@ path = "tests/parser_tests.rs"
 
 # Register the new example binaries
 [[example]]
-name = "01_invite_request"
-path = "examples/01_basic_parsing/01_invite_request.rs"
+name = "01_invite_request_typed"
+path = "examples/01_basic_parsing/01_invite_request_typed.rs"
 
 [[example]]
 name = "02_sip_response"

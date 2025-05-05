@@ -12,7 +12,7 @@ fn main() {
     
     loop {
         println!("\nSelect an example to run:");
-        println!("1. Parsing a SIP INVITE request");
+        println!("1. Parsing a SIP INVITE request (using typed headers)");
         println!("1a. Parsing a SIP INVITE request (using path accessors)");
         println!("1b. Parsing a SIP INVITE request (using query accessors)");
         println!("2. Parsing a SIP response");
@@ -28,7 +28,7 @@ fn main() {
         io::stdin().read_line(&mut choice).expect("Failed to read input");
         
         match choice.trim() {
-            "1" => run_example("01_invite_request"),
+            "1" => run_example("01_invite_request_typed"),
             "1a" => run_example("01_invite_request_path"),
             "1b" => run_example("01_invite_request_query"),
             "2" => run_example("02_sip_response"),
@@ -36,7 +36,7 @@ fn main() {
             "4" => run_example("04_sdp_builder"),
             "5" => {
                 println!("\nRunning all examples sequentially...\n");
-                run_example("01_invite_request");
+                run_example("01_invite_request_typed");
                 run_example("01_invite_request_path");
                 run_example("01_invite_request_query");
                 run_example("02_sip_response");
