@@ -1,22 +1,54 @@
-//! Example 1: Parsing a SIP INVITE request (JSON path accessor version)
+//! # Example 1: Parsing a SIP INVITE request (JSON Path Accessor Version)
 //! 
 //! This example demonstrates how to parse a basic SIP INVITE request
 //! and extract common header fields using JSON path accessors.
 //!
+//! ## Path Accessor Approach
+//!
+//! The path accessor approach provides a flexible, string-based method for accessing
+//! SIP message fields using dot notation paths (similar to JavaScript object access).
+//! It offers a good balance between simplicity and power.
+//!
+//! ### Advantages:
+//!
+//! - **Simplicity**: Simple dot notation is easy to understand and write
+//! - **Conciseness**: Often requires less code than typed methods
+//! - **Flexibility**: Access any field regardless of nested structure
+//! - **String defaults**: The `path_str_or()` method handles conversions and defaults easily
+//! - **No type imports**: Don't need to import specific header types
+//!
+//! ### When To Use Path Accessors:
+//!
+//! - For quick prototyping and development
+//! - When working with custom or non-standard headers
+//! - When the exact structure may vary
+//! - For simpler scripts where verbosity is a concern
+//! - When you need direct string access to values (most common case)
+//!
+//! ## Available Path Methods
+//! 
 //! There are two main path accessor methods:
 //! 
-//! 1. path() - Returns Option<SipValue>
+//! 1. **path()** - Returns Option<SipValue>
 //!    - Preserves the original type (number, bool, object, etc.)
 //!    - You must manually handle the Option and conversion
 //!    - Use when you need the original type (not just a string)
 //!    - Use when you need to check if a path exists
 //!
-//! 2. path_str_or() - Returns String
+//! 2. **path_str_or()** - Returns String
 //!    - Automatically converts to string
 //!    - Takes a default value to use if path not found
 //!    - More concise for simple string values (most common case)
 //!    - Use for simple string access with default values
 //!    - Works with all value types (strings, numbers, booleans, etc.)
+//!
+//! ## Path Format Examples
+//!
+//! ```
+//! request.path("method")                      // Top-level field
+//! request.path("headers.From.display_name")   // Nested header field
+//! request.path("headers.Via[0].params[0].Branch") // Arrays with indexing
+//! ```
 
 use bytes::Bytes;
 use rvoip_sip_core::prelude::*;

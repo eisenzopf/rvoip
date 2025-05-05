@@ -1,27 +1,207 @@
-//! Query-based access to SIP values
+//! # Query-based Access to SIP Values
 //! 
-//! This module provides a simplified JSONPath-like query system
-//! to extract values from SIP structures.
+//! This module provides a simplified JSONPath-like query system for extracting 
+//! and searching for values within SIP message structures.
+//!
+//! ## Query Syntax
+//!
+//! The query system supports a subset of JSONPath syntax:
+//!
+//! - `$` - Root element
+//! - `.` - Child operator
+//! - `..` - Recursive descent (search at any depth)
+//! - `*` - Wildcard
+//! - `[n]` - Array index
+//! - `[start:end]` - Array slice
+//! - `[?(@.property == value)]` - Filter expression
+//!
+//! ## Use Cases
+//!
+//! The query interface is particularly useful for:
+//!
+//! - Finding all instances of a field regardless of location (e.g., all tags or branches)
+//! - Exploring message structures when you don't know the exact path
+//! - Extracting collections of related values
+//! - Pattern matching across the message structure
+//!
+//! ## Examples
+//!
+//! ```
+//! # use rvoip_sip_core::prelude::*;
+//! # use rvoip_sip_core::json::SipJsonExt;
+//! # fn example() -> Option<()> {
+//! let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+//!     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+//!     .to("Bob", "sip:bob@example.com", Some("4567"))
+//!     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
+//!     .via("proxy.atlanta.com", "TCP", Some("z9hG4bK887jhd"))
+//!     .build();
+//!
+//! // Find all display names (in From, To headers)
+//! let display_names = request.query("$..display_name");
+//! 
+//! // Find all branch parameters (in Via headers)
+//! let branches = request.query("$..Branch");
+//!
+//! // Find all tag parameters
+//! let tags = request.query("$..Tag");
+//! # Some(())
+//! # }
+//! ```
 
 use crate::json::value::SipValue;
 use crate::json::{SipJsonResult, SipJsonError};
 use std::collections::HashSet;
 
-/// Query a SipValue using a simplified JSONPath-like syntax
+/// Query a SipValue using a simplified JSONPath-like syntax.
 ///
-/// Supported syntax:
-/// - `$` - root
-/// - `.` - child operator
-/// - `..` - recursive descent
-/// - `*` - wildcard
-/// - `[n]` - array index
-/// - `[start:end]` - array slice
-/// - `[?(@.property == value)]` - filter (basic)
+/// This function allows for powerful searches through SIP message structures,
+/// finding values that match specific patterns or criteria.
 ///
-/// Examples:
-/// - `$.headers.via.branch` - Get the branch parameter of the Via header
-/// - `$.headers.via[*].branch` - Get all branch parameters from all Via headers
-/// - `$..branch` - Get all branch parameters anywhere in the structure
+/// # Supported Syntax
+///
+/// - `$` - Root element
+/// - `.` - Child operator
+/// - `..` - Recursive descent (search at any depth)
+/// - `*` - Wildcard
+/// - `[n]` - Array index (zero-based)
+/// - `[start:end]` - Array slice
+/// - `[?(@.property == value)]` - Filter expression (basic)
+///
+/// # Parameters
+///
+/// - `value`: The SipValue to query
+/// - `query_str`: The query string in JSONPath-like syntax
+///
+/// # Returns
+///
+/// A vector of references to SipValue objects that match the query
+///
+/// # Examples
+///
+/// Basic direct field access:
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, query};
+/// # use std::collections::HashMap;
+/// # fn example() {
+/// // Create a SipValue with a "method" field
+/// let mut obj = HashMap::new();
+/// obj.insert("method".to_string(), SipValue::String("INVITE".to_string()));
+/// let message = SipValue::Object(obj);
+///
+/// // Query for the method field
+/// let results = query::query(&message, "$.method");
+/// assert_eq!(results.len(), 1);
+/// assert_eq!(results[0].as_str(), Some("INVITE"));
+/// # }
+/// # example();
+/// ```
+///
+/// Recursive descent to find all instances of a field:
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, query};
+/// # use std::collections::HashMap;
+/// # fn example() {
+/// // Create a nested structure with multiple display_name fields
+/// let mut from = HashMap::new();
+/// from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
+///
+/// let mut to = HashMap::new();
+/// to.insert("display_name".to_string(), SipValue::String("Bob".to_string()));
+///
+/// let mut headers = HashMap::new();
+/// headers.insert("From".to_string(), SipValue::Object(from));
+/// headers.insert("To".to_string(), SipValue::Object(to));
+///
+/// let mut message = HashMap::new();
+/// message.insert("headers".to_string(), SipValue::Object(headers));
+///
+/// let sip_msg = SipValue::Object(message);
+///
+/// // Find all display_name fields anywhere in the structure
+/// let names = query::query(&sip_msg, "$..display_name");
+/// assert_eq!(names.len(), 2);
+/// assert!(names.iter().any(|v| v.as_str() == Some("Alice")));
+/// assert!(names.iter().any(|v| v.as_str() == Some("Bob")));
+/// # }
+/// # example();
+/// ```
+///
+/// Using array indices and wildcards:
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, query};
+/// # use std::collections::HashMap;
+/// # fn example() {
+/// // Create a structure with an array of Via headers
+/// let mut via1 = HashMap::new();
+/// via1.insert("branch".to_string(), SipValue::String("z9hG4bK776asdhds".to_string()));
+/// via1.insert("transport".to_string(), SipValue::String("UDP".to_string()));
+///
+/// let mut via2 = HashMap::new();
+/// via2.insert("branch".to_string(), SipValue::String("z9hG4bK887jhd".to_string()));
+/// via2.insert("transport".to_string(), SipValue::String("TCP".to_string()));
+///
+/// let via_array = vec![SipValue::Object(via1), SipValue::Object(via2)];
+///
+/// let mut headers = HashMap::new();
+/// headers.insert("Via".to_string(), SipValue::Array(via_array));
+///
+/// let message = SipValue::Object(headers);
+///
+/// // Get the first Via header's branch
+/// let first_branch = query::query(&message, "$.Via[0].branch");
+/// assert_eq!(first_branch[0].as_str(), Some("z9hG4bK776asdhds"));
+///
+/// // Get all Via branches using wildcard
+/// let all_branches = query::query(&message, "$.Via[*].branch");
+/// assert_eq!(all_branches.len(), 2);
+///
+/// // Get all branches using recursive descent (alternative approach)
+/// let all_branches2 = query::query(&message, "$..branch");
+/// assert_eq!(all_branches2.len(), 2);
+/// # }
+/// # example();
+/// ```
+///
+/// Using filters:
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, query};
+/// # use std::collections::HashMap;
+/// # fn example() {
+/// // Create an array of header objects
+/// let mut header1 = HashMap::new();
+/// header1.insert("name".to_string(), SipValue::String("Via".to_string()));
+/// header1.insert("transport".to_string(), SipValue::String("UDP".to_string()));
+///
+/// let mut header2 = HashMap::new();
+/// header2.insert("name".to_string(), SipValue::String("Via".to_string()));
+/// header2.insert("transport".to_string(), SipValue::String("TCP".to_string()));
+///
+/// let mut header3 = HashMap::new();
+/// header3.insert("name".to_string(), SipValue::String("From".to_string()));
+///
+/// let headers = vec![
+///    SipValue::Object(header1), 
+///    SipValue::Object(header2),
+///    SipValue::Object(header3)
+/// ];
+///
+/// let message = SipValue::Array(headers);
+///
+/// // Find all Via headers
+/// let via_headers = query::query(&message, "$[?(@.name == \"Via\")]");
+/// assert_eq!(via_headers.len(), 2);
+///
+/// // Find UDP Via headers
+/// let udp_headers = query::query(&message, "$[?(@.transport == \"UDP\")]");
+/// assert_eq!(udp_headers.len(), 1);
+/// # }
+/// # example();
+/// ```
 pub fn query<'a>(value: &'a SipValue, query_str: &str) -> Vec<&'a SipValue> {
     if query_str.is_empty() {
         return vec![];

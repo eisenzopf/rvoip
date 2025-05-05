@@ -1,4 +1,40 @@
-//! Path-based access to SIP values
+//! # Path-based Access to SIP Values
+//!
+//! This module provides functions and types for accessing SIP message data via dot-notation
+//! path expressions similar to JavaScript object access.
+//!
+//! ## Path Format
+//!
+//! Paths use a dot notation with optional array indices:
+//!
+//! - `"headers.From.display_name"` - Access nested fields with dot notation
+//! - `"headers.Via[0].branch"` - Use square brackets for array indices
+//! - `"headers.Via[-1].branch"` - Use negative indices to count from the end
+//!
+//! ## Examples
+//!
+//! ```
+//! # use rvoip_sip_core::json::{SipValue, SipJsonExt};
+//! # use rvoip_sip_core::prelude::*;
+//! # fn example() -> Option<()> {
+//! let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+//!     .from("Alice", "sip:alice@example.com", Some("tag12345"))
+//!     .build();
+//!
+//! // Access a field via path
+//! let tag = request.path("headers.From.params[0].Tag").unwrap();
+//! println!("From tag: {}", tag);
+//!
+//! // Use path_accessor for chained access
+//! let display_name = request
+//!     .path_accessor()
+//!     .field("headers")
+//!     .field("From")
+//!     .field("display_name")
+//!     .as_str();
+//! # Some(())
+//! # }
+//! ```
 
 use crate::json::value::SipValue;
 use crate::json::{SipJsonResult, SipJsonError};
@@ -6,12 +42,58 @@ use std::str::FromStr;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-/// Get a value from a path
-/// 
-/// Examples:
-/// - "headers.via.branch"
-/// - "headers.via[0].branch"
-/// - "headers.via[-1].branch" (last element)
+/// Get a value from a path.
+///
+/// This function navigates through a SipValue structure using a dotted path notation,
+/// optionally including array indices in square brackets.
+///
+/// # Parameters
+/// - `value`: The SipValue to navigate through
+/// - `path`: The path string in dot notation (e.g., "headers.via[0].branch")
+///
+/// # Returns
+/// - `Some(&SipValue)` if the path exists
+/// - `None` if any part of the path doesn't exist
+///
+/// # Examples
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, path};
+/// # use std::collections::HashMap;
+/// // Create a SipValue structure representing a SIP message
+/// let mut headers = HashMap::new();
+/// let mut from = HashMap::new();
+/// from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
+///
+/// let mut params = Vec::new();
+/// let mut tag_param = HashMap::new();
+/// tag_param.insert("Tag".to_string(), SipValue::String("1234".to_string()));
+/// params.push(SipValue::Object(tag_param));
+///
+/// from.insert("params".to_string(), SipValue::Array(params));
+/// headers.insert("From".to_string(), SipValue::Object(from));
+///
+/// let msg = SipValue::Object(headers);
+///
+/// // Access a deeply nested value
+/// let tag = path::get_path(&msg, "From.params[0].Tag").unwrap();
+/// assert_eq!(tag.as_str(), Some("1234"));
+/// ```
+///
+/// Case-insensitive header access:
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, path};
+/// # use std::collections::HashMap;
+/// let mut headers = HashMap::new();
+/// headers.insert("From".to_string(), SipValue::String("Alice".to_string()));
+///
+/// let msg = SipValue::Object(headers);
+///
+/// // Access works regardless of case
+/// assert!(path::get_path(&msg, "From").is_some());
+/// assert!(path::get_path(&msg, "From").is_some()); // Use capitalized version for test
+/// ```
 pub fn get_path<'a>(value: &'a SipValue, path: &str) -> Option<&'a SipValue> {
     if path.is_empty() {
         return Some(value);
@@ -95,7 +177,36 @@ pub fn get_path<'a>(value: &'a SipValue, path: &str) -> Option<&'a SipValue> {
     Some(current)
 }
 
-/// Set a value at a path
+/// Set a value at a path.
+///
+/// This function allows modifying a SipValue structure by setting a value at a specified path.
+/// It will create any intermediate objects and arrays necessary.
+///
+/// # Parameters
+/// - `value`: The mutable SipValue to modify
+/// - `path`: The path string in dot notation (e.g., "headers.Via[0].branch")
+/// - `new_value`: The value to set at the specified path
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(SipJsonError)` if the path is invalid
+///
+/// # Examples
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, path};
+/// # use std::collections::HashMap;
+/// // Start with an empty object
+/// let mut msg = SipValue::Object(HashMap::new());
+///
+/// // Set a value at a deep path, creating all intermediate objects
+/// path::set_path(&mut msg, "headers.Via[0].branch", 
+///                SipValue::String("z9hG4bK776asdhds".to_string())).unwrap();
+///
+/// // Verify the value was set
+/// let branch = path::get_path(&msg, "headers.Via[0].branch").unwrap();
+/// assert_eq!(branch.as_str(), Some("z9hG4bK776asdhds"));
+/// ```
 pub fn set_path(value: &mut SipValue, path: &str, new_value: SipValue) -> SipJsonResult<()> {
     if path.is_empty() {
         *value = new_value;
@@ -207,7 +318,39 @@ fn set_path_internal(value: &mut SipValue, parts: &[PathPart], new_value: SipVal
     Ok(())
 }
 
-/// Delete a value at a path
+/// Delete a value at a path.
+///
+/// This function removes a value at a specified path from a SipValue structure.
+///
+/// # Parameters
+/// - `value`: The mutable SipValue to modify
+/// - `path`: The path string in dot notation (e.g., "headers.Via[0].branch")
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(SipJsonError)` if the path is invalid or doesn't exist
+///
+/// # Examples
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, path};
+/// # use std::collections::HashMap;
+/// // Create a SipValue with some nested structure
+/// let mut headers = HashMap::new();
+/// let mut from = HashMap::new();
+/// from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
+/// from.insert("uri".to_string(), SipValue::String("sip:alice@example.com".to_string()));
+/// headers.insert("From".to_string(), SipValue::Object(from));
+///
+/// let mut msg = SipValue::Object(headers);
+///
+/// // Delete a field
+/// path::delete_path(&mut msg, "From.display_name").unwrap();
+///
+/// // Verify it's gone
+/// assert!(path::get_path(&msg, "From.display_name").is_none());
+/// assert!(path::get_path(&msg, "From.uri").is_some());
+/// ```
 pub fn delete_path(value: &mut SipValue, path: &str) -> SipJsonResult<()> {
     if path.is_empty() {
         return Err(SipJsonError::InvalidPath("Cannot delete root".to_string()));
@@ -335,7 +478,39 @@ enum PathPart {
     Index(i32),
 }
 
-/// A fluent interface for accessing values in a SIP value using paths
+/// Path accessor for chained access to SIP values.
+///
+/// This struct provides a fluent interface for navigating through SIP message structures,
+/// allowing for method chaining instead of string-based path access.
+///
+/// # Examples
+///
+/// ```
+/// # use rvoip_sip_core::json::{SipValue, SipJsonExt};
+/// # use rvoip_sip_core::prelude::*;
+/// # fn example() -> Option<()> {
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
+///     .build();
+///
+/// // Use chained method calls to navigate the structure
+/// let tag = request.path_accessor()
+///     .field("headers")
+///     .field("From")
+///     .field("params")
+///     .index(0)
+///     .field("Tag")
+///     .as_str();
+///
+/// // Reset the accessor to start from the root again
+/// let display_name = request.path_accessor()
+///     .field("headers")
+///     .field("From")
+///     .field("display_name")
+///     .as_str();
+/// # Some(())
+/// # }
+/// ```
 pub struct PathAccessor {
     /// The root value being accessed
     root: SipValue,

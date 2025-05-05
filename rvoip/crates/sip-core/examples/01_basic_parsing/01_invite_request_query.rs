@@ -1,7 +1,45 @@
-//! Example: Parsing a SIP INVITE request (Query-based version)
+//! # Example: Parsing a SIP INVITE request (Query-based Version)
 //! 
 //! This example demonstrates how to parse a SIP INVITE request
 //! and extract fields using JSONPath-like queries.
+//!
+//! ## Query Accessor Approach
+//!
+//! The query accessor approach provides powerful JSONPath-like query capabilities
+//! for searching through SIP message structures. It's especially useful for
+//! complex searches, pattern matching, and exploring the message structure.
+//!
+//! ### Advantages:
+//!
+//! - **Pattern Matching**: Use wildcards and recursive descent to find patterns
+//! - **Collection Results**: Returns collections of all matching values
+//! - **Deep Searches**: Find values at any level of nesting with `$..field` syntax
+//! - **Exploration**: Great for exploring unknown message structures
+//! - **Filtering**: Can use filter expressions to narrow search results
+//!
+//! ### When To Use Query Accessors:
+//!
+//! - When you need to find all instances of a field (e.g., all display names)
+//! - When exploring an unfamiliar message structure
+//! - For data mining or analytics on SIP messages
+//! - When you're not sure of the exact path to a field
+//! - For complex search patterns that would be difficult with direct paths
+//!
+//! ## Query Syntax Examples
+//!
+//! ```
+//! request.query("$.method")                // Direct field access
+//! request.query("$..display_name")         // Find all display_name fields anywhere
+//! request.query("$.headers.Via[*]")        // All Via headers
+//! request.query("$..Branch")               // All Branch parameters anywhere
+//! ```
+//!
+//! The query syntax is similar to JSONPath and supports:
+//! - `$` - Root element
+//! - `.` - Child operator
+//! - `..` - Recursive descent (search at any depth)
+//! - `[n]` - Array index
+//! - `[*]` - All array elements
 
 use bytes::Bytes;
 use rvoip_sip_core::prelude::*;
@@ -45,11 +83,13 @@ fn main() {
         info!("\n---------- Using JSONQuery queries ----------");
         
         // Basic queries for single values
+        // This approach is similar to path access but returns a collection
         if let Some(val) = request.query("$.method").first() {
             info!("Method (query): {}", val);
         }
         
-        // Finding all display names
+        // Finding all display names - This is where queries shine!
+        // The recursive descent operator (..) searches at any depth
         info!("\n----- Finding all display names -----");
         let display_names = request.query("$..display_name");
         for (i, name) in display_names.iter().enumerate() {
@@ -69,14 +109,14 @@ fn main() {
             }
         }
         
-        // Finding tags
+        // Finding tags - Can quickly find all tag parameters
         info!("\n----- Finding all tags -----");
         let tags = request.query("$..Tag");
         for (i, tag) in tags.iter().enumerate() {
             info!("Tag {}: {}", i+1, tag);
         }
         
-        // Finding branch parameters
+        // Finding branch parameters - Same pattern works for any parameter
         info!("\n----- Finding all branch parameters -----");
         let branches = request.query("$..Branch");
         for (i, branch) in branches.iter().enumerate() {
@@ -100,7 +140,7 @@ fn main() {
             info!("CSeq: {} {}", seq, method);
         }
         
-        // Find all header types
+        // Find all header types - A powerful exploration technique
         info!("\n----- Finding all header types -----");
         let headers = request.query("$.headers[*]");
         for header in headers {
