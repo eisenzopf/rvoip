@@ -2,6 +2,7 @@ use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::headers::HeaderAccess;
 use tracing::{info, Level};
 use tracing_subscriber;
+use serde_json;
 
 fn main() {
     // Initialize logging
@@ -66,96 +67,61 @@ fn path_based_access() {
     let json_str = response.to_json_string_pretty().unwrap_or_default();
     info!("Response JSON structure:\n{}", json_str);
     
-    // Since get_path doesn't work properly in the current implementation,
-    // we'll first convert to a SipValue and then analyze the structure directly
-    let value = response.to_sip_value().unwrap_or_default();
-    
-    if let Some(headers_array) = value.as_object().and_then(|obj| obj.get("headers")).and_then(|h| h.as_array()) {
-        // Iterate through headers to find the From header
+    // Old, verbose way (shown for comparison)
+    info!("Using traditional path-based access:");
+    // Find the From display name by manually traversing through headers
+    // Here we need to loop through headers since they're in an array format
+    let headers = response.get_path("headers");
+    if let Some(headers_array) = headers.as_array() {
         for header in headers_array {
             if let Some(from) = header.as_object().and_then(|obj| obj.get("From")) {
-                // Now get the display_name from the From header
-                if let Some(display_name) = from.as_object().and_then(|obj| obj.get("display_name")) {
+                // Just work with the raw JSON value we have
+                if let Some(display_name) = from.as_object()
+                    .and_then(|obj| obj.get("display_name")) {
                     if let Some(name) = display_name.as_str() {
                         info!("  From display name: {}", name);
                     } else {
-                        info!("  From display name: Not found (not a string)");
+                        info!("  From display name: Not found");
                     }
-                } else {
-                    info!("  From display name: Not found (no display_name field)");
-                }
-                break;
-            }
-        }
-        
-        // Iterate to find the To header and get the tag
-        for header in headers_array {
-            if let Some(to) = header.as_object().and_then(|obj| obj.get("To")) {
-                // Look for the tag in the params array
-                if let Some(params) = to.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
-                    let mut found_tag = false;
-                    for param in params {
-                        if let Some(tag) = param.as_object().and_then(|obj| obj.get("Tag")) {
-                            if let Some(tag_str) = tag.as_str() {
-                                info!("  To tag: {}", tag_str);
-                                found_tag = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !found_tag {
-                        info!("  To tag: Not found (no Tag in params)");
-                    }
-                } else {
-                    info!("  To tag: Not found (no params array)");
-                }
-                break;
-            }
-        }
-        
-        // Find the Via header and get the first branch
-        for header in headers_array {
-            if let Some(via) = header.as_object().and_then(|obj| obj.get("Via")) {
-                if let Some(via_entries) = via.as_array() {
-                    if via_entries.is_empty() {
-                        info!("  First Via branch: Not found (empty Via array)");
-                    } else {
-                        let first_via = &via_entries[0];
-                        if let Some(params) = first_via.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
-                            let mut found_branch = false;
-                            for param in params {
-                                if let Some(branch) = param.as_object().and_then(|obj| obj.get("Branch")) {
-                                    if let Some(branch_str) = branch.as_str() {
-                                        info!("  First Via branch: {}", branch_str);
-                                        found_branch = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if !found_branch {
-                                info!("  First Via branch: Not found (no Branch in params)");
-                            }
-                        } else {
-                            info!("  First Via branch: Not found (no params array)");
-                        }
-                    }
-                } else {
-                    info!("  First Via branch: Not found (Via is not an array)");
                 }
                 break;
             }
         }
     }
     
-    // Get the status code
-    if let Some(status_code) = value.as_object().and_then(|obj| obj.get("status_code")) {
-        if let Some(code) = status_code.as_i64() {
-            info!("  Status code: {}", code);
-        } else {
-            info!("  Status code: Not found (not a number)");
-        }
+    // New, more fluent approach
+    info!("Using new chained path access:");
+    
+    // Find the From display name with chained path accessors
+    let mut path = response.path();
+    if let Some(name) = path.headers().from().display_name().as_str() {
+        info!("  From display name: {}", name);
     } else {
-        info!("  Status code: Not found (no status_code field)");
+        info!("  From display name: Not found");
+    }
+    
+    // Find the To tag with chained path accessors
+    let mut path = response.path();
+    if let Some(tag) = path.headers().to().tag().as_str() {
+        info!("  To tag: {}", tag);
+    } else {
+        info!("  To tag: Not found");
+    }
+    
+    // Find the first Via branch with chained path accessors and index
+    let mut path = response.path();
+    if let Some(branch) = path.headers().via().index(0).branch().as_str() {
+        info!("  First Via branch: {}", branch);
+    } else {
+        info!("  First Via branch: Not found");
+    }
+    
+    // Get the status code
+    let mut path = response.path();
+    if let Some(status) = path.status().as_str() {
+        info!("  Status code: {}", status);
+    } else {
+        info!("  Status code: Not found");
     }
 }
 

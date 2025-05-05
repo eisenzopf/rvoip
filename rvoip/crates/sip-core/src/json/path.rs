@@ -3,6 +3,8 @@
 use crate::json::value::SipValue;
 use crate::json::{SipJsonResult, SipJsonError};
 use std::str::FromStr;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 /// Get a value from a path
 /// 
@@ -278,9 +280,6 @@ fn parse_path(path: &str) -> Vec<PathPart> {
                         result.push(PathPart::Index(index));
                     }
                     
-                    // Debug output for parsed path parts
-                    println!("Parsed path part: field={}, index={}", field, &part[bracket_pos+1..close_pos]);
-                    
                     continue;
                 }
             }
@@ -288,10 +287,7 @@ fn parse_path(path: &str) -> Vec<PathPart> {
         
         // Regular field name
         result.push(PathPart::Field(part.to_string()));
-        println!("Parsed path part: field={}", part);
     }
-    
-    println!("Complete path parsing for '{}' resulted in {} parts", path, result.len());
     
     result
 }
@@ -303,4 +299,267 @@ enum PathPart {
     Field(String),
     /// An index in an array
     Index(i32),
+}
+
+/// A fluent interface for accessing values in a SIP value using paths
+pub struct PathAccessor {
+    /// The root value being accessed
+    root: SipValue,
+    /// The current value being accessed
+    current: SipValue,
+}
+
+impl PathAccessor {
+    /// Create a new path accessor from a SipValue
+    pub fn new(value: SipValue) -> Self {
+        Self {
+            root: value.clone(),
+            current: value,
+        }
+    }
+    
+    /// Access a field in the current value
+    pub fn field(&mut self, name: &str) -> &mut Self {
+        // Handle specific SIP field types with special handling
+        match name {
+            // Headers are accessed by name directly
+            "From" | "To" | "Via" | "Contact" | "Call-ID" | "CSeq" => {
+                // If we're looking at an array (like the headers array), find the object with the given key
+                if let Some(arr) = self.current.as_array() {
+                    for item in arr {
+                        if let Some(obj) = item.as_object() {
+                            if obj.contains_key(name) {
+                                self.current = obj.get(name).unwrap_or(&SipValue::Null).clone();
+                                return self;
+                            }
+                        }
+                    }
+                }
+            }
+            // Parameters in headers are accessed by name directly
+            "tag" | "Tag" => {
+                return self.tag();
+            }
+            "branch" | "Branch" => {
+                return self.branch();
+            }
+            // Other cases can use the default behavior
+            _ => {}
+        }
+        
+        // Default behavior for normal field access
+        if let Some(obj) = self.current.as_object() {
+            if let Some(field) = obj.get(name) {
+                self.current = field.clone();
+                return self;
+            }
+        }
+        // If field doesn't exist, set to null
+        self.current = SipValue::Null;
+        self
+    }
+    
+    /// Access an index in the current value (if it's an array)
+    pub fn index(&mut self, idx: i32) -> &mut Self {
+        if let Some(arr) = self.current.as_array() {
+            let index = if idx < 0 {
+                // Handle negative indices (counting from the end)
+                arr.len().checked_sub(idx.abs() as usize)
+            } else {
+                Some(idx as usize)
+            };
+            
+            if let Some(i) = index {
+                if i < arr.len() {
+                    self.current = arr[i].clone();
+                    return self;
+                }
+            }
+        }
+        // If index doesn't exist, set to null
+        self.current = SipValue::Null;
+        self
+    }
+    
+    /// Get the current value
+    pub fn value(&self) -> SipValue {
+        self.current.clone()
+    }
+    
+    /// Reset to the root value
+    pub fn reset(&mut self) -> &mut Self {
+        self.current = self.root.clone();
+        self
+    }
+    
+    /// Convenience method to get as string
+    pub fn as_str(&self) -> Option<String> {
+        self.current.as_str().map(|s| s.to_string())
+    }
+    
+    /// Convenience method to get as integer
+    pub fn as_i64(&self) -> Option<i64> {
+        self.current.as_i64()
+    }
+    
+    /// Convenience method to get as floating point
+    pub fn as_f64(&self) -> Option<f64> {
+        self.current.as_f64()
+    }
+    
+    /// Convenience method to get as boolean
+    pub fn as_bool(&self) -> Option<bool> {
+        self.current.as_bool()
+    }
+    
+    /// Convenience method to get as array
+    pub fn as_array(&self) -> Option<Vec<SipValue>> {
+        self.current.as_array().map(|arr| arr.clone())
+    }
+    
+    /// Convenience method to get as object
+    pub fn as_object(&self) -> Option<std::collections::HashMap<String, SipValue>> {
+        self.current.as_object().map(|obj| obj.clone())
+    }
+    
+    /// Dynamically access fields using method-like syntax
+    /// This allows for things like: path.headers().from().tag()
+    pub fn __dispatch(&mut self, method: &str) -> &mut Self {
+        self.field(method)
+    }
+    
+    // Generate methods for common SIP fields for more ergonomic access
+    
+    /// Access the headers field
+    pub fn headers(&mut self) -> &mut Self {
+        self.field("headers")
+    }
+    
+    /// Access the from header - handles the case where it's in an array of header objects
+    pub fn from(&mut self) -> &mut Self {
+        // If we're looking at an array (like the headers array), find the object with the "From" key
+        if let Some(arr) = self.current.as_array() {
+            for item in arr {
+                if let Some(obj) = item.as_object() {
+                    if obj.contains_key("From") {
+                        // Found the From header
+                        self.current = obj.get("From").unwrap_or(&SipValue::Null).clone();
+                        return self;
+                    }
+                }
+            }
+            // If we didn't find it in the array, try a direct access
+            self.field("From")
+        } else {
+            // Normal direct field access
+            self.field("From")
+        }
+    }
+    
+    /// Access the to header - handles the case where it's in an array of header objects
+    pub fn to(&mut self) -> &mut Self {
+        // If we're looking at an array (like the headers array), find the object with the "To" key
+        if let Some(arr) = self.current.as_array() {
+            for item in arr {
+                if let Some(obj) = item.as_object() {
+                    if obj.contains_key("To") {
+                        // Found the To header
+                        self.current = obj.get("To").unwrap_or(&SipValue::Null).clone();
+                        return self;
+                    }
+                }
+            }
+            // If we didn't find it in the array, try a direct access
+            self.field("To")
+        } else {
+            // Normal direct field access
+            self.field("To")
+        }
+    }
+    
+    /// Access the via header - handles the case where it's in an array of header objects
+    pub fn via(&mut self) -> &mut Self {
+        // If we're looking at an array (like the headers array), find the object with the "Via" key
+        if let Some(arr) = self.current.as_array() {
+            for item in arr {
+                if let Some(obj) = item.as_object() {
+                    if obj.contains_key("Via") {
+                        // Found the Via header
+                        self.current = obj.get("Via").unwrap_or(&SipValue::Null).clone();
+                        return self;
+                    }
+                }
+            }
+            // If we didn't find it in the array, try a direct access
+            self.field("Via")
+        } else {
+            // Normal direct field access
+            self.field("Via")
+        }
+    }
+    
+    /// Access the call-id header
+    pub fn call_id(&mut self) -> &mut Self {
+        self.field("Call-ID")
+    }
+    
+    /// Access the display name
+    pub fn display_name(&mut self) -> &mut Self {
+        self.field("display_name")
+    }
+    
+    /// Access the uri field
+    pub fn uri(&mut self) -> &mut Self {
+        self.field("uri")
+    }
+    
+    /// Access the tag parameter
+    pub fn tag(&mut self) -> &mut Self {
+        // First check if we have params array
+        if let Some(arr) = self.current.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
+            // Look through the params array for the Tag
+            for param in arr {
+                if let Some(obj) = param.as_object() {
+                    if obj.contains_key("Tag") {
+                        // Found the Tag parameter
+                        self.current = obj.get("Tag").unwrap_or(&SipValue::Null).clone();
+                        return self;
+                    }
+                }
+            }
+        }
+        
+        // Fall back to direct field access
+        self.field("tag")
+    }
+    
+    /// Access the branch parameter
+    pub fn branch(&mut self) -> &mut Self {
+        // First check if we have params array
+        if let Some(arr) = self.current.as_object().and_then(|obj| obj.get("params")).and_then(|p| p.as_array()) {
+            // Look through the params array for the Branch
+            for param in arr {
+                if let Some(obj) = param.as_object() {
+                    if obj.contains_key("Branch") {
+                        // Found the Branch parameter
+                        self.current = obj.get("Branch").unwrap_or(&SipValue::Null).clone();
+                        return self;
+                    }
+                }
+            }
+        }
+        
+        // Fall back to direct field access
+        self.field("branch")
+    }
+    
+    /// Access the params field
+    pub fn params(&mut self) -> &mut Self {
+        self.field("params")
+    }
+    
+    /// Access the status field
+    pub fn status(&mut self) -> &mut Self {
+        self.field("status")
+    }
 } 
