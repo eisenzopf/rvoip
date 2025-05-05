@@ -50,3 +50,20 @@ required-features = ["lenient_parsing"]
 [[test]]
 name = "parser"
 path = "tests/parser_tests.rs"
+
+# Register the new example binaries
+[[example]]
+name = "01_invite_request"
+path = "examples/01_basic_parsing/01_invite_request.rs"
+
+[[example]]
+name = "02_sip_response"
+path = "examples/01_basic_parsing/02_sip_response.rs"
+
+[[example]]
+name = "03_multiple_headers"
+path = "examples/01_basic_parsing/03_multiple_headers.rs"
+
+[[example]]
+name = "04_sdp_builder"
+path = "examples/01_basic_parsing/04_sdp_builder.rs"

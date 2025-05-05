@@ -1,82 +1,90 @@
-# Example 1: Basic SIP Message Parsing
+# Basic SIP Message Parsing Examples
 
-This example demonstrates how to parse raw SIP messages into structured types, how to access the various components of a SIP message, and how to create SIP messages with SDP content using the builder pattern.
+This directory contains a collection of basic examples demonstrating how to parse and work with SIP (Session Initiation Protocol) messages using the RVOIP SIP Core library.
 
-## What You'll Learn
+The examples are organized into modular components, each focusing on a specific aspect of SIP message handling:
 
-- How to parse raw SIP messages using the `parse_message` function
-- How to determine if a message is a request or response
-- How to access typed headers using the `typed_header` and `typed_headers` methods
-- How to extract parameters from headers (e.g., tags, branch parameters)
-- How to handle messages with multiple headers of the same type
-- How to create SIP messages with SDP content using the builder pattern
-- How to build and parse SDP sessions
+## Examples
 
-## Running the Example
+### 1. Parsing a SIP INVITE Request (`01_invite_request.rs`)
 
-```bash
-# Run the example
+This example demonstrates how to:
+- Parse a raw SIP INVITE request message
+- Access basic request information (method, URI, version)
+- Extract and work with typed headers (From, To, Contact)
+- Access header parameters (tags, branch identifiers)
+
+### 2. Parsing a SIP Response (`02_sip_response.rs`)
+
+This example shows how to:
+- Parse a SIP 200 OK response
+- Access response status code and reason phrase
+- Determine which request the response is for using CSeq
+- Handle multiple Via headers in responses
+- Extract tag parameters from headers
+
+### 3. Parsing Messages with Multiple Headers (`03_multiple_headers.rs`)
+
+This example covers:
+- Handling messages with multiple instances of the same header (Record-Route)
+- Iterating through header collections
+- Working with header parameters (loose routing)
+- Different ways to access headers (by type or by name)
+
+### 4. Working with SDP Content (`04_sdp_builder.rs`)
+
+This example demonstrates:
+- Creating SIP messages with SDP content using the builder pattern
+- Building SDP sessions with various attributes
+- Generating INVITE requests and responses with SDP bodies
+- Parsing SDP content from message bodies
+
+## Running the Examples
+
+You can run these examples individually or collectively using the interactive menu:
+
+```
 cargo run --example 01_basic_parsing
-
-# Run with debug logs for more detail
-RUST_LOG=debug cargo run --example 01_basic_parsing
 ```
 
-## Code Walkthrough
+This will present a menu that allows you to:
+1. Run any individual example
+2. Run all examples sequentially
+3. Exit the program
 
-The example is divided into four parts:
+To run a specific example directly, use:
 
-1. **Parsing a SIP INVITE Request**
-   - Demonstrates parsing a basic SIP INVITE request
-   - Shows how to access common headers like From, To, Contact, and Via
-   - Extracts the tag from the From header and the branch parameter from Via
+```
+cargo run --example <example_name>
+```
 
-2. **Parsing a SIP Response**
-   - Shows how to parse a 200 OK response
-   - Demonstrates accessing status code and reason phrase
-   - Handles multiple Via headers which are common in responses
-   - Checks for the To tag which is important for dialog establishment
+For instance:
 
-3. **Handling Multiple Headers**
-   - Shows how to work with multiple headers of the same type (Record-Route)
-   - Demonstrates iterating through headers and checking for parameters
-   - Shows alternative ways to access headers (by name vs. by type)
+```
+cargo run --example 01_invite_request
+```
 
-4. **Creating SIP Messages with SDP Content**
-   - Demonstrates how to use the builder pattern to create SIP messages
-   - Shows how to build SDP sessions with the SdpBuilder
-   - Illustrates how to attach SDP content to SIP messages
-   - Shows how to parse SDP from a SIP message body
+### Tracing Output
 
-## Key Concepts
+All examples are set up to display informational tracing messages by default. You can adjust the tracing level by setting the `RUST_LOG` environment variable:
 
-### Message Types
+```
+# Display all debug messages (more verbose)
+RUST_LOG=debug cargo run --example 01_invite_request
 
-SIP defines two main message types:
-- **Requests**: Used to initiate actions (INVITE, BYE, ACK, etc.)
-- **Responses**: Used to reply to requests (200 OK, 404 Not Found, etc.)
+# Display only warnings and errors
+RUST_LOG=warn cargo run --example 01_invite_request
+```
 
-### Important Headers
+Available logging levels from most to least verbose are: `trace`, `debug`, `info`, `warn`, `error`.
 
-- **From**: Identifies the initiator of the request
-- **To**: Identifies the intended recipient of the request
-- **Via**: Shows the path taken by the request so far
-- **CSeq**: Contains a sequence number and method name for request matching
-- **Call-ID**: Unique identifier for the call
-- **Contact**: Contains a URI for direct communication
-- **Record-Route**: Used by proxies to stay in the signaling path
-- **Content-Type**: Specifies the type of the message body (e.g., application/sdp)
+## Learning Path
 
-### SDP Integration
+These examples are designed to be followed sequentially, introducing SIP concepts gradually:
 
-SDP (Session Description Protocol) is commonly used with SIP for describing media sessions. Key concepts include:
+1. Start with basic request parsing to understand the fundamentals
+2. Move to response parsing to see how SIP transactions work
+3. Learn how to handle multiple headers for more complex scenarios
+4. Finally, explore SDP integration for media session negotiation
 
-- **SdpBuilder**: Fluent API for creating SDP sessions
-- **SDP Session Structure**: v=, o=, s=, c=, t=, m= lines and their meanings
-- **Media Descriptions**: Define the type, port, protocol, and formats for each media stream
-- **Media Attributes**: Additional information about media (rtpmap, fmtp, direction, etc.)
-- **Content Integration**: How to attach SDP to SIP messages using Content-Type headers
-
-### Next Steps
-
-Once you're comfortable with parsing SIP messages and creating them with SDP content, you can move on to more advanced examples that demonstrate dialog management, transactions, and full call flows. 
+Each example is heavily commented to explain what's happening at each step. 
