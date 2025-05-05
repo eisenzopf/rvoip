@@ -241,15 +241,31 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                 
                 // Check for recursive descent (..)
                 if chars.peek() == Some(&'.') {
-                    chars.next();
-                    if let Some(next_char) = chars.next() {
-                        if next_char == '[' {
-                            in_brackets = true;
-                            current = String::new();
-                        } else {
-                            current.push(next_char);
-                            parts.push(QueryPart::RecursiveDescent(current));
-                            current = String::new();
+                    chars.next(); // Consume the second dot
+                    
+                    // For recursive descent, collect the entire field name after the double dots
+                    let mut field_name = String::new();
+                    
+                    // Read until next . or [ or end of string
+                    while let Some(&next_char) = chars.peek() {
+                        if next_char == '.' || next_char == '[' {
+                            break;
+                        }
+                        field_name.push(chars.next().unwrap());
+                    }
+                    
+                    if !field_name.is_empty() {
+                        parts.push(QueryPart::RecursiveDescent(field_name));
+                    } else {
+                        // If nothing follows .., prepare for a field name in the next iteration
+                        // e.g., $..field would be [Root, RecursiveDescent("field")]
+                        current = String::new();
+                        if let Some(&next_char) = chars.peek() {
+                            if next_char == '[' {
+                                in_brackets = true;
+                                chars.next(); // Consume the [
+                                // Handle bracket parsing separately
+                            }
                         }
                     }
                 }
