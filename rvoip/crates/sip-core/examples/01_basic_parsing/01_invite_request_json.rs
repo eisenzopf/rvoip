@@ -44,97 +44,99 @@ fn main() {
         // ---------- Using JSON accessors ----------
         info!("\n---------- Using JSON accessors ----------");
         
-        // Getting the method - store the value directly
-        let method = request.path()
-            .field("method")
-            .value()
-            .as_str()
-            .map(String::from)
+        // Extract basic information using the simpler path API
+        let method = request.path("method")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
         info!("Method (JSON): {}", method);
         
-        // Getting From header values using specialized accessors
-        // Notice we don't need to know the position - the from() method finds it for us
-        let value = request.path().headers().from().display_name().value();
-        let from_display_name = value.as_str()
-            .map(String::from)
+        // Explore the headers to find their structure
+        if let Some(headers) = request.path("headers") {
+            if let Some(headers_array) = headers.as_array() {
+                info!("Found {} headers in the message", headers_array.len());
+                
+                // Print all header names to help understand the structure
+                for (i, header) in headers_array.iter().enumerate() {
+                    if let Some(obj) = header.as_object() {
+                        let unknown = String::from("unknown");
+                        let header_name = obj.keys().next().unwrap_or(&unknown);
+                        info!("Header at index {}: {}", i, header_name);
+                    }
+                }
+            }
+        }
+
+        // ---------- Direct header access (enhanced path parser) ----------
+        info!("\n---------- Direct header access (enhanced path parser) ----------");
+        
+        // With the enhanced path parser, we can now use these simpler paths:
+        
+        // Extract From header information
+        let from_display_name = request.path("headers.From.display_name")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().from().uri().field("user").value();
-        let from_user = value.as_str()
-            .map(String::from)
+        let from_user = request.path("headers.From.uri.user")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().from().uri().field("host").field("Domain").value();
-        let from_host = value.as_str()
-            .map(String::from)
+        let from_host = request.path("headers.From.uri.host.Domain")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().from().params().index(0).field("Tag").value();
-        let from_tag = value.as_str()
-            .map(String::from)
+        let from_tag = request.path("headers.From.params[0].Tag")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
         
         info!("From (JSON): {} <sip:{}@{}>", from_display_name, from_user, from_host);
         info!("From tag (JSON): {}", from_tag);
         
-        // Alternatively, we could access the tag directly using the tag() helper method:
-        let value = request.path().headers().from().tag().value();
-        let alt_from_tag = value.as_str()
-            .map(String::from)
-            .unwrap_or_else(|| String::from("(none)"));
-        info!("From tag (alternative): {}", alt_from_tag);
-        
-        // Getting To header values using specialized accessors
-        let value = request.path().headers().to().display_name().value();
-        let to_display_name = value.as_str()
-            .map(String::from)
+        // Extract To header information
+        let to_display_name = request.path("headers.To.display_name")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().to().uri().field("user").value();
-        let to_user = value.as_str()
-            .map(String::from)
+        let to_user = request.path("headers.To.uri.user")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().to().uri().field("host").field("Domain").value();
-        let to_host = value.as_str()
-            .map(String::from)
+        let to_host = request.path("headers.To.uri.host.Domain")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
         
         info!("To (JSON): {} <sip:{}@{}>", to_display_name, to_user, to_host);
         
-        // Getting Via header values using specialized accessors
-        let value = request.path().headers().via().index(0).field("sent_by_host").field("Domain").value();
-        let via_host = value.as_str()
-            .map(String::from)
+        // Extract Via header information
+        let via_host = request.path("headers.Via[0].sent_by_host.Domain")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().via().index(0).field("sent_protocol").field("transport").value();
-        let via_transport = value.as_str()
-            .map(String::from)
+        let via_transport = request.path("headers.Via[0].sent_protocol.transport")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        // Using branch() helper method instead of manual path traversal
-        let value = request.path().headers().via().index(0).branch().value();
-        let via_branch = value.as_str()
-            .map(String::from)
+        let via_branch = request.path("headers.Via[0].params[0].Branch")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
         
         info!("Via (JSON): {}; transport={}; branch={}", via_host, via_transport, via_branch);
         
-        // Getting Contact header value using specialized accessors
-        // Note: The Params casing might need adjustment based on your codebase structure
-        let value = request.path().headers().field("Contact").index(0).field("Params").index(0).field("address").uri().field("user").value();
-        let contact_user = value.as_str()
-            .map(String::from)
+        // Extract Contact header information
+        let contact_user = request.path("headers.Contact[0].Params[0].address.uri.user")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
             
-        let value = request.path().headers().field("Contact").index(0).field("Params").index(0).field("address").uri().field("host").field("Domain").value();
-        let contact_host = value.as_str()
-            .map(String::from)
+        let contact_host = request.path("headers.Contact[0].Params[0].address.uri.host.Domain")
+            .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| String::from("(none)"));
         
         info!("Contact (JSON): <sip:{}@{}>", contact_user, contact_host);
+        
+        // Extra: Example of accessing other headers directly
+        let call_id = request.path("headers.CallId.value")
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| String::from("(none)"));
+        info!("Call-ID: {}", call_id);
         
         // ---------- JSON Query Example ----------
         info!("\n---------- JSON Query Example ----------");
@@ -147,4 +149,22 @@ fn main() {
     } else {
         panic!("Expected a request, got a response!");
     }
-} 
+}
+
+// Note: With the enhanced path parser, we no longer need this helper function
+// since we can access headers directly by name
+//
+// fn find_header_index<T: SipJsonExt>(sip_object: &T, header_name: &str) -> Option<usize> {
+//     if let Some(headers) = sip_object.path("headers") {
+//         if let Some(headers_array) = headers.as_array() {
+//             for (i, header) in headers_array.iter().enumerate() {
+//                 if let Some(obj) = header.as_object() {
+//                     if obj.contains_key(header_name) {
+//                         return Some(i);
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//     None
+// } 

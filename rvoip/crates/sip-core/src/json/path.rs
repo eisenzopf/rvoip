@@ -23,15 +23,49 @@ pub fn get_path<'a>(value: &'a SipValue, path: &str) -> Option<&'a SipValue> {
     for part in parts {
         match part {
             PathPart::Field(field) => {
+                // Case 1: Normal field access on an object
                 if let Some(obj) = current.as_object() {
                     if let Some(next) = obj.get(&field) {
                         current = next;
-                    } else {
-                        return None;
+                        continue;
                     }
-                } else {
-                    return None;
+                } 
+                
+                // Case 2: Field access on an array - try to find an object with matching key
+                // This enables paths like "headers.from.display_name" to work without indices
+                if let Some(arr) = current.as_array() {
+                    let mut found = false;
+                    for item in arr {
+                        if let Some(obj) = item.as_object() {
+                            // Handle SIP headers stored in the headers array
+                            // Check if the object has the field as a key (case-insensitive)
+                            if obj.contains_key(&field) || 
+                               obj.contains_key(&field.to_lowercase()) || 
+                               obj.contains_key(&capitalize(&field)) {
+                                
+                                // Get the actual key with correct case
+                                let actual_key = if obj.contains_key(&field) {
+                                    &field
+                                } else if obj.contains_key(&field.to_lowercase()) {
+                                    &field.to_lowercase()
+                                } else {
+                                    &capitalize(&field)
+                                };
+                                
+                                current = obj.get(actual_key).unwrap(); // Safe unwrap as we know it exists
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if found {
+                        continue;
+                    }
                 }
+                
+                // Not found in either way
+                return None;
             }
             PathPart::Index(idx) => {
                 if let Some(arr) = current.as_array() {
@@ -561,5 +595,14 @@ impl PathAccessor {
     /// Access the status field
     pub fn status(&mut self) -> &mut Self {
         self.field("status")
+    }
+}
+
+// Helper function to capitalize a string (first letter uppercase, rest lowercase)
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
 } 

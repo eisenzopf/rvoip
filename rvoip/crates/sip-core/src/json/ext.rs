@@ -17,8 +17,12 @@ pub trait SipJsonExt {
     /// Returns None if the path doesn't exist
     fn get_path(&self, path: impl AsRef<str>) -> SipValue;
     
+    /// Simple path accessor that returns an Option directly
+    /// Usage: let display_name = request.path("headers.from.display_name");
+    fn path(&self, path: impl AsRef<str>) -> Option<SipValue>;
+    
     /// Get a PathAccessor for chained access to fields
-    fn path(&self) -> PathAccessor;
+    fn path_accessor(&self) -> PathAccessor;
     
     /// Query for values using a JSONPath-like syntax
     fn query(&self, query_str: impl AsRef<str>) -> Vec<SipValue>;
@@ -92,7 +96,24 @@ where
         }
     }
     
-    fn path(&self) -> PathAccessor {
+    /// Simple path accessor that returns an Option directly
+    fn path(&self, path: impl AsRef<str>) -> Option<SipValue> {
+        // First convert to JSON
+        match self.to_sip_value() {
+            Ok(value) => {
+                // Empty path returns the full value
+                if path.as_ref().is_empty() {
+                    return Some(value);
+                }
+                
+                // Try to find the value at the given path
+                crate::json::path::get_path(&value, path.as_ref()).map(|v| v.clone())
+            },
+            Err(_) => None,
+        }
+    }
+    
+    fn path_accessor(&self) -> PathAccessor {
         // Convert to SipValue first
         match self.to_sip_value() {
             Ok(value) => PathAccessor::new(value),
