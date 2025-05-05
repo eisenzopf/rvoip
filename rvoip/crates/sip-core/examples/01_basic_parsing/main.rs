@@ -13,6 +13,7 @@ fn main() {
     loop {
         println!("\nSelect an example to run:");
         println!("1. Parsing a SIP INVITE request");
+        println!("1a. Parsing a SIP INVITE request (using JSON accessors)");
         println!("2. Parsing a SIP response");
         println!("3. Parsing a message with multiple headers");
         println!("4. Creating SIP messages with SDP content");
@@ -25,19 +26,21 @@ fn main() {
         let mut choice = String::new();
         io::stdin().read_line(&mut choice).expect("Failed to read input");
         
-        match choice.trim().parse::<u32>() {
-            Ok(1) => run_example("01_invite_request"),
-            Ok(2) => run_example("02_sip_response"),
-            Ok(3) => run_example("03_multiple_headers"),
-            Ok(4) => run_example("04_sdp_builder"),
-            Ok(5) => {
+        match choice.trim() {
+            "1" => run_example("01_invite_request"),
+            "1a" => run_example("01_invite_request_json"),
+            "2" => run_example("02_sip_response"),
+            "3" => run_example("03_multiple_headers"),
+            "4" => run_example("04_sdp_builder"),
+            "5" => {
                 println!("\nRunning all examples sequentially...\n");
                 run_example("01_invite_request");
+                run_example("01_invite_request_json");
                 run_example("02_sip_response");
                 run_example("03_multiple_headers");
                 run_example("04_sdp_builder");
             },
-            Ok(0) => {
+            "0" => {
                 println!("Exiting...");
                 break;
             },

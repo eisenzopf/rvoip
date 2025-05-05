@@ -14,6 +14,15 @@ This example demonstrates how to:
 - Extract and work with typed headers (From, To, Contact)
 - Access header parameters (tags, branch identifiers)
 
+### 1a. Parsing a SIP INVITE Request using JSON Accessors (`01_invite_request_json.rs`)
+
+This alternative example shows how to:
+- Parse a SIP INVITE request just like the first example
+- Access header fields using the JSON accessor API instead of typed headers
+- Use path-based access with strings like "headers.from.address.display_name"
+- Query for specific values across the entire message using JSONPath syntax
+- Chain path accessors for a more fluent API experience
+
 ### 2. Parsing a SIP Response (`02_sip_response.rs`)
 
 This example shows how to:
