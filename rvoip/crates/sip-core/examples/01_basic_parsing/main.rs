@@ -13,7 +13,8 @@ fn main() {
     loop {
         println!("\nSelect an example to run:");
         println!("1. Parsing a SIP INVITE request");
-        println!("1a. Parsing a SIP INVITE request (using JSON accessors)");
+        println!("1a. Parsing a SIP INVITE request (using path accessors)");
+        println!("1b. Parsing a SIP INVITE request (using query accessors)");
         println!("2. Parsing a SIP response");
         println!("3. Parsing a message with multiple headers");
         println!("4. Creating SIP messages with SDP content");
@@ -28,14 +29,16 @@ fn main() {
         
         match choice.trim() {
             "1" => run_example("01_invite_request"),
-            "1a" => run_example("01_invite_request_json"),
+            "1a" => run_example("01_invite_request_path"),
+            "1b" => run_example("01_invite_request_query"),
             "2" => run_example("02_sip_response"),
             "3" => run_example("03_multiple_headers"),
             "4" => run_example("04_sdp_builder"),
             "5" => {
                 println!("\nRunning all examples sequentially...\n");
                 run_example("01_invite_request");
-                run_example("01_invite_request_json");
+                run_example("01_invite_request_path");
+                run_example("01_invite_request_query");
                 run_example("02_sip_response");
                 run_example("03_multiple_headers");
                 run_example("04_sdp_builder");

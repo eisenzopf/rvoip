@@ -57,10 +57,6 @@ name = "01_invite_request"
 path = "examples/01_basic_parsing/01_invite_request.rs"
 
 [[example]]
-name = "01_invite_request_json"
-path = "examples/01_basic_parsing/01_invite_request_json.rs"
-
-[[example]]
 name = "02_sip_response"
 path = "examples/01_basic_parsing/02_sip_response.rs"
 
@@ -71,3 +67,11 @@ path = "examples/01_basic_parsing/03_multiple_headers.rs"
 [[example]]
 name = "04_sdp_builder"
 path = "examples/01_basic_parsing/04_sdp_builder.rs"
+
+[[example]]
+name = "01_invite_request_query"
+path = "examples/01_basic_parsing/01_invite_request_query.rs"
+
+[[example]]
+name = "01_invite_request_path"
+path = "examples/01_basic_parsing/01_invite_request_path.rs"
