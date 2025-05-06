@@ -55,6 +55,7 @@ pub mod content;
 pub mod call_id;
 pub mod in_reply_to;
 pub mod reply_to;
+pub mod from;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -82,6 +83,7 @@ pub use content::ContentBuilderExt;
 pub use call_id::CallIdBuilderExt;
 pub use in_reply_to::InReplyToBuilderExt;
 pub use reply_to::ReplyToBuilderExt;
+pub use from::FromBuilderExt;
 
 // Re-export header builder traits
 

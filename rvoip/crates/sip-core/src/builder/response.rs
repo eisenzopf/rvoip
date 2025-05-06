@@ -331,33 +331,9 @@ impl SimpleResponseBuilder {
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
     ///     .from("Alice", "sip:alice@example.com", Some("1928301774"));
     /// ```
-    pub fn from(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
-        match Uri::from_str(uri) {
-            Ok(uri) => {
-                let mut address = Address::new_with_display_name(display_name, uri);
-                
-                // Add tag if provided
-                if let Some(tag_value) = tag {
-                    address.params.push(Param::tag(tag_value));
-                }
-                
-                self.response = self.response.with_header(TypedHeader::From(From::new(address)));
-                self
-            },
-            Err(_) => {
-                // Best effort - if URI parsing fails, still try to continue with a simple string
-                let uri_str = uri.to_string();
-                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
-                
-                // Add tag if provided
-                if let Some(tag_value) = tag {
-                    address.params.push(Param::tag(tag_value));
-                }
-                
-                self.response = self.response.with_header(TypedHeader::From(From::new(address)));
-                self
-            }
-        }
+    pub fn from(self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        use crate::builder::headers::FromBuilderExt;
+        FromBuilderExt::from(self, display_name, uri, tag)
     }
     
     /// Add a To header with optional tag parameter
