@@ -603,26 +603,9 @@ impl SimpleRequestBuilder {
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .contact("sip:alice@192.168.1.1:5060", Some("Alice"));
     /// ```
-    pub fn contact(mut self, uri: &str, display_name: Option<&str>) -> Self {
-        match Uri::from_str(uri) {
-            Ok(uri) => {
-                // Create an address with or without display name
-                let address = match display_name {
-                    Some(name) => Address::new_with_display_name(name, uri),
-                    None => Address::new(uri)
-                };
-                
-                // Create a contact param with the address
-                let contact_param = ContactParamInfo { address };
-                let contact = Contact::new_params(vec![contact_param]);
-                
-                self.request = self.request.with_header(TypedHeader::Contact(contact));
-            },
-            Err(_) => {
-                // Silently fail - contact is not critical
-            }
-        }
-        self
+    pub fn contact(self, uri: &str, display_name: Option<&str>) -> Self {
+        use crate::builder::headers::ContactBuilderExt;
+        ContactBuilderExt::contact(self, uri, display_name)
     }
     
     /// Add a Content-Type header

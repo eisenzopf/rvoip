@@ -57,6 +57,7 @@ pub mod in_reply_to;
 pub mod reply_to;
 pub mod from;
 pub mod to;
+pub mod contact;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -86,6 +87,7 @@ pub use in_reply_to::InReplyToBuilderExt;
 pub use reply_to::ReplyToBuilderExt;
 pub use from::FromBuilderExt;
 pub use to::ToBuilderExt;
+pub use contact::ContactBuilderExt;
 
 // Re-export header builder traits
 
