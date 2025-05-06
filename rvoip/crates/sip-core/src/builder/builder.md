@@ -28,23 +28,23 @@ when possible, with runtime validation for more complex scenarios.
 The builder supports the following SIP headers:
 
 - **Core Headers**
-  - [`From`][headers::from], [`To`][headers::to], [`Contact`][headers::contact], [`Call-ID`][headers::call_id], [`CSeq`][headers::cseq], [`Via`][headers::via], [`Max-Forwards`][headers::max_forwards]
+  - [`From`][headers::from::FromBuilderExt], [`To`][headers::to::ToBuilderExt], [`Contact`][headers::contact::ContactBuilderExt], [`Call-ID`][headers::call_id::CallIdBuilderExt], [`CSeq`][headers::cseq::CSeqBuilderExt], [`Via`][headers::via::ViaBuilderExt], [`Max-Forwards`][headers::max_forwards::MaxForwardsBuilderExt]
 
 - **Content-Related Headers**
-  - [`Content-Type`][headers::content], [`Content-Length`][headers::content], [`Content-Encoding`][headers::content_encoding], [`Content-Language`][headers::content_language], [`Content-Disposition`][headers::content_disposition]
-  - [`Accept`][headers::accept], [`Accept-Encoding`][headers::accept_encoding], [`Accept-Language`][headers::accept_language]
+  - [`Content-Type`][headers::content_type::ContentTypeBuilderExt], [`Content-Length`][headers::content_length::ContentLengthBuilderExt], [`Content-Encoding`][headers::content_encoding::ContentEncodingExt], [`Content-Language`][headers::content_language::ContentLanguageExt], [`Content-Disposition`][headers::content_disposition::ContentDispositionExt]
+  - [`Accept`][headers::accept::AcceptExt], [`Accept-Encoding`][headers::accept_encoding::AcceptEncodingExt], [`Accept-Language`][headers::accept_language::AcceptLanguageExt]
 
 - **Authentication Headers**
-  - [`Authorization`][headers::authorization], [`WWW-Authenticate`][headers::www_authenticate], [`Proxy-Authenticate`][headers::proxy_authenticate], [`Proxy-Authorization`][headers::proxy_authorization], [`Authentication-Info`][headers::authentication_info]
+  - [`Authorization`][headers::authorization::AuthorizationExt], [`WWW-Authenticate`][headers::www_authenticate::WwwAuthenticateExt], [`Proxy-Authenticate`][headers::proxy_authenticate::ProxyAuthenticateExt], [`Proxy-Authorization`][headers::proxy_authorization::ProxyAuthorizationExt], [`Authentication-Info`][headers::authentication_info::AuthenticationInfoExt]
 
 - **Routing Headers**
-  - [`Route`][headers::route], [`Record-Route`][headers::record_route], [`Path`][headers::path]
+  - [`Route`][headers::route::RouteBuilderExt], [`Record-Route`][headers::record_route::RecordRouteBuilderExt], [`Path`][headers::path::PathBuilderExt]
 
 - **Feature Headers**
-  - [`Allow`][headers::allow], [`Supported`][headers::supported], [`Unsupported`][headers::unsupported], [`Require`][headers::require], [`Proxy-Require`][headers::proxy_require]
+  - [`Allow`][headers::allow::AllowBuilderExt], [`Supported`][headers::supported::SupportedBuilderExt], [`Unsupported`][headers::unsupported::UnsupportedBuilderExt], [`Require`][headers::require::RequireBuilderExt], [`Proxy-Require`][headers::proxy_require::ProxyRequireBuilderExt]
 
 - **Miscellaneous Headers**
-  - [`User-Agent`][headers::user_agent], [`Server`][headers::server], [`Call-Info`][headers::call_info], [`In-Reply-To`][headers::in_reply_to], [`Reply-To`][headers::reply_to]
+  - [`User-Agent`][headers::user_agent::UserAgentBuilderExt], [`Server`][headers::server::ServerBuilderExt], [`Call-Info`][headers::call_info::CallInfoBuilderExt], [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt], [`Reply-To`][headers::reply_to::ReplyToBuilderExt]
 
 ## Recommendations
 
@@ -645,35 +645,37 @@ let ok_bye = SimpleResponseBuilder::ok()
     .build();
 ```
 
-[headers::from]: crate::builder::headers
-[headers::to]: crate::builder::headers
-[headers::contact]: crate::builder::headers
-[headers::call_id]: crate::builder::headers::call_id
-[headers::cseq]: crate::builder::headers
-[headers::via]: crate::builder::headers
-[headers::max_forwards]: crate::builder::headers
-[headers::content]: crate::builder::headers::content
-[headers::content_encoding]: crate::builder::headers::content_encoding
-[headers::content_language]: crate::builder::headers::content_language
-[headers::content_disposition]: crate::builder::headers::content_disposition
-[headers::accept]: crate::builder::headers::accept
-[headers::accept_encoding]: crate::builder::headers::accept_encoding
-[headers::accept_language]: crate::builder::headers::accept_language
-[headers::authorization]: crate::builder::headers::authorization
-[headers::www_authenticate]: crate::builder::headers::www_authenticate
-[headers::proxy_authenticate]: crate::builder::headers::proxy_authenticate
-[headers::proxy_authorization]: crate::builder::headers::proxy_authorization
-[headers::authentication_info]: crate::builder::headers::authentication_info
-[headers::route]: crate::builder::headers::route
-[headers::record_route]: crate::builder::headers::record_route
-[headers::path]: crate::builder::headers::path
-[headers::allow]: crate::builder::headers::allow
-[headers::supported]: crate::builder::headers::supported
-[headers::unsupported]: crate::builder::headers::unsupported
-[headers::require]: crate::builder::headers::require
-[headers::proxy_require]: crate::builder::headers::proxy_require
-[headers::user_agent]: crate::builder::headers::user_agent
-[headers::server]: crate::builder::headers::server
-[headers::call_info]: crate::builder::headers
-[headers::in_reply_to]: crate::builder::headers::in_reply_to
-[headers::reply_to]: crate::builder::headers::reply_to 
+[headers::from::FromBuilderExt]: crate::builder::headers::from::FromBuilderExt
+[headers::to::ToBuilderExt]: crate::builder::headers::to::ToBuilderExt
+[headers::contact::ContactBuilderExt]: crate::builder::headers::contact::ContactBuilderExt
+[headers::call_id::CallIdBuilderExt]: crate::builder::headers::call_id::CallIdBuilderExt
+[headers::cseq::CSeqBuilderExt]: crate::builder::headers::cseq::CSeqBuilderExt
+[headers::via::ViaBuilderExt]: crate::builder::headers::via::ViaBuilderExt
+[headers::max_forwards::MaxForwardsBuilderExt]: crate::builder::headers::max_forwards::MaxForwardsBuilderExt
+[headers::content::ContentBuilderExt]: crate::builder::headers::content::ContentBuilderExt
+[headers::content_type::ContentTypeBuilderExt]: crate::builder::headers::content_type::ContentTypeBuilderExt
+[headers::content_length::ContentLengthBuilderExt]: crate::builder::headers::content_length::ContentLengthBuilderExt
+[headers::content_encoding::ContentEncodingExt]: crate::builder::headers::content_encoding::ContentEncodingExt
+[headers::content_language::ContentLanguageExt]: crate::builder::headers::content_language::ContentLanguageExt
+[headers::content_disposition::ContentDispositionExt]: crate::builder::headers::content_disposition::ContentDispositionExt
+[headers::accept::AcceptExt]: crate::builder::headers::accept::AcceptExt
+[headers::accept_encoding::AcceptEncodingExt]: crate::builder::headers::accept_encoding::AcceptEncodingExt
+[headers::accept_language::AcceptLanguageExt]: crate::builder::headers::accept_language::AcceptLanguageExt
+[headers::authorization::AuthorizationExt]: crate::builder::headers::authorization::AuthorizationExt
+[headers::www_authenticate::WwwAuthenticateExt]: crate::builder::headers::www_authenticate::WwwAuthenticateExt
+[headers::proxy_authenticate::ProxyAuthenticateExt]: crate::builder::headers::proxy_authenticate::ProxyAuthenticateExt
+[headers::proxy_authorization::ProxyAuthorizationExt]: crate::builder::headers::proxy_authorization::ProxyAuthorizationExt
+[headers::authentication_info::AuthenticationInfoExt]: crate::builder::headers::authentication_info::AuthenticationInfoExt
+[headers::route::RouteBuilderExt]: crate::builder::headers::route::RouteBuilderExt
+[headers::record_route::RecordRouteBuilderExt]: crate::builder::headers::record_route::RecordRouteBuilderExt
+[headers::path::PathBuilderExt]: crate::builder::headers::path::PathBuilderExt
+[headers::allow::AllowBuilderExt]: crate::builder::headers::allow::AllowBuilderExt
+[headers::supported::SupportedBuilderExt]: crate::builder::headers::supported::SupportedBuilderExt
+[headers::unsupported::UnsupportedBuilderExt]: crate::builder::headers::unsupported::UnsupportedBuilderExt
+[headers::require::RequireBuilderExt]: crate::builder::headers::require::RequireBuilderExt
+[headers::proxy_require::ProxyRequireBuilderExt]: crate::builder::headers::proxy_require::ProxyRequireBuilderExt
+[headers::user_agent::UserAgentBuilderExt]: crate::builder::headers::user_agent::UserAgentBuilderExt
+[headers::server::ServerBuilderExt]: crate::builder::headers::server::ServerBuilderExt
+[headers::call_info::CallInfoBuilderExt]: crate::builder::headers::call_info::CallInfoBuilderExt
+[headers::in_reply_to::InReplyToBuilderExt]: crate::builder::headers::in_reply_to::InReplyToBuilderExt
+[headers::reply_to::ReplyToBuilderExt]: crate::builder::headers::reply_to::ReplyToBuilderExt 

@@ -52,6 +52,7 @@ pub mod server;
 pub mod path;
 pub mod proxy_require;
 pub mod content;
+pub mod content_type;
 pub mod call_id;
 pub mod in_reply_to;
 pub mod reply_to;
@@ -61,6 +62,8 @@ pub mod contact;
 pub mod via;
 pub mod cseq;
 pub mod max_forwards;
+pub mod call_info;
+pub mod content_length;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -85,6 +88,7 @@ pub use server::ServerBuilderExt;
 pub use path::PathBuilderExt;
 pub use proxy_require::ProxyRequireBuilderExt;
 pub use content::ContentBuilderExt;
+pub use content_type::ContentTypeBuilderExt;
 pub use call_id::CallIdBuilderExt;
 pub use in_reply_to::InReplyToBuilderExt;
 pub use reply_to::ReplyToBuilderExt;
@@ -94,6 +98,8 @@ pub use contact::ContactBuilderExt;
 pub use via::ViaBuilderExt;
 pub use cseq::CSeqBuilderExt;
 pub use max_forwards::MaxForwardsBuilderExt;
+pub use call_info::CallInfoBuilderExt;
+pub use content_length::ContentLengthBuilderExt;
 
 // Re-export header builder traits
 
