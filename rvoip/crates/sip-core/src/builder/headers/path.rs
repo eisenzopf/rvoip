@@ -8,13 +8,13 @@
 //! use rvoip_sip_core::prelude::*;
 //! 
 //! // Create a request with a Path header containing a single URI
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
-//!     .path("sip:proxy.example.com;lr")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+//!     .path("sip:proxy.example.com;lr").unwrap()
 //!     .build();
 //! 
 //! // Create a request with a Path header containing multiple URIs
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
-//!     .path_addresses(vec!["sip:p1.example.com;lr", "sip:p2.example.com;lr"])
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+//!     .path_addresses(vec!["sip:p1.example.com;lr", "sip:p2.example.com;lr"]).unwrap()
 //!     .build();
 //! 
 //! // Check the Path header on a response

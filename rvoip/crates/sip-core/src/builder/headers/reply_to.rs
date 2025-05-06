@@ -8,16 +8,17 @@
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::builder::headers::ReplyToBuilderExt;
 //! use std::str::FromStr;
 //!
 //! // Create a request with a Reply-To header using a string URI
-//! let request = RequestBuilder::new(Method::Invite, "sip:example.com")
-//!     .reply_to("sip:support@example.com")
+//! let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+//!     .reply_to("sip:support@example.com").unwrap()
 //!     .build();
 //!
 //! // Create a request with a Reply-To header with a display name
-//! let request = RequestBuilder::new(Method::Invite, "sip:example.com")
-//!     .reply_to_with_display_name("Support Team", "sip:support@example.com")
+//! let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+//!     .reply_to_with_display_name("Support Team", "sip:support@example.com").unwrap()
 //!     .build();
 //! ```
 

@@ -9,7 +9,7 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a request with a Digest Authorization
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .authorization_digest(
 //!         "alice",                 // username
 //!         "sip.example.com",       // realm
@@ -26,7 +26,7 @@
 //!     .build();
 //!
 //! // Create a request with a Basic Authorization
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .authorization_basic("alice", "password123")
 //!     .build();
 //! ```
@@ -79,7 +79,7 @@ pub trait AuthorizationExt {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let request = RequestBuilder::new(Method::Register, "sip:example.com")
+    /// let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
     ///     .authorization_digest(
     ///         "alice",
     ///         "sip.example.com",
@@ -129,7 +129,7 @@ pub trait AuthorizationExt {
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let request = RequestBuilder::new(Method::Register, "sip:example.com")
+    /// let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
     ///     .authorization_basic("alice", "password123")
     ///     .build();
     /// ```
@@ -250,8 +250,7 @@ mod tests {
     #[test]
     fn test_authorization_digest() {
         // Create a request with a Digest Authorization
-        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
-            .expect("Failed to create request builder")
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
             .authorization_digest(
                 "alice",
                 "sip.example.com",
@@ -328,8 +327,7 @@ mod tests {
     #[test]
     fn test_authorization_basic() {
         // Create a request with a Basic Authorization
-        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
-            .expect("Failed to create request builder")
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
             .authorization_basic("alice", "password123")
             .build();
             

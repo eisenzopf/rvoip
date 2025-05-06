@@ -8,12 +8,12 @@
 //! use rvoip_sip_core::prelude::*;
 //! 
 //! // Create a request with a Proxy-Require header containing a single option tag
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .proxy_require_tag("sec-agree")
 //!     .build();
 //! 
 //! // Create a request with a Proxy-Require header containing multiple option tags
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .proxy_require_tags(vec!["sec-agree", "precondition"])
 //!     .build();
 //! ```

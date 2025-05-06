@@ -10,12 +10,12 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a request with a single In-Reply-To Call-ID
-//! let request = RequestBuilder::new(Method::Invite, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
 //!     .in_reply_to("70710@saturn.bell-tel.com")
 //!     .build();
 //!
 //! // Create a request with multiple In-Reply-To Call-IDs
-//! let request = RequestBuilder::new(Method::Invite, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
 //!     .in_reply_to_multiple(vec!["70710@saturn.bell-tel.com", "17320@venus.bell-tel.com"])
 //!     .build();
 //! ```

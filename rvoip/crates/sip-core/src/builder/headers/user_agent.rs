@@ -8,12 +8,12 @@
 //! use rvoip_sip_core::prelude::*;
 //! 
 //! // Create a request with a simple User-Agent header
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .user_agent("RVOIP/1.0")
 //!     .build();
 //! 
 //! // Create a request with a more detailed User-Agent header
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .user_agent_products(vec!["RVOIP/1.0", "Rust/1.68", "(Linux x86_64)"])
 //!     .build();
 //! 

@@ -19,6 +19,7 @@ use crate::types::{
     TypedHeader,
     Param,
     max_forwards::MaxForwards,
+    user_agent::UserAgent,
 };
 
 /// The SimpleRequestBuilder provides a streamlined approach to creating SIP request messages.
@@ -722,10 +723,11 @@ impl SimpleRequestBuilder {
     /// use rvoip_sip_core::types::{Method, TypedHeader};
     /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
-    /// let user_agent = UserAgent::new();  // Create empty User-Agent header
+    /// let user_agent = UserAgent::single("RVOIP/1.0");
+    /// let products = vec!["RVOIP/1.0".to_string()]; // Convert to Vec<String> for TypedHeader::UserAgent
     /// 
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
-    ///     .header(TypedHeader::UserAgent(user_agent));
+    ///     .header(TypedHeader::UserAgent(products));
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
         self.request = self.request.with_header(header);

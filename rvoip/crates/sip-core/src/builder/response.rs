@@ -46,6 +46,7 @@ use crate::types::{
 ///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::types::Method;
 ///
 /// // 200 OK response
 /// let ok = SimpleResponseBuilder::ok()
@@ -610,12 +611,11 @@ impl SimpleResponseBuilder {
     /// use rvoip_sip_core::types::{StatusCode, TypedHeader};
     /// use rvoip_sip_core::types::server::ServerInfo;
     ///
-    /// let server = ServerInfo::new()
-    ///     .with_product("SIPCore", Some("2.1"))
-    ///     .with_comment("High Performance Edition");
+    /// // Create a vector of server product tokens
+    /// let server_products = vec!["SIPCore/2.1".to_string(), "(High Performance Edition)".to_string()];
     ///
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
-    ///     .header(TypedHeader::Server(server));
+    ///     .header(TypedHeader::Server(server_products));
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
         self.response = self.response.with_header(header);

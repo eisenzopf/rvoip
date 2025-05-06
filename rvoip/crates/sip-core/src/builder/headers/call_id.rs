@@ -10,17 +10,17 @@
 //! use rvoip_sip_core::prelude::*;
 //!
 //! // Create a request with a custom Call-ID
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .call_id_header("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com")
 //!     .build();
 //!
 //! // Create a request with a random Call-ID
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .random_call_id()
 //!     .build();
 //!
 //! // Create a request with a random Call-ID including host
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com")
+//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .random_call_id_with_host("example.com")
 //!     .build();
 //! ```
