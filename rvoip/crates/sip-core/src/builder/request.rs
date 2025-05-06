@@ -443,33 +443,9 @@ impl SimpleRequestBuilder {
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .to("Bob", "sip:bob@example.com", None);
     /// ```
-    pub fn to(mut self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
-        match Uri::from_str(uri) {
-            Ok(uri) => {
-                let mut address = Address::new_with_display_name(display_name, uri);
-                
-                // Add tag if provided
-                if let Some(tag_value) = tag {
-                    address.params.push(Param::tag(tag_value));
-                }
-                
-                self.request = self.request.with_header(TypedHeader::To(To::new(address)));
-                self
-            },
-            Err(_) => {
-                // Best effort - if URI parsing fails, still try to continue with a simple string
-                let uri_str = uri.to_string();
-                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
-                
-                // Add tag if provided
-                if let Some(tag_value) = tag {
-                    address.params.push(Param::tag(tag_value));
-                }
-                
-                self.request = self.request.with_header(TypedHeader::To(To::new(address)));
-                self
-            }
-        }
+    pub fn to(self, display_name: &str, uri: &str, tag: Option<&str>) -> Self {
+        use crate::builder::headers::ToBuilderExt;
+        ToBuilderExt::to(self, display_name, uri, tag)
     }
     
     /// Add a Call-ID header
