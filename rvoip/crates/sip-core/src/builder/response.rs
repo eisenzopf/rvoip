@@ -409,11 +409,9 @@ impl SimpleResponseBuilder {
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
     ///     .cseq(1, Method::Invite);
     /// ```
-    pub fn cseq(mut self, seq: u32, method: Method) -> Self {
-        self.response = self.response.with_header(
-            TypedHeader::CSeq(CSeq::new(seq, method))
-        );
-        self
+    pub fn cseq(self, seq: u32, method: Method) -> Self {
+        use crate::builder::headers::CSeqBuilderExt;
+        CSeqBuilderExt::cseq_with_method(self, seq, method)
     }
     
     /// Add a Via header with optional branch parameter

@@ -394,6 +394,14 @@ impl SimpleRequestBuilder {
         Self::new(Method::Cancel, uri)
     }
 
+    /// Get the method of the request being built
+    ///
+    /// # Returns
+    /// A reference to the Method
+    pub fn method(&self) -> &Method {
+        &self.request.method
+    }
+    
     /// Add a From header with optional tag parameter
     ///
     /// Creates and adds a From header as specified in [RFC 3261 Section 20.20](https://datatracker.ietf.org/doc/html/rfc3261#section-20.20).
@@ -493,12 +501,9 @@ impl SimpleRequestBuilder {
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .cseq(1);
     /// ```
-    pub fn cseq(mut self, seq: u32) -> Self {
-        let method = self.request.method.clone();
-        self.request = self.request.with_header(
-            TypedHeader::CSeq(CSeq::new(seq, method))
-        );
-        self
+    pub fn cseq(self, seq: u32) -> Self {
+        use crate::builder::headers::CSeqBuilderExt;
+        CSeqBuilderExt::cseq(self, seq)
     }
     
     /// Add a Via header with optional branch parameter

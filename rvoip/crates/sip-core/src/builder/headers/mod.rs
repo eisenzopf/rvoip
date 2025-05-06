@@ -59,6 +59,7 @@ pub mod from;
 pub mod to;
 pub mod contact;
 pub mod via;
+pub mod cseq;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -90,6 +91,7 @@ pub use from::FromBuilderExt;
 pub use to::ToBuilderExt;
 pub use contact::ContactBuilderExt;
 pub use via::ViaBuilderExt;
+pub use cseq::CSeqBuilderExt;
 
 // Re-export header builder traits
 
