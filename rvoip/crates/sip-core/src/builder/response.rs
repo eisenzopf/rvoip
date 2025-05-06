@@ -383,9 +383,9 @@ impl SimpleResponseBuilder {
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
     ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@host.example.com");
     /// ```
-    pub fn call_id(mut self, call_id: &str) -> Self {
-        self.response = self.response.with_header(TypedHeader::CallId(CallId::new(call_id)));
-        self
+    pub fn call_id(self, call_id: &str) -> Self {
+        use crate::builder::headers::CallIdBuilderExt;
+        CallIdBuilderExt::call_id(self, call_id)
     }
     
     /// Add a CSeq header for responses (requires method)

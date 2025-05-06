@@ -476,9 +476,9 @@ impl SimpleRequestBuilder {
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@host.example.com");
     /// ```
-    pub fn call_id(mut self, call_id: &str) -> Self {
-        self.request = self.request.with_header(TypedHeader::CallId(CallId::new(call_id)));
-        self
+    pub fn call_id(self, call_id: &str) -> Self {
+        use crate::builder::headers::CallIdBuilderExt;
+        CallIdBuilderExt::call_id(self, call_id)
     }
     
     /// Add a CSeq header for requests
@@ -553,11 +553,9 @@ impl SimpleRequestBuilder {
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .max_forwards(70);
     /// ```
-    pub fn max_forwards(mut self, value: u32) -> Self {
-        self.request = self.request.with_header(
-            TypedHeader::MaxForwards(MaxForwards::new(value as u8))
-        );
-        self
+    pub fn max_forwards(self, value: u32) -> Self {
+        use crate::builder::headers::MaxForwardsBuilderExt;
+        MaxForwardsBuilderExt::max_forwards(self, value)
     }
     
     /// Add a Contact header
