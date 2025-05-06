@@ -1,6 +1,32 @@
-//! Content header builders
+//! Content body builders
 //!
-//! This module provides builder methods for content-related headers.
+//! This module provides builder methods for message body content in SIP messages.
+//! It builds on top of the ContentType header functionality to provide methods for
+//! setting the message body along with the appropriate Content-Type header.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::builder::SimpleRequestBuilder;
+//! use rvoip_sip_core::builder::headers::ContentBuilderExt;
+//! use rvoip_sip_core::types::{Method, sdp::SdpSession};
+//! use std::str::FromStr;
+//!
+//! // Parse an SDP session
+//! let sdp = SdpSession::from_str("\
+//! v=0\r\n\
+//! o=alice 2890844526 2890844526 IN IP4 alice.example.org\r\n\
+//! s=SIP Call\r\n\
+//! c=IN IP4 alice.example.org\r\n\
+//! t=0 0\r\n\
+//! m=audio 49170 RTP/AVP 0\r\n\
+//! a=rtpmap:0 PCMU/8000\r\n").unwrap();
+//!
+//! // Create a request with SDP body
+//! let request = SimpleRequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+//!     .sdp_body(&sdp)
+//!     .build();
+//! ```
 
 use crate::error::{Error, Result};
 use crate::types::{
@@ -19,16 +45,68 @@ use crate::sdp::{SdpBuilder, integration};
 use bytes::Bytes;
 use crate::builder::headers::content_type::ContentTypeBuilderExt;
 
-/// Extension trait that adds content-related building capabilities to request and response builders
+/// Extension trait that adds body content building capabilities to SIP message builders.
+///
+/// This trait extends the ContentTypeBuilderExt trait to provide methods for setting
+/// the message body content along with the appropriate Content-Type header.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::ContentBuilderExt;
+/// use rvoip_sip_core::types::{Method, sdp::SdpSession};
+/// use std::str::FromStr;
+///
+/// // Parse an SDP session
+/// let sdp = SdpSession::from_str("\
+/// v=0\r\n\
+/// o=alice 2890844526 2890844526 IN IP4 alice.example.org\r\n\
+/// s=SIP Call\r\n\
+/// c=IN IP4 alice.example.org\r\n\
+/// t=0 0\r\n\
+/// m=audio 49170 RTP/AVP 0\r\n\
+/// a=rtpmap:0 PCMU/8000\r\n").unwrap();
+///
+/// // Create a request with SDP body
+/// let request = SimpleRequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+///     .sdp_body(&sdp)
+///     .build();
+/// ```
 pub trait ContentBuilderExt: ContentTypeBuilderExt {
     /// Add an SDP session as the message body
     ///
     /// This method sets the Content-Type to application/sdp and adds the SDP session
-    /// as the message body.
+    /// as the message body. It automatically handles setting both the header and the body.
     ///
     /// # Parameters
     ///
     /// - `sdp`: The SDP session to add as the body
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::ContentBuilderExt;
+    /// use rvoip_sip_core::types::{Method, sdp::SdpSession};
+    /// use std::str::FromStr;
+    ///
+    /// let sdp = SdpSession::from_str("\
+    /// v=0\r\n\
+    /// o=alice 123 456 IN IP4 127.0.0.1\r\n\
+    /// s=Session\r\n\
+    /// c=IN IP4 127.0.0.1\r\n\
+    /// t=0 0\r\n\
+    /// m=audio 49170 RTP/AVP 0\r\n\
+    /// a=rtpmap:0 PCMU/8000\r\n").unwrap();
+    ///
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     .sdp_body(&sdp)
+    ///     .build();
+    /// ```
     fn sdp_body(self, sdp: &SdpSession) -> Self;
     
     // Note: The following methods are commented out because they require complex rebuilding

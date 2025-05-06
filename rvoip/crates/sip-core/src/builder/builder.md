@@ -33,6 +33,7 @@ The builder supports the following SIP headers:
 - **Content-Related Headers**
   - [`Content-Type`][headers::content_type::ContentTypeBuilderExt], [`Content-Length`][headers::content_length::ContentLengthBuilderExt], [`Content-Encoding`][headers::content_encoding::ContentEncodingExt], [`Content-Language`][headers::content_language::ContentLanguageExt], [`Content-Disposition`][headers::content_disposition::ContentDispositionExt]
   - [`Accept`][headers::accept::AcceptExt], [`Accept-Encoding`][headers::accept_encoding::AcceptEncodingExt], [`Accept-Language`][headers::accept_language::AcceptLanguageExt]
+  - [`Content`][headers::content::ContentBuilderExt] - For message body handling with appropriate Content-Type headers
 
 - **Authentication Headers**
   - [`Authorization`][headers::authorization::AuthorizationExt], [`WWW-Authenticate`][headers::www_authenticate::WwwAuthenticateExt], [`Proxy-Authenticate`][headers::proxy_authenticate::ProxyAuthenticateExt], [`Proxy-Authorization`][headers::proxy_authorization::ProxyAuthorizationExt], [`Authentication-Info`][headers::authentication_info::AuthenticationInfoExt]
@@ -77,8 +78,7 @@ The builder supports the following SIP headers:
    let sdp = SdpSession::from_str("v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n").unwrap();
    
    let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
-       .content_type_sdp()
-       .sdp_body(&sdp)
+       .sdp_body(&sdp)  // Sets Content-Type to application/sdp and adds the SDP body
        .build();
    ```
 
@@ -158,7 +158,7 @@ let response = SimpleResponseBuilder::new(StatusCode::Ok, None)
 
 ```rust
 use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::builder::headers::ContentBuilderExt;
+use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
 use rvoip_sip_core::builder::headers::ContentEncodingExt;
 use rvoip_sip_core::builder::headers::ContentLanguageExt;
 use rvoip_sip_core::builder::headers::AcceptExt;
@@ -209,7 +209,36 @@ let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     .accept_language("fr", None)
     
     // Set body and Content-Length is managed automatically
-    .sdp_body(&sdp)
+    .body("v=0\r\no=alice...") // Raw body as string
+    .build();
+```
+
+#### Using ContentBuilderExt for SDP Bodies
+
+```rust
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::builder::headers::ContentBuilderExt;
+use rvoip_sip_core::types::sdp::SdpSession;
+use std::str::FromStr;
+
+// Parse an SDP session
+let sdp = SdpSession::from_str("\
+v=0\r
+o=alice 2890844526 2890844526 IN IP4 alice.example.org\r
+s=SIP Call\r
+c=IN IP4 alice.example.org\r
+t=0 0\r
+m=audio 49170 RTP/AVP 0\r
+a=rtpmap:0 PCMU/8000\r
+").unwrap();
+
+// Create a request with SDP body
+// This automatically sets Content-Type: application/sdp and the body
+let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    .from("Alice", "sip:alice@example.com", Some("tag1234"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("sdp-body-example")
+    .sdp_body(&sdp)  // This handles both Content-Type and body
     .build();
 ```
 
@@ -243,17 +272,14 @@ let response = SimpleResponseBuilder::new(StatusCode::Ok, None)
     .call_id("content-test-123")
     .cseq(1, Method::Invite)
     
-    // Content-Type set via convenient extension method
-    .content_type_sdp()
+    // Add SDP body with one method
+    .sdp_body(&sdp)  // Sets Content-Type and body together
     
     // Content-Encoding header
     .content_encoding("identity")
     
     // Content-Language header
     .content_language("en")
-    
-    // Set body and Content-Length is managed automatically
-    .sdp_body(&sdp)
     .build();
 ```
 
