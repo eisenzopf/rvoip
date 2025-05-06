@@ -438,36 +438,9 @@ impl SimpleResponseBuilder {
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
     ///     .via("192.168.1.1:5060", "UDP", Some("z9hG4bK776asdhds"));
     /// ```
-    pub fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
-        let mut params = Vec::new();
-        
-        // Add branch parameter if provided
-        if let Some(branch_value) = branch {
-            params.push(Param::branch(branch_value));
-        }
-        
-        // Parse host to separate hostname and port
-        let (hostname, port) = if host.contains(':') {
-            let parts: Vec<&str> = host.split(':').collect();
-            if parts.len() == 2 {
-                if let Ok(port_num) = parts[1].parse::<u16>() {
-                    (parts[0].to_string(), Some(port_num))
-                } else {
-                    (host.to_string(), None)
-                }
-            } else {
-                (host.to_string(), None)
-            }
-        } else {
-            (host.to_string(), None)
-        };
-        
-        // Create Via header
-        if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
-            self.response = self.response.with_header(TypedHeader::Via(via));
-        }
-        
-        self
+    pub fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
+        use crate::builder::headers::ViaBuilderExt;
+        ViaBuilderExt::via(self, host, transport, branch)
     }
     
     /// Add a Contact header
