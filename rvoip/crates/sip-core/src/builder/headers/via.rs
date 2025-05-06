@@ -14,6 +14,8 @@ use crate::builder::headers::HeaderSetter;
 ///
 /// # Examples
 ///
+/// ## Basic Via Header
+///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// use rvoip_sip_core::builder::headers::ViaBuilderExt;
@@ -22,6 +24,52 @@ use crate::builder::headers::HeaderSetter;
 /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .via("192.168.1.1:5060", "UDP", Some("z9hG4bK776asdhds"))
 ///     .build();
+/// ```
+///
+/// ## Multiple Via Headers (Request Through Proxies)
+///
+/// When a SIP message traverses multiple proxies, each one adds a Via header. 
+/// The topmost (first) Via header represents the most recent hop.
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::ViaBuilderExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Simulate a request that went through two proxies
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+///     // First Via (most recent, added by last proxy)
+///     .via("proxy2.example.com:5060", "UDP", Some("z9hG4bK33792"))
+///     // Second Via (added by first proxy)
+///     .via("proxy1.example.com:5060", "UDP", Some("z9hG4bK123e5"))
+///     // Third Via (original client)
+///     .via("192.168.1.1:5060", "UDP", Some("z9hG4bK776asdhds"))
+///     .build();
+/// ```
+///
+/// ## Via Headers with Additional Parameters
+///
+/// Via headers can contain additional parameters like 'received', 'rport', 'ttl', etc.
+/// These are added manually using the TypedHeader approach for full control:
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::types::{Method, TypedHeader, Param};
+/// use rvoip_sip_core::types::via::Via;
+///
+/// // Create a request with Via header containing special parameters
+/// let mut request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap();
+///
+/// // Create Via header with rport and received parameters
+/// let mut params = Vec::new();
+/// params.push(Param::branch("z9hG4bK776asdhds"));
+/// params.push(Param::new("rport", Some("5060")));    // rport parameter
+/// params.push(Param::new("received", Some("203.0.113.1"))); // received parameter
+/// 
+/// let via = Via::new("SIP", "2.0", "UDP", "client.example.com", Some(5060), params).unwrap();
+/// request = request.header(TypedHeader::Via(via));
+///
+/// let final_request = request.build();
 /// ```
 pub trait ViaBuilderExt {
     /// Add a Via header with optional branch parameter
@@ -36,6 +84,22 @@ pub trait ViaBuilderExt {
     ///
     /// # Returns
     /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::ViaBuilderExt;
+    ///
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     .via("192.168.1.1:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .build();
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// For more complex Via headers with additional parameters (received, rport, ttl, etc.),
+    /// you should use the TypedHeader approach with Via constructor directly.
     fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self;
 }
 

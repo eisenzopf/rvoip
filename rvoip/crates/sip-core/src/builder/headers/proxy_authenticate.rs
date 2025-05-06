@@ -1,3 +1,56 @@
+//! Proxy-Authenticate header builder
+//!
+//! This module provides builder methods for adding Proxy-Authenticate headers to SIP responses,
+//! used for proxy authentication challenges as defined in RFC 3261 Section 22.
+//!
+//! The Proxy-Authenticate header is similar to WWW-Authenticate but is used specifically 
+//! by proxy servers to challenge clients. It appears in 407 (Proxy Authentication Required)
+//! responses, whereas WWW-Authenticate appears in 401 (Unauthorized) responses.
+//!
+//! # Proxy Authentication Flow in SIP
+//!
+//! A typical SIP proxy authentication flow works like this:
+//!
+//! 1. Client sends a request through a proxy server
+//! 2. Proxy responds with 407 Proxy Authentication Required containing a Proxy-Authenticate header
+//! 3. Client generates a response to the challenge and sends a new request with Proxy-Authorization header
+//! 4. If the credentials are valid, the proxy forwards the request to its destination
+//!
+//! # Difference from WWW-Authenticate
+//!
+//! While the structure and parameters are nearly identical to WWW-Authenticate, 
+//! the Proxy-Authenticate header is used for different purposes:
+//!
+//! - **WWW-Authenticate**: Used by the final destination server to authenticate the client
+//! - **Proxy-Authenticate**: Used by intermediate proxy servers to authenticate clients 
+//!   before forwarding their requests
+//!
+//! # Examples
+//!
+//! ```rust
+//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::builder::SimpleResponseBuilder;
+//! use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+//!
+//! // Create a response with a Digest Proxy-Authenticate challenge
+//! let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+//!     .proxy_authenticate_digest(
+//!         "proxy.example.com",       // realm
+//!         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+//!         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+//!         Some("MD5"),               // algorithm
+//!         Some(vec!["auth"]),        // qop options
+//!         None,                      // stale flag
+//!         None,                      // domain
+//!     )
+//!     .build();
+//!
+//! // Create a response with a Basic Proxy-Authenticate challenge
+//! let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+//!     .proxy_authenticate_basic("proxy.example.com")
+//!     .build();
+//! ```
+
 use crate::error::{Error, Result};
 use std::convert::TryFrom;
 use crate::types::{
@@ -16,18 +69,213 @@ use crate::types::{
 use super::HeaderSetter;
 
 /// Extension trait for adding Proxy-Authenticate header building capabilities
+///
+/// This trait provides methods for adding Proxy-Authenticate headers to SIP responses,
+/// which are used by proxy servers to challenge clients to authenticate as specified in
+/// [RFC 3261 Section 22.3](https://datatracker.ietf.org/doc/html/rfc3261#section-22.3).
+///
+/// The Proxy-Authenticate header field consists of at least one challenge that indicates
+/// the authentication scheme and parameters applicable to a specific realm.
+///
+/// # Common Use Cases
+///
+/// - Adding authentication challenges to proxy servers
+/// - Implementing security for SIP traffic traversing a proxy
+/// - Creating multi-tier authentication systems (both proxy and endpoint authentication)
+///
+/// # Examples
+///
+/// ## Complete Proxy Authentication Flow Example
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+/// use rvoip_sip_core::builder::headers::{ProxyAuthenticateExt, ProxyAuthorizationExt};
+/// use std::str::FromStr;
+///
+/// // Step 1: Client sends initial INVITE request through a proxy
+/// let initial_request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.net").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Bob", "sip:bob@example.net", None)
+///     .contact("<sip:alice@192.168.1.2>", None)
+///     .build();
+///
+/// // Step 2: Proxy challenges client with Proxy-Authenticate
+/// // Generate a nonce value (in production, this would be securely generated)
+/// let nonce = "3ba1f67c4c2229b3a5fd";
+/// 
+/// let challenge_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+///     .proxy_authenticate_digest(
+///         "proxy.example.com",       // realm 
+///         nonce,                     // nonce
+///         None,                      // opaque
+///         Some("SHA-256"),           // algorithm
+///         Some(vec!["auth"]),        // qop options
+///         None,                      // stale flag
+///         None,                      // domain
+///     )
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))  // Echo From header
+///     .to("Bob", "sip:bob@example.net", None)                    // Echo To header
+///     .build();
+///
+/// // Step 3: Client calculates response and sends authenticated request
+/// // In a real implementation, the response would be calculated according to RFC 2617
+/// let proxy_auth_hash = "7c1d357bec28ae9f4d800967legab276";
+///
+/// let authenticated_request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.net").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Bob", "sip:bob@example.net", None)
+///     .contact("<sip:alice@192.168.1.2>", None)
+///     // Note: parameter order differs from authorization_digest!
+///     // Order: username, realm, nonce, uri, response, algorithm, cnonce, opaque, qop, nc
+///     .proxy_authorization_digest(
+///         "alice",                  // username
+///         "proxy.example.com",      // realm
+///         nonce,                    // nonce (from challenge)
+///         "sip:bob@example.net",    // uri
+///         proxy_auth_hash,          // response
+///         Some("SHA-256"),          // algorithm 
+///         Some("8f5666ab"),         // cnonce
+///         None,                     // opaque
+///         Some("auth"),             // qop
+///         Some("00000001")          // nc
+///     )
+///     .build();
+///
+/// // Step 4: Proxy forwards the request (not shown in this example)
+/// ```
+///
+/// ## Advanced Authentication Options
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+///
+/// // Secure challenge with domain restriction
+/// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+///     .proxy_authenticate_digest(
+///         "proxy.example.com",
+///         "9FxHwSyJClx391jQKoMl3Z1",
+///         Some("secureOpaque8734"), 
+///         Some("SHA-256"),            // SHA-256 for improved security
+///         Some(vec!["auth", "auth-int"]), // Support both auth types
+///         None,
+///         // Restrict authentication to specific domains handled by this proxy
+///         Some(vec!["sip:example.com", "sip:voice.example.com", "sip:video.example.com"])
+///     )
+///     .build();
+///
+/// // Challenge with stale=true for nonce refresh without requiring new credentials
+/// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+///     .proxy_authenticate_digest(
+///         "proxy.example.com",
+///         "newNonce5349058kdjfd",
+///         None,
+///         Some("MD5"),
+///         Some(vec!["auth"]),
+///         Some(true),                 // stale=true - indicates client should retry with new nonce
+///         None
+///     )
+///     .build();
+/// ```
+///
+/// ## Multiple Authentication Challenges and Session Security
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+///
+/// // Create a response with additional security headers
+/// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+///     .proxy_authenticate_digest(
+///         "secure.proxy.example.com",
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+///         Some("opaque-session-data"),
+///         Some("SHA-256"),
+///         Some(vec!["auth"]),
+///         None,
+///         None
+///     )
+///     // Add headers indicating security requirements (demonstration)
+///     .header(TypedHeader::Other(
+///         HeaderName::Other("Security-Scheme".to_string()),
+///         HeaderValue::text("TLS")
+///     ))
+///     .header(TypedHeader::Supported(
+///         Supported::new(vec!["sips".to_string(), "gruu".to_string()])
+///     ))
+///     .build();
+/// ```
 pub trait ProxyAuthenticateExt {
     /// Add a Digest Proxy-Authenticate header to the response
     ///
-    /// # Arguments
+    /// This method adds a Proxy-Authenticate header with a Digest authentication challenge
+    /// to a SIP response. This is typically used with 407 Proxy Authentication Required 
+    /// responses to challenge the client to authenticate with the proxy.
     ///
-    /// * `realm` - The authentication realm
-    /// * `nonce` - The server nonce value
-    /// * `opaque` - Optional opaque value to be returned unchanged
-    /// * `algorithm` - Optional algorithm (defaults to MD5 if None)
-    /// * `qop` - Optional quality of protection options
-    /// * `stale` - Optional stale flag
+    /// Digest authentication is the preferred authentication method for SIP as defined in
+    /// [RFC 3261 Section 22.4](https://datatracker.ietf.org/doc/html/rfc3261#section-22.4),
+    /// which builds upon the HTTP Digest Authentication in [RFC 2617](https://datatracker.ietf.org/doc/html/rfc2617).
+    ///
+    /// # Parameters
+    ///
+    /// * `realm` - The authentication realm (mandatory) - identifies the protection domain
+    /// * `nonce` - The server nonce value (mandatory) - a server-specified data string that should change periodically
+    /// * `opaque` - Optional opaque value that must be returned unchanged in the Proxy-Authorization header
+    /// * `algorithm` - Optional algorithm (defaults to MD5 if None, but SHA-256 is recommended for security)
+    /// * `qop` - Optional quality of protection options (auth, auth-int)
+    /// * `stale` - Optional stale flag (true if nonce is stale but credentials are valid)
     /// * `domain` - Optional authentication domain (list of URIs that share credentials)
+    ///
+    /// # Returns
+    ///
+    /// The builder with the Proxy-Authenticate header added
+    ///
+    /// # Examples
+    ///
+    /// ## Basic Challenge
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+    ///
+    /// // Create a minimal digest challenge
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+    ///     .proxy_authenticate_digest(
+    ///         "proxy.example.com",
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+    ///         None, // no opaque
+    ///         None, // default algorithm (MD5)
+    ///         None, // no QoP
+    ///         None, // no stale flag
+    ///         None, // no domain
+    ///     )
+    ///     .build();
+    /// ```
+    ///
+    /// ## Secure Challenge with QoP
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+    ///
+    /// // Create a secure challenge with quality of protection options
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+    ///     .proxy_authenticate_digest(
+    ///         "proxy.example.com",
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // Opaque value
+    ///         Some("SHA-256"),                       // Modern algorithm
+    ///         Some(vec!["auth"]),                    // Auth QoP
+    ///         None,
+    ///         Some(vec!["sip:example.com"])          // Domain
+    ///     )
+    ///     .build();
+    /// ```
     fn proxy_authenticate_digest(
         self,
         realm: &str,
@@ -41,9 +289,64 @@ pub trait ProxyAuthenticateExt {
 
     /// Add a Basic Proxy-Authenticate header to the response
     ///
-    /// # Arguments
+    /// This method adds a Proxy-Authenticate header with a Basic authentication challenge
+    /// to a SIP response. While Basic authentication is less common in SIP than Digest,
+    /// it may be used in simple scenarios or for legacy compatibility.
     ///
-    /// * `realm` - The authentication realm
+    /// # Security Considerations
+    ///
+    /// Basic authentication transmits credentials with minimal protection (only base64 encoding,
+    /// which is trivial to decode). It should only be used over secure connections (like TLS)
+    /// and is generally not recommended for SIP proxy authentication. Digest authentication
+    /// provides much better security.
+    ///
+    /// # Parameters
+    ///
+    /// * `realm` - The authentication realm (protection domain)
+    ///
+    /// # Returns
+    ///
+    /// The builder with the Proxy-Authenticate header added
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+    ///
+    /// // Create a basic authentication challenge
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+    ///     .proxy_authenticate_basic("proxy.example.com")
+    ///     .build();
+    /// ```
+    ///
+    /// ## When to Use Basic Authentication
+    ///
+    /// Basic authentication might be appropriate in these limited scenarios:
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
+    ///
+    /// // 1. Within private networks with TLS
+    /// let private_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+    ///     .proxy_authenticate_basic("internal.proxy.corp.example.com")
+    ///     .build();
+    ///     
+    /// // 2. As a fallback when a client doesn't support digest
+    /// let fallback_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+    ///     // Primary authentication method (preferred)
+    ///     .proxy_authenticate_digest(
+    ///         "proxy.example.com",
+    ///         "nonce123456",
+    ///         None, None, None, None, None
+    ///     )
+    ///     // Fallback authentication method (less secure)
+    ///     .proxy_authenticate_basic("proxy.example.com")
+    ///     .build();
+    /// ```
     fn proxy_authenticate_basic(self, realm: &str) -> Self;
 }
 

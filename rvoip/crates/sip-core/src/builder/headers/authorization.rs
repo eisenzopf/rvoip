@@ -7,9 +7,10 @@
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::builder::SimpleRequestBuilder;
 //!
 //! // Create a request with a Digest Authorization
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+//! let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .authorization_digest(
 //!         "alice",                 // username
 //!         "sip.example.com",       // realm
@@ -26,7 +27,7 @@
 //!     .build();
 //!
 //! // Create a request with a Basic Authorization
-//! let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+//! let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
 //!     .authorization_basic("alice", "password123")
 //!     .build();
 //! ```
@@ -50,6 +51,199 @@ use crate::types::{
 use super::HeaderSetter;
 
 /// Extension trait for adding Authorization header building capabilities
+///
+/// This trait allows for easy addition of various types of authorization headers 
+/// to SIP requests. It supports both Digest Authentication (the most common form in SIP)
+/// and Basic Authentication.
+///
+/// # Important Note on Parameter Order
+///
+/// The parameter order in `authorization_digest` and `proxy_authorization_digest` (from ProxyAuthorizationExt) 
+/// methods are *not* identical. Pay close attention to the parameter order when using these methods:
+///
+/// - In `authorization_digest`: the `response` parameter comes *before* the optional parameters like cnonce/qop
+/// - In `proxy_authorization_digest`: the `uri` parameter comes *before* the `response` parameter
+///
+/// These differences exist for historical reasons in the implementation. Always refer to the method
+/// signatures and examples to ensure correct parameter ordering.
+///
+/// # Examples
+///
+/// ## Responding to a 401 Unauthorized Challenge
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::CSeqBuilderExt;
+/// use std::str::FromStr;
+///
+/// // First, we receive a 401 response with a WWW-Authenticate header
+/// let www_auth_header = "Digest realm=\"sip.example.com\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", \
+///                         algorithm=MD5, qop=\"auth\"";
+/// 
+/// // Parse the response to extract the challenge parameters
+/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Unauthorized"))
+///     .header(TypedHeader::WwwAuthenticate(WwwAuthenticate::from_str(www_auth_header).unwrap()))
+///     .build();
+///
+/// // Now construct a new request with the proper authorization
+/// // In a real scenario, we would compute the response hash using the challenge,
+/// // credentials, and requested URI according to RFC 2617/7616
+/// let computed_response = "5ccc069c403ebaf9f0171e9517f40e41"; // MD5(username:realm:password)
+/// 
+/// let authenticated_request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Alice", "sip:alice@example.com", None)
+///     .authorization_digest(
+///         "alice",                 // username 
+///         "sip.example.com",       // realm (from challenge)
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce (from challenge)
+///         computed_response,       // the computed response hash
+///         Some("0a4f113b"),        // client nonce (required for qop=auth)
+///         Some("auth"),            // qop (from challenge)
+///         Some("00000001"),        // nonce count (starts at 1)
+///         Some("REGISTER"),        // method (for proper hash computation)
+///         Some("sip:example.com"), // uri (for proper hash computation)
+///         Some("MD5"),             // algorithm (from challenge)
+///         None,                    // opaque (would be from challenge if present)
+///     )
+///     .build();
+/// ```
+///
+/// ## Full SIP Registration Flow with Authentication
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::CSeqBuilderExt;
+/// use std::str::FromStr;
+///
+/// // Step 1: Send initial REGISTER request (no authorization)
+/// let initial_register = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Alice", "sip:alice@example.com", None)
+///     .contact("<sip:alice@192.168.1.2>;expires=3600", None)
+///     .cseq_with_method(1, Method::Register)
+///     .build();
+///
+/// // Step 2: Receive 401 Unauthorized with challenge
+/// let challenge_response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Unauthorized"))
+///     .header(TypedHeader::WwwAuthenticate(WwwAuthenticate::from_str(
+///         "Digest realm=\"sip.example.com\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", \
+///          algorithm=MD5, qop=\"auth\"").unwrap()))
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))  // Echo From header
+///     .to("Alice", "sip:alice@example.com", None)                // Echo To header
+///     .cseq_with_method(1, Method::Register)                     // Echo CSeq
+///     .build();
+///
+/// // Step 3: Send authenticated REGISTER request
+/// // In production code, compute the digest response using A1=username:realm:password and 
+/// // A2=method:uri as defined in RFC 2617/7616
+/// let computed_response = "5ccc069c403ebaf9f0171e9517f40e41"; 
+///
+/// let authenticated_register = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Alice", "sip:alice@example.com", None)
+///     .contact("<sip:alice@192.168.1.2>;expires=3600", None)
+///     .cseq_with_method(2, Method::Register)  // Increment CSeq for new request
+///     .authorization_digest(
+///         "alice",                 // username
+///         "sip.example.com",       // realm (from challenge)
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce (from challenge)
+///         computed_response,       // the computed response hash
+///         Some("0a4f113b"),        // client nonce 
+///         Some("auth"),            // qop (from challenge)
+///         Some("00000001"),        // nonce count (starts at 1)
+///         Some("REGISTER"),        // method
+///         Some("sip:example.com"), // uri
+///         Some("MD5"),             // algorithm (from challenge)
+///         None,                    // opaque (not in challenge)
+///     )
+///     .build();
+///
+/// // Step 4: Receive 200 OK response (registration successful)
+/// let success_response = SimpleResponseBuilder::ok()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl")) // Echo From
+///     .to("Alice", "sip:alice@example.com", Some("tag123"))     // Echo To, add tag
+///     .cseq_with_method(2, Method::Register)                    // Echo CSeq
+///     .contact("<sip:alice@192.168.1.2>;expires=3600", None)    // Confirm registration
+///     .build();
+/// ```
+///
+/// ## Using with Proxy Authentication
+///
+/// For proxy authentication (responding to 407 Proxy Authentication Required),
+/// use the ProxyAuthorizationExt trait from the proxy_authorization module:
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::{ProxyAuthorizationExt, ContentTypeBuilderExt};
+/// use std::str::FromStr;
+///
+/// // Scenario: Receive a 407 Proxy Authentication Required
+/// let proxy_auth_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, Some("Proxy Authentication Required"))
+///     .header(TypedHeader::ProxyAuthenticate(ProxyAuthenticate::from_str(
+///         "Digest realm=\"proxy.example.com\", nonce=\"3ba1f67c4c2229b3a5fd\", algorithm=SHA-256, qop=\"auth\"").unwrap()))
+///     .build();
+///
+/// // Compute proxy authentication response (in real code, this would be a proper hash)
+/// let proxy_auth_hash = "7c1d357bec28ae9f4d800967legab276";
+///
+/// // Create INVITE request with proxy authentication
+/// let invite_with_auth = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.net").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+///     .to("Bob", "sip:bob@example.net", None)
+///     .contact("<sip:alice@192.168.1.2>", None)
+///     // Use proxy_authorization_digest from ProxyAuthorizationExt trait
+///     // NOTE: Parameter order is different from authorization_digest!
+///     // Order: username, realm, nonce, uri, response, algorithm, cnonce, opaque, qop, nc
+///     .proxy_authorization_digest(
+///         "alice",                  // username
+///         "proxy.example.com",      // realm
+///         "3ba1f67c4c2229b3a5fd",   // nonce
+///         "sip:bob@example.net",    // uri (NOTE: comes BEFORE response)
+///         proxy_auth_hash,          // response
+///         Some("SHA-256"),          // algorithm 
+///         Some("8f5666ab"),         // cnonce
+///         None,                     // opaque
+///         Some("auth"),             // qop
+///         Some("00000001")          // nc
+///     )
+///     .content_type_sdp()
+///     .body(concat!(
+///         "v=0\r\n",
+///         "o=alice 2890844526 2890844526 IN IP4 192.168.1.2\r\n",
+///         "s=Call with Alice\r\n",
+///         "c=IN IP4 192.168.1.2\r\n",
+///         "t=0 0\r\n",
+///         "m=audio 49170 RTP/AVP 0 8\r\n",
+///         "a=rtpmap:0 PCMU/8000\r\n",
+///         "a=rtpmap:8 PCMA/8000\r\n"
+///     ))
+///     .build();
+/// ```
+///
+/// ## Basic Authentication
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+///
+/// // Create a request with Basic Authentication (less common in SIP)
+/// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", None)
+///     .to("Alice", "sip:alice@example.com", None)
+///     .authorization_basic("alice", "password123")  // username:password base64 encoded
+///     .build();
+///
+/// // Note: Basic authentication is generally not recommended for SIP as it 
+/// // transmits credentials with minimal protection. Digest authentication
+/// // is much more common and secure in SIP deployments.
+/// ```
 pub trait AuthorizationExt {
     /// Add a Digest Authorization header to the request
     ///
@@ -74,27 +268,44 @@ pub trait AuthorizationExt {
     ///
     /// The builder with the Authorization header added
     ///
+    /// # Important Note on Parameter Order
+    ///
+    /// The parameter order must be followed exactly as shown. This is especially important
+    /// when comparing with `proxy_authorization_digest` which has different parameter ordering.
+    /// If parameters are provided in the wrong order, authentication will fail or behave unexpectedly.
+    ///
     /// # Example
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
-    /// let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+    /// // Create a request with full Digest Authorization parameters
+    /// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
     ///     .authorization_digest(
-    ///         "alice",
-    ///         "sip.example.com",
-    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
-    ///         "5ccc069c403ebaf9f0171e9517f40e41",
-    ///         Some("0a4f113b"),
-    ///         Some("auth"),
-    ///         Some("00000001"),
-    ///         Some("REGISTER"),
-    ///         Some("sip:example.com"),
-    ///         Some("MD5"),
-    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"),
+    ///         "alice",                 // username
+    ///         "sip.example.com",       // realm
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+    ///         "5ccc069c403ebaf9f0171e9517f40e41",   // response
+    ///         Some("0a4f113b"),        // cnonce (required for qop=auth)
+    ///         Some("auth"),            // qop 
+    ///         Some("00000001"),        // nonce count (required for qop=auth)
+    ///         Some("REGISTER"),        // method used in hash calculation
+    ///         Some("sip:example.com"), // uri used in hash calculation
+    ///         Some("MD5"),             // algorithm
+    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
     ///     )
     ///     .build();
     /// ```
+    ///
+    /// # Note
+    ///
+    /// The `response` parameter should be calculated according to the algorithm
+    /// specified in RFC 2617 (HTTP Digest) and RFC 3261 (SIP).
+    /// For MD5 and qop=auth, the calculation would be:
+    /// - A1 = username:realm:password
+    /// - A2 = method:uri
+    /// - response = MD5(MD5(A1):nonce:nc:cnonce:qop:MD5(A2))
     fn authorization_digest(
         self,
         username: &str,
@@ -128,11 +339,19 @@ pub trait AuthorizationExt {
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
-    /// let request = RequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+    /// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
     ///     .authorization_basic("alice", "password123")
     ///     .build();
     /// ```
+    ///
+    /// # Security Considerations
+    ///
+    /// Basic authentication sends credentials with minimal protection (only base64 encoding,
+    /// which is trivial to decode). It should only be used over secure connections (like TLS)
+    /// and is generally not recommended for SIP authentication. Digest authentication
+    /// provides much better security.
     fn authorization_basic(self, username: &str, password: &str) -> Self;
 }
 
