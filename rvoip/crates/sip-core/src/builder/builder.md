@@ -1,7 +1,7 @@
 # SIP Builders
 
 This module provides builder patterns for creating SIP messages with a fluent, chainable API.
-The builders support all common SIP headers defined in [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261)
+The builders ([`SimpleRequestBuilder`] and [`SimpleResponseBuilder`]) support all common SIP headers defined in [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261)
 and various extensions.
 
 ## Overview
@@ -28,23 +28,23 @@ when possible, with runtime validation for more complex scenarios.
 The builder supports the following SIP headers:
 
 - **Core Headers**
-  - From, To, Contact, Call-ID, CSeq, Via, Max-Forwards
+  - [`From`][headers::from], [`To`][headers::to], [`Contact`][headers::contact], [`Call-ID`][headers::call_id], [`CSeq`][headers::cseq], [`Via`][headers::via], [`Max-Forwards`][headers::max_forwards]
 
 - **Content-Related Headers**
-  - Content-Type, Content-Length, Content-Encoding, Content-Language, Content-Disposition
-  - Accept, Accept-Encoding, Accept-Language
+  - [`Content-Type`][headers::content], [`Content-Length`][headers::content], [`Content-Encoding`][headers::content_encoding], [`Content-Language`][headers::content_language], [`Content-Disposition`][headers::content_disposition]
+  - [`Accept`][headers::accept], [`Accept-Encoding`][headers::accept_encoding], [`Accept-Language`][headers::accept_language]
 
 - **Authentication Headers**
-  - Authorization, WWW-Authenticate, Proxy-Authenticate, Proxy-Authorization, Authentication-Info
+  - [`Authorization`][headers::authorization], [`WWW-Authenticate`][headers::www_authenticate], [`Proxy-Authenticate`][headers::proxy_authenticate], [`Proxy-Authorization`][headers::proxy_authorization], [`Authentication-Info`][headers::authentication_info]
 
 - **Routing Headers**
-  - Route, Record-Route, Path
+  - [`Route`][headers::route], [`Record-Route`][headers::record_route], [`Path`][headers::path]
 
 - **Feature Headers**
-  - Allow, Supported, Unsupported, Require, Proxy-Require
+  - [`Allow`][headers::allow], [`Supported`][headers::supported], [`Unsupported`][headers::unsupported], [`Require`][headers::require], [`Proxy-Require`][headers::proxy_require]
 
 - **Miscellaneous Headers**
-  - User-Agent, Server, Call-Info, In-Reply-To, Reply-To
+  - [`User-Agent`][headers::user_agent], [`Server`][headers::server], [`Call-Info`][headers::call_info], [`In-Reply-To`][headers::in_reply_to], [`Reply-To`][headers::reply_to]
 
 ## Recommendations
 
@@ -643,4 +643,37 @@ let ok_bye = SimpleResponseBuilder::ok()
     .via("alice.example.com", "UDP", Some("z9hG4bK776ztuvw"))
     .user_agent("Bob SIP Client 2.0")
     .build();
-``` 
+```
+
+[headers::from]: crate::builder::headers
+[headers::to]: crate::builder::headers
+[headers::contact]: crate::builder::headers
+[headers::call_id]: crate::builder::headers::call_id
+[headers::cseq]: crate::builder::headers
+[headers::via]: crate::builder::headers
+[headers::max_forwards]: crate::builder::headers
+[headers::content]: crate::builder::headers::content
+[headers::content_encoding]: crate::builder::headers::content_encoding
+[headers::content_language]: crate::builder::headers::content_language
+[headers::content_disposition]: crate::builder::headers::content_disposition
+[headers::accept]: crate::builder::headers::accept
+[headers::accept_encoding]: crate::builder::headers::accept_encoding
+[headers::accept_language]: crate::builder::headers::accept_language
+[headers::authorization]: crate::builder::headers::authorization
+[headers::www_authenticate]: crate::builder::headers::www_authenticate
+[headers::proxy_authenticate]: crate::builder::headers::proxy_authenticate
+[headers::proxy_authorization]: crate::builder::headers::proxy_authorization
+[headers::authentication_info]: crate::builder::headers::authentication_info
+[headers::route]: crate::builder::headers::route
+[headers::record_route]: crate::builder::headers::record_route
+[headers::path]: crate::builder::headers::path
+[headers::allow]: crate::builder::headers::allow
+[headers::supported]: crate::builder::headers::supported
+[headers::unsupported]: crate::builder::headers::unsupported
+[headers::require]: crate::builder::headers::require
+[headers::proxy_require]: crate::builder::headers::proxy_require
+[headers::user_agent]: crate::builder::headers::user_agent
+[headers::server]: crate::builder::headers::server
+[headers::call_info]: crate::builder::headers
+[headers::in_reply_to]: crate::builder::headers::in_reply_to
+[headers::reply_to]: crate::builder::headers::reply_to 
