@@ -10,9 +10,31 @@ use crate::builder::headers::HeaderSetter;
 ///
 /// This trait provides a standard way to add CSeq headers to both request and response builders
 /// as specified in [RFC 3261 Section 20.16](https://datatracker.ietf.org/doc/html/rfc3261#section-20.16).
-/// The CSeq header serves as a way to identify and order transactions.
+/// 
+/// ## Purpose and Importance
+/// 
+/// The CSeq header serves multiple critical functions in SIP:
+/// 
+/// - **Transaction Identification**: Along with Call-ID and other headers, it uniquely identifies SIP transactions
+/// - **Request Ordering**: Allows recipients to properly order requests
+/// - **Request-Response Matching**: Enables matching responses to their corresponding requests
+/// - **Retransmission Detection**: Helps identify retransmitted messages versus new requests
+/// 
+/// The CSeq header contains two parts:
+/// 1. A sequence number (32-bit unsigned integer)
+/// 2. A request method that matches the method of the request
+///
+/// ## Usage Guidelines
+/// 
+/// - For new dialogs, start with a low number (typically 1)
+/// - Increment the sequence number for each subsequent request within the same dialog
+/// - Responses must echo the same CSeq number and method as the request they're answering
+/// - For forked requests, each fork maintains the same CSeq
+/// - ACK and CANCEL use the same CSeq number as the request they reference
 ///
 /// # Examples
+///
+/// ## Basic Request Example
 ///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -23,25 +45,121 @@ use crate::builder::headers::HeaderSetter;
 /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .cseq(1)
 ///     .build();
+/// ```
 ///
-/// // For responses, both sequence number and method must be provided
+/// ## Response Example
+///
+/// ```rust
 /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::CSeqBuilderExt;
+/// use rvoip_sip_core::types::Method;
 /// 
+/// // For responses, both sequence number and method must be provided
 /// let response = SimpleResponseBuilder::ok()
 ///     .cseq_with_method(1, Method::Invite)
 ///     .build();
 /// ```
+///
+/// ## Real-World Dialog Example
+///
+/// ```rust
+/// use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+/// use rvoip_sip_core::builder::headers::{CSeqBuilderExt, FromBuilderExt, ToBuilderExt, CallIdBuilderExt};
+/// use rvoip_sip_core::types::Method;
+///
+/// // Step 1: Initial INVITE with CSeq = 1
+/// let call_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com";
+/// let alice_tag = "1928301774";
+/// 
+/// let invite = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some(alice_tag))
+///     .to("Bob", "sip:bob@biloxi.example.com", None)
+///     .call_id(call_id)
+///     .cseq(1) // Initial CSeq for the dialog
+///     .build();
+///
+/// // Step 2: 200 OK response maintains the same CSeq
+/// let bob_tag = "a6c85cf";
+/// 
+/// let ok_response = SimpleResponseBuilder::ok()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some(alice_tag))
+///     .to("Bob", "sip:bob@biloxi.example.com", Some(bob_tag)) // Response adds To tag
+///     .call_id(call_id)
+///     .cseq_with_method(1, Method::Invite) // Same as the request
+///     .build();
+///
+/// // Step 3: ACK request with same CSeq as INVITE
+/// let ack = SimpleRequestBuilder::new(Method::Ack, "sip:bob@biloxi.example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some(alice_tag))
+///     .to("Bob", "sip:bob@biloxi.example.com", Some(bob_tag))
+///     .call_id(call_id)
+///     .cseq(1) // ACK uses same CSeq number as the INVITE it acknowledges
+///     .build();
+///
+/// // Step 4: Later BYE request with incremented CSeq
+/// let bye = SimpleRequestBuilder::new(Method::Bye, "sip:bob@biloxi.example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some(alice_tag))
+///     .to("Bob", "sip:bob@biloxi.example.com", Some(bob_tag))
+///     .call_id(call_id)
+///     .cseq(2) // Increment CSeq for new request in the dialog
+///     .build();
+///
+/// // Step 5: 200 OK response to BYE
+/// let bye_ok = SimpleResponseBuilder::ok()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some(alice_tag))
+///     .to("Bob", "sip:bob@biloxi.example.com", Some(bob_tag))
+///     .call_id(call_id)
+///     .cseq_with_method(2, Method::Bye) // Same as the BYE request
+///     .build();
+/// ```
+///
+/// ## Handling Mid-Dialog Requests
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::{CSeqBuilderExt, FromBuilderExt, ToBuilderExt, CallIdBuilderExt};
+/// use rvoip_sip_core::types::Method;
+///
+/// // Mid-dialog INFO request with an updated CSeq
+/// let info = SimpleRequestBuilder::new(Method::Info, "sip:bob@biloxi.example.com").unwrap()
+///     .from("Alice", "sip:alice@atlanta.example.com", Some("1928301774"))
+///     .to("Bob", "sip:bob@biloxi.example.com", Some("a6c85cf"))
+///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com")
+///     .cseq(3) // Next sequential number after previous requests
+///     .build();
+/// ```
 pub trait CSeqBuilderExt {
     /// Add a CSeq header with specified sequence number
+    ///
+    /// For requests, this method automatically uses the request method in the CSeq header.
+    /// For responses, this method is less commonly used as responses should match both
+    /// the sequence number and method of the request they're answering.
     ///
     /// # Parameters
     /// - `seq`: The sequence number (e.g., 1, 2, 3)
     ///
     /// # Returns
     /// Self for method chaining
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::CSeqBuilderExt;
+    ///
+    /// // New INVITE with CSeq 1
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     .cseq(1)
+    ///     .build();
+    /// ```
     fn cseq(self, seq: u32) -> Self;
 
     /// Add a CSeq header with specified sequence number and method
+    ///
+    /// This method is particularly important for responses, which must echo both
+    /// the sequence number and method from the request being answered.
+    /// For requests, it can be used when the CSeq method needs to differ from
+    /// the request method (rare but sometimes needed for special cases).
     ///
     /// # Parameters
     /// - `seq`: The sequence number (e.g., 1, 2, 3)
@@ -49,6 +167,19 @@ pub trait CSeqBuilderExt {
     ///
     /// # Returns
     /// Self for method chaining
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::builder::headers::CSeqBuilderExt;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// // 200 OK response to an INVITE
+    /// let response = SimpleResponseBuilder::ok()
+    ///     .cseq_with_method(101, Method::Invite)
+    ///     .build();
+    /// ```
     fn cseq_with_method(self, seq: u32, method: Method) -> Self;
 }
 

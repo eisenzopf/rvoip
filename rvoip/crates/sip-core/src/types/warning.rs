@@ -270,6 +270,155 @@ impl FromStr for Warning {
     }
 }
 
+/// A wrapper for a list of Warning headers.
+///
+/// This type is used to properly implement TypedHeaderTrait for a collection
+/// of Warning headers, as required by the TypedHeader::Warning variant which
+/// expects Vec<Warning>.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+///
+/// // Create a WarningHeader with a single warning
+/// let agent = Uri::sip("example.com");
+/// let warning = Warning::new(370, agent, "Insufficient bandwidth");
+/// let warning_header = WarningHeader::new(vec![warning]);
+///
+/// // Convert to a generic header
+/// let header = warning_header.to_header();
+/// assert_eq!(header.name, HeaderName::Warning);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarningHeader {
+    /// The list of warnings in this header
+    pub warnings: Vec<Warning>,
+}
+
+impl WarningHeader {
+    /// Creates a new WarningHeader with the given warnings.
+    ///
+    /// # Parameters
+    ///
+    /// - `warnings`: A vector of Warning objects
+    ///
+    /// # Returns
+    ///
+    /// A new WarningHeader instance
+    pub fn new(warnings: Vec<Warning>) -> Self {
+        Self { warnings }
+    }
+
+    /// Creates a new WarningHeader with a single warning.
+    ///
+    /// # Parameters
+    ///
+    /// - `code`: The warning code (should be in the range 300-399)
+    /// - `agent`: A URI identifying the entity generating the warning
+    /// - `text`: The warning text
+    ///
+    /// # Returns
+    ///
+    /// A new WarningHeader instance with a single warning
+    pub fn single(code: u16, agent: Uri, text: impl Into<String>) -> Self {
+        Self { warnings: vec![Warning::new(code, agent, text)] }
+    }
+
+    /// Adds a warning to this header.
+    ///
+    /// # Parameters
+    ///
+    /// - `warning`: The Warning to add
+    ///
+    /// # Returns
+    ///
+    /// Self for method chaining
+    pub fn add_warning(&mut self, warning: Warning) -> &mut Self {
+        self.warnings.push(warning);
+        self
+    }
+
+    /// Adds a new warning with the given parameters.
+    ///
+    /// # Parameters
+    ///
+    /// - `code`: The warning code (should be in the range 300-399)
+    /// - `agent`: A URI identifying the entity generating the warning
+    /// - `text`: The warning text
+    ///
+    /// # Returns
+    ///
+    /// Self for method chaining
+    pub fn add(&mut self, code: u16, agent: Uri, text: impl Into<String>) -> &mut Self {
+        self.warnings.push(Warning::new(code, agent, text));
+        self
+    }
+}
+
+impl fmt::Display for WarningHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.warnings.is_empty() {
+            return Ok(());
+        }
+
+        for (i, warning) in self.warnings.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", warning)?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for WarningHeader {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        use crate::error::Error;
+
+        match all_consuming(parse_warning_value_list)(s.as_bytes()) {
+            Ok((_, values)) => {
+                let mut warnings = Vec::with_capacity(values.len());
+                
+                for value in values {
+                    // Convert the agent to a URI
+                    let agent = match &value.agent {
+                        WarnAgent::HostPort(host, port) => {
+                            let mut uri = Uri::sip(host.to_string());
+                            if let Some(p) = port {
+                                uri.port = Some(*p);
+                            }
+                            uri
+                        },
+                        WarnAgent::Pseudonym(name) => {
+                            Uri::sip(name)
+                        }
+                    };
+                    
+                    // Convert text from Vec<u8> to String
+                    let text = match from_utf8(&value.text) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return Err(Error::ParseError("Invalid UTF-8 in warning text".to_string()))
+                    };
+                    
+                    warnings.push(Warning {
+                        code: value.code,
+                        agent,
+                        text
+                    });
+                }
+                
+                Ok(WarningHeader { warnings })
+            },
+            Err(e) => Err(Error::ParseError(
+                format!("Failed to parse Warning header: {:?}", e)
+            ))
+        }
+    }
+}
+
 // Implement TypedHeaderTrait for Warning
 impl TypedHeaderTrait for Warning {
     type Name = HeaderName;
@@ -306,4 +455,38 @@ impl TypedHeaderTrait for Warning {
     }
 }
 
-// TODO: Implement methods if needed 
+// Implement TypedHeaderTrait for WarningHeader
+impl TypedHeaderTrait for WarningHeader {
+    type Name = HeaderName;
+
+    fn header_name() -> Self::Name {
+        HeaderName::Warning
+    }
+
+    fn to_header(&self) -> Header {
+        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+    }
+
+    fn from_header(header: &Header) -> Result<Self> {
+        if header.name != Self::header_name() {
+            return Err(crate::error::Error::InvalidHeader(
+                format!("Expected {} header, got {}", Self::header_name(), header.name)
+            ));
+        }
+
+        match &header.value {
+            HeaderValue::Raw(bytes) => {
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    WarningHeader::from_str(s.trim())
+                } else {
+                    Err(crate::error::Error::InvalidHeader(
+                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                    ))
+                }
+            },
+            _ => Err(crate::error::Error::InvalidHeader(
+                format!("Unexpected header value type for {}", Self::header_name())
+            )),
+        }
+    }
+} 

@@ -23,7 +23,7 @@ pub use crate::builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseB
 pub use crate::types::param::Param;
 pub use crate::types::param::GenericValue;
 pub use crate::types::warning::Warning;
-pub use crate::types::warning::{WarnAgent, WarningValue};
+pub use crate::types::warning::{WarnAgent, WarningValue, WarningHeader};
 pub use crate::types::address::Address;
 pub use crate::types::from::From;
 pub use crate::types::to::To;
@@ -53,6 +53,7 @@ pub use crate::types::retry_after::RetryAfter;
 pub use crate::parser::headers::route::RouteEntry as ParserRouteValue;
 pub use crate::types::route::Route;
 pub use crate::types::path::Path;
+pub use crate::parser::headers::route::RouteEntry as PathEntry;
 
 // Server-related types needed for doc tests
 pub use crate::types::server::{ServerInfo, ServerProduct, Product, ServerVal};
@@ -99,7 +100,9 @@ pub use crate::builder::headers::{
     PathBuilderExt,
     ProxyRequireBuilderExt,
     CallIdBuilderExt,
-    InReplyToBuilderExt
+    InReplyToBuilderExt,
+    PriorityBuilderExt,
+    WarningBuilderExt
 };
 
 // Add ProxyRequire type

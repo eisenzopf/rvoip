@@ -32,8 +32,10 @@ The builder supports the following SIP headers:
 
 - **Content-Related Headers**
   - [`Content-Type`][headers::content_type::ContentTypeBuilderExt], [`Content-Length`][headers::content_length::ContentLengthBuilderExt], [`Content-Encoding`][headers::content_encoding::ContentEncodingExt], [`Content-Language`][headers::content_language::ContentLanguageExt], [`Content-Disposition`][headers::content_disposition::ContentDispositionExt]
+  - [`MIME-Version`][headers::mime_version::MimeVersionBuilderExt] - Important for multipart MIME content
   - [`Accept`][headers::accept::AcceptExt], [`Accept-Encoding`][headers::accept_encoding::AcceptEncodingExt], [`Accept-Language`][headers::accept_language::AcceptLanguageExt]
   - [`Content`][headers::content::ContentBuilderExt] - For message body handling with appropriate Content-Type headers
+  - [`Multipart`][multipart::MultipartBuilder] - For creating multipart MIME bodies with multiple content types
 
 - **Authentication Headers**
   - [`Authorization`][headers::authorization::AuthorizationExt], [`WWW-Authenticate`][headers::www_authenticate::WwwAuthenticateExt], [`Proxy-Authenticate`][headers::proxy_authenticate::ProxyAuthenticateExt], [`Proxy-Authorization`][headers::proxy_authorization::ProxyAuthorizationExt], [`Authentication-Info`][headers::authentication_info::AuthenticationInfoExt]
@@ -46,6 +48,14 @@ The builder supports the following SIP headers:
 
 - **Miscellaneous Headers**
   - [`User-Agent`][headers::user_agent::UserAgentBuilderExt], [`Server`][headers::server::ServerBuilderExt], [`Call-Info`][headers::call_info::CallInfoBuilderExt], [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt], [`Reply-To`][headers::reply_to::ReplyToBuilderExt]
+  - [`Organization`][headers::organization::OrganizationBuilderExt] - Identifies the organization to which the entity belongs
+  - [`Priority`][headers::priority::PriorityBuilderExt] - Indicates the urgency or importance of a request
+  - [`Expires`][headers::expires::ExpiresBuilderExt] - Specifies expiration time for registrations or subscriptions
+
+- **Error and Diagnostic Headers**
+  - [`Warning`][headers::warning::WarningBuilderExt] - Carries additional information about response status
+  - [`Error-Info`][headers::error_info::ErrorInfoBuilderExt] - Provides pointers to additional error information
+  - [`Reason`][headers::reason::ReasonBuilderExt] - Provides information about why a request was generated
 
 ## Recommendations
 
@@ -704,4 +714,12 @@ let ok_bye = SimpleResponseBuilder::ok()
 [headers::server::ServerBuilderExt]: crate::builder::headers::server::ServerBuilderExt
 [headers::call_info::CallInfoBuilderExt]: crate::builder::headers::call_info::CallInfoBuilderExt
 [headers::in_reply_to::InReplyToBuilderExt]: crate::builder::headers::in_reply_to::InReplyToBuilderExt
-[headers::reply_to::ReplyToBuilderExt]: crate::builder::headers::reply_to::ReplyToBuilderExt 
+[headers::reply_to::ReplyToBuilderExt]: crate::builder::headers::reply_to::ReplyToBuilderExt
+[headers::mime_version::MimeVersionBuilderExt]: crate::builder::headers::mime_version::MimeVersionBuilderExt
+[multipart::MultipartBuilder]: crate::builder::multipart::MultipartBuilder
+[headers::warning::WarningBuilderExt]: crate::builder::headers::warning::WarningBuilderExt
+[headers::error_info::ErrorInfoBuilderExt]: crate::builder::headers::error_info::ErrorInfoBuilderExt
+[headers::reason::ReasonBuilderExt]: crate::builder::headers::reason::ReasonBuilderExt
+[headers::expires::ExpiresBuilderExt]: crate::builder::headers::expires::ExpiresBuilderExt
+[headers::organization::OrganizationBuilderExt]: crate::builder::headers::organization::OrganizationBuilderExt
+[headers::priority::PriorityBuilderExt]: crate::builder::headers::priority::PriorityBuilderExt 

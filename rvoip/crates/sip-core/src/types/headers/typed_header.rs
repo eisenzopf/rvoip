@@ -51,6 +51,8 @@ use crate::types::param::Param;
 use crate::types::address::Address;
 use crate::types::uri::{Uri, Scheme};
 use crate::prelude::GenericValue;
+use crate::types::alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
+use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
 
 // Import parser components
 use crate::parser;
@@ -84,9 +86,10 @@ use crate::parser::headers::content_type::parse_content_type_value;
 /// // Access the header name
 /// assert_eq!(header.name(), HeaderName::CallId);
 ///
-/// // Convert to a generic header
-/// let generic: Header = header.to_header();
-/// assert_eq!(generic.name, HeaderName::CallId);
+/// // Convert to string representation
+/// let header_str = header.to_string();
+/// assert!(header_str.contains("Call-ID"));
+/// assert!(header_str.contains("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypedHeader {
@@ -144,10 +147,11 @@ pub enum TypedHeader {
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
     InReplyTo(crate::types::in_reply_to::InReplyTo),
     RetryAfter(RetryAfter), // Now using types::retry_after::RetryAfter
-    ErrorInfo(Vec<ErrorInfoValue>), // Use imported parser type
-    AlertInfo(Vec<AlertInfoValue>), // Use imported parser type
+    ErrorInfo(ErrorInfoHeader), // Use our new ErrorInfoHeader type instead of Vec<ErrorInfoValue>
+    AlertInfo(crate::types::alert_info::AlertInfoHeader), // Use our AlertInfoHeader type
     CallInfo(CallInfo), // Use our new CallInfo type
     Path(crate::types::path::Path), // Add Path header variant
+    Reason(crate::types::reason::Reason), // Add Reason header variant
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -205,6 +209,7 @@ impl TypedHeader {
             TypedHeader::Event(_) => HeaderName::Event,
             TypedHeader::SubscriptionState(_) => HeaderName::SubscriptionState,
             TypedHeader::Path(_) => HeaderName::Path, // Add Path header case
+            TypedHeader::Reason(_) => HeaderName::Reason, // Add Reason header case
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -264,6 +269,12 @@ impl TypedHeader {
                 Some(unsafe { &*(h as *const _ as *const T) }),
                 
             TypedHeader::ReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::Reason(h) if type_id == std::any::TypeId::of::<crate::types::reason::Reason>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+                
+            TypedHeader::ErrorInfo(h) if type_id == std::any::TypeId::of::<crate::types::error_info::ErrorInfoHeader>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
                 
             _ => None,
@@ -355,24 +366,10 @@ impl fmt::Display for TypedHeader {
             },
             TypedHeader::RetryAfter(retry_after) => write!(f, "{}: {:?}", HeaderName::RetryAfter, retry_after),
             TypedHeader::ErrorInfo(error_info) => {
-                write!(f, "{}: ", HeaderName::ErrorInfo)?;
-                for (i, info) in error_info.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", info)?;
-                }
-                Ok(())
+                write!(f, "{}", error_info)
             },
             TypedHeader::AlertInfo(alert_info) => {
-                write!(f, "{}: ", HeaderName::AlertInfo)?;
-                for (i, info) in alert_info.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", info)?;
-                }
-                Ok(())
+                write!(f, "{}: {}", HeaderName::AlertInfo, alert_info)
             },
             TypedHeader::CallInfo(call_info) => {
                 write!(f, "{}", call_info)
@@ -382,6 +379,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::Path(path) => {
                 write!(f, "{}: {}", HeaderName::Path, path)
             },
+            TypedHeader::Reason(reason) => write!(f, "{}: {}", HeaderName::Reason, reason),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -929,6 +927,14 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, strings)| TypedHeader::InReplyTo(crate::types::in_reply_to::InReplyTo::with_multiple_strings(strings)))
                 .map_err(Error::from),
              HeaderName::Warning => {
+                 // First try to use WarningHeader TypedHeaderTrait implementation
+                 if let Ok(s) = std::str::from_utf8(value_bytes) {
+                     if let Ok(warning_header) = crate::types::warning::WarningHeader::from_str(s.trim()) {
+                         return Ok(TypedHeader::Warning(warning_header.warnings));
+                     }
+                 }
+                 
+                 // Fallback to the original parsing logic
                  let parse_result = all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);
                  match parse_result {
                      Ok((_, parsed_values)) => {
@@ -989,11 +995,56 @@ impl TryFrom<Header> for TypedHeader {
                         Ok(TypedHeader::RetryAfter(retry_after))
                     })
             },
-            HeaderName::ErrorInfo => all_consuming(parser::headers::parse_error_info)(value_bytes)
-                .map(|(_, error_info_values)| TypedHeader::ErrorInfo(error_info_values))
-                .map_err(Error::from),
+            HeaderName::ErrorInfo => {
+                if let HeaderValue::Raw(bytes) = &header.value {
+                    // Special handling for Error-Info with comments
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        match ErrorInfoHeader::from_str(s.trim()) {
+                            Ok(error_info) => {
+                                return Ok(TypedHeader::ErrorInfo(error_info));
+                            },
+                            Err(_) => {
+                                // Fall through to generic parser below
+                            }
+                        }
+                    }
+                    
+                    // If direct FromStr parsing failed, try the standard parser
+                    match all_consuming(parser::headers::error_info::parse_error_info)(bytes) {
+                        Ok((_, error_info_values)) => {
+                            let mut list = ErrorInfoList::new();
+                            for value in error_info_values {
+                                list.add(ErrorInfoHeader::from_error_info_value(&value));
+                            }
+                            
+                            return Ok(TypedHeader::ErrorInfo(ErrorInfoHeader { error_info_list: list }));
+                        },
+                        Err(e) => {
+                            return Err(Error::from(e.to_owned()));
+                        }
+                    }
+                } else if let HeaderValue::ErrorInfo(values) = &header.value {
+                    // Convert from parser values to our type
+                    let mut list = ErrorInfoList::new();
+                    for value in values {
+                        list.add(ErrorInfoHeader::from_error_info_value(value));
+                    }
+                    return Ok(TypedHeader::ErrorInfo(ErrorInfoHeader { error_info_list: list }));
+                } else {
+                    return Err(Error::InvalidHeader(format!("Invalid {} header", HeaderName::ErrorInfo)));
+                }
+            },
             HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(value_bytes)
-                .map(|(_, alert_info_values)| TypedHeader::AlertInfo(alert_info_values))
+                .map(|(_, alert_info_values)| {
+                    // Convert parser values to our AlertInfo types
+                    let mut alert_info_list = crate::types::alert_info::AlertInfoList::new();
+                    for value in alert_info_values {
+                        if let Ok(alert_info) = crate::types::alert_info::AlertInfoHeader::from_alert_info_value(&value) {
+                            alert_info_list.add(alert_info);
+                        }
+                    }
+                    TypedHeader::AlertInfo(crate::types::alert_info::AlertInfoHeader { alert_info_list })
+                })
                 .map_err(Error::from),
             HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(value_bytes)
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
@@ -1030,6 +1081,12 @@ impl TryFrom<Header> for TypedHeader {
                 } else {
                     Err(Error::InvalidHeader(format!("Invalid Path header")))
                 }
+            },
+            HeaderName::Reason => {
+                // Use the parser for Reason headers
+                all_consuming(crate::parser::headers::parse_reason)(value_bytes)
+                    .map(|(_, reason)| TypedHeader::Reason(reason))
+                    .map_err(|e| Error::from(e.to_owned()))
             },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };

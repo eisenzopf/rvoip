@@ -123,18 +123,17 @@ impl AcceptEncoding {
     /// ```rust
     /// use rvoip_sip_core::types::AcceptEncoding;
     /// use rvoip_sip_core::parser::headers::accept_encoding::EncodingInfo;
+    /// use rvoip_sip_core::types::param::Param;
     /// use ordered_float::NotNan;
     ///
     /// let gzip = EncodingInfo {
     ///     coding: "gzip".to_string(),
-    ///     q: Some(NotNan::new(1.0).unwrap()),
-    ///     params: vec![],
+    ///     params: vec![Param::Q(NotNan::new(1.0).unwrap())],
     /// };
     ///
     /// let identity = EncodingInfo {
     ///     coding: "identity".to_string(),
-    ///     q: Some(NotNan::new(0.5).unwrap()),
-    ///     params: vec![],
+    ///     params: vec![Param::Q(NotNan::new(0.5).unwrap())],
     /// };
     ///
     /// let header = AcceptEncoding::from_encodings(vec![gzip, identity]);
@@ -162,7 +161,6 @@ impl AcceptEncoding {
     /// let mut header = AcceptEncoding::new();
     /// let gzip = EncodingInfo {
     ///     coding: "gzip".to_string(),
-    ///     q: None,
     ///     params: vec![],
     /// };
     /// header.push(gzip);

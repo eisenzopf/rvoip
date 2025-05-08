@@ -156,7 +156,7 @@ impl ErrorInfo {
     /// let error_info = ErrorInfo::new("sip:busy@example.com")
     ///     .with_comment("User is currently busy");
     ///
-    /// assert_eq!(error_info.to_string(), "sip:busy@example.com (User is currently busy)");
+    /// assert_eq!(error_info.to_string(), "<sip:busy@example.com> (User is currently busy)");
     /// ```
     pub fn with_comment(mut self, comment: &str) -> Self {
         self.comment = Some(comment.to_string());
@@ -185,7 +185,7 @@ impl ErrorInfo {
     /// let error_info = ErrorInfo::new("sip:busy@example.com")
     ///     .with_param("reason", "busy");
     ///
-    /// assert_eq!(error_info.to_string(), "sip:busy@example.com;reason=busy");
+    /// assert_eq!(error_info.to_string(), "<sip:busy@example.com>;reason=busy");
     ///
     /// // Add multiple parameters
     /// let error_info = ErrorInfo::new("sip:busy@example.com")
@@ -205,7 +205,7 @@ impl fmt::Display for ErrorInfo {
     /// Formats the ErrorInfo as a string.
     ///
     /// The format follows the SIP specification:
-    /// - URI (enclosed in angle brackets if it contains spaces)
+    /// - URI (enclosed in angle brackets)
     /// - Optional comment in parentheses
     /// - Parameters as name=value pairs separated by semicolons
     ///
@@ -216,38 +216,30 @@ impl fmt::Display for ErrorInfo {
     ///
     /// // Basic URI
     /// let error_info = ErrorInfo::new("sip:busy@example.com");
-    /// assert_eq!(error_info.to_string(), "sip:busy@example.com");
+    /// assert_eq!(error_info.to_string(), "<sip:busy@example.com>");
     ///
     /// // URI with a comment
     /// let error_info = ErrorInfo::new("sip:busy@example.com")
     ///     .with_comment("User is busy");
-    /// assert_eq!(error_info.to_string(), "sip:busy@example.com (User is busy)");
+    /// assert_eq!(error_info.to_string(), "<sip:busy@example.com> (User is busy)");
     ///
     /// // URI with parameters
     /// let error_info = ErrorInfo::new("sip:busy@example.com")
     ///     .with_param("reason", "busy");
-    /// assert_eq!(error_info.to_string(), "sip:busy@example.com;reason=busy");
-    ///
-    /// // URI with spaces (enclosed in angle brackets)
-    /// let error_info = ErrorInfo::new("http://example.com/error message.html");
-    /// assert_eq!(error_info.to_string(), "<http://example.com/error message.html>");
+    /// assert_eq!(error_info.to_string(), "<sip:busy@example.com>;reason=busy");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Start with the URI, potentially with angle brackets if it has spaces
-        if self.uri.contains(' ') {
-            write!(f, "<{}>", self.uri)?;
-        } else {
-            write!(f, "{}", self.uri)?;
-        }
-        
-        // Optional comment
-        if let Some(comment) = &self.comment {
-            write!(f, " ({})", comment)?;
-        }
+        // Always use angle brackets around the URI (required by the parser)
+        write!(f, "<{}>", self.uri)?;
         
         // Parameters if any
         for (name, value) in &self.parameters {
             write!(f, ";{}={}", name, value)?;
+        }
+        
+        // Optional comment - put it last according to RFC
+        if let Some(comment) = &self.comment {
+            write!(f, " ({})", comment)?;
         }
         
         Ok(())
@@ -427,13 +419,13 @@ impl fmt::Display for ErrorInfoList {
     /// // Single entry
     /// let list = ErrorInfoList::new()
     ///     .with(ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy"));
-    /// assert_eq!(list.to_string(), "sip:busy@example.com;reason=busy");
+    /// assert_eq!(list.to_string(), "<sip:busy@example.com>;reason=busy");
     ///
     /// // Multiple entries
     /// let list = ErrorInfoList::new()
     ///     .with(ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy"))
     ///     .with(ErrorInfo::new("https://example.com/errors/busy.html"));
-    /// assert_eq!(list.to_string(), "sip:busy@example.com;reason=busy, https://example.com/errors/busy.html");
+    /// assert_eq!(list.to_string(), "<sip:busy@example.com>;reason=busy, <https://example.com/errors/busy.html>");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
@@ -478,6 +470,7 @@ impl fmt::Display for ErrorInfoList {
 /// ).unwrap();
 /// assert_eq!(header.error_info_list.len(), 2);
 /// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorInfoHeader {
     /// The list of ErrorInfo entries in this header
     pub error_info_list: ErrorInfoList,
@@ -518,6 +511,11 @@ impl ErrorInfoHeader {
     /// An `ErrorInfo` instance constructed from the parsed value
     pub fn from_error_info_value(value: &ErrorInfoValue) -> ErrorInfo {
         let mut info = ErrorInfo::new(&value.uri_str);
+        
+        // Add comment if present
+        if let Some(comment) = &value.comment {
+            info = info.with_comment(comment);
+        }
         
         // Convert params to parameters HashMap
         for param in &value.params {
@@ -621,7 +619,7 @@ impl fmt::Display for ErrorInfoHeader {
     /// let mut header = ErrorInfoHeader::new();
     /// header.error_info_list.add(ErrorInfo::new("sip:busy@example.com"));
     ///
-    /// assert_eq!(header.to_string(), "Error-Info: sip:busy@example.com");
+    /// assert_eq!(header.to_string(), "Error-Info: <sip:busy@example.com>");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Error-Info: {}", self.error_info_list)
@@ -664,7 +662,7 @@ impl TypedHeaderTrait for ErrorInfoHeader {
                     // Convert to ErrorInfo
                     let error_info = ErrorInfo {
                         uri: value.uri.to_string(),
-                        comment: None, // Comment is not preserved in HeaderValue::ErrorInfo
+                        comment: value.comment.clone(), // Use comment if available
                         parameters: value.params.iter().filter_map(|param| {
                             if let Param::Other(name, Some(param_value)) = param {
                                 // Extract the string value
@@ -732,14 +730,14 @@ mod tests {
         // Test formatting without parameters
         let mut header = ErrorInfoHeader::new();
         header.error_info_list.add(ErrorInfo::new("sip:busy@example.com"));
-        assert_eq!(header.to_string(), "Error-Info: sip:busy@example.com");
+        assert_eq!(header.to_string(), "Error-Info: <sip:busy@example.com>");
 
         // Test formatting with parameters
         let mut header = ErrorInfoHeader::new();
         header.error_info_list.add(
             ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy")
         );
-        assert_eq!(header.to_string(), "Error-Info: sip:busy@example.com;reason=busy");
+        assert_eq!(header.to_string(), "Error-Info: <sip:busy@example.com>;reason=busy");
 
         // Test with multiple items
         let mut header = ErrorInfoHeader::new();
@@ -747,7 +745,7 @@ mod tests {
         header.error_info_list.add(ErrorInfo::new("https://example.com/errors/busy.html"));
         assert_eq!(
             header.to_string(),
-            "Error-Info: sip:busy@example.com, https://example.com/errors/busy.html"
+            "Error-Info: <sip:busy@example.com>, <https://example.com/errors/busy.html>"
         );
     }
 
@@ -777,7 +775,7 @@ mod tests {
     #[test]
     fn test_comment_handling() {
         let error_info = ErrorInfo::new("sip:busy@example.com").with_comment("User is busy");
-        assert_eq!(error_info.to_string(), "sip:busy@example.com (User is busy)");
+        assert_eq!(error_info.to_string(), "<sip:busy@example.com> (User is busy)");
     }
 
     #[test]
@@ -808,6 +806,6 @@ mod tests {
         assert_eq!(new_header.error_info_list.items[0].parameters.get("reason").unwrap(), "busy");
         
         // Test that the formatted header string matches what we expect
-        assert_eq!(header.to_string(), "Error-Info: sip:busy@example.com;reason=busy");
+        assert_eq!(header.to_string(), "Error-Info: <sip:busy@example.com>;reason=busy");
     }
 } 

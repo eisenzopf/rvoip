@@ -1,37 +1,3 @@
-//! Authorization header builder
-//!
-//! This module provides builder methods for adding Authorization headers to SIP requests,
-//! used for providing authentication credentials as defined in RFC 3261 Section 22.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use rvoip_sip_core::prelude::*;
-//! use rvoip_sip_core::builder::SimpleRequestBuilder;
-//!
-//! // Create a request with a Digest Authorization
-//! let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
-//!     .authorization_digest(
-//!         "alice",                 // username
-//!         "sip.example.com",       // realm
-//!         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
-//!         "5ccc069c403ebaf9f0171e9517f40e41",   // response
-//!         Some("0a4f113b"),        // cnonce 
-//!         Some("auth"),            // qop
-//!         Some("00000001"),        // nc
-//!         Some("REGISTER"),        // method
-//!         Some("sip:example.com"), // uri
-//!         Some("MD5"),             // algorithm
-//!         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
-//!     )
-//!     .build();
-//!
-//! // Create a request with a Basic Authorization
-//! let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
-//!     .authorization_basic("alice", "password123")
-//!     .build();
-//! ```
-
 use base64::{Engine as _, engine::general_purpose};
 use crate::error::Result;
 use crate::types::{
@@ -50,11 +16,94 @@ use crate::types::{
 };
 use super::HeaderSetter;
 
-/// Extension trait for adding Authorization header building capabilities
+/// Authorization header builder
 ///
-/// This trait allows for easy addition of various types of authorization headers 
-/// to SIP requests. It supports both Digest Authentication (the most common form in SIP)
-/// and Basic Authentication.
+/// This module provides builder methods for adding Authorization headers to SIP requests,
+/// used for providing authentication credentials as defined in RFC 3261 Section 22.
+///
+/// ## SIP Authentication Overview
+///
+/// SIP authentication is based on the HTTP authentication framework defined in
+/// [RFC 2617](https://datatracker.ietf.org/doc/html/rfc2617) and later 
+/// [RFC 7616](https://datatracker.ietf.org/doc/html/rfc7616), adapted for SIP in
+/// [RFC 3261 Section 22](https://datatracker.ietf.org/doc/html/rfc3261#section-22).
+/// Authorization occurs primarily when registering with a registrar, accessing resources
+/// through a proxy, or when making requests to secured endpoints.
+///
+/// ## Authentication Flow
+///
+/// 1. Client sends a request without credentials
+/// 2. Server responds with 401 Unauthorized (registrar/UAS) or 407 Proxy Authentication Required (proxy)
+/// 3. Server includes a WWW-Authenticate or Proxy-Authenticate header with challenge parameters
+/// 4. Client computes a response using the challenge, credentials, and request information
+/// 5. Client resends request with Authorization or Proxy-Authorization header including the response
+/// 6. Server validates the credentials and grants access if valid
+///
+/// ## Types of Authentication
+///
+/// - **Digest Authentication**: The primary authentication method in SIP, providing a challenge-response
+///   mechanism that avoids sending passwords in plaintext
+/// - **Basic Authentication**: A simple authentication method using Base64-encoded username:password,
+///   which should only be used over secure transports like TLS
+///
+/// ## Common Digest Authentication Parameters
+///
+/// - **username**: The user being authenticated
+/// - **realm**: Authentication domain
+/// - **nonce**: Server-generated unique challenge string
+/// - **response**: Hash computed from credentials and challenge
+/// - **uri**: The request URI, used in hash computation
+/// - **algorithm**: Hash algorithm (e.g., MD5, SHA-256)
+/// - **qop** (Quality of Protection): Indicates authentication quality level (auth, auth-int)
+/// - **cnonce**: Client-generated nonce for replay protection
+/// - **nc** (Nonce Count): Counter for nonce reuse tracking
+/// - **opaque**: Server data to be returned unchanged
+///
+/// ## Relationship with other headers
+///
+/// - **Authorization** vs **WWW-Authenticate**: WWW-Authenticate presents the challenge from a UAS,
+///   Authorization provides the response to that challenge
+/// - **Authorization** vs **Proxy-Authorization**: Authorization responds to endpoint challenges,
+///   Proxy-Authorization responds to proxy challenges
+/// - **Authorization** vs **Authentication-Info**: Authorization is in requests from clients,
+///   Authentication-Info provides post-authentication data in responses
+///
+/// ## Security Considerations
+///
+/// - Digest authentication should use strong algorithms like SHA-256 when possible
+/// - Basic authentication should only be used over TLS connections
+/// - Clients should validate the realm to prevent man-in-the-middle attacks
+/// - Mutual authentication (server authenticating to client) is possible with auth-int qop
+/// - Replay protection requires proper handling of nonce/cnonce values and nonce counts
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+///
+/// // Create a request with a Digest Authorization
+/// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .authorization_digest(
+///         "alice",                 // username
+///         "sip.example.com",       // realm
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+///         "5ccc069c403ebaf9f0171e9517f40e41",   // response
+///         Some("0a4f113b"),        // cnonce 
+///         Some("auth"),            // qop
+///         Some("00000001"),        // nc
+///         Some("REGISTER"),        // method
+///         Some("sip:example.com"), // uri
+///         Some("MD5"),             // algorithm
+///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+///     )
+///     .build();
+///
+/// // Create a request with a Basic Authorization
+/// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+///     .authorization_basic("alice", "password123")
+///     .build();
+/// ```
 ///
 /// # Important Note on Parameter Order
 ///
@@ -250,6 +299,25 @@ pub trait AuthorizationExt {
     /// This method adds an Authorization header with a Digest authentication response
     /// to a SIP request. This is typically used in response to a 401 Unauthorized challenge.
     ///
+    /// ## Digest Authentication in SIP
+    ///
+    /// Digest authentication is the primary authentication mechanism in SIP, defined in 
+    /// [RFC 3261 Section 22.4](https://datatracker.ietf.org/doc/html/rfc3261#section-22.4).
+    /// It uses a challenge-response mechanism where:
+    ///
+    /// 1. The server provides a challenge in a WWW-Authenticate header
+    /// 2. The client computes a response hash using the challenge, credentials, and request details
+    /// 3. The client sends the response in an Authorization header
+    /// 
+    /// The digest response calculation depends on several parameters and the chosen hash algorithm.
+    /// For MD5 with qop=auth (most common in legacy systems):
+    ///
+    /// - A1 = username:realm:password
+    /// - A2 = method:uri
+    /// - response = MD5(MD5(A1):nonce:nc:cnonce:qop:MD5(A2))
+    ///
+    /// For SHA-256 and newer systems, the calculation is similar but uses SHA-256 instead of MD5.
+    ///
     /// # Parameters
     ///
     /// * `username` - The authentication username (mandatory)
@@ -298,14 +366,19 @@ pub trait AuthorizationExt {
     ///     .build();
     /// ```
     ///
-    /// # Note
+    /// # Common Algorithm Choices
     ///
-    /// The `response` parameter should be calculated according to the algorithm
-    /// specified in RFC 2617 (HTTP Digest) and RFC 3261 (SIP).
-    /// For MD5 and qop=auth, the calculation would be:
-    /// - A1 = username:realm:password
-    /// - A2 = method:uri
-    /// - response = MD5(MD5(A1):nonce:nc:cnonce:qop:MD5(A2))
+    /// - **MD5**: The original algorithm from RFC 2617, widely supported but less secure
+    /// - **MD5-sess**: MD5 with session variations for improved security
+    /// - **SHA-256**: Modern secure hash algorithm, recommended for new implementations
+    /// - **SHA-256-sess**: SHA-256 with session variations
+    /// - **SHA-512-256**: Even stronger hash algorithm for high-security environments
+    ///
+    /// # Note on Nonce Count
+    ///
+    /// The nonce count (nc) is a hexadecimal counter that increases with each request using
+    /// the same nonce. It starts at 00000001 and should be incremented for each request using
+    /// the same nonce value. This prevents replay attacks.
     fn authorization_digest(
         self,
         username: &str,
@@ -326,6 +399,18 @@ pub trait AuthorizationExt {
     /// This method adds an Authorization header with a Basic authentication response
     /// to a SIP request. Basic authentication simply base64-encodes the username and password.
     ///
+    /// ## Basic Authentication in SIP
+    ///
+    /// Basic authentication is defined in [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617)
+    /// for HTTP and adapted for SIP. It works by:
+    ///
+    /// 1. Concatenating username and password with a colon separator: `username:password`
+    /// 2. Base64-encoding this string
+    /// 3. Adding it to the Authorization header as `Authorization: Basic {encoded-string}`
+    ///
+    /// Because the password is sent with only Base64 encoding (which is trivially reversed),
+    /// Basic authentication should only be used over secure transport like TLS.
+    ///
     /// # Parameters
     ///
     /// * `username` - The authentication username
@@ -341,9 +426,17 @@ pub trait AuthorizationExt {
     /// use rvoip_sip_core::prelude::*;
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
-    /// let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com").unwrap()
+    /// // Create a REGISTER request with Basic Authentication over TLS
+    /// let request = SimpleRequestBuilder::new(Method::Register, "sips:secure.example.com").unwrap()
+    ///     .from("Alice", "sips:alice@secure.example.com", Some("reg-1"))
+    ///     .to("Alice", "sips:alice@secure.example.com", None)
+    ///     .contact("<sips:alice@192.0.2.1:5061>", None)
+    ///     // Add a Basic authentication header
     ///     .authorization_basic("alice", "password123")
     ///     .build();
+    ///
+    /// // Note: This is sending a request to a SIPS URI (SIP over TLS),
+    /// // which provides the transport security needed for Basic authentication
     /// ```
     ///
     /// # Security Considerations
@@ -351,7 +444,7 @@ pub trait AuthorizationExt {
     /// Basic authentication sends credentials with minimal protection (only base64 encoding,
     /// which is trivial to decode). It should only be used over secure connections (like TLS)
     /// and is generally not recommended for SIP authentication. Digest authentication
-    /// provides much better security.
+    /// provides much better security for insecure transports.
     fn authorization_basic(self, username: &str, password: &str) -> Self;
 }
 

@@ -22,6 +22,92 @@ use crate::types::{
     user_agent::UserAgent,
 };
 
+/// # SIP Request Builder
+///
+/// The SimpleRequestBuilder provides a streamlined approach to creating SIP request messages
+/// as defined in [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261).
+///
+/// ## SIP Request Overview
+///
+/// SIP (Session Initiation Protocol) requests are messages sent by clients to servers to initiate
+/// actions or transactions. Each request contains a method indicating the desired action, a 
+/// Request-URI identifying the resource, and various headers providing additional information.
+///
+/// A typical SIP request looks like:
+///
+/// ```text
+/// INVITE sip:bob@example.com SIP/2.0
+/// Via: SIP/2.0/UDP alice.example.com:5060;branch=z9hG4bK776asdhds
+/// Max-Forwards: 70
+/// To: Bob <sip:bob@example.com>
+/// From: Alice <sip:alice@example.com>;tag=1928301774
+/// Call-ID: a84b4c76e66710
+/// CSeq: 314159 INVITE
+/// Contact: <sip:alice@192.168.1.2:5060>
+/// Content-Type: application/sdp
+/// Content-Length: 142
+///
+/// [SDP message body]
+/// ```
+///
+/// ## Common SIP Methods
+///
+/// SIP defines several methods for different purposes:
+///
+/// - **INVITE**: Initiates a session (call) between endpoints
+/// - **ACK**: Acknowledges receipt of a final response to an INVITE
+/// - **BYE**: Terminates an established session
+/// - **CANCEL**: Cancels a pending INVITE transaction
+/// - **REGISTER**: Registers contact information with a SIP server
+/// - **OPTIONS**: Queries a server about its capabilities
+/// - **REFER**: Asks recipient to issue a request (typically used for transfers)
+/// - **SUBSCRIBE**: Requests notification of an event
+/// - **NOTIFY**: Sends a notification of an event
+/// - **MESSAGE**: Sends an instant message (RFC 3428)
+///
+/// ## Key SIP Request Headers
+///
+/// - **Via**: Indicates the transport path taken by the request so far
+/// - **Max-Forwards**: Limits the number of hops a request can make
+/// - **From**: Identifies the logical initiator of the request
+/// - **To**: Identifies the logical recipient of the request
+/// - **Call-ID**: Unique identifier for this call or registration
+/// - **CSeq**: Sequence number and method for ordering requests
+/// - **Contact**: Direct URI at which the sender can be reached
+/// - **Content-Type/Content-Length**: Describes the message body, if present
+///
+/// ## SIP Dialog Context
+///
+/// Many SIP requests operate within the context of a dialog - a peer-to-peer relationship
+/// between two SIP endpoints. Dialogs are established by certain transactions (like INVITE)
+/// and provide context for subsequent requests.
+///
+/// Dialog identification requires:
+/// - Call-ID value
+/// - Local tag (From header tag)
+/// - Remote tag (To header tag)
+///
+/// ## Transaction Model
+///
+/// SIP uses a transaction model to group requests and responses:
+///
+/// - **INVITE transactions**: Used to establish sessions, includes a three-way handshake
+/// - **Non-INVITE transactions**: Used for other methods, with a simpler two-way handshake
+///
+/// ## Benefits of Using SimpleRequestBuilder
+///
+/// The SimpleRequestBuilder provides several advantages:
+///
+/// - **Ergonomic API**: Fluent interface with method chaining
+/// - **Default Handling**: Sets reasonable defaults for many optional fields
+/// - **RFC Compliance**: Ensures compliance with SIP standards and conventions
+/// - **Header Management**: Properly formats and validates SIP headers
+/// - **Method-Specific Builders**: Convenience constructors for common requests
+/// - **Type Safety**: Leverages Rust's type system to prevent invalid messages
+///
+/// The examples below demonstrate how to create various types of SIP requests
+/// for common scenarios.
+
 /// The SimpleRequestBuilder provides a streamlined approach to creating SIP request messages.
 ///
 /// # Examples
@@ -122,7 +208,7 @@ use crate::types::{
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// use rvoip_sip_core::types::TypedHeader;
 /// use rvoip_sip_core::types::auth::{Authorization, AuthScheme};
-/// use rvoip_sip_core::types::Uri;
+/// use rvoip_sip_core::types::uri::Uri;
 /// use std::str::FromStr;
 ///
 /// // Create an Authorization header
@@ -268,12 +354,110 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic INVITE Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete INVITE Request with SDP Body
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::sdp::SdpBuilder;
+    /// use rvoip_sip_core::sdp::attributes::MediaDirection;
+    ///
+    /// // Create SDP for a voice call using the SdpBuilder pattern
+    /// let sdp_body = SdpBuilder::new("SIP Voice Call")
+    ///     .origin("alice", "2890844526", "2890844526", "IN", "IP4", "192.168.1.2")
+    ///     .connection("IN", "IP4", "192.168.1.2")
+    ///     .time("0", "0")
+    ///     .media_audio(49170, "RTP/AVP")
+    ///         .formats(&["0", "8"])
+    ///         .rtpmap("0", "PCMU/8000")
+    ///         .rtpmap("8", "PCMA/8000")
+    ///         .direction(MediaDirection::SendRecv)
+    ///         .done()
+    ///     .build()
+    ///     .expect("Valid SDP");
+    ///
+    /// // Create an INVITE request to establish a call
+    /// let invite_request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     // Add required headers for a dialog
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     // Add routing information
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     // Add SDP information
+    ///     .content_type("application/sdp")
+    ///     .body(sdp_body.to_string())
+    ///     .build();
+    /// ```
+    /// 
+    /// ## INVITE Request with Audio and Video
+    /// 
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::sdp::SdpBuilder;
+    /// use rvoip_sip_core::sdp::attributes::MediaDirection;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::supported::Supported;
+    ///
+    /// // Create an SDP with audio and video streams using SdpBuilder
+    /// let sdp_body = SdpBuilder::new("Audio/Video Call")
+    ///     .origin("alice", "2890844526", "2890844526", "IN", "IP4", "192.168.1.2")
+    ///     .connection("IN", "IP4", "192.168.1.2")
+    ///     .time("0", "0")
+    ///     // Add BUNDLE group to use a single transport for both media
+    ///     .group("BUNDLE", &["audio", "video"])
+    ///     // Audio stream
+    ///     .media_audio(49170, "RTP/AVP")
+    ///         .formats(&["0", "101"])
+    ///         .rtpmap("0", "PCMU/8000")
+    ///         .rtpmap("101", "telephone-event/8000")
+    ///         .fmtp("101", "0-16")  // DTMF events
+    ///         .direction(MediaDirection::SendRecv)
+    ///         .mid("audio")  // Media ID for bundling
+    ///         .done()
+    ///     // Video stream
+    ///     .media_video(49172, "RTP/AVP")
+    ///         .formats(&["96", "97"])
+    ///         .rtpmap("96", "H264/90000")
+    ///         .fmtp("96", "profile-level-id=42e01f;packetization-mode=1")
+    ///         .rtpmap("97", "VP8/90000")
+    ///         .direction(MediaDirection::SendRecv)
+    ///         .mid("video")  // Media ID for bundling
+    ///         .done()
+    ///     .build()
+    ///     .expect("Valid SDP");
+    ///
+    /// // Create a complete INVITE request with audio and video
+    /// let invite_with_av = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     // Support for required extensions
+    ///     .header(TypedHeader::Supported(Supported::new(vec![
+    ///         "100rel".to_string(),  // Reliable provisional responses
+    ///         "ice".to_string(),     // Interactive Connectivity Establishment
+    ///         "replaces".to_string() // Call replacement
+    ///     ])))
+    ///     // Add SDP body with audio and video
+    ///     .content_type("application/sdp")
+    ///     .body(sdp_body.to_string())
+    ///     .build();
     /// ```
     pub fn invite(uri: &str) -> Result<Self> {
         Self::new(Method::Invite, uri)
@@ -291,12 +475,74 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic REGISTER Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::register("sip:registrar.example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete Registration with Expiration Time
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::expires::Expires;
+    /// 
+    /// // Create a REGISTER request with a 1-hour expiration
+    /// let register_request = SimpleRequestBuilder::register("sip:registrar.example.com").unwrap()
+    ///     // Add required headers for registration
+    ///     .from("Alice", "sip:alice@example.com", Some("reg-tag-1"))
+    ///     .to("Alice", "sip:alice@example.com", None) // To header matches From without tag
+    ///     .call_id("reg-call-1@192.168.1.2")
+    ///     .cseq(1)
+    ///     // Add routing information
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     // Add registration information
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     .header(TypedHeader::Expires(Expires::new(3600))) // 1 hour registration
+    ///     .build();
+    /// ```
+    ///
+    /// ## Registration Refresh with Authentication
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::expires::Expires;
+    /// use rvoip_sip_core::types::auth::{Authorization, AuthScheme};
+    /// use rvoip_sip_core::types::uri::Uri;
+    /// use std::str::FromStr;
+    ///
+    /// // Create a URI for the authorization header
+    /// let reg_uri = Uri::from_str("sip:registrar.example.com").unwrap();
+    /// 
+    /// // Create an Authorization header with digest authentication
+    /// let auth = Authorization::new(
+    ///     AuthScheme::Digest,
+    ///     "alice",                                    // username
+    ///     "example.com",                              // realm
+    ///     "dcd98b7102dd2f0e8b11d0f600bfb0c093",      // nonce
+    ///     reg_uri,                                    // uri
+    ///     "a2ea68c230e5fea1ca715740fb14db97"         // response hash
+    /// );
+    ///
+    /// // Create a REGISTER refresh with authentication
+    /// let register_refresh = SimpleRequestBuilder::register("sip:registrar.example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("reg-tag-1"))
+    ///     .to("Alice", "sip:alice@example.com", None)
+    ///     .call_id("reg-call-1@192.168.1.2")
+    ///     .cseq(2)  // Increment CSeq for refresh
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887asdhrt"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     .header(TypedHeader::Expires(Expires::new(3600)))
+    ///     .header(TypedHeader::Authorization(auth))
+    ///     .build();
     /// ```
     pub fn register(uri: &str) -> Result<Self> {
         Self::new(Method::Register, uri)
@@ -314,12 +560,52 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic BYE Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::bye("sip:bob@example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete BYE Request for an Established Dialog
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// // Create a BYE request to terminate an active dialog
+    /// let bye_request = SimpleRequestBuilder::bye("sip:bob@example.com").unwrap()
+    ///     // For BYE requests, both From and To tags must be present
+    ///     // as they identify the dialog being terminated
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", Some("b5qt9xl3"))  // To tag is required for BYE
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(2)  // CSeq increments throughout the dialog
+    ///     // Add routing information
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887jhgfd"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     .build();
+    /// ```
+    ///
+    /// ## BYE Request with Custom Reason Header
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::ReasonBuilderExt;
+    ///
+    /// // Create a BYE request with a reason for termination
+    /// let bye_request = SimpleRequestBuilder::bye("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", Some("b5qt9xl3"))
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(3)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK99alhkgj"))
+    ///     .max_forwards(70)
+    ///     .reason("SIP", 487, Some("Client call transfer"))  // Add reason for the termination
+    ///     .build();
     /// ```
     pub fn bye(uri: &str) -> Result<Self> {
         Self::new(Method::Bye, uri)
@@ -337,12 +623,80 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic OPTIONS Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::options("sip:bob@example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete OPTIONS Request to Query Server Capabilities
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::accept::Accept;
+    ///
+    /// // Create a simple empty Accept header - simplified for doc test
+    /// let accept = Accept::new();
+    ///
+    /// // Create an OPTIONS request to query a server's capabilities
+    /// let options_request = SimpleRequestBuilder::options("sip:server.example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("opt-tag-1"))
+    ///     .to("Server", "sip:server.example.com", None)
+    ///     .call_id("options-call-1@192.168.1.2")
+    ///     .cseq(1)
+    ///     // Add routing information
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     // Add Accept header to indicate which body formats we can process
+    ///     .header(TypedHeader::Accept(accept))
+    ///     .build();
+    /// ```
+    ///
+    /// ## OPTIONS Request with Supported Extensions
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::supported::Supported;
+    /// use rvoip_sip_core::types::allow::Allow;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// // Create supported extensions header
+    /// let supported = Supported::new(vec![
+    ///     "100rel".to_string(),
+    ///     "path".to_string(),
+    ///     "timer".to_string(),
+    ///     "replaces".to_string()
+    /// ]);
+    ///
+    /// // Create Allow header for methods we support
+    /// let mut allow = Allow::new();
+    /// allow.add_method(Method::Invite);
+    /// allow.add_method(Method::Ack);
+    /// allow.add_method(Method::Cancel);
+    /// allow.add_method(Method::Bye);
+    /// allow.add_method(Method::Options);
+    /// allow.add_method(Method::Refer);
+    ///
+    /// // Create an OPTIONS request that advertises our capabilities
+    /// let options_request = SimpleRequestBuilder::options("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("opt-tag-2"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("options-call-2@192.168.1.2")
+    ///     .cseq(1)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK99nnmbhr"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.2:5060", None)
+    ///     // Add headers to advertise our capabilities
+    ///     .header(TypedHeader::Supported(supported))
+    ///     .header(TypedHeader::Allow(allow))
+    ///     .build();
     /// ```
     pub fn options(uri: &str) -> Result<Self> {
         Self::new(Method::Options, uri)
@@ -360,12 +714,63 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic ACK Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::ack("sip:bob@example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete ACK for a 200 OK Response
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// // Create an ACK to acknowledge a 200 OK response
+    /// // The tags and Call-ID must match the dialog established by the INVITE
+    /// let ack_request = SimpleRequestBuilder::ack("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))  // Same tag as INVITE
+    ///     .to("Bob", "sip:bob@example.com", Some("b5qt9xl3"))  // To tag from the 200 OK response
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")  // Same as INVITE
+    ///     .cseq(1)  // Must match the INVITE CSeq number
+    ///     // Add routing information
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887jhgfd"))
+    ///     .max_forwards(70)
+    ///     .build();
+    /// ```
+    ///
+    /// ## ACK with Route Headers for Record-Route
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use rvoip_sip_core::types::route::Route;
+    /// use rvoip_sip_core::types::uri::Uri;
+    /// use std::str::FromStr;
+    ///
+    /// // Create route URIs from Record-Route headers received in the INVITE transaction
+    /// let route1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
+    /// let route2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
+    /// 
+    /// // Create route for proxies - simplified for doc test
+    /// let mut route = Route::new(vec![]);
+    /// route.add_uri(route2);
+    /// route.add_uri(route1);
+    ///
+    /// // Create an ACK with routing information from Record-Routes
+    /// let ack_request = SimpleRequestBuilder::ack("sip:bob@192.168.2.3:5060").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", Some("b5qt9xl3"))
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887jhgfd"))
+    ///     .max_forwards(70)
+    ///     // Add route header to follow the same path as the INVITE
+    ///     .header(TypedHeader::Route(route))
+    ///     .build();
     /// ```
     pub fn ack(uri: &str) -> Result<Self> {
         Self::new(Method::Ack, uri)
@@ -383,12 +788,87 @@ impl SimpleRequestBuilder {
     /// # Returns
     /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// ## Basic CANCEL Request
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     ///
     /// let builder = SimpleRequestBuilder::cancel("sip:bob@example.com").unwrap();
+    /// ```
+    ///
+    /// ## Complete CANCEL Request for a Pending INVITE
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// // Create a CANCEL request to terminate a pending INVITE
+    /// // CANCEL must have the same request-URI, Call-ID, From, To, and CSeq number as the INVITE
+    /// let cancel_request = SimpleRequestBuilder::cancel("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))  // Same as INVITE
+    ///     .to("Bob", "sip:bob@example.com", None)  // Same as INVITE (no To tag yet)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")  // Same as INVITE
+    ///     .cseq(1)  // Must match the INVITE CSeq number
+    ///     // Add routing information (branch parameter can be different)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK776asghyt"))
+    ///     .max_forwards(70)
+    ///     .build();
+    /// ```
+    ///
+    /// ## CANCEL Request with Route Headers
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::route::Route;
+    /// use rvoip_sip_core::types::uri::Uri;
+    /// use rvoip_sip_core::types::TypedHeader;
+    /// use std::str::FromStr;
+    ///
+    /// // Route header from the original INVITE
+    /// let route_uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
+    /// // Create a simple route - simplified for doc test
+    /// let mut route = Route::new(vec![]);
+    /// route.add_uri(route_uri);
+    ///
+    /// // Create a CANCEL request for an INVITE
+    /// let cancel_request = SimpleRequestBuilder::cancel("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887asdfgh"))
+    ///     .max_forwards(70)
+    ///     // Use same route as INVITE
+    ///     .header(TypedHeader::Route(route))
+    ///     .build();
+    /// ```
+    ///
+    /// ## CANCEL Request with Reason Header
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::ReasonBuilderExt;
+    ///
+    /// // Create a CANCEL request with a reason for termination
+    /// let cancel_request = SimpleRequestBuilder::cancel("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     .via("192.168.1.2:5060", "UDP", Some("z9hG4bK887asdfgh"))
+    ///     .max_forwards(70)
+    ///     .reason_busy()  // Indicate the call is being canceled because user is busy
+    ///     .build();
+    ///
+    /// // Alternatively, use reason_terminated() for standard request termination
+    /// let cancel_standard = SimpleRequestBuilder::cancel("sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@192.168.1.2")
+    ///     .cseq(1)
+    ///     .reason_terminated()  // Standard reason for CANCEL (487 Request Terminated)
+    ///     .build();
     /// ```
     pub fn cancel(uri: &str) -> Result<Self> {
         Self::new(Method::Cancel, uri)

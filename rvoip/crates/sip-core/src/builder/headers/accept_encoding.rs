@@ -10,9 +10,173 @@ use crate::parser::headers::accept_encoding::EncodingInfo;
 use crate::types::param::Param;
 use super::HeaderSetter;
 
-/// Extension trait for adding Accept-Encoding header building capabilities
+/// Accept-Encoding Header Builder for SIP Messages
+///
+/// This module provides builder methods for the Accept-Encoding header in SIP messages,
+/// which indicates what content encodings the User Agent can understand.
+///
+/// ## SIP Accept-Encoding Header Overview
+///
+/// The Accept-Encoding header is defined in [RFC 3261 Section 20.2](https://datatracker.ietf.org/doc/html/rfc3261#section-20.2)
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// [RFC 2616 Section 14.3](https://datatracker.ietf.org/doc/html/rfc2616#section-14.3) for HTTP.
+/// The header specifies which content encodings are acceptable in responses or future messages.
+///
+/// ## Purpose of Accept-Encoding Header
+///
+/// The Accept-Encoding header serves several important purposes in SIP:
+///
+/// 1. It enables the use of compression to reduce bandwidth requirements
+/// 2. It allows UAs to indicate which compression algorithms they support
+/// 3. It provides a mechanism to express preferences via quality values (q-values)
+/// 4. It helps optimize transmission efficiency, particularly for large message bodies
+///
+/// ## Common Encodings in SIP
+///
+/// - **gzip**: Standard GZIP compression, widely supported
+/// - **deflate**: ZLIB compression format
+/// - **compress**: UNIX "compress" program method (less common)
+/// - **identity**: No encoding/compression (the content is sent as-is)
+/// - **\***: Wildcard to indicate all other encodings not explicitly listed
+///
+/// ## Quality Values (q-values)
+///
+/// The Accept-Encoding header can include quality values (q-values) to indicate preference order:
+///
+/// - Values range from 0.0 to 1.0, with 1.0 being the highest priority
+/// - Default value is 1.0 when not specified
+/// - A q-value of 0.0 explicitly indicates rejection of that encoding
+/// - The wildcard "\*" with q=0.0 rejects all unlisted encodings
+///
+/// ## Special Considerations
+///
+/// 1. **Performance Trade-offs**: Compression reduces bandwidth but increases CPU usage
+/// 2. **Multiple Headers**: The Accept-Encoding header can appear multiple times in a request
+/// 3. **Default Behavior**: If no Accept-Encoding header is present, all encodings are acceptable
+/// 4. **Identity Encoding**: Explicitly including "identity" indicates a preference for unencoded content
+///
+/// ## Relationship with other headers
+///
+/// - **Accept-Encoding** + **Content-Encoding**: Accept-Encoding specifies what can be received, Content-Encoding specifies what is being sent
+/// - **Accept-Encoding** vs **Accept**: Accept is for content types, Accept-Encoding is for compression methods
+/// - **Accept-Encoding** works with **Content-Length**: Compression affects message size and thus Content-Length
+/// - **Accept-Encoding** considerations with **Max-Forwards**: In constrained networks, appropriate encoding can prevent message fragmentation
+///
+/// # Examples
+///
+/// ## Basic Usage with Compression
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::AcceptEncodingExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a request that accepts gzip-compressed responses
+/// let request = SimpleRequestBuilder::new(Method::Message, "sip:recipient@example.com").unwrap()
+///     .accept_encoding("gzip", None)  // Accept gzip content with default priority
+///     .build();
+/// ```
+///
+/// ## Multiple Encodings with Priorities
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::AcceptEncodingExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a request that specifies encoding preferences
+/// let encodings = vec![
+///     ("gzip", Some(1.0)),         // Preferred encoding
+///     ("deflate", Some(0.8)),      // Acceptable alternative
+///     ("identity", Some(0.5)),     // Unencoded content as fallback
+///     ("*", Some(0.0)),            // Reject all other encodings
+/// ];
+///
+/// let request = SimpleRequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+///     .accept_encodings(encodings)
+///     .build();
+/// ```
+///
+/// ## Mobile Client Optimization
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::AcceptEncodingExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a SUBSCRIBE request optimized for mobile networks
+/// let request = SimpleRequestBuilder::new(Method::Subscribe, "sip:presence@example.com").unwrap()
+///     .accept_encoding("gzip", Some(1.0))       // Strongly prefer compression
+///     .accept_encoding("deflate", Some(0.8))    // Accept deflate if gzip isn't available
+///     .accept_encoding("identity", Some(0.1))   // Strongly discourage uncompressed content
+///     .build();
+/// ```
+///
+/// ## When to use Accept-Encoding Headers
+///
+/// Accept-Encoding headers are particularly useful in the following scenarios:
+///
+/// 1. **Bandwidth-constrained environments**: Mobile networks, satellite links
+/// 2. **Large message bodies**: When transferring substantial content like images or documents
+/// 3. **High-latency networks**: Where reducing message size can improve responsiveness
+/// 4. **Optimizing battery life**: On mobile devices, compression can reduce transmission energy
+/// 5. **Network cost reduction**: For metered connections where data volume has direct cost implications
+///
+/// ## Best Practices
+///
+/// - Include Accept-Encoding when bandwidth efficiency matters
+/// - Always accept "identity" with some q-value to provide a fallback
+/// - Use the wildcard with q=0 to explicitly reject unlisted encodings when necessary
+/// - For mobile clients, prioritize compression by assigning higher q-values
+/// - Don't request compression for very small messages where overhead outweighs benefits
+///
+/// # Examples
+///
+/// ## SIP Client on Limited Bandwidth
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::AcceptEncodingExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a request from a client on a constrained network
+/// let request = SimpleRequestBuilder::new(Method::Options, "sip:service@example.com").unwrap()
+///     .from("Mobile Client", "sip:mobile@example.com", Some("tag1234"))
+///     .to("Service", "sip:service@example.com", None)
+///     // Strongly prefer compressed responses
+///     .accept_encoding("gzip", Some(1.0))
+///     .accept_encoding("deflate", Some(0.9))
+///     .accept_encoding("identity", Some(0.1))  // Discourage uncompressed responses
+///     .build();
+/// ```
+///
+/// ## File Transfer Optimization
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::AcceptEncodingExt;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Create a MESSAGE request that will receive a large file transfer
+/// let encodings = vec![
+///     ("gzip", Some(1.0)),         // Best compression for large files
+///     ("deflate", Some(0.9)),      // Good alternative
+///     ("identity", Some(0.2)),     // Accept uncompressed as last resort
+/// ];
+///
+/// let request = SimpleRequestBuilder::new(Method::Message, "sip:file-service@example.com").unwrap()
+///     .from("Recipient", "sip:user@example.com", Some("file-req"))
+///     .to("File Service", "sip:file-service@example.com", None)
+///     .accept_encodings(encodings)  // Specify compression preferences for the response
+///     .body("Please send me the requested document")
+///     .build();
+/// ```
 pub trait AcceptEncodingExt {
     /// Add an Accept-Encoding header with a single encoding
+    ///
+    /// This method specifies a single content encoding that the UA can process,
+    /// optionally with a quality value (q-value) to indicate preference when
+    /// multiple Accept-Encoding headers are present.
     ///
     /// # Arguments
     ///
@@ -27,16 +191,29 @@ pub trait AcceptEncodingExt {
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptEncodingExt};
+    /// use rvoip_sip_core::types::Method;
     /// 
-    /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-    ///     .from("Alice", "sip:alice@example.com", None)
-    ///     .to("Alice", "sip:alice@example.com", None)
-    ///     .accept_encoding("gzip", Some(0.9))
+    /// // Create a request that accepts gzip-compressed responses
+    /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("tag5678"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .accept_encoding("gzip", Some(0.9))  // Accept gzip compression with high priority
     ///     .build();
     /// ```
+    ///
+    /// # RFC Reference
+    /// 
+    /// As per [RFC 3261 Section 20.2](https://datatracker.ietf.org/doc/html/rfc3261#section-20.2),
+    /// the Accept-Encoding header field follows the syntax defined in 
+    /// [RFC 2616 Section 14.3](https://datatracker.ietf.org/doc/html/rfc2616#section-14.3),
+    /// including the use of q-values to indicate relative preference.
     fn accept_encoding(self, encoding: &str, q: Option<f32>) -> Self;
 
     /// Add an Accept-Encoding header with multiple encodings
+    ///
+    /// This method specifies multiple content encodings that the UA can process,
+    /// each with an optional quality value to indicate preference order.
+    /// This is more efficient than adding multiple individual Accept-Encoding headers.
     ///
     /// # Arguments
     ///
@@ -50,19 +227,30 @@ pub trait AcceptEncodingExt {
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptEncodingExt};
+    /// use rvoip_sip_core::types::Method;
     /// 
+    /// // Create a comprehensive set of encoding preferences
     /// let encodings = vec![
-    ///     ("gzip", Some(1.0)),
-    ///     ("identity", Some(0.5)),
-    ///     ("*", Some(0.0)), // Reject all other encodings
+    ///     ("gzip", Some(1.0)),         // Highest priority - prefer gzip
+    ///     ("deflate", Some(0.8)),      // Second priority
+    ///     ("identity", Some(0.5)),     // Third priority - uncompressed content
+    ///     ("*", Some(0.0)),            // Reject all other encodings not listed
     /// ];
     /// 
-    /// let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
-    ///     .from("Alice", "sip:alice@example.com", None)
-    ///     .to("Alice", "sip:alice@example.com", None)
-    ///     .accept_encodings(encodings)
+    /// // Create a request with encoding preferences
+    /// let request = SimpleRequestBuilder::new(Method::Subscribe, "sip:presence@example.com").unwrap()
+    ///     .from("Watcher", "sip:watcher@example.com", Some("watch123"))
+    ///     .to("Presence Service", "sip:presence@example.com", None)
+    ///     .accept_encodings(encodings)  // Set all encoding preferences at once
     ///     .build();
     /// ```
+    ///
+    /// # Special Values
+    ///
+    /// - **identity**: Represents no encoding/compression (content sent as-is)
+    /// - **\***: Wildcard that matches any encoding not explicitly listed
+    /// - **q=0.0**: When used with an encoding, explicitly rejects that encoding
+    /// - **\* with q=0.0**: Rejects all encodings not explicitly listed
     fn accept_encodings(self, encodings: Vec<(&str, Option<f32>)>) -> Self;
 }
 

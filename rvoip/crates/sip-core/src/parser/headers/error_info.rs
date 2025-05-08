@@ -33,6 +33,7 @@ pub struct ErrorInfoValue {
     pub uri: Uri,
     pub uri_str: String,
     pub params: Vec<Param>,
+    pub comment: Option<String>,
 }
 
 /// Parse a URI enclosed in angle brackets with optional whitespace before and after.
@@ -95,6 +96,7 @@ fn param(input: &[u8]) -> ParseResult<Param> {
 }
 
 /// Verifies that there are no trailing characters after the parameter list
+/// except possibly a properly formatted comment in parentheses
 fn verify_no_trailing_chars(input: &[u8]) -> bool {
     // Skip any leading whitespace
     let mut i = 0;
@@ -102,23 +104,74 @@ fn verify_no_trailing_chars(input: &[u8]) -> bool {
         i += 1;
     }
     
-    // We need to be at the end of the input or at a comma (which would start the next URI)
-    i >= input.len() || input[i] == b','
+    // Empty input is valid
+    if i >= input.len() {
+        return true;
+    }
+    
+    // A comma (which would start the next URI) is valid
+    if input[i] == b',' {
+        return true;
+    }
+    
+    // A '(' char starts a comment, which is valid
+    if input[i] == b'(' {
+        // Find the matching closing parenthesis
+        let mut paren_count = 1;
+        i += 1;
+        
+        while i < input.len() && paren_count > 0 {
+            if input[i] == b'(' {
+                paren_count += 1;
+            } else if input[i] == b')' {
+                paren_count -= 1;
+            }
+            i += 1;
+        }
+        
+        // If we found the closing parenthesis
+        if paren_count == 0 {
+            // Skip any more whitespace
+            while i < input.len() && (input[i] == b' ' || input[i] == b'\t') {
+                i += 1;
+            }
+            
+            // Now we expect to be at the end of input or at a comma
+            return i >= input.len() || input[i] == b',';
+        }
+    }
+    
+    // Anything else is invalid
+    false
 }
 
-/// Parses an error-info-value, which is an error-uri followed by optional parameters.
-/// error-info-value = error-uri *( SEMI generic-param )
+/// Parse a comment enclosed in parentheses
+fn error_info_comment(input: &[u8]) -> ParseResult<&[u8]> {
+    delimited(
+        tuple((space0, tag(b"("))), // Allow whitespace before opening parenthesis
+        take_until(")"),
+        tag(b")")
+    )(input)
+}
+
+/// Parses an error-info-value, which is an error-uri followed by optional parameters and an optional comment.
+/// error-info-value = error-uri *( SEMI generic-param ) [COMMENT]
 fn error_info_value(input: &[u8]) -> ParseResult<ErrorInfoValue> {
     let (input, _) = space0(input)?;
     
-    let (remaining, (uri_str, params)) = tuple((
-        enclosed_uri,
-        many0(param)
-    ))(input)?;
+    // Parse URI
+    let (mut remaining, uri_str) = enclosed_uri(input)?;
     
-    // Verify there are no trailing invalid characters
-    if !verify_no_trailing_chars(remaining) {
-        return Err(Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+    // Parse parameters
+    let (remaining_after_params, params) = many0(param)(remaining)?;
+    remaining = remaining_after_params;
+    
+    // Parse optional comment
+    let mut comment_text = None;
+    let comment_result = error_info_comment(remaining);
+    if let Ok((rest, comment_data)) = comment_result {
+        comment_text = Some(String::from_utf8_lossy(comment_data).into_owned());
+        remaining = rest;
     }
     
     // Create a URI safely without recursive calls
@@ -137,7 +190,7 @@ fn error_info_value(input: &[u8]) -> ParseResult<ErrorInfoValue> {
         }
     });
     
-    Ok((remaining, ErrorInfoValue { uri, uri_str, params }))
+    Ok((remaining, ErrorInfoValue { uri, uri_str, params, comment: comment_text }))
 }
 
 // Helper function to create an ErrorInfoUri without using FromStr implementation
@@ -185,6 +238,10 @@ fn trailing_comma_check(input: &[u8]) -> ParseResult<&[u8]> {
 /// Parses the value part of an Error-Info header (without the "Error-Info:" prefix).
 /// Example: `<sip:error@example.com>;reason=busy, <http://error.org>`
 pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
+    // Trim leading whitespace 
+    let (input, _) = space0(input)?;
+    
+    // Parse list of error_info_values separated by commas
     let (input, items) = separated_list1(
         tuple((space0, comma, space0)), // Allow whitespace around commas
         error_info_value
@@ -193,7 +250,7 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
     // Check for trailing comma
     let (input, _) = trailing_comma_check(input)?;
     
-    // Verify we've consumed all input
+    // Verify we've consumed all input (except for trailing whitespace)
     let (input, _) = space0(input)?;
     if !input.is_empty() {
         return Err(Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)));
@@ -512,5 +569,26 @@ mod tests {
             let result = parse_error_info(case.as_bytes());
             assert!(result.is_err(), "Invalid ABNF case should be rejected: {:?}", case);
         }
+    }
+
+    #[test]
+    fn test_parse_error_info_with_comment() {
+        let input = "<sip:not-in-service@example.com>;reason=Foo (Service unavailable)";
+        let result = parse_error_info(input.as_bytes());
+        assert!(result.is_ok(), "Failed to parse with comment: {:?}", result.err());
+        let (rem, infos) = result.unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(infos.len(), 1);
+        
+        // Verify URI
+        assert_eq!(infos[0].uri_str, "sip:not-in-service@example.com");
+        
+        // Check parameters
+        assert_eq!(infos[0].params.len(), 1);
+        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v)) 
+            if n == "reason" && v.to_string() == "Foo"));
+        
+        // Check comment
+        assert_eq!(infos[0].comment, Some("Service unavailable".to_string()));
     }
 } 

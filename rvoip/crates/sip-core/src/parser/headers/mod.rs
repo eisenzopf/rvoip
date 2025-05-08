@@ -40,6 +40,7 @@ pub mod call_info;
 pub mod error_info;
 pub mod warning;
 pub mod retry_after;
+pub mod reason;
 pub mod auth; // Group for auth parsers
 pub mod www_authenticate;
 pub mod proxy_authenticate;
@@ -94,6 +95,7 @@ pub use call_info::parse_call_info;
 pub use error_info::parse_error_info;
 pub use warning::parse_warning_value_list;
 pub use retry_after::parse_retry_after;
+pub use reason::parse_reason;
 pub use www_authenticate::parse_www_authenticate;
 pub use proxy_authenticate::parse_proxy_authenticate;
 pub use authorization::parse_authorization;

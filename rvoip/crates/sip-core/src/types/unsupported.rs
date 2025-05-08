@@ -441,11 +441,10 @@ impl TypedHeaderTrait for Unsupported {
     /// use rvoip_sip_core::prelude::*;
     ///
     /// // Create a header with Unsupported value
-    /// let tags = vec![b"timer".to_vec(), b"100rel".to_vec()];
-    /// let header = Header {
-    ///     name: HeaderName::Unsupported,
-    ///     value: HeaderValue::Unsupported(tags),
-    /// };
+    /// let header = Header::new(
+    ///     HeaderName::Unsupported,
+    ///     HeaderValue::Raw("timer, 100rel".as_bytes().to_vec())
+    /// );
     ///
     /// // Convert to Unsupported
     /// let unsupported = Unsupported::from_header(&header).unwrap();

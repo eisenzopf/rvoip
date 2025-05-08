@@ -17,7 +17,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use rvoip_sip_core::types::UserAgent;
+//! use rvoip_sip_core::types::user_agent::UserAgent;
 //! use std::str::FromStr;
 //!
 //! // Create a User-Agent header
@@ -46,7 +46,7 @@ use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::types::UserAgent;
+/// use rvoip_sip_core::types::user_agent::UserAgent;
 /// use std::str::FromStr;
 ///
 /// // Create a User-Agent header
@@ -78,7 +78,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let user_agent = UserAgent::new();
     /// assert!(user_agent.products().is_empty());
@@ -102,7 +102,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let user_agent = UserAgent::single("Example-SIP-Client/1.0");
     /// assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
@@ -126,7 +126,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let user_agent = UserAgent::with_products(&[
     ///     "Example-SIP-Client/1.0",
@@ -150,7 +150,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let mut user_agent = UserAgent::new();
     /// user_agent.add_product("Example-SIP-Client/1.0");
@@ -169,7 +169,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let user_agent = UserAgent::with_products(&[
     ///     "Example-SIP-Client/1.0",
@@ -193,7 +193,7 @@ impl UserAgent {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::types::UserAgent;
+    /// use rvoip_sip_core::types::user_agent::UserAgent;
     ///
     /// let user_agent = UserAgent::new();
     /// assert!(user_agent.is_empty());

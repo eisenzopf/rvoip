@@ -1,46 +1,3 @@
-//! WWW-Authenticate header builder
-//!
-//! This module provides builder methods for adding WWW-Authenticate headers to SIP responses,
-//! used for authentication challenges as defined in RFC 3261 Section 22.
-//!
-//! The WWW-Authenticate header is sent by the server in 401 (Unauthorized) responses to 
-//! challenge the client to provide credentials. The most common authentication scheme in 
-//! SIP is Digest Authentication, though Basic Authentication is also supported.
-//!
-//! # Authentication Flow in SIP
-//!
-//! A typical SIP authentication flow works like this:
-//!
-//! 1. Client sends a request (e.g., REGISTER)
-//! 2. Server responds with 401 Unauthorized containing a WWW-Authenticate header with a challenge
-//! 3. Client generates a response to the challenge and sends a new request with Authorization header
-//! 4. If the credentials are valid, the server accepts the request
-//!
-//! # Examples
-//!
-//! ```rust
-//! use rvoip_sip_core::prelude::*;
-//! use rvoip_sip_core::builder::SimpleResponseBuilder;
-//!
-//! // Create a response with a Digest WWW-Authenticate challenge
-//! let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-//!     .www_authenticate_digest(
-//!         "sip.example.com",        // realm
-//!         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
-//!         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
-//!         Some("MD5"),              // algorithm
-//!         Some(vec!["auth"]),       // qop options
-//!         None,                     // stale flag
-//!         None,                     // domain
-//!     )
-//!     .build();
-//!
-//! // Create a response with a Basic WWW-Authenticate challenge
-//! let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-//!     .www_authenticate_basic("sip.example.com")
-//!     .build();
-//! ```
-
 use crate::error::{Error, Result};
 use std::convert::TryFrom;
 use crate::types::{
@@ -58,11 +15,84 @@ use crate::types::{
 };
 use super::HeaderSetter;
 
-/// Extension trait for adding WWW-Authenticate header building capabilities
+/// WWW-Authenticate header builder
 ///
-/// This trait provides methods for adding WWW-Authenticate headers to SIP responses,
-/// which are used to challenge clients to authenticate as specified in 
-/// [RFC 3261 Section 22.1](https://datatracker.ietf.org/doc/html/rfc3261#section-22.1).
+/// This module provides builder methods for adding WWW-Authenticate headers to SIP responses,
+/// used for authentication challenges as defined in RFC 3261 Section 22.
+///
+/// ## SIP Authentication Challenge Overview
+///
+/// The WWW-Authenticate header is a key component of SIP's security framework defined in
+/// [RFC 3261 Section 22](https://datatracker.ietf.org/doc/html/rfc3261#section-22). It's sent
+/// by a server in 401 (Unauthorized) responses to challenge the client to provide valid credentials
+/// before accessing the requested resource.
+///
+/// ## Authentication Challenge Process
+///
+/// 1. Client sends an initial request (e.g., REGISTER, INVITE)
+/// 2. Server responds with 401 Unauthorized containing a WWW-Authenticate header with challenge parameters
+/// 3. Client computes a response using the challenge, user credentials, and request information
+/// 4. Client resends the request with an Authorization header including the computed response
+/// 5. Server validates the credentials and processes the request if valid
+///
+/// ## Challenge Types in SIP
+///
+/// - **Digest Authentication**: The primary challenge mechanism in SIP, providing a secure way
+///   to authenticate without transmitting passwords in plaintext
+/// - **Basic Authentication**: A simple challenge method requiring username:password in Base64 encoding,
+///   which should only be used over secure transports like TLS
+/// 
+/// ## Common Digest Challenge Parameters
+///
+/// - **realm**: Authentication domain, indicates the protection space
+/// - **nonce**: Server-generated unique challenge string
+/// - **opaque**: Data string that should be returned unchanged by the client
+/// - **algorithm**: Hash algorithm (e.g., MD5, SHA-256)
+/// - **qop** (Quality of Protection): Indicates authentication quality level (auth, auth-int)
+/// - **stale**: Indicates if the nonce is stale but credentials might still be valid
+/// - **domain**: List of URIs that share the same authentication information
+///
+/// ## Security Recommendations
+///
+/// - Use cryptographically random values for nonce generation
+/// - Prefer SHA-256 over MD5 for modern deployments
+/// - Include client nonce and nonce count support (qop="auth")
+/// - Set short nonce lifetimes and use the stale parameter for expired nonces
+/// - For high-security environments, use TLS along with Digest authentication
+///
+/// ## Relationship with other headers
+///
+/// - **WWW-Authenticate** vs **Authorization**: WWW-Authenticate presents the challenge from the server,
+///   Authorization provides the client's response to that challenge
+/// - **WWW-Authenticate** vs **Proxy-Authenticate**: WWW-Authenticate is used by UAS/registrars for
+///   end-to-end authentication, Proxy-Authenticate is used by proxies for hop-by-hop authentication
+/// - **WWW-Authenticate** vs **Authentication-Info**: WWW-Authenticate initiates the challenge,
+///   Authentication-Info provides additional authentication data in successful responses
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+///
+/// // Create a response with a Digest WWW-Authenticate challenge
+/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+///     .www_authenticate_digest(
+///         "sip.example.com",        // realm
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
+///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
+///         Some("MD5"),              // algorithm
+///         Some(vec!["auth"]),       // qop options
+///         None,                     // stale flag
+///         None,                     // domain
+///     )
+///     .build();
+///
+/// // Create a response with a Basic WWW-Authenticate challenge
+/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+///     .www_authenticate_basic("sip.example.com")
+///     .build();
+/// ```
 ///
 /// The WWW-Authenticate header field consists of at least one challenge that indicates
 /// the authentication scheme and parameters applicable to a specific realm.
@@ -73,7 +103,7 @@ use super::HeaderSetter;
 /// - Supporting multiple authentication schemes in a single response
 /// - Implementing security for sensitive SIP operations like registration
 ///
-/// # Examples
+/// # More Examples
 ///
 /// ## Complete Authentication Flow Example
 ///
@@ -173,6 +203,45 @@ use super::HeaderSetter;
 ///     .build();
 /// ```
 ///
+/// ## SIP Registration Service with Strong Authentication
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::WwwAuthenticateExt;
+///
+/// // Scenario: SIP Registrar implementation with strong authentication
+/// // This example shows how to create a secure challenge for a SIP registration service
+///
+/// // Function to generate a 401 challenge with best security practices
+/// fn create_secure_registration_challenge(request_from_tag: &str) -> SimpleResponseBuilder {
+///     // In production, use a cryptographically secure random generator for nonce
+///     let nonce = "d5e5ff37c381c489bc858ac968a7c246a729ef76";
+///     
+///     SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required"))
+///         .www_authenticate_digest(
+///             "registrar.example.com",         // Consistent realm for your domain
+///             nonce,                           // Strong random nonce
+///             Some("9e14fdca8fe47d13b5"), // Opaque server state value
+///             Some("SHA-256"),                 // Modern secure algorithm
+///             Some(vec!["auth"]),              // Quality of protection with nonce counting
+///             None,                            // Not stale yet
+///             Some(vec!["sip:registrar.example.com", "sip:sip.example.com"]) // Domain scope
+///         )
+///         .from("Alice", "sip:alice@example.com", Some(request_from_tag)) 
+///         .to("Alice", "sip:alice@example.com", None)
+/// }
+///
+/// // When a REGISTER request is received, create a challenge response
+/// let challenge = create_secure_registration_challenge("a73kszlfl").build();
+/// 
+/// // The challenge response follows best practices:
+/// // 1. Uses SHA-256 instead of MD5
+/// // 2. Employs qop="auth" requiring cnonce and nonce counting
+/// // 3. Includes domain parameter to limit scope
+/// // 4. Provides opaque server state
+/// ```
+///
 /// ## Multiple Authentication Challenges
 ///
 /// While not directly supported by this builder, you can add multiple WWW-Authenticate
@@ -205,11 +274,16 @@ pub trait WwwAuthenticateExt {
     /// to a SIP response. This is typically used with 401 Unauthorized responses to
     /// challenge the client to authenticate.
     ///
+    /// ## Digest Challenge in SIP
+    ///
     /// Digest authentication is the preferred authentication method for SIP as defined in
     /// [RFC 3261 Section 22.4](https://datatracker.ietf.org/doc/html/rfc3261#section-22.4),
     /// which builds upon the HTTP Digest Authentication in [RFC 2617](https://datatracker.ietf.org/doc/html/rfc2617).
     ///
-    /// # Parameters
+    /// The challenge contains parameters that the client will use to compute a response hash.
+    /// This enables secure authentication without transmitting the password over the network.
+    ///
+    /// ## Parameters
     ///
     /// * `realm` - The authentication realm (mandatory) - identifies the protection domain
     /// * `nonce` - The server nonce value (mandatory) - a server-specified data string
@@ -219,13 +293,13 @@ pub trait WwwAuthenticateExt {
     /// * `stale` - Optional stale flag (true if nonce is stale but credentials are valid)
     /// * `domain` - Optional authentication domain (list of URIs that share credentials)
     ///
-    /// # Returns
+    /// ## Returns
     ///
     /// The builder with the WWW-Authenticate header added
     ///
-    /// # Examples
+    /// ## Examples
     ///
-    /// ## Basic Challenge
+    /// ### Basic Challenge
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
@@ -245,7 +319,7 @@ pub trait WwwAuthenticateExt {
     ///     .build();
     /// ```
     ///
-    /// ## Secure Production Challenge
+    /// ### Secure Production Challenge
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
@@ -261,6 +335,49 @@ pub trait WwwAuthenticateExt {
     ///         Some(vec!["auth"]),                     // Quality of protection
     ///         None,
     ///         Some(vec!["sip:secure.example.com"])    // Limit to specific domain
+    ///     )
+    ///     .build();
+    /// ```
+    ///
+    /// ### INVITE Challenge with Domain Restriction
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    ///
+    /// // Challenge for an INVITE request to protect sensitive calling features
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required"))
+    ///     .www_authenticate_digest(
+    ///         "pbx.example.com",
+    ///         "a2f3ab7c8d9e0f1a2b3c4d5e", 
+    ///         None,
+    ///         Some("SHA-256"),
+    ///         Some(vec!["auth"]),
+    ///         None,
+    ///         Some(vec!["sip:pbx.example.com", "sip:voicemail.example.com"]) // Only these services
+    ///     )
+    ///     .from("Bob", "sip:bob@example.com", Some("invite-1"))  // Echo From 
+    ///     .to("Service", "sip:service@pbx.example.com", None)   // Echo To
+    ///     .build();
+    /// ```
+    ///
+    /// ### Handling Nonce Expiration
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    ///
+    /// // After nonce timeout, send a new challenge with stale=true
+    /// // This tells the client their credentials might be valid but nonce has expired
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Nonce Expired"))
+    ///     .www_authenticate_digest(
+    ///         "sip.example.com",
+    ///         "fresh45nonce89value12", // New nonce value
+    ///         None,
+    ///         Some("MD5"),
+    ///         Some(vec!["auth"]),
+    ///         Some(true),             // stale=true indicates valid credentials but expired nonce
+    ///         None
     ///     )
     ///     .build();
     /// ```
@@ -281,22 +398,33 @@ pub trait WwwAuthenticateExt {
     /// to a SIP response. While Basic authentication is less common in SIP than Digest,
     /// it may be used in simple scenarios or for legacy compatibility.
     ///
-    /// # Security Considerations
+    /// ## Basic Authentication in SIP
+    ///
+    /// Basic authentication simply requires the client to provide Base64-encoded 
+    /// "username:password" credentials. It is defined in [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617)
+    /// for HTTP and adapted for SIP.
+    ///
+    /// Because this authentication method transmits the password with minimal protection,
+    /// it should only be used over secure transports like TLS (SIPS).
+    ///
+    /// ## Security Considerations
     ///
     /// Basic authentication transmits credentials with minimal protection (only base64 encoding,
     /// which is trivial to decode). It should only be used over secure connections (like TLS)
     /// and is generally not recommended for SIP authentication. Digest authentication
     /// provides much better security.
     ///
-    /// # Parameters
+    /// ## Parameters
     ///
     /// * `realm` - The authentication realm (protection domain)
     ///
-    /// # Returns
+    /// ## Returns
     ///
     /// The builder with the WWW-Authenticate header added
     ///
-    /// # Examples
+    /// ## Examples
+    ///
+    /// ### Simple Basic Challenge
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
@@ -308,7 +436,7 @@ pub trait WwwAuthenticateExt {
     ///     .build();
     /// ```
     ///
-    /// ## Using with TLS for Better Security
+    /// ### Using with TLS for Better Security
     ///
     /// ```rust
     /// use rvoip_sip_core::prelude::*;
@@ -321,6 +449,23 @@ pub trait WwwAuthenticateExt {
     ///     .build();
     /// 
     /// // The response should be sent over a TLS connection
+    /// ```
+    ///
+    /// ### In a Simple SIPS Environment
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    ///
+    /// // Basic authentication for a small office with TLS
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required"))
+    ///     .from("PBX", "sips:pbx@example.com", Some("pbx-challenge"))
+    ///     .to("User", "sips:user@example.com", None)
+    ///     .www_authenticate_basic("secure-office-pbx")
+    ///     .build();
+    ///
+    /// // This is only appropriate for small deployments with TLS
+    /// // where simplicity is preferred over security strength
     /// ```
     fn www_authenticate_basic(self, realm: &str) -> Self;
 }

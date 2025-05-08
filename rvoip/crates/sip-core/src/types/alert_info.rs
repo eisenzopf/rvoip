@@ -35,7 +35,7 @@
 //! assert_eq!(header.get_param("appearance"), Some("2"));
 //! ```
 
-use crate::parser::headers::alert_info::{AlertInfoValue, parse_alert_info};
+use crate::parser::headers::alert_info::{AlertInfoValue, parse_alert_info, AlertInfoUri};
 use crate::error::{Result, Error};
 use crate::types::uri::Uri;
 use crate::types::param::Param;
@@ -45,6 +45,7 @@ use std::str::FromStr;
 use nom::combinator::all_consuming;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+
 
 /// Represents a SIP Alert-Info header as defined in RFC 3261 Section 20.4.
 ///
@@ -404,8 +405,15 @@ impl fmt::Display for AlertInfoList {
 
 /// Convert from parser AlertInfoValue to our AlertInfo type
 fn convert_from_parser_value(value: &AlertInfoValue) -> Result<AlertInfo> {
-    // Convert the URI
-    let uri = value.uri.clone();
+    // Convert the URI from AlertInfoUri to Uri
+    let uri = match &value.uri {
+        AlertInfoUri::Sip(uri) => uri.clone(),
+        AlertInfoUri::Other { uri, .. } => {
+            // For non-SIP URIs, create a new Uri
+            Uri::from_str(uri)
+                .map_err(|e| Error::ParseError(format!("Could not convert AlertInfoUri to Uri: {}", e)))?
+        }
+    };
     
     // Convert parameters
     let mut params = HashMap::new();
@@ -435,10 +443,15 @@ impl FromStr for AlertInfo {
 
     fn from_str(s: &str) -> Result<Self> {
         // Parse as a single Alert-Info value
-        let parsed = parser::headers::alert_info::parse_alert_info_value(s.as_bytes())
+        let parsed = parse_alert_info(s.as_bytes())
             .map_err(|e| Error::ParseError(format!("Invalid Alert-Info format: {:?}", e)))?;
         
-        convert_from_parser_value(&parsed.1)
+        // We expect only one value when parsing a single AlertInfo
+        if parsed.1.len() != 1 {
+            return Err(Error::ParseError(format!("Expected a single Alert-Info value, got {}", parsed.1.len())));
+        }
+        
+        convert_from_parser_value(&parsed.1[0])
     }
 }
 
@@ -529,7 +542,7 @@ impl AlertInfoHeader {
     /// # Returns
     ///
     /// A Result containing the converted AlertInfo, or an error if conversion fails
-    fn from_alert_info_value(value: &AlertInfoValue) -> Result<AlertInfo> {
+    pub fn from_alert_info_value(value: &AlertInfoValue) -> Result<AlertInfo> {
         convert_from_parser_value(value)
     }
 }
@@ -539,14 +552,14 @@ impl FromStr for AlertInfoHeader {
 
     fn from_str(s: &str) -> Result<Self> {
         // Handle the case of just the header without the name
-        let input = if !s.contains(':') {
-            format!("Alert-Info: {}", s)
+        let input = if s.starts_with("Alert-Info:") {
+            s.trim_start_matches("Alert-Info:").trim()
         } else {
-            s.to_string()
+            s
         };
         
         // Parse the header
-        let result = all_consuming(parse_alert_info)(input.as_bytes())
+        let result = parse_alert_info(input.as_bytes())
             .map_err(|e| Error::ParseError(format!("Failed to parse Alert-Info header: {:?}", e)))?;
             
         let parsed_values = result.1;
@@ -610,9 +623,6 @@ impl TypedHeaderTrait for AlertInfoHeader {
         }
     }
 }
-
-// For convenience, define a type alias for the main type we use
-pub type AlertInfo = crate::types::alert_info::AlertInfo;
 
 #[cfg(test)]
 mod tests {

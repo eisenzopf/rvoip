@@ -135,6 +135,8 @@ pub enum HeaderName {
     Unsupported,
     /// Path: Path header (RFC 3327) for registration routing
     Path,
+    /// Reason: Provides reasons for specific events (RFC 3326)
+    Reason,
 }
 
 impl HeaderName {
@@ -191,6 +193,7 @@ impl HeaderName {
             HeaderName::Server => "Server",
             HeaderName::Unsupported => "Unsupported",
             HeaderName::Path => "Path",
+            HeaderName::Reason => "Reason",
             HeaderName::Other(s) => s,
         }
     }
@@ -263,6 +266,7 @@ impl FromStr for HeaderName {
             "proxy-require" => Ok(HeaderName::ProxyRequire),
             "unsupported" => Ok(HeaderName::Unsupported),
             "path" => Ok(HeaderName::Path),
+            "reason" => Ok(HeaderName::Reason),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

@@ -385,6 +385,8 @@ pub mod unsupported;
 pub mod content_encoding;
 pub mod content_language;
 pub mod accept_encoding;
+pub mod reason;
+pub mod alert_info;
 
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
@@ -422,6 +424,8 @@ pub use retry_after::*;
 pub use error_info::*;
 pub use supported::Supported;
 pub use unsupported::Unsupported;
+pub use reason::Reason;
+pub use alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {
