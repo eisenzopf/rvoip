@@ -525,6 +525,15 @@ impl TryFrom<Header> for TypedHeader {
                 // Use the AuthenticationInfo directly without parsing
                 return Ok(TypedHeader::AuthenticationInfo(auth_info.clone()));
             },
+            HeaderValue::ReferTo(refer_to) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ReferTo {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ReferTo directly without parsing
+                return Ok(TypedHeader::ReferTo(refer_to.clone()));
+            },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
                 // Only process if the header name is correct
                 if header.name != HeaderName::ContentDisposition {
@@ -1050,7 +1059,7 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
             HeaderName::ReferTo => {
-                if let HeaderValue::ReferTo(value) = header.value {
+                if let HeaderValue::ReferTo(value) = &header.value {
                     // Access fields through methods instead of direct access
                     let display_name = value.address().display_name.clone();
                     let uri = value.uri().clone();
@@ -1061,12 +1070,19 @@ impl TryFrom<Header> for TypedHeader {
                         uri,
                         params,
                     })))
+                } else if let HeaderValue::Raw(bytes) = &header.value {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        let refer_to = crate::types::refer_to::ReferTo::from_str(s.trim())?;
+                        Ok(TypedHeader::ReferTo(refer_to))
+                    } else {
+                        Err(Error::InvalidHeader(format!("Invalid UTF-8 in Refer-To header")))
+                    }
                 } else {
                     Err(Error::ParseError(format!(
                         "Expected ReferTo header value, got {:?}", header.value
                     )))
                 }
-            }
+            },
             HeaderName::Path => {
                 if let HeaderValue::Raw(bytes) = &header.value {
                     if let Ok(s) = std::str::from_utf8(bytes) {

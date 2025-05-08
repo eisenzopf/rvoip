@@ -361,7 +361,7 @@ impl TypedHeaderTrait for ReferTo {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(Self::header_name(), HeaderValue::ReferTo(self.clone()))
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -372,6 +372,7 @@ impl TypedHeaderTrait for ReferTo {
         }
 
         match &header.value {
+            HeaderValue::ReferTo(refer_to) => Ok(refer_to.clone()),
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ReferTo::from_str(s.trim())

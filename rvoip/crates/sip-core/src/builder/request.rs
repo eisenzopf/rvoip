@@ -20,6 +20,7 @@ use crate::types::{
     Param,
     max_forwards::MaxForwards,
     user_agent::UserAgent,
+    header::{HeaderName, HeaderValue},
 };
 
 /// # SIP Request Builder
@@ -1121,6 +1122,19 @@ impl SimpleRequestBuilder {
     ///     .header(TypedHeader::UserAgent(products));
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
+        // Special handling for TypedHeader::Other when the name indicates it should be a specific typed header
+        if let TypedHeader::Other(name, value) = &header {
+            if *name == HeaderName::ReferTo {
+                // If it's a ReferTo header that got converted to Other, try to convert it back
+                if let HeaderValue::ReferTo(refer_to) = value {
+                    // Create a proper TypedHeader::ReferTo
+                    let typed_refer_to = TypedHeader::ReferTo(refer_to.clone());
+                    self.request = self.request.with_header(typed_refer_to);
+                    return self;
+                }
+            }
+        }
+        
         self.request = self.request.with_header(header);
         self
     }

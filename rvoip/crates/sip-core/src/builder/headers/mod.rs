@@ -17,9 +17,17 @@ impl HeaderSetter for crate::builder::SimpleRequestBuilder {
         }
         
         let header_val = header.to_header();
+        println!("Set header called with name: {:?}", header_val.name);
+        
         match TypedHeader::try_from(header_val) {
-            Ok(typed_header) => self.header(typed_header),
-            Err(_) => self
+            Ok(typed_header) => {
+                println!("Successfully converted to TypedHeader: {:?}", typed_header);
+                self.header(typed_header)
+            },
+            Err(e) => {
+                println!("Failed to convert to TypedHeader: {:?}", e);
+                self
+            }
         }
     }
 }
@@ -82,6 +90,7 @@ pub mod alert_info;
 pub mod error_info;
 pub mod priority;
 pub mod warning;
+pub mod refer_to;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -126,6 +135,7 @@ pub use alert_info::AlertInfoBuilderExt;
 pub use error_info::ErrorInfoBuilderExt;
 pub use priority::PriorityBuilderExt;
 pub use warning::WarningBuilderExt;
+pub use refer_to::ReferToExt;
 
 // Re-export header builder traits
 

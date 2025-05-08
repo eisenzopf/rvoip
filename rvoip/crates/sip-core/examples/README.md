@@ -1,110 +1,173 @@
-# SIP Core Tutorial Examples
+# SIP Core Interactive Tutorial
 
-This directory contains a series of examples that progressively introduce the features and capabilities of the `rvoip-sip-core` library. These examples are designed to be used as a tutorial, starting with the simplest concepts and building up to more complex applications.
+This interactive tutorial series introduces you to building and parsing SIP/SDP messages using the `rvoip-sip-core` library. The tutorials are designed to progressively build your knowledge from basic concepts to advanced real-world scenarios.
 
-## How to Run the Examples
+## Using the Interactive Tutorial
 
-All examples can be run using Cargo:
+This tutorial is built with [mdBook](https://rust-lang.github.io/mdBook/), allowing you to:
+- Read explanations and code examples
+- Run code experiments directly in your browser
+- Modify examples to see how they work
+- Follow a structured learning path
+
+### Getting Started
 
 ```bash
-# Run a specific example
-cargo run --example 01_basic_parsing
+# Install mdBook if you don't have it
+cargo install mdbook
 
-# Run with logs enabled
-RUST_LOG=debug cargo run --example 01_basic_parsing
+# Serve the tutorial locally
+cd tutorial
+mdbook serve --open
 ```
 
-## Examples Overview
+## Tutorial Structure
 
-### 1. Basic SIP Message Parsing
-**Directory**: `01_basic_parsing/`
+### Part 1: SIP Fundamentals
 
-Learn how to parse SIP messages and access their components. This example demonstrates:
-- Parsing raw SIP messages into structured types
-- Accessing headers and message components
-- Understanding the basic structure of SIP messages
+#### Tutorial 1: Introduction to SIP
+- What is SIP and how it works
+- SIP message structure
+- Understanding SIP URIs
+- Basic SIP terminology
 
-### 2. Creating SIP Messages
-**Directory**: `02_creating_messages/`
+#### Tutorial 2: Parsing Your First SIP Message
+- Using the parser to decode SIP messages
+- Accessing message components
+- Understanding headers and body
+- Using the `json` module to inspect message structure
 
-Learn how to create SIP requests and responses. This example demonstrates:
-- Building SIP messages using the builder pattern
-- Creating messages with the concise macro syntax
-- Handling different header types
-- Proper URI construction
+#### Tutorial 3: Creating SIP Messages with the Builder Pattern
+- Introduction to the `builder` module
+- Creating a simple SIP request
+- Adding headers and content
+- Validating SIP messages
 
-### 3. SIP Dialog Example
-**Directory**: `03_sip_dialog/`
+#### Tutorial 4: SIP Requests in Depth
+- Common request methods (INVITE, REGISTER, BYE, etc.)
+- Method-specific builders
+- Required headers for different request types
+- Request validation
 
-Implement a basic call flow with dialog state management. This example demonstrates:
-- Complete call flow (INVITE, 200 OK, ACK, BYE)
-- Dialog state tracking
-- Transaction handling
-- End-to-end message flow
+#### Tutorial 5: SIP Responses in Depth
+- Response status codes and their meanings
+- Creating responses with the builder
+- Matching responses to requests
+- Response headers and body
 
-### 4. SDP Integration
-**Directory**: `04_sdp_integration/`
+### Part 2: SDP and Media Negotiation
 
-Learn how to work with Session Description Protocol (SDP) for media negotiation. This example demonstrates:
-- Creating and parsing SDP messages
-- Integrating SDP bodies with SIP messages
-- Basic media negotiation concepts
-- Offer/answer model implementation
+#### Tutorial 6: Introduction to SDP
+- SDP structure and purpose
+- Media descriptions and attributes
+- Connection information
+- Time descriptions
 
-### 5. Authentication and Security
-**Directory**: `05_authentication/`
+#### Tutorial 7: Creating SDP Messages
+- Building SDP sessions
+- Adding media streams
+- Setting codec parameters
+- Time and connection information
 
-Handle authentication in SIP communications. This example demonstrates:
-- Implementing digest authentication
-- Creating and validating authentication headers
-- Nonce handling and security best practices
-- Registrar authentication flows
+#### Tutorial 8: Integrating SDP with SIP
+- SDP as a SIP message body
+- Content-Type headers
+- Offer/Answer model basics
+- Parsing SDP from SIP messages
 
-### 6. Advanced Routing
-**Directory**: `06_advanced_routing/`
+#### Tutorial 9: Media Negotiation with SDP
+- Implementing the Offer/Answer model
+- Codec negotiation
+- Media capability advertisement
+- Handling multiple media streams
 
-Learn SIP routing mechanisms for proxies and servers. This example demonstrates:
-- Via header handling for routing
-- Implementing basic proxy functionality
-- Record-route and route header processing
-- Multi-hop communication
+### Part 3: SIP Dialogs and Transactions
 
-### 7. Multipart Message Handling
-**Directory**: `07_multipart_messages/`
+#### Tutorial 10: SIP Transactions
+- Client and server transactions
+- Transaction identifiers
+- Transaction state machines
+- Handling retransmissions
 
-Work with multipart MIME bodies in SIP messages. This example demonstrates:
-- Creating and parsing multipart bodies
-- Handling mixed content types
-- Real-world use cases for multipart messages
-- Content-type header handling
+#### Tutorial 11: SIP Dialogs
+- Dialog creation and identification
+- Dialog state management
+- Route sets and dialog routing
+- Dialog termination
 
-### 8. Complete SIP Client
-**Directory**: `08_sip_client/`
+#### Tutorial 12: Complete Call Flow
+- INVITE-200-ACK flow
+- Mid-dialog requests
+- Call termination with BYE
+- Error handling during calls
 
-Build a functional SIP client application. This example demonstrates:
-- Registration with a SIP server
-- Making and receiving calls
-- Integration with transport layer
-- Handling retransmissions and timeouts
-- Full application structure
+### Part 4: Advanced SIP Features
 
-### 9. WebRTC Integration
-**Directory**: `09_webrtc_integration/`
+#### Tutorial 13: Authentication
+- Digest authentication
+- Creating authentication headers
+- Handling authentication challenges
+- Secure credential management
 
-Connect SIP signaling with WebRTC media. This example demonstrates:
-- Using SDP for WebRTC negotiation
-- ICE candidate handling in SDP
-- Creating a SIP-to-WebRTC bridge
-- Modern communication applications
+#### Tutorial 14: SIP Registration
+- Client registration process
+- Expiration and refreshing
+- Multiple contacts
+- Registration state management
 
-## Progression Path
+#### Tutorial 15: SIP Proxying and Routing
+- Via headers and routing
+- Record-Route and Route headers
+- Proxy behavior
+- Forwarding requests and responses
 
-The examples are designed to be followed in order, as later examples build upon concepts introduced in earlier ones. However, each example is self-contained and can be run independently.
+#### Tutorial 16: Event Notification Framework
+- SUBSCRIBE and NOTIFY methods
+- Event packages
+- Subscription state management
+- Notification bodies
 
-For developers new to SIP, we recommend starting with Example 1 and working through the series sequentially.
+### Part 5: Real-World Applications
+
+#### Tutorial 17: Building a SIP Client
+- Client architecture
+- Transport layer integration
+- User interface considerations
+- Registration and call handling
+
+#### Tutorial 18: WebRTC Integration
+- SDP for WebRTC
+- ICE candidates in SDP
+- SIP signaling for WebRTC media
+- Browser interoperability
+
+#### Tutorial 19: SIP Troubleshooting
+- Common SIP issues and solutions
+- Debugging SIP messages
+- Tracing SIP flows
+- Performance considerations
+
+#### Tutorial 20: Advanced Use Cases
+- Multi-device forking
+- Conference calling
+- Call transfer
+- Presence and messaging
+
+## Running Example Code
+
+Each tutorial includes runnable code examples. You can:
+
+```bash
+# Run a specific tutorial's example code
+cargo run --example tutorial_01_parsing
+
+# Run with logging enabled
+RUST_LOG=debug cargo run --example tutorial_10_dialogs
+```
 
 ## Additional Resources
 
-- [SIP Core Documentation](../README.md)
+- [SIP Core API Documentation](https://docs.rs/rvoip-sip-core)
 - [SIP RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261)
-- [SDP RFC 4566](https://datatracker.ietf.org/doc/html/rfc4566) 
+- [SDP RFC 4566](https://datatracker.ietf.org/doc/html/rfc4566)
+- [WebRTC and SIP Integration](https://datatracker.ietf.org/doc/html/rfc7118) 
