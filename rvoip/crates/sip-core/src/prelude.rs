@@ -47,6 +47,7 @@ pub use crate::types::priority::Priority;
 pub use crate::types::record_route::RecordRoute;
 pub use crate::types::record_route::RecordRouteEntry;
 pub use crate::types::refer_to::ReferTo;
+pub use crate::types::referred_by::ReferredBy;
 pub use crate::types::reply_to::ReplyTo;
 pub use crate::types::require::Require;
 pub use crate::types::retry_after::RetryAfter;
@@ -102,7 +103,8 @@ pub use crate::builder::headers::{
     CallIdBuilderExt,
     InReplyToBuilderExt,
     PriorityBuilderExt,
-    WarningBuilderExt
+    WarningBuilderExt,
+    ReferredByExt
 };
 
 // Add ProxyRequire type

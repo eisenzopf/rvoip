@@ -8,6 +8,8 @@ use rvoip_sip_core::builder::headers::AcceptExt;
 use rvoip_sip_core::builder::headers::AcceptLanguageExt;
 use rvoip_sip_core::builder::headers::AcceptEncodingExt;
 use rvoip_sip_core::builder::headers::AuthorizationExt;
+use rvoip_sip_core::builder::headers::ReferToExt;
+use rvoip_sip_core::builder::headers::ReferredByExt;
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use rvoip_sip_core::types::TypedHeader;
@@ -167,11 +169,10 @@ fn create_refer() -> Result<Message> {
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
         .max_forwards(70)
         .contact("sip:alice@atlanta.example.com", None)
-        // Refer-To header specifies transfer target
-        .header(TypedHeader::Other(HeaderName::Other("Refer-To".to_string()), 
-                HeaderValue::text("<sip:carol@chicago.example.com>")))
-        .header(TypedHeader::Other(HeaderName::Other("Referred-By".to_string()), 
-                HeaderValue::text("<sip:alice@atlanta.example.com>")))
+        // Use ReferToExt trait's refer_to_uri method
+        .refer_to_uri("sip:carol@chicago.example.com")
+        // Use ReferredByExt trait's referred_by_str method
+        .referred_by_str("<sip:alice@atlanta.example.com>")?
         .build();
     
     Ok(Message::Request(refer_request))

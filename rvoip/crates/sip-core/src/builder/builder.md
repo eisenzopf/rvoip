@@ -47,7 +47,7 @@ The builder supports the following SIP headers:
   - [`Allow`][headers::allow::AllowBuilderExt], [`Supported`][headers::supported::SupportedBuilderExt], [`Unsupported`][headers::unsupported::UnsupportedBuilderExt], [`Require`][headers::require::RequireBuilderExt], [`Proxy-Require`][headers::proxy_require::ProxyRequireBuilderExt]
 
 - **Miscellaneous Headers**
-  - [`User-Agent`][headers::user_agent::UserAgentBuilderExt], [`Server`][headers::server::ServerBuilderExt], [`Call-Info`][headers::call_info::CallInfoBuilderExt], [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt], [`Reply-To`][headers::reply_to::ReplyToBuilderExt]
+  - [`User-Agent`][headers::user_agent::UserAgentBuilderExt], [`Server`][headers::server::ServerBuilderExt], [`Call-Info`][headers::call_info::CallInfoBuilderExt], [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt], [`Reply-To`][headers::reply_to::ReplyToBuilderExt], [`Refer-To`][headers::refer_to::ReferToExt]
   - [`Organization`][headers::organization::OrganizationBuilderExt] - Identifies the organization to which the entity belongs
   - [`Priority`][headers::priority::PriorityBuilderExt] - Indicates the urgency or importance of a request
   - [`Expires`][headers::expires::ExpiresBuilderExt] - Specifies expiration time for registrations or subscriptions
@@ -722,4 +722,5 @@ let ok_bye = SimpleResponseBuilder::ok()
 [headers::reason::ReasonBuilderExt]: crate::builder::headers::reason::ReasonBuilderExt
 [headers::expires::ExpiresBuilderExt]: crate::builder::headers::expires::ExpiresBuilderExt
 [headers::organization::OrganizationBuilderExt]: crate::builder::headers::organization::OrganizationBuilderExt
-[headers::priority::PriorityBuilderExt]: crate::builder::headers::priority::PriorityBuilderExt 
+[headers::priority::PriorityBuilderExt]: crate::builder::headers::priority::PriorityBuilderExt
+[headers::refer_to::ReferToExt]: crate::builder::headers::refer_to::ReferToExt 

@@ -62,9 +62,9 @@ fn refer_to_spec(input: &[u8]) -> ParseResult<Address> {
     )(input)
 }
 
-/// Parse a complete Refer-To header value and return a ReferToHeader type
-pub fn parse_refer_to(input: &[u8]) -> ParseResult<ReferToHeader> {
-    map(refer_to_spec, ReferToHeader)(input)
+/// Parse a complete Refer-To header value
+pub fn parse_refer_to(input: &[u8]) -> ParseResult<Address> {
+    refer_to_spec(input)
 }
 
 /// Public API for parsing a Refer-To header value.

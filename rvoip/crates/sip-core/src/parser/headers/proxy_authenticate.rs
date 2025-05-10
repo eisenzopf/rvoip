@@ -247,8 +247,8 @@ pub fn parse_proxy_authenticate<'a>(input: &'a [u8]) -> ParseResult<'a, Vec<Chal
                     },
                     Err(_) => break,
                 }
-            }
-            
+    }
+
             Ok((current_input, challenges))
         },
         Err(e) => Err(e),

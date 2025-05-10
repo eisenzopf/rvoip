@@ -433,10 +433,10 @@ impl FromStr for ReferTo {
     /// assert!(result.is_err());
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        // Parse using the refer_to_spec parser which handles both name-addr and addr-spec
+        // Parse using the refer_to parser which handles both name-addr and addr-spec
         // formats as well as any parameters following the address.
         all_consuming(parse_refer_to)(s.as_bytes())
-            .map(|(_rem, refer_to)| refer_to)
+            .map(|(_rem, address)| ReferTo::new(address))
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
 } 

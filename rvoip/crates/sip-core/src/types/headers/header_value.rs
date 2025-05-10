@@ -12,6 +12,7 @@ use crate::types::record_route::RecordRouteEntry;
 use crate::parser::headers::reply_to::ReplyToValue;
 use crate::types::reply_to::ReplyTo;
 use crate::types::refer_to::ReferTo;
+use crate::types::referred_by::ReferredBy;
 use crate::types::via::ViaHeader;
 use crate::types::cseq::CSeq;
 use crate::types::max_forwards::MaxForwards;
@@ -68,7 +69,8 @@ pub enum HeaderValue {
     Route(Vec<RouteEntry>),
     RecordRoute(Vec<RecordRouteEntry>),
     ReplyTo(ReplyTo),
-    ReferTo(ReferTo), // Add ReferTo variant
+    ReferTo(ReferTo),
+    ReferredBy(ReferredBy),
 
     // === Request/Response Info ===
     Via(Vec<ViaHeader>), // ViaHeader would contain the parsed tuple

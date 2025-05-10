@@ -20,6 +20,7 @@ pub mod user_agent;
 pub mod server;
 pub mod reply_to;
 pub mod refer_to;
+pub mod referred_by;
 pub mod organization;
 pub mod date;
 pub mod allow;
@@ -75,6 +76,7 @@ pub use user_agent::parse_user_agent;
 pub use server::parse_server;
 pub use reply_to::parse_reply_to;
 pub use refer_to::parse_refer_to;
+pub use referred_by::parse_referred_by;
 pub use organization::parse_organization;
 pub use date::parse_date;
 pub use allow::parse_allow;
@@ -129,7 +131,7 @@ mod tests {
         assert!(true);
     }
 
-    /// Test that parsing a simple Via header works through the exported function
+    /// Test that parsing a Via header works through the exported function
     #[test]
     fn test_via_parser() {
         // Use the direct via_param_parser function instead of parse_via since our test doesn't include the header name

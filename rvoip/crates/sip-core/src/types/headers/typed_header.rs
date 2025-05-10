@@ -53,6 +53,7 @@ use crate::types::uri::{Uri, Scheme};
 use crate::prelude::GenericValue;
 use crate::types::alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
+use crate::types::referred_by::ReferredBy;
 
 // Import parser components
 use crate::parser;
@@ -119,6 +120,7 @@ pub enum TypedHeader {
     Allow(Allow), // Use types::Allow
     ReplyTo(ReplyTo), // Use types::ReplyTo
     ReferTo(ReferTo), // Add ReferTo variant
+    ReferredBy(ReferredBy), // Add ReferredBy variant
     Require(Require), // Use types::Require
     Warning(Vec<Warning>), // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
@@ -182,6 +184,7 @@ impl TypedHeader {
             TypedHeader::Allow(_) => HeaderName::Allow,
             TypedHeader::ReplyTo(_) => HeaderName::ReplyTo,
             TypedHeader::ReferTo(_) => HeaderName::ReferTo,
+            TypedHeader::ReferredBy(_) => HeaderName::ReferredBy,
             TypedHeader::Warning(_) => HeaderName::Warning,
             TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
@@ -307,6 +310,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::Allow(allow) => write!(f, "{}: {}", HeaderName::Allow, allow),
             TypedHeader::ReplyTo(reply_to) => write!(f, "{}: {}", HeaderName::ReplyTo, reply_to),
             TypedHeader::ReferTo(refer_to) => write!(f, "{}: {}", HeaderName::ReferTo, refer_to),
+            TypedHeader::ReferredBy(referred_by) => write!(f, "{}: {}", HeaderName::ReferredBy, referred_by),
             TypedHeader::Warning(warnings) => {
                 write!(f, "{}: ", HeaderName::Warning)?;
                 for (i, warning) in warnings.iter().enumerate() {
@@ -533,6 +537,15 @@ impl TryFrom<Header> for TypedHeader {
                 
                 // Use the ReferTo directly without parsing
                 return Ok(TypedHeader::ReferTo(refer_to.clone()));
+            },
+            HeaderValue::ReferredBy(referred_by) => {
+                // Only process if the header name is correct
+                if header.name != HeaderName::ReferredBy {
+                    return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
+                }
+                
+                // Use the ReferredBy directly without parsing
+                return Ok(TypedHeader::ReferredBy(referred_by.clone()));
             },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
                 // Only process if the header name is correct
@@ -1059,28 +1072,15 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
             HeaderName::ReferTo => {
-                if let HeaderValue::ReferTo(value) = &header.value {
-                    // Access fields through methods instead of direct access
-                    let display_name = value.address().display_name.clone();
-                    let uri = value.uri().clone();
-                    let params = value.params().to_vec();
-                    
-                    Ok(TypedHeader::ReferTo(ReferTo::new(Address {
-                        display_name,
-                        uri,
-                        params,
-                    })))
-                } else if let HeaderValue::Raw(bytes) = &header.value {
-                    if let Ok(s) = std::str::from_utf8(bytes) {
-                        let refer_to = crate::types::refer_to::ReferTo::from_str(s.trim())?;
-                        Ok(TypedHeader::ReferTo(refer_to))
-                    } else {
-                        Err(Error::InvalidHeader(format!("Invalid UTF-8 in Refer-To header")))
-                    }
-                } else {
-                    Err(Error::ParseError(format!(
-                        "Expected ReferTo header value, got {:?}", header.value
-                    )))
+                match all_consuming(parser::headers::parse_refer_to)(value_bytes) {
+                    Ok((_, addr)) => Ok(TypedHeader::ReferTo(ReferTo::new(addr))),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            },
+            HeaderName::ReferredBy => {
+                match all_consuming(parser::headers::parse_referred_by)(value_bytes) {
+                    Ok((_, addr)) => Ok(TypedHeader::ReferredBy(ReferredBy::new(addr))),
+                    Err(e) => Err(Error::from(e.to_owned())),
                 }
             },
             HeaderName::Path => {

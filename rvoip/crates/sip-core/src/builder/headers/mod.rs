@@ -91,6 +91,7 @@ pub mod error_info;
 pub mod priority;
 pub mod warning;
 pub mod refer_to;
+pub mod referred_by;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -136,6 +137,5 @@ pub use error_info::ErrorInfoBuilderExt;
 pub use priority::PriorityBuilderExt;
 pub use warning::WarningBuilderExt;
 pub use refer_to::ReferToExt;
-
-// Re-export header builder traits
+pub use referred_by::ReferredByExt;
 
