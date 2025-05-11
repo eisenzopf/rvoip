@@ -88,8 +88,13 @@ impl fmt::Display for LanguageInfo {
         write!(f, "{}", self.range)?;
         
         // Add q-value if present
-        if let Some(q) = self.q {
-            write!(f, ";q={:.3}", q)?;
+        if let Some(q_not_nan) = self.q {
+            let q_val: f32 = q_not_nan.into_inner();
+            if q_val.fract() == 0.0 && q_val >= 0.0 { // Ensure it's a whole number like 0.0, 1.0
+                write!(f, ";q={}", q_val as i32)?;
+            } else {
+                write!(f, ";q={:.3}", q_val)?;
+            }
         }
         
         // Add other parameters - make sure to include semicolons
@@ -98,7 +103,14 @@ impl fmt::Display for LanguageInfo {
             write!(f, ";")?;
             // Now write the parameter without a leading semicolon
             match param {
-                Param::Q(val) => write!(f, "q={:.3}", val)?,
+                Param::Q(q_not_nan) => {
+                    let q_val: f32 = q_not_nan.into_inner();
+                    if q_val.fract() == 0.0 && q_val >= 0.0 {
+                        write!(f, "q={}", q_val as i32)?;
+                    } else {
+                        write!(f, "q={:.3}", q_val)?;
+                    }
+                }
                 Param::Other(name, None) => write!(f, "{}", name)?,
                 Param::Other(name, Some(GenericValue::Token(val))) => write!(f, "{}={}", name, val)?,
                 Param::Other(name, Some(GenericValue::Quoted(val))) => write!(f, "{}=\"{}\"", name, val)?,

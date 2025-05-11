@@ -53,7 +53,14 @@ impl std::fmt::Display for EncodingInfo {
         
         for param in &self.params {
             match param {
-                Param::Q(q) => write!(f, ";q={:.3}", q)?,
+                Param::Q(q_not_nan) => {
+                    let q_val: f32 = q_not_nan.into_inner();
+                    if q_val.fract() == 0.0 && q_val >= 0.0 { // Ensure it's a whole number like 0.0, 1.0
+                        write!(f, ";q={}", q_val as i32)?;
+                    } else {
+                        write!(f, ";q={:.3}", q_val)?;
+                    }
+                }
                 Param::Other(name, None) => write!(f, ";{}", name)?,
                 Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) => 
                     write!(f, ";{}={}", name, value)?,
