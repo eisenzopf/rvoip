@@ -137,6 +137,8 @@ pub enum HeaderName {
     Path,
     /// Reason: Provides reasons for specific events (RFC 3326)
     Reason,
+    /// Session-Expires: Session expiration information (RFC 4028)
+    SessionExpires,
 }
 
 impl HeaderName {
@@ -194,6 +196,7 @@ impl HeaderName {
             HeaderName::Unsupported => "Unsupported",
             HeaderName::Path => "Path",
             HeaderName::Reason => "Reason",
+            HeaderName::SessionExpires => "Session-Expires",
             HeaderName::Other(s) => s,
         }
     }
@@ -267,6 +270,7 @@ impl FromStr for HeaderName {
             "unsupported" => Ok(HeaderName::Unsupported),
             "path" => Ok(HeaderName::Path),
             "reason" => Ok(HeaderName::Reason),
+            "session-expires" | "x" => Ok(HeaderName::SessionExpires),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }
@@ -290,5 +294,9 @@ mod tests {
         
         // Empty header name is invalid
         assert!(HeaderName::from_str("").is_err());
+
+        assert_eq!(HeaderName::from_str("Session-Expires").unwrap(), HeaderName::SessionExpires);
+        assert_eq!(HeaderName::from_str("session-expires").unwrap(), HeaderName::SessionExpires);
+        assert_eq!(HeaderName::from_str("x").unwrap(), HeaderName::SessionExpires);
     }
 } 

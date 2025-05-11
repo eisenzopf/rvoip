@@ -49,6 +49,7 @@ pub mod authorization;
 pub mod proxy_authorization;
 pub mod authentication_info;
 pub mod uri_with_params; // Added
+pub mod session_expires; // Added for Session-Expires header
 
 // Keep internal modules private
 mod server_val;
@@ -103,6 +104,7 @@ pub use proxy_authenticate::parse_proxy_authenticate;
 pub use authorization::parse_authorization;
 pub use proxy_authorization::parse_proxy_authorization;
 pub use authentication_info::parse_authentication_info;
+pub use session_expires::parse_session_expires_header;
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};

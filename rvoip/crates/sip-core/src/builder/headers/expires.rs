@@ -273,6 +273,16 @@ where
     }
 }
 
+pub trait ExpiresExt {
+    fn expires(self, delta_seconds: u32) -> Self;
+}
+
+impl<T: HeaderSetter> ExpiresExt for T {
+    fn expires(self, delta_seconds: u32) -> Self {
+        self.set_header(Expires(delta_seconds))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +290,10 @@ mod tests {
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
     use std::time::Duration;
+    use crate::builder::request::SimpleRequestBuilder;
+    use crate::types::expires::Expires;
+    use crate::types::headers::HeaderName;
+    use crate::types::headers::header_access::HeaderAccess;
 
     #[test]
     fn test_request_expires_seconds() {
@@ -390,21 +404,14 @@ mod tests {
     
     #[test]
     fn test_multiple_expires() {
-        // In the actual header processing, headers are added to a list
-        // rather than replacing the previous value
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
-            .expires_one_hour()
-            .expires_zero() // This adds another Expires header
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@biloxi.com")
+            .unwrap()
+            .expires(3600)
+            .expires(0)
             .build();
-            
-        // Typically, the last header added is the one that should be honored by SIP implementations
-        // But in our test we're just checking that the header exists in the list
-        if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
-            // The exact behavior depends on the header extraction implementation
-            // In our current implementation, we're getting the first header, not the last
-            assert_eq!(expires.0, 3600);
-        } else {
-            panic!("Expires header not found or has wrong type");
-        }
+
+        let header = request.typed_header::<Expires>();
+        assert!(header.is_some(), "Expires header should be present");
+        assert_eq!(header.unwrap().0, 0, "Expires header should be 0 after second set");
     }
 } 

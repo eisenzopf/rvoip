@@ -184,18 +184,16 @@ mod tests {
     
     #[test]
     fn test_multiple_organization() {
-        // In the actual header processing, headers are added to a list
-        // rather than replacing the previous value
+        // Test that setting Organization multiple times results in the last value being used,
+        // as Organization should be a single-value header.
         let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
             .organization("First Organization")
-            .organization("Second Organization") // This adds another Organization header
+            .organization("Second Organization") // This should replace the first one
             .build();
             
-        // Check that the header exists in the list
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
-            // The exact behavior depends on the header extraction implementation
-            // In our current implementation, we're getting the first header, not the last
-            assert_eq!(org.as_str(), "First Organization");
+            // We expect the last set value due to replacement logic.
+            assert_eq!(org.as_str(), "Second Organization");
         } else {
             panic!("Organization header not found or has wrong type");
         }

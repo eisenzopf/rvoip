@@ -313,27 +313,19 @@ impl Message {
     /// - `T`: The expected header type
     ///
     /// # Returns
-    /// The typed header if found and correctly typed, or None
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rvoip_sip_core::prelude::*;
-    ///
-    /// let call_id = CallId::new("abc123");
-    /// let response = Response::new(StatusCode::Ok)
-    ///     .with_header(TypedHeader::CallId(call_id.clone()));
-    /// let message: Message = response.into();
-    ///
-    /// let retrieved = message.typed_header::<CallId>();
-    /// assert!(retrieved.is_some());
-    /// assert_eq!(retrieved.unwrap().value(), "abc123");
-    /// ```
-    pub fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> {
-        // First check if the header name matches what we expect
-        if let Some(h) = self.header(&T::header_name().into()) {
-            // Use the centralized as_typed_ref method
-            return h.as_typed_ref::<T>();
+    /// An optional reference to the first header of the specified type
+    pub fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug, 
+        T: std::fmt::Debug
+    {
+        for h in self.all_headers() {
+            // Check name first for a small optimization, though as_typed_ref also checks.
+            if h.name() == T::header_name().into() { 
+                if let Some(typed_val) = h.as_typed_ref::<T>() { // as_typed_ref now expects these bounds on T
+                    return Some(typed_val);
+                }
+            }
         }
         None
     }
@@ -672,7 +664,11 @@ impl StdFrom<Response> for Message {
 
 // Implement HeaderAccess for Message
 impl HeaderAccess for Message {
-    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T> {
+    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         use crate::types::headers::collect_typed_headers;
         
         // Get the headers from the message
@@ -685,7 +681,11 @@ impl HeaderAccess for Message {
         collect_typed_headers::<T>(headers)
     }
 
-    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> {
+    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         self.typed_headers::<T>().into_iter().next()
     }
 

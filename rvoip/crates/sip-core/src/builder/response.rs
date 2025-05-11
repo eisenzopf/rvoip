@@ -19,6 +19,8 @@ use crate::types::{
     Address,
     TypedHeader,
     Param,
+    HeaderName,
+    HeaderValue,
 };
 
 /// # SIP Response Builder
@@ -162,8 +164,8 @@ use crate::types::{
 ///
 /// // Create an SDP body using the SdpBuilder pattern
 /// let sdp_body = SdpBuilder::new("Session")
-///     .origin("bob", "2890844527", "2890844527", "IN", "IP4", "bob.example.com")
-///     .connection("IN", "IP4", "bob.example.com")
+///     .origin("bob", "2890844527", "2890844527", "IN", "IP4", "127.0.0.1")
+///     .connection("IN", "IP4", "127.0.0.1")
 ///     .time("0", "0")
 ///     .media_audio(49172, "RTP/AVP")
 ///         .formats(&["0"])
@@ -934,7 +936,100 @@ impl SimpleResponseBuilder {
     ///     .header(TypedHeader::Server(server_products));
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
-        self.response = self.response.with_header(header);
+        let new_header_name = header.name();
+
+        match &header {
+            // Single-value headers: Remove existing headers of the same name before adding the new one.
+            TypedHeader::From(_) |
+            TypedHeader::To(_) |
+            TypedHeader::CallId(_) |
+            TypedHeader::CSeq(_) |
+            TypedHeader::MaxForwards(_) | // Though MaxForwards is less common in responses, treat as single if set directly.
+            TypedHeader::ContentType(_) |
+            TypedHeader::ContentLength(_) |
+            TypedHeader::Expires(_) |
+            TypedHeader::SessionExpires(_) |
+            TypedHeader::UserAgent(_) |
+            TypedHeader::Server(_) |
+            TypedHeader::Organization(_) |
+            TypedHeader::Subject(_) |
+            TypedHeader::Priority(_) |
+            TypedHeader::MimeVersion(_) |
+            TypedHeader::ReferTo(_) |
+            TypedHeader::ReferredBy(_) |
+            TypedHeader::RetryAfter(_) |
+            TypedHeader::ReplyTo(_) |
+            TypedHeader::Event(_) |
+            TypedHeader::SubscriptionState(_) |
+            TypedHeader::MinExpires(_) |
+            TypedHeader::Date(_) |
+            TypedHeader::Timestamp(_) => {
+                self.response.headers.retain(|h| h.name() != new_header_name);
+            }
+            
+            // Appendable headers: These headers can appear multiple times.
+            TypedHeader::Via(_) |
+            TypedHeader::Route(_) |         // Less common in responses but possible
+            TypedHeader::RecordRoute(_) |
+            TypedHeader::Contact(_) |
+            TypedHeader::Warning(_) |
+            TypedHeader::CallInfo(_) |
+            TypedHeader::Supported(_) |
+            TypedHeader::Unsupported(_) |
+            TypedHeader::Require(_) |
+            TypedHeader::ProxyRequire(_) |  // Less common in responses
+            TypedHeader::Allow(_) |
+            TypedHeader::Accept(_) |
+            TypedHeader::AcceptEncoding(_) |
+            TypedHeader::AcceptLanguage(_) |
+            TypedHeader::AlertInfo(_) |
+            TypedHeader::ErrorInfo(_) |
+            TypedHeader::ContentEncoding(_) |
+            TypedHeader::ContentLanguage(_) |
+            TypedHeader::ContentDisposition(_) |
+            TypedHeader::InReplyTo(_) |     // Less common in responses
+            TypedHeader::Path(_) |          // For Path service
+            TypedHeader::Authorization(_) | // Typically in requests, but handle if set
+            TypedHeader::ProxyAuthorization(_) | // Typically in requests
+            TypedHeader::WwwAuthenticate(_) |
+            TypedHeader::ProxyAuthenticate(_) |
+            TypedHeader::AuthenticationInfo(_) |
+            TypedHeader::Reason(_) => {
+                // No retain logic, these headers are appended.
+            }
+
+            // Handle 'Other' separately to decide based on its actual name
+            TypedHeader::Other(name, _value_ref) => {
+                let is_known_appendable_by_name = matches!(name,
+                    HeaderName::Via | HeaderName::Route | HeaderName::RecordRoute |
+                    HeaderName::Contact | HeaderName::Warning | HeaderName::CallInfo |
+                    HeaderName::Supported | HeaderName::Unsupported | HeaderName::Require |
+                    HeaderName::ProxyRequire | HeaderName::Allow | HeaderName::Accept |
+                    HeaderName::AcceptEncoding | HeaderName::AcceptLanguage |
+                    HeaderName::AlertInfo | HeaderName::ErrorInfo | HeaderName::ContentEncoding |
+                    HeaderName::ContentLanguage | HeaderName::ContentDisposition |
+                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::Authorization |
+                    HeaderName::ProxyAuthorization | HeaderName::WwwAuthenticate | HeaderName::ProxyAuthenticate |
+                    HeaderName::AuthenticationInfo | HeaderName::Reason
+                );
+                if !is_known_appendable_by_name {
+                    self.response.headers.retain(|h| h.name() != *name);
+                }
+            }
+        };
+
+        if let TypedHeader::Other(name, value) = &header {
+            if *name == HeaderName::ReferTo {
+                if let HeaderValue::ReferTo(refer_to_val) = value {
+                    let typed_refer_to = TypedHeader::ReferTo(refer_to_val.clone());
+                    self.response.headers.push(typed_refer_to);
+                    return self;
+                }
+            }
+            // Add other similar conversions here if needed
+        }
+
+        self.response.headers.push(header);
         self
     }
     

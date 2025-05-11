@@ -1122,20 +1122,76 @@ impl SimpleRequestBuilder {
     ///     .header(TypedHeader::UserAgent(products));
     /// ```
     pub fn header(mut self, header: TypedHeader) -> Self {
-        // Special handling for TypedHeader::Other when the name indicates it should be a specific typed header
-        if let TypedHeader::Other(name, value) = &header {
-            if *name == HeaderName::ReferTo {
-                // If it's a ReferTo header that got converted to Other, try to convert it back
-                if let HeaderValue::ReferTo(refer_to) = value {
-                    // Create a proper TypedHeader::ReferTo
-                    let typed_refer_to = TypedHeader::ReferTo(refer_to.clone());
-                    self.request = self.request.with_header(typed_refer_to);
-                    return self;
+        let new_header_name = header.name();
+
+        match &header {
+            // Single-value headers: Remove existing headers of the same name before adding the new one.
+            TypedHeader::Expires(_) => {
+                self.request.headers.retain(|h| h.name() != new_header_name);
+            }
+            TypedHeader::From(_) |
+            TypedHeader::To(_) |
+            TypedHeader::CallId(_) |
+            TypedHeader::CSeq(_) |
+            TypedHeader::MaxForwards(_) |
+            TypedHeader::ContentType(_) |
+            TypedHeader::ContentLength(_) |
+            TypedHeader::SessionExpires(_) |
+            TypedHeader::UserAgent(_) |
+            TypedHeader::Server(_) |
+            TypedHeader::Organization(_) |
+            TypedHeader::Subject(_) |
+            TypedHeader::Priority(_) |
+            TypedHeader::MimeVersion(_) |
+            TypedHeader::ReferTo(_) |
+            TypedHeader::ReferredBy(_) |
+            TypedHeader::RetryAfter(_) |
+            TypedHeader::MinExpires(_) |
+            TypedHeader::Reason(_) |
+            TypedHeader::Timestamp(_) => {
+                 self.request.headers.retain(|h| h.name() != new_header_name);
+            }
+            // Appendable headers: These headers can appear multiple times.
+            TypedHeader::Route(_) |
+            TypedHeader::RecordRoute(_) |
+            TypedHeader::Via(_) |
+            TypedHeader::Contact(_) |
+            TypedHeader::Warning(_) |
+            TypedHeader::Accept(_) |
+            TypedHeader::AcceptEncoding(_) |
+            TypedHeader::AcceptLanguage(_) |
+            TypedHeader::Allow(_) |
+            TypedHeader::Supported(_) |
+            TypedHeader::Unsupported(_) |
+            TypedHeader::Require(_) |
+            TypedHeader::ProxyRequire(_) |
+            TypedHeader::AlertInfo(_) |
+            TypedHeader::CallInfo(_) |
+            TypedHeader::ErrorInfo(_) |
+            TypedHeader::InReplyTo(_) |
+            TypedHeader::ContentEncoding(_) |
+            TypedHeader::ContentLanguage(_) |
+            TypedHeader::ContentDisposition(_) |
+            TypedHeader::WwwAuthenticate(_) |
+            TypedHeader::Authorization(_) |
+            TypedHeader::ProxyAuthenticate(_) |
+            TypedHeader::ProxyAuthorization(_) |
+            TypedHeader::AuthenticationInfo(_) |
+            TypedHeader::ReplyTo(_) => {
+                // For appendable headers, no special action is needed before pushing.
+            }
+            TypedHeader::Other(name, _value) => {
+                if *name == HeaderName::ReferTo { 
+                    self.request.headers.retain(|h| h.name() != HeaderName::ReferTo);
                 }
             }
-        }
-        
-        self.request = self.request.with_header(header);
+            _ => {
+                // By default, if a header type is not explicitly handled for replacement,
+                // it will be appended. No retain logic needed here.
+            }
+        };
+
+        self.request.headers.push(header); // Removed .clone()
         self
     }
     

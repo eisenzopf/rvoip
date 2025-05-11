@@ -25,7 +25,10 @@ pub trait HeaderAccess {
     /// # Returns
     ///
     /// A vector of references to all headers of the specified type
-    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T>;
+    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T>
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug;
 
     /// Returns the first header with the specified type, if any.
     ///
@@ -36,7 +39,10 @@ pub trait HeaderAccess {
     /// # Returns
     ///
     /// An optional reference to the first header of the specified type
-    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T>;
+    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T>
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug;
 
     /// Returns all headers with the specified name.
     ///
@@ -115,7 +121,11 @@ pub trait HeaderAccess {
 
 /// Helper function to try to extract a typed header of a specific type
 /// from a `TypedHeader` enum.
-pub fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedHeader) -> Option<&'a T> {
+pub fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedHeader) -> Option<&'a T> 
+where 
+    <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+    T: std::fmt::Debug
+{
     header.as_typed_ref::<T>()
 }
 
@@ -123,7 +133,11 @@ pub fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedH
 /// 
 /// This function uses the more efficient `as_typed_ref` method on TypedHeader
 /// and handles special cases like Via headers that can contain multiple entries.
-pub fn collect_typed_headers<'a, T: TypedHeaderTrait + 'static>(headers: &'a [TypedHeader]) -> Vec<&'a T> {
+pub fn collect_typed_headers<'a, T: TypedHeaderTrait + 'static>(headers: &'a [TypedHeader]) -> Vec<&'a T> 
+where 
+    <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+    T: std::fmt::Debug
+{
     // Filter headers by name first for efficiency
     let target_name: HeaderName = T::header_name().into();
     let type_id = std::any::TypeId::of::<T>();

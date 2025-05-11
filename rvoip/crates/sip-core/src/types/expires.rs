@@ -206,7 +206,7 @@ impl TypedHeaderTrait for Expires {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     s.trim().parse::<u32>().map(Expires)
                         .map_err(|_| Error::InvalidHeader(
-                            format!("Invalid integer value in {} header", Self::header_name())
+                            format!("Invalid integer value in {} header: '{}'", Self::header_name(), s)
                         ))
                 } else {
                     Err(Error::InvalidHeader(
@@ -216,7 +216,7 @@ impl TypedHeaderTrait for Expires {
             },
             HeaderValue::Expires(expires) => Ok(*expires),
             _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
+                format!("Unexpected header value type {:?} for {}", header.value, Self::header_name())
             )),
         }
     }

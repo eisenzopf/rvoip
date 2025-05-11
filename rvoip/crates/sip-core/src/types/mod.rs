@@ -388,6 +388,7 @@ pub mod content_language;
 pub mod accept_encoding;
 pub mod reason;
 pub mod alert_info;
+pub mod session_expires;
 
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
@@ -427,6 +428,7 @@ pub use supported::Supported;
 pub use unsupported::Unsupported;
 pub use reason::Reason;
 pub use alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
+pub use session_expires::SessionExpires;
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {
@@ -437,3 +439,5 @@ impl AsRef<Message> for Message {
 
 // Add user_agent module declaration
 pub mod user_agent;
+
+pub use user_agent::UserAgent;

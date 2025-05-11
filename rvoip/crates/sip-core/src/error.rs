@@ -135,6 +135,10 @@ pub enum Error {
     /// Internal error
     #[error("Internal Error: {0}")]
     InternalError(String),
+
+    /// Error related to message or header building
+    #[error("Builder error: {0}")]
+    BuilderError(String),
 }
 
 impl From<nom::Err<nom::error::Error<&str>>> for Error {

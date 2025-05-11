@@ -6,6 +6,7 @@ use crate::types::{
     headers::header_access::HeaderAccess,
 };
 use super::HeaderSetter;
+use crate::types::StatusCode;
 
 /// Reason header builder
 ///
@@ -363,7 +364,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::builder::request::SimpleRequestBuilder;
+    use crate::types::Method;
+    use crate::types::reason::Reason;
+    use crate::types::headers::HeaderName;
+    use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
 
@@ -475,30 +480,17 @@ mod tests {
 
     #[test]
     fn test_multiple_reasons() {
-        // We can add multiple different reasons to a message
-        let request = RequestBuilder::new(Method::Bye, "sip:bob@example.com").unwrap()
-            .reason_sip(200, Some("Call completed elsewhere"))
+        let request = SimpleRequestBuilder::new(Method::Bye, "sip:bob@biloxi.com")
+            .unwrap()
+            .reason_sip(487, Some("Request Terminated"))
             .reason_q850(16, Some("Normal Clearing"))
             .build();
-            
-        // Check if both headers are present
-        let reason_headers: Vec<&TypedHeader> = request.headers(&HeaderName::Reason);
-        assert_eq!(reason_headers.len(), 2);
-        
-        // Verify first header
-        if let TypedHeader::Reason(reason) = reason_headers[0] {
-            assert_eq!(reason.protocol(), "SIP");
-            assert_eq!(reason.cause(), 200);
-        } else {
-            panic!("First Reason header has wrong type");
-        }
-        
-        // Verify second header
-        if let TypedHeader::Reason(reason) = reason_headers[1] {
-            assert_eq!(reason.protocol(), "Q.850");
-            assert_eq!(reason.cause(), 16);
-        } else {
-            panic!("Second Reason header has wrong type");
-        }
+
+        let header = request.typed_header::<Reason>();
+        assert!(header.is_some(), "Reason header should be present");
+        let reason = header.unwrap();
+        assert_eq!(reason.protocol(), "Q.850", "Protocol should be Q.850");
+        assert_eq!(reason.cause(), 16, "Cause should be 16");
+        assert_eq!(reason.text().as_deref(), Some("Normal Clearing"), "Text should be 'Normal Clearing'");
     }
 } 

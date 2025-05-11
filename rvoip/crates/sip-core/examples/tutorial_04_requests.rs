@@ -10,9 +10,11 @@ use rvoip_sip_core::builder::headers::AcceptEncodingExt;
 use rvoip_sip_core::builder::headers::AuthorizationExt;
 use rvoip_sip_core::builder::headers::ReferToExt;
 use rvoip_sip_core::builder::headers::ReferredByExt;
+use rvoip_sip_core::builder::headers::SessionExpiresExt;
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::types::session_expires::Refresher;
 use std::error::Error;
 
 fn main() -> std::result::Result<(), Box<dyn Error>> {
@@ -97,9 +99,8 @@ fn create_detailed_invite() -> Result<Message> {
             "replaces".to_string(), 
             "100rel".to_string()
         ])
-        // Session-specific headers (using TypedHeader for non-builder headers)
-        .header(TypedHeader::Other(HeaderName::Other("Session-Expires".to_string()), 
-                HeaderValue::text("3600;refresher=uac")))
+        // Session-specific headers
+        .session_expires(3600, Some(Refresher::Uac))
         .header(TypedHeader::Other(HeaderName::Other("Min-SE".to_string()), 
                 HeaderValue::text("90")))
         // Use the SDP we created
@@ -218,8 +219,7 @@ fn create_update() -> Result<Message> {
         .contact("sip:alice@atlanta.example.com", None)
         .content_type("application/sdp")
         // Session timer headers
-        .header(TypedHeader::Other(HeaderName::Other("Session-Expires".to_string()), 
-                HeaderValue::text("1800;refresher=uac")))
+        .session_expires(1800, Some(Refresher::Uac))
         .body(sdp.to_string())
         .build();
     

@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
 use crate::types::header::{TypedHeaderTrait, Header};
 use crate::types::TypedHeader;
+use crate::types::headers::header_name::HeaderName;
 
 /// Trait for setting headers on builders 
 pub trait HeaderSetter {
@@ -17,16 +18,15 @@ impl HeaderSetter for crate::builder::SimpleRequestBuilder {
         }
         
         let header_val = header.to_header();
-        println!("Set header called with name: {:?}", header_val.name);
-        
-        match TypedHeader::try_from(header_val) {
+
+        match TypedHeader::try_from(header_val) { // Removed .clone() as it's not needed without the error eprintfn
             Ok(typed_header) => {
-                println!("Successfully converted to TypedHeader: {:?}", typed_header);
                 self.header(typed_header)
             },
-            Err(e) => {
-                println!("Failed to convert to TypedHeader: {:?}", e);
-                self
+            Err(_e) => { // Reverted _e to avoid unused variable warning if e was only for eprintfn
+                // If try_from fails, the header is effectively ignored for now.
+                // Consider logging this error in a real application.
+                self // Return self to allow chaining even if a header fails to convert
             }
         }
     }
@@ -92,6 +92,7 @@ pub mod priority;
 pub mod warning;
 pub mod refer_to;
 pub mod referred_by;
+pub mod session_expires;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -138,4 +139,5 @@ pub use priority::PriorityBuilderExt;
 pub use warning::WarningBuilderExt;
 pub use refer_to::ReferToExt;
 pub use referred_by::ReferredByExt;
+pub use session_expires::SessionExpiresExt;
 

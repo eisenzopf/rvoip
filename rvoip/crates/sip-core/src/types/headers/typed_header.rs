@@ -54,6 +54,7 @@ use crate::prelude::GenericValue;
 use crate::types::alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
 use crate::types::referred_by::ReferredBy;
+use crate::types::session_expires::SessionExpires;
 
 // Import parser components
 use crate::parser;
@@ -64,6 +65,7 @@ use crate::parser::headers::accept_encoding::EncodingInfo;
 use crate::parser::headers::alert_info::AlertInfoValue;
 use crate::parser::headers::error_info::ErrorInfoValue;
 use crate::parser::headers::content_type::parse_content_type_value;
+use crate::parser::headers::session_expires::parse_session_expires;
 
 /// A strongly-typed representation of a SIP header.
 ///
@@ -154,6 +156,7 @@ pub enum TypedHeader {
     CallInfo(CallInfo), // Use our new CallInfo type
     Path(crate::types::path::Path), // Add Path header variant
     Reason(crate::types::reason::Reason), // Add Reason header variant
+    SessionExpires(SessionExpires), // Added SessionExpires variant
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -213,6 +216,7 @@ impl TypedHeader {
             TypedHeader::SubscriptionState(_) => HeaderName::SubscriptionState,
             TypedHeader::Path(_) => HeaderName::Path, // Add Path header case
             TypedHeader::Reason(_) => HeaderName::Reason, // Add Reason header case
+            TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -221,65 +225,59 @@ impl TypedHeader {
     /// 
     /// This method is used internally by the HeaderAccess trait implementations
     /// to provide type-safe access to headers.
-    pub fn as_typed_ref<'a, T: TypedHeaderTrait + 'static>(&'a self) -> Option<&'a T> {
-        // First check if the header name matches what we expect
+    pub fn as_typed_ref<'a, T: TypedHeaderTrait + 'static>(&'a self) -> Option<&'a T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         if self.name() != T::header_name().into() {
             return None;
         }
         
-        // A simpler approach that doesn't need to list every variant:
-        // Cast based on the enum variant and check using TypeId
-        let type_id = std::any::TypeId::of::<T>();
+        let type_id_t = std::any::TypeId::of::<T>();
         
         match self {
-            TypedHeader::CallId(h) if type_id == std::any::TypeId::of::<crate::types::CallId>() => 
+            TypedHeader::CallId(h) if type_id_t == std::any::TypeId::of::<crate::types::CallId>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::From(h) if type_id == std::any::TypeId::of::<crate::types::from::From>() => 
+            TypedHeader::From(h) if type_id_t == std::any::TypeId::of::<crate::types::from::From>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::To(h) if type_id == std::any::TypeId::of::<crate::types::to::To>() => 
+            TypedHeader::To(h) if type_id_t == std::any::TypeId::of::<crate::types::to::To>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::Via(h) if type_id == std::any::TypeId::of::<crate::types::via::Via>() => 
+            TypedHeader::Via(h) if type_id_t == std::any::TypeId::of::<crate::types::via::Via>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::CSeq(h) if type_id == std::any::TypeId::of::<crate::types::CSeq>() => 
+            TypedHeader::CSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::CSeq>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::ContentLength(h) if type_id == std::any::TypeId::of::<crate::types::content_length::ContentLength>() => 
+            TypedHeader::ContentLength(h) if type_id_t == std::any::TypeId::of::<crate::types::content_length::ContentLength>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::MaxForwards(h) if type_id == std::any::TypeId::of::<crate::types::MaxForwards>() => 
+            TypedHeader::MaxForwards(h) if type_id_t == std::any::TypeId::of::<crate::types::MaxForwards>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::Contact(h) if type_id == std::any::TypeId::of::<crate::types::contact::Contact>() => 
+            TypedHeader::Contact(h) if type_id_t == std::any::TypeId::of::<crate::types::contact::Contact>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::ContentType(h) if type_id == std::any::TypeId::of::<crate::types::content_type::ContentType>() => 
+            TypedHeader::ContentType(h) if type_id_t == std::any::TypeId::of::<crate::types::content_type::ContentType>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::Require(h) if type_id == std::any::TypeId::of::<crate::types::require::Require>() => 
+            TypedHeader::Require(h) if type_id_t == std::any::TypeId::of::<crate::types::require::Require>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::Supported(h) if type_id == std::any::TypeId::of::<crate::types::supported::Supported>() => 
+            TypedHeader::Supported(h) if type_id_t == std::any::TypeId::of::<crate::types::supported::Supported>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::ContentDisposition(h) if type_id == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() => 
+            TypedHeader::ContentDisposition(h) if type_id_t == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::InReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() => 
+            TypedHeader::InReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::ReplyTo(h) if type_id == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() => 
+            TypedHeader::ReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::Reason(h) if type_id == std::any::TypeId::of::<crate::types::reason::Reason>() => 
+            TypedHeader::Reason(h) if type_id_t == std::any::TypeId::of::<crate::types::reason::Reason>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
-            TypedHeader::ErrorInfo(h) if type_id == std::any::TypeId::of::<crate::types::error_info::ErrorInfoHeader>() => 
+            TypedHeader::ErrorInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::error_info::ErrorInfoHeader>() => 
                 Some(unsafe { &*(h as *const _ as *const T) }),
-                
+            TypedHeader::AlertInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::alert_info::AlertInfoHeader>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::CallInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::call_info::CallInfo>() => 
+                Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::Expires(h_inner) if type_id_t == std::any::TypeId::of::<crate::types::expires::Expires>() => {
+                Some(unsafe { &*(h_inner as *const _ as *const T) })
+            }
+            TypedHeader::SessionExpires(h) if type_id_t == std::any::TypeId::of::<crate::types::session_expires::SessionExpires>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,
         }
     }
@@ -384,6 +382,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::Path, path)
             },
             TypedHeader::Reason(reason) => write!(f, "{}: {}", HeaderName::Reason, reason),
+            TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -548,7 +547,6 @@ impl TryFrom<Header> for TypedHeader {
                 return Ok(TypedHeader::ReferredBy(referred_by.clone()));
             },
             HeaderValue::ContentDisposition((disp_type_bytes, params_vec)) => {
-                // Only process if the header name is correct
                 if header.name != HeaderName::ContentDisposition {
                     return Ok(TypedHeader::Other(header.name.clone(), header.value.clone()));
                 }
@@ -1098,12 +1096,12 @@ impl TryFrom<Header> for TypedHeader {
                     Err(Error::InvalidHeader(format!("Invalid Path header")))
                 }
             },
-            HeaderName::Reason => {
-                // Use the parser for Reason headers
-                all_consuming(crate::parser::headers::parse_reason)(value_bytes)
-                    .map(|(_, reason)| TypedHeader::Reason(reason))
-                    .map_err(|e| Error::from(e.to_owned()))
-            },
+            HeaderName::Reason => all_consuming(parser::headers::parse_reason)(value_bytes)
+                .map(|(_, v)| TypedHeader::Reason(v))
+                .map_err(Error::from),
+            HeaderName::SessionExpires => all_consuming(parse_session_expires)(value_bytes)
+                .map(|(_, (delta, refresher, params))| TypedHeader::SessionExpires(SessionExpires::new_with_params(delta, refresher, params)))
+                .map_err(Error::from),
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
         

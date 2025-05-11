@@ -339,7 +339,11 @@ impl Response {
     }
     
     /// Retrieves the first header with the specified type, if any.
-    pub fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> {
+    pub fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         for header in &self.headers {
             if let Some(typed) = try_as_typed_header::<T>(header) {
                 return Some(typed);
@@ -747,12 +751,20 @@ impl fmt::Display for Response {
 
 // Implement HeaderAccess for Response
 impl HeaderAccess for Response {
-    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T> {
+    fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         use crate::types::headers::collect_typed_headers;
         collect_typed_headers::<T>(&self.headers)
     }
 
-    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> {
+    fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T> 
+    where 
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+        T: std::fmt::Debug
+    {
         self.typed_headers::<T>().into_iter().next()
     }
 
@@ -808,7 +820,11 @@ impl HeaderAccess for Response {
 }
 
 // Helper function to try casting a TypedHeader to a specific type
-fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedHeader) -> Option<&'a T> {
+fn try_as_typed_header<'a, T: TypedHeaderTrait + 'static>(header: &'a TypedHeader) -> Option<&'a T> 
+where 
+    <T as TypedHeaderTrait>::Name: std::fmt::Debug,
+    T: std::fmt::Debug
+{
     header.as_typed_ref::<T>()
 }
 
