@@ -94,86 +94,237 @@ use std::cell::RefCell;
 /// assert!(path::get_path(&msg, "From").is_some());
 /// assert!(path::get_path(&msg, "From").is_some()); // Use capitalized version for test
 /// ```
-pub fn get_path<'a>(value: &'a SipValue, path: &str) -> Option<&'a SipValue> {
+pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue> {
     if path.is_empty() {
-        return Some(value);
+        return Some(root_value);
     }
-
-    let mut current = value;
-    let parts = parse_path(path);
-
-    for part in parts {
-        match part {
-            PathPart::Field(field) => {
-                // Case 1: Normal field access on an object
-                if let Some(obj) = current.as_object() {
-                    if let Some(next) = obj.get(&field) {
-                        current = next;
-                        continue;
+    
+    // Parse the path into segments
+    let (_, segments) = match parse_path_nom(path) {
+        Ok(result) => result,
+        Err(_) => return None, // Invalid path syntax
+    };
+    
+    // Debug print
+    // println!("Parsed path: {:?} from '{}'", segments, path);
+    
+    // Walk through each segment, traversing the JSON tree
+    let mut current = root_value;
+    let mut segment_idx = 0;
+    
+    // Special case for headers - direct access to common headers
+    if segments.len() >= 2 && 
+       segments[0] == PathSegment::Field("headers".to_string()) {
+        if let PathSegment::Field(header_name) = &segments[1] {
+            // We're trying to access a specific header type
+            // Look in the headers array for the header
+            if let Some(headers_array) = current.as_object()
+                                               .and_then(|obj| obj.get("headers"))
+                                               .and_then(|h| h.as_array()) {
+                // First check if there's an index specified
+                let header_index = if segments.len() >= 3 {
+                    if let PathSegment::Index(idx) = segments[2] {
+                        // We have a specified index - use that
+                        Some(idx)
+                    } else {
+                        // Default to first occurrence
+                        Some(0)
                     }
-                } 
+                } else {
+                    // No index specified, use first occurrence
+                    Some(0)
+                };
                 
-                // Case 2: Field access on an array - try to find an object with matching key
-                // This enables paths like "headers.from.display_name" to work without indices
-                if let Some(arr) = current.as_array() {
-                    let mut found = false;
-                    for item in arr {
-                        if let Some(obj) = item.as_object() {
-                            // Handle SIP headers stored in the headers array
-                            // Check if the object has the field as a key (case-insensitive)
-                            if obj.contains_key(&field) || 
-                               obj.contains_key(&field.to_lowercase()) || 
-                               obj.contains_key(&capitalize(&field)) {
-                                
-                                // Get the actual key with correct case
-                                let actual_key = if obj.contains_key(&field) {
-                                    &field
-                                } else if obj.contains_key(&field.to_lowercase()) {
-                                    &field.to_lowercase()
-                                } else {
-                                    &capitalize(&field)
-                                };
-                                
-                                current = obj.get(actual_key).unwrap(); // Safe unwrap as we know it exists
-                                found = true;
-                                break;
-                            }
+                // Loop through headers to find the one we want
+                let mut matching_headers = Vec::new();
+                for header in headers_array {
+                    if let SipValue::Object(obj) = header {
+                        // Try both the original name and capitalized version
+                        let cap_name = capitalize(header_name);
+                        if obj.contains_key(header_name) || obj.contains_key(&cap_name) {
+                            // Found our header
+                            let actual_key = if obj.contains_key(header_name) {
+                                header_name.as_str()
+                            } else {
+                                &cap_name
+                            };
+                            
+                            matching_headers.push(obj.get(actual_key).unwrap());
                         }
-                    }
-                    
-                    if found {
-                        continue;
                     }
                 }
                 
-                // Not found in either way
-                return None;
-            }
-            PathPart::Index(idx) => {
-                if let Some(arr) = current.as_array() {
-                    let index = if idx < 0 {
-                        // Handle negative indices (counting from the end)
-                        arr.len().checked_sub(idx.abs() as usize)
-                    } else {
-                        Some(idx as usize)
-                    };
-
-                    if let Some(i) = index {
-                        if i < arr.len() {
-                            current = &arr[i];
+                // If we found headers, get the one at the index
+                if !matching_headers.is_empty() {
+                    if let Some(idx) = header_index {
+                        let idx_usize = if idx < 0 {
+                            matching_headers.len().checked_sub(idx.abs() as usize)
                         } else {
-                            return None;
+                            Some(idx as usize)
+                        };
+                        
+                        if let Some(i) = idx_usize {
+                            if i < matching_headers.len() {
+                                // Found our header
+                                current = matching_headers[i];
+                                
+                                // Skip past the headers.HeaderName[index] parts
+                                segment_idx = if segments.len() >= 3 && matches!(segments[2], PathSegment::Index(_)) {
+                                    3 // Skip headers, name, and index
+                                } else {
+                                    2 // Skip just headers and name
+                                };
+                            } else {
+                                return None; // Index out of bounds
+                            }
+                        } else {
+                            return None; // Invalid index
                         }
                     } else {
-                        return None;
+                        // No index specified - use first
+                        current = matching_headers[0];
+                        segment_idx = 2; // Skip headers and name
                     }
                 } else {
+                    return None; // Header not found
+                }
+            } else {
+                // Not a proper headers array
+                // Just try normal object traversal
+            }
+        }
+    }
+    
+    // Process remaining segments
+    while segment_idx < segments.len() {
+        let segment = &segments[segment_idx];
+        
+        // Debug print
+        // println!("Processing segment {:?} at index {}, current value: {:?}", segment, segment_idx, current);
+        
+        match segment {
+            PathSegment::Field(field_name) => {
+                if let SipValue::Object(obj) = current {
+                    // Case 1: Direct field access on an object
+                    if let Some(value) = find_field_case_insensitive(obj, field_name) {
+                        current = value;
+                    } else {
+                        // Field not found
+                        return None;
+                    }
+                } else if let SipValue::Array(arr) = current {
+                    // Handle special case for arrays when trying to access fields
+                    if !arr.is_empty() {
+                        // First check if there's an explicit index specified next
+                        if segment_idx + 1 < segments.len() {
+                            if let PathSegment::Index(_) = &segments[segment_idx + 1] {
+                                // Index will be handled in the next iteration
+                            } else {
+                                // Implicit index 0 - take first element in the array
+                                current = &arr[0];
+                                // Now try to access the field in this object
+                                if let SipValue::Object(obj) = current {
+                                    if let Some(value) = find_field_case_insensitive(obj, field_name) {
+                                        current = value;
+                                    } else {
+                                        return None; // Field not found
+                                    }
+                                } else {
+                                    // Field access on non-object
+                                    return None;
+                                }
+                            }
+                        } else {
+                            // Last segment is a field access on an array
+                            // Implicit index 0 - take first element in the array
+                            current = &arr[0];
+                            // Now try to access the field in this object
+                            if let SipValue::Object(obj) = current {
+                                if let Some(value) = find_field_case_insensitive(obj, field_name) {
+                                    current = value;
+                                } else {
+                                    return None; // Field not found
+                                }
+                            } else {
+                                // Field access on non-object
+                                return None;
+                            }
+                        }
+                    } else {
+                        return None; // Empty array
+                    }
+                } else {
+                    // Cannot access field on non-object/non-array
                     return None;
+                }
+            },
+            PathSegment::Index(idx) => {
+                if let SipValue::Array(arr) = current {
+                    // Case 3: Direct index access on an array
+                    let resolved_idx = if *idx < 0 {
+                        arr.len().checked_sub(idx.abs() as usize)
+                    } else {
+                        Some(*idx as usize)
+                    };
+                    
+                    if let Some(index) = resolved_idx {
+                        if let Some(value) = arr.get(index) {
+                            current = value;
+                        } else {
+                            return None; // Index out of bounds
+                        }
+                    } else {
+                        return None; // Invalid negative index
+                    }
+                } else {
+                    return None; // Cannot index non-array
+                }
+            }
+        }
+        
+        segment_idx += 1;
+    }
+    
+    // For path patterns that expect string values from complex types
+    if current.is_object() || current.is_array() {
+        // Try to extract a meaningful string representation based on the context
+        if path.ends_with(".uri") {
+            // For paths ending with .uri, look for a uri field or direct string conversion
+            if let SipValue::Object(obj) = current {
+                if let Some(uri) = obj.get("uri") {
+                    current = uri;
+                }
+            }
+        } else if path.ends_with(".display_name") {
+            // For paths ending with .display_name, extract the display name field
+            if let SipValue::Object(obj) = current {
+                if let Some(name) = obj.get("display_name") {
+                    current = name;
+                }
+            }
+        } else if path.contains(".params") && path.ends_with(".Tag") || path.ends_with(".Branch") {
+            // For param access, extract tag or branch value
+            let param_name = if path.ends_with(".Tag") { "Tag" } else { "Branch" };
+            if let SipValue::Array(params) = current {
+                for param in params {
+                    if let SipValue::Object(obj) = param {
+                        if let Some(value) = obj.get(param_name) {
+                            current = value;
+                            break;
+                        }
+                    }
+                }
+            } else if let SipValue::Object(obj) = current {
+                if let Some(value) = obj.get(param_name) {
+                    current = value;
                 }
             }
         }
     }
-
+    
+    // Debug print the result
+    // println!("Final value for path '{}': {:?}", path, current);
+    
     Some(current)
 }
 
@@ -429,52 +580,103 @@ fn delete_path_internal(value: &mut SipValue, parts: &[PathPart]) -> SipJsonResu
     Ok(())
 }
 
-/// Parse a path string into parts
-fn parse_path(path: &str) -> Vec<PathPart> {
-    let mut result = Vec::new();
+/// Parse a path string into segments using nom
+fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
+    use nom::branch::alt;
+    use nom::bytes::complete::{tag, take_while1};
+    use nom::character::complete::{char, digit1};
+    use nom::combinator::{map, opt, recognize};
+    use nom::multi::separated_list0;
+    use nom::sequence::{delimited, tuple};
+
+    // Parse a field name (alphanumeric + '_' + '-')
+    let field_name = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-');
     
-    if path.is_empty() {
-        return result;
-    }
+    // Parse a field segment: just a field name
+    let field_segment = map(field_name, |name: &str| PathSegment::Field(name.to_string()));
     
-    // Split by dots, but handle array indexing
-    let parts = path.split('.');
+    // Parse a signed integer for array index
+    let signed_int = map(
+        recognize(tuple((
+            opt(char('-')), // Optional negative sign
+            digit1         // At least one digit
+        ))),
+        |digits: &str| digits.parse::<i32>().unwrap_or(0)
+    );
     
-    for part in parts {
-        // Check if this part has an array index
-        if let Some(bracket_pos) = part.find('[') {
-            if let Some(close_pos) = part.find(']') {
-                if bracket_pos < close_pos {
-                    // Get the field name (part before the bracket)
-                    let field = &part[0..bracket_pos];
-                    if !field.is_empty() {
-                        result.push(PathPart::Field(field.to_string()));
-                    }
-                    
-                    // Get the index value
-                    let index_str = &part[bracket_pos + 1..close_pos];
-                    if let Ok(index) = index_str.parse::<i32>() {
-                        result.push(PathPart::Index(index));
-                    }
-                    
-                    continue;
-                }
-            }
-        }
-        
-        // Regular field name
-        result.push(PathPart::Field(part.to_string()));
-    }
+    // Parse an array index segment: [index]
+    let index_segment = map(
+        delimited(char('['), signed_int, char(']')),
+        PathSegment::Index
+    );
     
-    result
+    // Parse a single segment
+    let segment = alt((field_segment, index_segment));
+    
+    // Parse a path as a list of segments separated by dots
+    separated_list0(char('.'), segment)(input)
 }
 
-/// A part of a path
+/// Find a field in an object by name, with case-insensitive matching
+fn find_field_case_insensitive<'a>(obj: &'a std::collections::HashMap<String, SipValue>, field_name: &str) -> Option<&'a SipValue> {
+    // First try direct match
+    if let Some(value) = obj.get(field_name) {
+        return Some(value);
+    }
+    
+    // Try lowercase
+    let lower = field_name.to_lowercase();
+    if let Some(value) = obj.get(&lower) {
+        return Some(value);
+    }
+    
+    // Try capitalized
+    let cap = capitalize(field_name);
+    obj.get(&cap)
+}
+
+/// Find the first object in an array that has the specified field
+fn find_first_object_with_field<'a>(arr: &'a [SipValue], field_name: &str) -> Option<&'a SipValue> {
+    for item in arr {
+        if let SipValue::Object(obj) = item {
+            if let Some(value) = find_field_case_insensitive(obj, field_name) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Find the Nth object in an array that has the specified field
+fn find_nth_object_with_field<'a>(arr: &'a [SipValue], field_name: &str, index: i32) -> Option<&'a SipValue> {
+    let mut matching_values = Vec::new();
+    
+    // Collect all items that match
+    for item in arr {
+        if let SipValue::Object(obj) = item {
+            if let Some(value) = find_field_case_insensitive(obj, field_name) {
+                matching_values.push(value);
+            }
+        }
+    }
+    
+    // Convert negative index to positive (counting from end)
+    let final_idx = if index < 0 {
+        matching_values.len().checked_sub(index.abs() as usize)
+    } else {
+        Some(index as usize)
+    };
+    
+    // Get the value at the calculated index
+    final_idx.and_then(|idx| matching_values.get(idx)).copied()
+}
+
+/// Path segment representing a single access operation
 #[derive(Debug, Clone, PartialEq)]
-enum PathPart {
-    /// A field in an object
+enum PathSegment {
+    /// Access a field in an object (or find an object with this field in an array)
     Field(String),
-    /// An index in an array
+    /// Access an indexed element in an array
     Index(i32),
 }
 
@@ -780,4 +982,26 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+// Legacy parse_path function kept for compatibility with existing code
+fn parse_path(path: &str) -> Vec<PathPart> {
+    let (_, segments) = parse_path_nom(path).unwrap_or(("", Vec::new()));
+    
+    // Convert PathSegment to PathPart
+    segments.into_iter().map(|segment| {
+        match segment {
+            PathSegment::Field(name) => PathPart::Field(name),
+            PathSegment::Index(idx) => PathPart::Index(idx),
+        }
+    }).collect()
+}
+
+/// A part of a path (legacy, kept for backwards compatibility)
+#[derive(Debug, Clone, PartialEq)]
+enum PathPart {
+    /// A field in an object
+    Field(String),
+    /// An index in an array
+    Index(i32),
 } 

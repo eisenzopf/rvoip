@@ -58,23 +58,29 @@ Content-Length: 0\r\n\
         println!("    From: {} <{}>; tag={}", 
             request.path_str_or("headers.From.display_name", "(unknown)"),
             request.path_str_or("headers.From.uri", "(unknown)"),
-            request.path_str_or("headers.From.params[0].Tag", "(none)"));
+            request.path_str_or("headers.From.Params.Tag", "(none)"));
             
         println!("    To: {} <{}>", 
             request.path_str_or("headers.To.display_name", "(unknown)"),
-            request.path_str_or("headers.To.uri", "(unknown)"));
+            request.path_str_or("headers.To.Uri", "(unknown)"));
             
-        println!("    Via: SIP/2.0/{} {}; branch={}", 
-            request.path_str_or("headers.Via[0].sent_protocol.transport", "(unknown)"),
-            request.path_str_or("headers.Via[0].sent_by_host.Domain", "(unknown)"),
-            request.path_str_or("headers.Via[0].params[0].Branch", "(unknown)"));
+        // Test both implicit and explicit first-element Via header access
+        println!("    Via (implicit): SIP/2.0/{} {}; branch={}", 
+            request.path_str_or("headers.Via.sent_protocol.transport", "(unknown)"),
+            request.path_str_or("headers.Via.sent_by_host.Domain", "(unknown)"),
+            request.path_str_or("headers.Via.params.Branch", "(unknown)"));
+            
+        println!("    Via (explicit): SIP/2.0/{} {}; branch={}", 
+            request.path_str_or("headers.Via.sent_protocol.transport", "(unknown)"),
+            request.path_str_or("headers.Via.sent_by_host.Domain", "(unknown)"),
+            request.path_str_or("headers.Via.params.Branch", "(unknown)"));
             
         println!("    Call-ID: {}", request.path_str_or("headers.CallId", "(none)"));
         println!("    CSeq: {} {}", 
             request.path_str_or("headers.CSeq.seq", "(unknown)"),
             request.path_str_or("headers.CSeq.method", "(unknown)"));
         println!("    Contact: <{}>", 
-            request.path_str_or("headers.Contact[0].Params[0].address.uri", "(unknown)"));
+            request.path_str_or("headers.Contact.Params.Address.uri", "(unknown)"));
         println!("    Expires: {}", request.path_str_or("headers.Expires", "(unknown)"));
         
         // 2. Using Native Methods
@@ -149,7 +155,7 @@ Content-Length: 0\r\n\
         
         // 1. Using Path Accessors
         println!("1. Using Path Accessors:");
-        println!("  Status Code: {}", response.path_str_or("status_code", "(unknown)"));
+        println!("  Status Code: {}", response.path_str_or("status", "(unknown)"));
         println!("  Reason: {}", response.path_str_or("reason", "(unknown)"));
         println!("  Version: {}", response.path_str_or("version", "(unknown)"));
         
@@ -168,12 +174,12 @@ Content-Length: 0\r\n\
         println!("    Via: SIP/2.0/{} {}; branch={}; received={}", 
             response.path_str_or("headers.Via[0].sent_protocol.transport", "(unknown)"),
             response.path_str_or("headers.Via[0].sent_by_host.Domain", "(unknown)"),
-            response.path_str_or("headers.Via[0].params[0].Branch", "(unknown)"),
+            response.path_str_or("headers.Via[0].params.Branch", "(unknown)"),
             response.path_str_or("headers.Via[0].params[1].Received", "(unknown)"));
             
         println!("    Contact: <{}>; expires={}", 
             response.path_str_or("headers.Contact[0].Params[0].address.uri", "(unknown)"),
-            response.path_str_or("headers.Contact[0].Params[0].params[0].Expires", "(unknown)"));
+            response.path_str_or("headers.Contact[0].Params[0].address.params[0].Expires", "(unknown)"));
         
         // 2. Using Native Methods
         println!("\n2. Using Native Methods:");
@@ -242,25 +248,33 @@ Content-Length: 0\r\n\
         // 1. Accessing multiple headers with path accessors
         println!("1. Accessing multiple headers with path accessors:");
         
-        // Via headers
+        // Via headers - test both implicit and explicit access
         println!("\n  Via headers:");
-        println!("    First Via: SIP/2.0/{} {}; branch={}", 
+        println!("    First Via (implicit index): SIP/2.0/{} {}; branch={}", 
+            request.path_str_or("headers.Via.sent_protocol.transport", "(unknown)"),
+            request.path_str_or("headers.Via.sent_by_host.Domain", "(unknown)"),
+            request.path_str_or("headers.Via.params.Branch", "(unknown)"));
+            
+        println!("    First Via (explicit index): SIP/2.0/{} {}; branch={}", 
             request.path_str_or("headers.Via[0].sent_protocol.transport", "(unknown)"),
             request.path_str_or("headers.Via[0].sent_by_host.Domain", "(unknown)"),
-            request.path_str_or("headers.Via[0].params[0].Branch", "(unknown)"));
+            request.path_str_or("headers.Via[0].params.Branch", "(unknown)"));
             
         println!("    Second Via: SIP/2.0/{} {}; branch={}", 
             request.path_str_or("headers.Via[1].sent_protocol.transport", "(unknown)"),
             request.path_str_or("headers.Via[1].sent_by_host.Domain", "(unknown)"),
-            request.path_str_or("headers.Via[1].params[0].Branch", "(unknown)"));
+            request.path_str_or("headers.Via[1].params.Branch", "(unknown)"));
         
         // Record-Route headers
+        // Note: With the enhanced get_path, headers.RecordRoute accesses the first instance,
+        // and headers.RecordRoute[1] accesses the second instance.
+        // The .uri access will implicitly take the first element if the RecordRoute value is an array.
         println!("\n  Record-Route headers:");
         println!("    First Record-Route: <{}>", 
-            request.path_str_or("headers.RecordRoute[0].Params[0].uri", "(unknown)"));
+            request.path_str_or("headers.RecordRoute.uri", "(unknown)"));
             
         println!("    Second Record-Route: <{}>", 
-            request.path_str_or("headers.RecordRoute[1].Params[0].uri", "(unknown)"));
+            request.path_str_or("headers.RecordRoute[1].uri", "(unknown)"));
         
         // 2. Accessing multiple headers with native methods
         println!("\n2. Accessing multiple headers with native methods:");

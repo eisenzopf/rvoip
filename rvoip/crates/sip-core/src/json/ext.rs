@@ -383,7 +383,8 @@ where
     
     /// Get a string value at the given path
     fn path_str(&self, path: impl AsRef<str>) -> Option<String> {
-        self.path(path)
+        let path_str = path.as_ref();
+        self.path(path_str)
             .map(|v| {
                 // Handle different value types by converting them to strings
                 if let Some(s) = v.as_str() {
@@ -401,8 +402,163 @@ where
                 } else if v.is_null() {
                     // Handle null values
                     "null".to_string()
+                } else if v.is_object() {
+                    // Try to extract meaningful string representation from objects
+                    
+                    // Handle URIs
+                    if path_str.ends_with(".uri") || path_str.ends_with("Uri") {
+                        if let Some(scheme) = v.get_path("scheme").and_then(|s| s.as_str()) {
+                            let mut uri = String::new();
+                            
+                            // Build a basic SIP URI string
+                            uri.push_str(scheme);
+                            uri.push_str(":");
+                            
+                            if let Some(user) = v.get_path("user").and_then(|u| u.as_str()) {
+                                uri.push_str(user);
+                                
+                                if let Some(password) = v.get_path("password").and_then(|p| p.as_str()) {
+                                    uri.push_str(":");
+                                    uri.push_str(password);
+                                }
+                                
+                                uri.push_str("@");
+                            }
+                            
+                            if let Some(host_obj) = v.get_path("host") {
+                                if let Some(domain) = host_obj.get_path("Domain").and_then(|d| d.as_str()) {
+                                    uri.push_str(domain);
+                                } else {
+                                    uri.push_str(&format!("{}", host_obj));
+                                }
+                            }
+                            
+                            if let Some(port) = v.get_path("port").and_then(|p| p.as_f64()) {
+                                if port > 0.0 {
+                                    uri.push_str(":");
+                                    uri.push_str(&port.to_string());
+                                }
+                            }
+                            
+                            return uri;
+                        }
+                    }
+                    
+                    // Handle display_name specially
+                    if path_str.ends_with(".display_name") {
+                        if let Some(name) = v.as_str() {
+                            return name.to_string();
+                        }
+                    }
+                    
+                    // Handle branch specially
+                    if path_str.ends_with(".Branch") || path_str.ends_with(".branch") {
+                        if let Some(branch) = v.as_str() {
+                            return branch.to_string();
+                        }
+                    }
+                    
+                    // Handle tag specially
+                    if path_str.ends_with(".Tag") || path_str.ends_with(".tag") {
+                        if let Some(tag) = v.as_str() {
+                            return tag.to_string();
+                        }
+                    }
+                    
+                    // Handle Via headers specially
+                    if path_str.contains(".Via") || path_str.contains(".via") {
+                        if let Some(sent_protocol) = v.get_path("sent_protocol") {
+                            let mut via = String::new();
+                            
+                            // Protocol and transport
+                            let transport = sent_protocol.get_path("transport")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("UDP");
+                            via.push_str("SIP/2.0/");
+                            via.push_str(transport);
+                            via.push_str(" ");
+                            
+                            // Host
+                            if let Some(host_obj) = v.get_path("sent_by_host") {
+                                if let Some(domain) = host_obj.get_path("Domain").and_then(|d| d.as_str()) {
+                                    via.push_str(domain);
+                                    
+                                    // Port (if present)
+                                    if let Some(port) = v.get_path("sent_by_port").and_then(|p| p.as_f64()) {
+                                        if port != 5060.0 { // Only include non-default port
+                                            via.push_str(":");
+                                            via.push_str(&port.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Parameters
+                            if let Some(params) = v.get_path("params") {
+                                // Branch parameter
+                                if let Some(branch) = params.get_path("Branch").and_then(|b| b.as_str()) {
+                                    via.push_str("; branch=");
+                                    via.push_str(branch);
+                                }
+                                
+                                // Received parameter
+                                if let Some(received) = params.get_path("Received").and_then(|r| r.as_str()) {
+                                    via.push_str("; received=");
+                                    via.push_str(received);
+                                }
+                            }
+                            
+                            return via;
+                        }
+                    }
+                    
+                    // Fallback for other complex objects
+                    format!("{}", v)
+                } else if v.is_array() {
+                    // For Contact headers, try to extract URI
+                    if path_str.contains(".Contact") {
+                        if let Some(arr) = v.as_array() {
+                            if !arr.is_empty() {
+                                let first = &arr[0];
+                                
+                                // Try to extract meaningful data from Contact array format
+                                if let Some(params) = first.get_path("Params").and_then(|p| p.as_array()) {
+                                    if !params.is_empty() {
+                                        if let Some(address) = params[0].get_path("address") {
+                                            if let Some(uri) = address.get_path("uri") {
+                                                // Extract URI
+                                                let mut uri_str = String::from("<");
+                                                
+                                                if let Some(scheme) = uri.get_path("scheme").and_then(|s| s.as_str()) {
+                                                    uri_str.push_str(scheme);
+                                                    uri_str.push_str(":");
+                                                    
+                                                    if let Some(user) = uri.get_path("user").and_then(|u| u.as_str()) {
+                                                        uri_str.push_str(user);
+                                                        uri_str.push_str("@");
+                                                    }
+                                                    
+                                                    if let Some(host_obj) = uri.get_path("host") {
+                                                        if let Some(domain) = host_obj.get_path("Domain").and_then(|d| d.as_str()) {
+                                                            uri_str.push_str(domain);
+                                                        }
+                                                    }
+                                                }
+                                                
+                                                uri_str.push_str(">");
+                                                return uri_str;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Fallback for arrays
+                    format!("{}", v)
                 } else {
-                    // Fallback for other value types (arrays, objects)
+                    // Fallback for other value types
                     format!("{}", v)
                 }
             })
