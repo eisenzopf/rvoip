@@ -389,7 +389,8 @@ pub mod accept_encoding;
 pub mod reason;
 pub mod alert_info;
 pub mod session_expires;
-
+pub mod date;
+pub mod event;
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
@@ -429,6 +430,8 @@ pub use unsupported::Unsupported;
 pub use reason::Reason;
 pub use alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 pub use session_expires::SessionExpires;
+pub use date::Date;
+pub use event::{Event, EventType};
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

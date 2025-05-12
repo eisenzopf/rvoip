@@ -11,9 +11,11 @@ use rvoip_sip_core::builder::headers::AuthorizationExt;
 use rvoip_sip_core::builder::headers::ReferToExt;
 use rvoip_sip_core::builder::headers::ReferredByExt;
 use rvoip_sip_core::builder::headers::SessionExpiresExt;
+use rvoip_sip_core::builder::headers::EventBuilderExt;
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::types::event::EventType;
 use rvoip_sip_core::types::session_expires::Refresher;
 use std::error::Error;
 
@@ -151,8 +153,7 @@ fn create_subscribe() -> Result<Message> {
         .max_forwards(70)
         .contact("sip:alice@atlanta.example.com", None)
         // Event package and subscription details
-        .header(TypedHeader::Other(HeaderName::Other("Event".to_string()), 
-                HeaderValue::text("presence")))
+        .event_type(EventType::Token("presence".to_string()))
         .accept("application/pidf+xml", Some(1.0))
         .expires_seconds(3600)
         .build();

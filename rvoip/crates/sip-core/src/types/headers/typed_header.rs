@@ -55,6 +55,7 @@ use crate::types::alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
 use crate::types::referred_by::ReferredBy;
 use crate::types::session_expires::SessionExpires;
+use crate::types::event::{Event as EventTypeData}; // Alias to avoid clash if Event struct is also used locally
 
 // Import parser components
 use crate::parser;
@@ -129,7 +130,7 @@ pub enum TypedHeader {
     Subject(Subject), // Use types::Subject instead of String
     
     // Add Event and SubscriptionState headers
-    Event(String), // Placeholder for Event header type
+    Event(EventTypeData), // ADDED Event variant, using alias
     SubscriptionState(String), // Placeholder for SubscriptionState header type
 
     // Placeholder Types (replace with actual types from types/* where available)
@@ -278,6 +279,8 @@ impl TypedHeader {
             }
             TypedHeader::SessionExpires(h) if type_id_t == std::any::TypeId::of::<crate::types::session_expires::SessionExpires>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::Event(h) if type_id_t == std::any::TypeId::of::<crate::types::event::Event>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,
         }
     }
@@ -376,7 +379,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::CallInfo(call_info) => {
                 write!(f, "{}", call_info)
             },
-            TypedHeader::Event(_) => write!(f, "{}: Event", HeaderName::Event),
+            TypedHeader::Event(event_data) => write!(f, "{}: {}", HeaderName::Event, event_data),
             TypedHeader::SubscriptionState(_) => write!(f, "{}: SubscriptionState", HeaderName::SubscriptionState),
             TypedHeader::Path(path) => {
                 write!(f, "{}: {}", HeaderName::Path, path)
@@ -1102,6 +1105,12 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::SessionExpires => all_consuming(parse_session_expires)(value_bytes)
                 .map(|(_, (delta, refresher, params))| TypedHeader::SessionExpires(SessionExpires::new_with_params(delta, refresher, params)))
                 .map_err(Error::from),
+            HeaderName::Event => {
+                // Use the FromStr trait of types::event::Event, which calls the parser
+                std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::Parser(format!("Invalid UTF-8 in Event header value: {}", e)))
+                    .and_then(|s| crate::types::event::Event::from_str(s).map(TypedHeader::Event))
+            },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
         

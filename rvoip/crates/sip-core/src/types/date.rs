@@ -39,7 +39,7 @@
 use crate::error::{Result, Error};
 use std::fmt;
 use std::str::FromStr;
-use chrono::{DateTime, FixedOffset, Utc, TimeZone};
+use chrono::{DateTime, FixedOffset, Utc, TimeZone, Datelike, Timelike};
 use serde::{Serialize, Deserialize};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 

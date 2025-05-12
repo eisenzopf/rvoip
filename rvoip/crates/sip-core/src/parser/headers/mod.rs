@@ -50,6 +50,7 @@ pub mod proxy_authorization;
 pub mod authentication_info;
 pub mod uri_with_params; // Added
 pub mod session_expires; // Added for Session-Expires header
+pub mod event; // Added for Event header
 
 // Keep internal modules private
 mod server_val;
@@ -105,6 +106,7 @@ pub use authorization::parse_authorization;
 pub use proxy_authorization::parse_proxy_authorization;
 pub use authentication_info::parse_authentication_info;
 pub use session_expires::parse_session_expires_header;
+pub use event::parse_event_header_value; // Added for Event header value parsing
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};
@@ -116,6 +118,8 @@ pub use session_expires::parse_session_expires_header;
 mod tests {
     use super::*;
     use crate::parser::ParseResult;
+    use crate::types::event::EventType;
+    use crate::types::event::ParamValue;
 
     /// Test to verify that exported parser functions are correctly accessible
     #[test]
@@ -203,5 +207,19 @@ mod tests {
         let input = b"100rel,precondition";
         let result = parse_require(input);
         assert!(result.is_ok());
+    }
+
+    /// Test that parsing an Event header value works through the exported function
+    #[test]
+    fn test_event_parser() {
+        let input = b"presence;id=123;foo=bar";
+        let result = parse_event_header_value(input);
+        assert!(result.is_ok());
+        if let Ok((rem, event_header)) = result {
+            assert!(rem.is_empty());
+            assert_eq!(event_header.event_type, EventType::Token("presence".to_string()));
+            assert_eq!(event_header.id, Some("123".to_string()));
+            assert_eq!(event_header.params.get("foo"), Some(&ParamValue::Value("bar".to_string())));
+        }
     }
 }

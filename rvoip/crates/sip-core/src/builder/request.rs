@@ -1126,9 +1126,7 @@ impl SimpleRequestBuilder {
 
         match &header {
             // Single-value headers: Remove existing headers of the same name before adding the new one.
-            TypedHeader::Expires(_) => {
-                self.request.headers.retain(|h| h.name() != new_header_name);
-            }
+            TypedHeader::Expires(_) |
             TypedHeader::From(_) |
             TypedHeader::To(_) |
             TypedHeader::CallId(_) |
@@ -1148,7 +1146,9 @@ impl SimpleRequestBuilder {
             TypedHeader::RetryAfter(_) |
             TypedHeader::MinExpires(_) |
             TypedHeader::Reason(_) |
-            TypedHeader::Timestamp(_) => {
+            TypedHeader::Timestamp(_) |
+            TypedHeader::Event(_) |
+            TypedHeader::SubscriptionState(_) => {
                  self.request.headers.retain(|h| h.name() != new_header_name);
             }
             // Appendable headers: These headers can appear multiple times.
