@@ -61,6 +61,7 @@ use crate::types::MimeVersion;
 use crate::types::min_expires::MinExpires;
 use crate::types::min_se::MinSE;
 use crate::types::organization::Organization;
+use crate::types::rseq::RSeq;
 
 // Import parser components
 use crate::parser;
@@ -164,6 +165,7 @@ pub enum TypedHeader {
     Reason(crate::types::reason::Reason), // Add Reason header variant
     SessionExpires(SessionExpires), // Added SessionExpires variant
     MinSE(MinSE),
+    RSeq(crate::types::rseq::RSeq), // Added RSeq variant
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -225,6 +227,7 @@ impl TypedHeader {
             TypedHeader::Reason(_) => HeaderName::Reason, // Add Reason header case
             TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
             TypedHeader::MinSE(_) => HeaderName::MinSE,
+            TypedHeader::RSeq(_) => HeaderName::RSeq, // Use proper HeaderName enum variant
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -290,6 +293,8 @@ impl TypedHeader {
                 Some(unsafe { &*(h as *const _ as *const T) }),
             TypedHeader::MinSE(h) if type_id_t == std::any::TypeId::of::<crate::types::min_se::MinSE>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::RSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::rseq::RSeq>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,
         }
     }
@@ -351,7 +356,14 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::ProxyRequire, proxy_require)
             },
             TypedHeader::Date(date) => write!(f, "{}: {}", HeaderName::Date, date),
-            TypedHeader::Timestamp(timestamp) => write!(f, "{}: {:?}", HeaderName::Timestamp, timestamp),
+            TypedHeader::Timestamp(timestamp) => {
+                // Format the tuple using Display implementation for the (NotNan<f32>, Option<NotNan<f32>>) type
+                let (value, delay) = timestamp;
+                match delay {
+                    Some(d) => write!(f, "{}: {} {}", HeaderName::Timestamp, value, d),
+                    None => write!(f, "{}: {}", HeaderName::Timestamp, value)
+                }
+            },
             TypedHeader::Organization(organization) => write!(f, "{}: {}", HeaderName::Organization, organization),
             TypedHeader::Priority(priority) => write!(f, "{}: {}", HeaderName::Priority, priority),
             TypedHeader::Subject(subject) => write!(f, "{}: {}", HeaderName::Subject, subject),
@@ -378,7 +390,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::InReplyTo(in_reply_to) => {
                 write!(f, "{}: {}", HeaderName::InReplyTo, in_reply_to)
             },
-            TypedHeader::RetryAfter(retry_after) => write!(f, "{}: {:?}", HeaderName::RetryAfter, retry_after),
+            TypedHeader::RetryAfter(retry_after) => write!(f, "{}: {}", HeaderName::RetryAfter, retry_after),
             TypedHeader::ErrorInfo(error_info) => {
                 write!(f, "{}", error_info)
             },
@@ -396,6 +408,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::Reason(reason) => write!(f, "{}: {}", HeaderName::Reason, reason),
             TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
             TypedHeader::MinSE(val) => write!(f, "{}: {}", HeaderName::MinSE, val),
+            TypedHeader::RSeq(val) => write!(f, "{}: {}", HeaderName::RSeq, val),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -1136,6 +1149,11 @@ impl TryFrom<Header> for TypedHeader {
                 let value_str = std::str::from_utf8(value_bytes)
                     .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in MinSE header value: {}", e)))?;
                 Ok(TypedHeader::MinSE(MinSE::from_str(value_str)?))
+            },
+            HeaderName::RSeq => {
+                let value_str = std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in RSeq header value: {}", e)))?;
+                Ok(TypedHeader::RSeq(crate::types::rseq::RSeq::from_str(value_str)?))
             },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };

@@ -267,7 +267,7 @@
 //! ```rust
 //! use rvoip_sip_core::types::{Uri, Address, Param};
 //! use rvoip_sip_core::types::route::Route;
-//! use rvoip_sip_core::types::{TypedHeader, HeaderName};
+//! use rvoip_core::types::{TypedHeader, HeaderName};
 //! use rvoip_sip_core::builder::SimpleRequestBuilder;
 //! use rvoip_sip_core::types::Method;
 //! use std::str::FromStr;
@@ -375,6 +375,7 @@ pub mod warning;
 pub mod multipart;
 pub mod path;
 pub mod proxy_require;
+pub mod rseq;
 
 // Modules missing re-exports - Add them
 pub mod priority;
@@ -435,6 +436,7 @@ pub use date::Date;
 pub use event::{Event, EventType};
 pub use timestamp::Timestamp;
 pub use to::To;
+pub use rseq::RSeq;
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

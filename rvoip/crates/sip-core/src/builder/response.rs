@@ -964,7 +964,8 @@ impl SimpleResponseBuilder {
             TypedHeader::MinSE(_) |
             TypedHeader::MinExpires(_) |
             TypedHeader::Date(_) |
-            TypedHeader::Timestamp(_) => {
+            TypedHeader::Timestamp(_) |
+            TypedHeader::RSeq(_) => {
                 self.response.headers.retain(|h| h.name() != new_header_name);
             }
             

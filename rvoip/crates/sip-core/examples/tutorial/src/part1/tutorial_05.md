@@ -102,7 +102,7 @@ let response = ResponseBuilder::new(StatusCode::SessionProgress, None)
     .contact("sip:bob@biloxi.example.com", None)
     .content_type("application/sdp")
     .header(TypedHeader::Require(require)) // Requires reliable provisional responses
-    .header(TypedHeader::Other(HeaderName::Other("RSeq".to_string()), HeaderValue::Raw(b"1".to_vec()))) // RSeq header for reliability
+    .rseq(1) // RSeq header for reliability
     .body(sdp.to_string())
     .build();
 ```
@@ -311,17 +311,13 @@ let response = ResponseBuilder::new(StatusCode::NotAcceptable, None)
 The 486 Busy Here response indicates that the user is currently busy and cannot take the call.
 
 ```rust
-// Create RetryAfter header using the RetryAfter::new() constructor
-let retry_after = RetryAfter::new(60)
-    .with_comment("User in another call");
-
 let response = ResponseBuilder::new(StatusCode::BusyHere, None)
     .from("Bob", "sip:bob@biloxi.example.com", None)
     .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .call_id("3848276298220188511@atlanta.example.com")
     .cseq(314159, Method::Invite)
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-    .header(TypedHeader::RetryAfter(retry_after)) // Try again in 1 minute
+    .retry_after_with_comment(60, "User in another call") // Try again in 1 minute
     .build();
 ```
 
@@ -336,18 +332,13 @@ Server error responses indicate that the server failed to fulfill an apparently 
 The 500 Server Internal Error response indicates that the server encountered an unexpected condition that prevented it from fulfilling the request.
 
 ```rust
-// Create RetryAfter header using the RetryAfter::new() constructor
-let retry_after = RetryAfter::new(300)
-    .with_comment("Server maintenance")
-    .with_param(Param::new("reason", Some("maintenance")));
-
 let response = ResponseBuilder::new(StatusCode::ServerInternalError, None)
     .from("Bob", "sip:bob@biloxi.example.com", None)
     .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .call_id("3848276298220188511@atlanta.example.com")
     .cseq(314159, Method::Invite)
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-    .header(TypedHeader::RetryAfter(retry_after)) // Retry after 5 minutes with alternate retry intervals
+    .retry_after_duration(300, 0, Some("Server maintenance")) // Retry after 5 minutes
     .build();
 ```
 
@@ -356,16 +347,13 @@ let response = ResponseBuilder::new(StatusCode::ServerInternalError, None)
 The 503 Service Unavailable response indicates that the server is temporarily unable to handle the request due to overload or maintenance.
 
 ```rust
-// Create RetryAfter header using the RetryAfter::new() constructor
-let retry_after = RetryAfter::new(120);
-
 let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
     .from("Bob", "sip:bob@biloxi.example.com", None)
     .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .call_id("3848276298220188511@atlanta.example.com")
     .cseq(314159, Method::Invite)
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-    .header(TypedHeader::RetryAfter(retry_after)) // Retry after 2 minutes
+    .retry_after(120) // Retry after 2 minutes
     .build();
 ```
 
@@ -378,17 +366,13 @@ Global failure responses indicate that the request cannot be fulfilled at any se
 The 603 Decline response indicates that the user explicitly does not wish to participate in the call.
 
 ```rust
-// Create RetryAfter header using the RetryAfter::new() constructor
-let retry_after = RetryAfter::new(3600)
-    .with_comment("User unavailable");
-
 let response = ResponseBuilder::new(StatusCode::Decline, None)
     .from("Bob", "sip:bob@biloxi.example.com", None)
     .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .call_id("3848276298220188511@atlanta.example.com")
     .cseq(314159, Method::Invite)
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-    .header(TypedHeader::RetryAfter(retry_after)) // Try again in 1 hour
+    .retry_after_with_comment(3600, "User unavailable") // Try again in 1 hour
     .build();
 ```
 

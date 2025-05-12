@@ -141,6 +141,8 @@ pub enum HeaderName {
     SessionExpires,
     /// MinSE: Minimum Session Expires header
     MinSE,
+    /// RSeq: Response sequence number for reliable provisional responses (RFC 3262)
+    RSeq,
 }
 
 impl HeaderName {
@@ -201,6 +203,7 @@ impl HeaderName {
             HeaderName::SessionExpires => "Session-Expires",
             HeaderName::Other(s) => s,
             HeaderName::MinSE => "Min-SE",
+            HeaderName::RSeq => "RSeq",
         }
     }
 }
@@ -275,6 +278,7 @@ impl FromStr for HeaderName {
             "reason" => Ok(HeaderName::Reason),
             "session-expires" | "x" => Ok(HeaderName::SessionExpires),
             "min-se" => Ok(HeaderName::MinSE),
+            "rseq" => Ok(HeaderName::RSeq),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

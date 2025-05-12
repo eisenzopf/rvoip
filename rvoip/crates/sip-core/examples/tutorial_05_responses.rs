@@ -2,7 +2,7 @@
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::ResponseBuilder;
 use rvoip_sip_core::builder::headers::*;
-use rvoip_sip_core::types::{StatusCode, Refresher, RetryAfter, Require};
+use rvoip_sip_core::types::{StatusCode, Refresher, Require};
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use std::error::Error;
@@ -137,7 +137,7 @@ fn create_session_progress_response() -> Result<Message> {
         .contact("sip:bob@biloxi.example.com", None)
         .content_type("application/sdp")
         .header(TypedHeader::Require(require)) // Requires reliable provisional responses
-        .header(TypedHeader::Other(HeaderName::Other("RSeq".to_string()), HeaderValue::Raw(b"1".to_vec()))) // RSeq header for reliability
+        .rseq(1) // Using the new RSeq builder
         .body(sdp.to_string())
         .build();
     
@@ -315,18 +315,13 @@ fn create_not_acceptable_response() -> Result<Message> {
 
 // Create a 500 Server Internal Error response
 fn create_server_error_response() -> Result<Message> {
-    // Create RetryAfter header using the RetryAfter::new() constructor
-    let retry_after = RetryAfter::new(300)
-        .with_comment("Server maintenance")
-        .with_param(Param::new("reason", Some("maintenance")));
-    
     let response = ResponseBuilder::new(StatusCode::ServerInternalError, None)
         .from("Bob", "sip:bob@biloxi.example.com", None)
         .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
         .call_id("3848276298220188511@atlanta.example.com")
         .cseq(314159, Method::Invite)
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-        .header(TypedHeader::RetryAfter(retry_after)) // Retry after 5 minutes with alternate retry intervals
+        .retry_after_duration(300, 0, Some("Server maintenance")) // Using the new RetryAfter builder
         .build();
     
     Ok(Message::Response(response))
@@ -334,16 +329,13 @@ fn create_server_error_response() -> Result<Message> {
 
 // Create a 503 Service Unavailable response
 fn create_service_unavailable_response() -> Result<Message> {
-    // Create RetryAfter header using the RetryAfter::new() constructor
-    let retry_after = RetryAfter::new(120);
-    
     let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
         .from("Bob", "sip:bob@biloxi.example.com", None)
         .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
         .call_id("3848276298220188511@atlanta.example.com")
         .cseq(314159, Method::Invite)
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-        .header(TypedHeader::RetryAfter(retry_after)) // Retry after 2 minutes
+        .retry_after(120) // Using the new RetryAfter builder
         .build();
     
     Ok(Message::Response(response))
@@ -351,17 +343,13 @@ fn create_service_unavailable_response() -> Result<Message> {
 
 // 486 Busy Here (technically a 4xx but relevant to 6xx section)
 fn create_busy_response() -> Result<Message> {
-    // Create RetryAfter header using the RetryAfter::new() constructor
-    let retry_after = RetryAfter::new(60)
-        .with_comment("User in another call");
-    
     let response = ResponseBuilder::new(StatusCode::BusyHere, None)
         .from("Bob", "sip:bob@biloxi.example.com", None)
         .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
         .call_id("3848276298220188511@atlanta.example.com")
         .cseq(314159, Method::Invite)
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-        .header(TypedHeader::RetryAfter(retry_after)) // Try again in 1 minute
+        .retry_after_with_comment(60, "User in another call") // Using the new RetryAfter builder
         .build();
     
     Ok(Message::Response(response))
@@ -369,17 +357,13 @@ fn create_busy_response() -> Result<Message> {
 
 // Create a 603 Decline response (global failure)
 fn create_decline_response() -> Result<Message> {
-    // Create RetryAfter header using the RetryAfter::new() constructor
-    let retry_after = RetryAfter::new(3600)
-        .with_comment("User unavailable");
-    
     let response = ResponseBuilder::new(StatusCode::Decline, None)
         .from("Bob", "sip:bob@biloxi.example.com", None)
         .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
         .call_id("3848276298220188511@atlanta.example.com")
         .cseq(314159, Method::Invite)
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
-        .header(TypedHeader::RetryAfter(retry_after)) // Try again in 1 hour
+        .retry_after_with_comment(3600, "User unavailable") // Using the new RetryAfter builder
         .build();
     
     Ok(Message::Response(response))
