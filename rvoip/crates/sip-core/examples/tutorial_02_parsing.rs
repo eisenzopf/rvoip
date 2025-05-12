@@ -172,14 +172,14 @@ Content-Length: 0\r\n\
             response.path_str_or("headers.To.params[0].Tag", "(none)"));
             
         println!("    Via: SIP/2.0/{} {}; branch={}; received={}", 
-            response.path_str_or("headers.Via[0].sent_protocol.transport", "(unknown)"),
-            response.path_str_or("headers.Via[0].sent_by_host.Domain", "(unknown)"),
-            response.path_str_or("headers.Via[0].params.Branch", "(unknown)"),
-            response.path_str_or("headers.Via[0].params[1].Received", "(unknown)"));
+            response.path_str_or("headers.Via.sent_protocol.transport", "(unknown)"),
+            response.path_str_or("headers.Via.sent_by_host.Domain", "(unknown)"),
+            response.path_str_or("headers.Via.params.Branch", "(unknown)"),
+            response.path_str_or("headers.Via.params[1].Received", "(unknown)"));
             
         println!("    Contact: <{}>; expires={}", 
-            response.path_str_or("headers.Contact[0].Params[0].address.uri", "(unknown)"),
-            response.path_str_or("headers.Contact[0].Params[0].address.params[0].Expires", "(unknown)"));
+            response.path_str_or("headers.Contact.Params.address.uri", "(unknown)"),
+            response.path_str_or("headers.Contact.Params.address.params[0].Expires", "(unknown)"));
         
         // 2. Using Native Methods
         println!("\n2. Using Native Methods:");

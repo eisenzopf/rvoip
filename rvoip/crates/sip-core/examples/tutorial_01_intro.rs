@@ -83,9 +83,9 @@ Content-Length: {}\r\n\
             request.path_str_or("headers.To.display_name", "(unknown)"));
             
         println!("  Via: SIP/2.0/{} {}; branch={}", 
-            request.path_str_or("headers.Via[0].sent_protocol.transport", "UDP"),
-            request.path_str_or("headers.Via[0].sent_by_host.Domain", "unknown"),
-            request.path_str_or("headers.Via[0].params[0].Branch", "unknown"));
+            request.path_str_or("headers.Via.sent_protocol.transport", "UDP"),
+            request.path_str_or("headers.Via.sent_by_host.Domain", "unknown"),
+            request.path_str_or("headers.Via.params.Branch", "unknown"));
             
         println!("  Call-ID: {}", request.path_str_or("headers.CallId", "(none)"));
         
@@ -248,7 +248,6 @@ a=rtpmap:0 PCMU/8000"#)
             for line in lines.iter().take(10) {
                 println!("{}", line);
             }
-            println!("... (more lines) ...");
         },
         Err(e) => println!("Failed to create WebRTC SDP: {}", e),
     }

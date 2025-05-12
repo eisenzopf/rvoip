@@ -31,7 +31,21 @@ The INVITE method is used to establish a session between user agents. It typical
 ### Detailed INVITE Example
 
 ```rust
-let invite = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com")?
+// Create SDP using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&["0", "8", "97"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .rtpmap("97", "iLBC/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let invite_request = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", None)
     .call_id("3848276298220188511@atlanta.example.com")
@@ -41,25 +55,26 @@ let invite = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com")?
     .contact("sip:alice@atlanta.example.com", None)
     // Add standard but optional headers
     .content_type("application/sdp")
-    .content_length(None)  // Will be calculated automatically
     .user_agent("SIPClient/1.0")
-    .accept("application/sdp")
-    .allow(&["INVITE", "ACK", "CANCEL", "BYE", "NOTIFY", "REFER", "OPTIONS"])
-    .supported(&["replaces", "100rel"])
-    .header(TypedHeader::Other(HeaderName::Other("Session-Expires".to_string()), 
-            HeaderValue::text("3600;refresher=uac")))
-    .header(TypedHeader::Other(HeaderName::Other("Min-SE".to_string()), 
-            HeaderValue::text("90")))
-    .body("v=0\r\n\
-           o=alice 2890844526 2890844526 IN IP4 atlanta.example.com\r\n\
-           s=Call with Bob\r\n\
-           c=IN IP4 atlanta.example.com\r\n\
-           t=0 0\r\n\
-           m=audio 49170 RTP/AVP 0 8 97\r\n\
-           a=rtpmap:0 PCMU/8000\r\n\
-           a=rtpmap:8 PCMA/8000\r\n\
-           a=rtpmap:97 iLBC/8000\r\n\
-           a=sendrecv\r\n")
+    .accept("application/sdp", None)
+    .allow_methods(vec![
+        Method::Invite, 
+        Method::Ack, 
+        Method::Cancel, 
+        Method::Bye, 
+        Method::Notify, 
+        Method::Refer, 
+        Method::Options
+    ])
+    .supported_tags(vec![
+        "replaces".to_string(), 
+        "100rel".to_string()
+    ])
+    // Session-specific headers
+    .session_expires(3600, Some(Refresher::Uac))
+    .min_se(90)
+    // Use the SDP we created
+    .body(sdp.to_string())
     .build();
 ```
 
@@ -79,7 +94,7 @@ The REGISTER method is used to register contact information for a user with a SI
 ### REGISTER with Authentication
 
 ```rust
-let register = SimpleRequestBuilder::register("sip:registrar.example.com")?
+let register_request = SimpleRequestBuilder::register("sip:registrar.example.com")?
     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
     .to("Alice", "sip:alice@example.com", None)
     .call_id("1j9FpLxk3uxtm8tn@alice-pc.example.com")
@@ -88,20 +103,20 @@ let register = SimpleRequestBuilder::register("sip:registrar.example.com")?
     .max_forwards(70)
     .contact("sip:alice@alice-pc.example.com", None)
     .expires_seconds(3600)
-    // Add authentication header
-    .header(TypedHeader::Other(
-        HeaderName::Other("Authorization".to_string()),
-        HeaderValue::text("Digest username=\"alice@example.com\", \
-                          realm=\"example.com\", \
-                          nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", \
-                          uri=\"sip:registrar.example.com\", \
-                          response=\"e6f99bf42fe01fc304d3d4eee7dddd44\", \
-                          algorithm=MD5, \
-                          cnonce=\"0a4f113b\", \
-                          opaque=\"5ccc069c403ebaf9f0171e9517f40e41\", \
-                          qop=auth, \
-                          nc=00000001")
-    ))
+    // Add authentication header using AuthorizationExt
+    .authorization_digest(
+        "alice@example.com",                    // username
+        "example.com",                          // realm
+        "dcd98b7102dd2f0e8b11d0f600bfb0c093",   // nonce
+        "e6f99bf42fe01fc304d3d4eee7dddd44",     // response
+        Some("0a4f113b"),                       // cnonce
+        Some("auth"),                           // qop
+        Some("00000001"),                       // nc
+        Some("REGISTER"),                       // method
+        Some("sip:registrar.example.com"),      // uri
+        Some("MD5"),                            // algorithm
+        Some("5ccc069c403ebaf9f0171e9517f40e41") // opaque
+    )
     .build();
 ```
 
@@ -119,7 +134,7 @@ The SUBSCRIBE method is used to request notification of an event or set of event
 ### SUBSCRIBE Example
 
 ```rust
-let subscribe = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@biloxi.example.com")?
+let subscribe_request = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", None)
     .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
@@ -128,10 +143,8 @@ let subscribe = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@biloxi.exa
     .max_forwards(70)
     .contact("sip:alice@atlanta.example.com", None)
     // Event package and subscription details
-    .header(TypedHeader::Other(HeaderName::Other("Event".to_string()), 
-            HeaderValue::text("presence")))
-    .header(TypedHeader::Other(HeaderName::Other("Accept".to_string()), 
-            HeaderValue::text("application/pidf+xml")))
+    .event_type(EventType::Token("presence".to_string()))
+    .accept("application/pidf+xml", Some(1.0))
     .expires_seconds(3600)
     .build();
 ```
@@ -149,7 +162,7 @@ The REFER method is used to ask the recipient to issue a request. It's commonly 
 ### REFER Example
 
 ```rust
-let refer = SimpleRequestBuilder::new(Method::Refer, "sip:bob@biloxi.example.com")?
+let refer_request = SimpleRequestBuilder::new(Method::Refer, "sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
     .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
@@ -157,11 +170,10 @@ let refer = SimpleRequestBuilder::new(Method::Refer, "sip:bob@biloxi.example.com
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
     .max_forwards(70)
     .contact("sip:alice@atlanta.example.com", None)
-    // Refer-To header specifies transfer target
-    .header(TypedHeader::Other(HeaderName::Other("Refer-To".to_string()), 
-            HeaderValue::text("<sip:carol@chicago.example.com>")))
-    .header(TypedHeader::Other(HeaderName::Other("Referred-By".to_string()), 
-            HeaderValue::text("<sip:alice@atlanta.example.com>")))
+    // Use ReferToExt trait's refer_to_uri method
+    .refer_to_uri("sip:carol@chicago.example.com")
+    // Use ReferredByExt trait's referred_by_str method
+    .referred_by_str("<sip:alice@atlanta.example.com>")?
     .build();
 ```
 
@@ -177,7 +189,7 @@ The MESSAGE method is used for instant messaging functionality within SIP. It ca
 ### MESSAGE Example
 
 ```rust
-let message = SimpleRequestBuilder::new(Method::Message, "sip:bob@biloxi.example.com")?
+let message_request = SimpleRequestBuilder::new(Method::Message, "sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", None)
     .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
@@ -201,7 +213,19 @@ The UPDATE method is used to modify the state of a session without changing the 
 ### UPDATE Example
 
 ```rust
-let update = SimpleRequestBuilder::new(Method::Update, "sip:bob@biloxi.example.com")?
+// Create SDP for the update using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844527", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let update_request = SimpleRequestBuilder::new(Method::Update, "sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
     .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
@@ -211,16 +235,8 @@ let update = SimpleRequestBuilder::new(Method::Update, "sip:bob@biloxi.example.c
     .contact("sip:alice@atlanta.example.com", None)
     .content_type("application/sdp")
     // Session timer headers
-    .header(TypedHeader::Other(HeaderName::Other("Session-Expires".to_string()), 
-            HeaderValue::text("1800;refresher=uac")))
-    .body("v=0\r\n\
-           o=alice 2890844526 2890844527 IN IP4 atlanta.example.com\r\n\
-           s=Call with Bob\r\n\
-           c=IN IP4 atlanta.example.com\r\n\
-           t=0 0\r\n\
-           m=audio 49170 RTP/AVP 0\r\n\
-           a=rtpmap:0 PCMU/8000\r\n\
-           a=sendrecv\r\n")
+    .session_expires(1800, Some(Refresher::Uac))
+    .body(sdp.to_string())
     .build();
 ```
 
@@ -236,18 +252,16 @@ The OPTIONS method is used to query the capabilities of a server or another user
 ### OPTIONS Example
 
 ```rust
-let options = SimpleRequestBuilder::options("sip:bob@biloxi.example.com")?
+let options_request = SimpleRequestBuilder::options("sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", None)
     .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
     .cseq(1)
     .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
     .max_forwards(70)
-    .accept("application/sdp")
-    .header(TypedHeader::Other(HeaderName::Other("Accept-Language".to_string()), 
-            HeaderValue::text("en")))
-    .header(TypedHeader::Other(HeaderName::Other("Accept-Encoding".to_string()), 
-            HeaderValue::text("identity")))
+    .accept("application/sdp", None)
+    .accept_language("en", Some(1.0))
+    .accept_encoding("identity", Some(1.0))
     .build();
 ```
 
@@ -264,7 +278,7 @@ The ACK method is used to acknowledge receipt of a final response to an INVITE r
 ### ACK Example
 
 ```rust
-let ack = SimpleRequestBuilder::ack("sip:bob@biloxi.example.com")?
+let ack_request = SimpleRequestBuilder::ack("sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
     .call_id("3848276298220188511@atlanta.example.com")
@@ -286,7 +300,7 @@ The CANCEL method is used to cancel a pending request. It's commonly used to can
 ### CANCEL Example
 
 ```rust
-let cancel = SimpleRequestBuilder::cancel("sip:bob@biloxi.example.com")?
+let cancel_request = SimpleRequestBuilder::cancel("sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", None)
     .call_id("3848276298220188511@atlanta.example.com")
@@ -309,7 +323,7 @@ The BYE method is used to terminate an established session.
 ### BYE Example
 
 ```rust
-let bye = SimpleRequestBuilder::bye("sip:bob@biloxi.example.com")?
+let bye_request = SimpleRequestBuilder::bye("sip:bob@biloxi.example.com")?
     .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
     .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
     .call_id("3848276298220188511@atlanta.example.com")
