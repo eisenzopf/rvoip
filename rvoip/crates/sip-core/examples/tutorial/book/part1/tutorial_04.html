@@ -1,0 +1,554 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>SIP Requests in Depth</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="sip-requests-in-depth"><a class="header" href="#sip-requests-in-depth">SIP Requests in Depth</a></h1>
+<p>In this tutorial, we'll dive deeper into SIP requests, exploring the different request methods, their specific requirements, and how to implement them using the <code>rvoip-sip-core</code> library. Building on what we learned about the builder pattern in the previous tutorial, we'll now focus on the semantics and usage of each request type.</p>
+<h2 id="sip-request-methods"><a class="header" href="#sip-request-methods">SIP Request Methods</a></h2>
+<p>The SIP protocol defines several request methods, each serving a specific purpose in establishing, managing, or terminating sessions. The core methods defined in <a href="https://tools.ietf.org/html/rfc3261">RFC 3261</a> are:</p>
+<ol>
+<li><strong>INVITE</strong>: Initiates a session</li>
+<li><strong>ACK</strong>: Confirms receipt of a final response to INVITE</li>
+<li><strong>BYE</strong>: Terminates a session</li>
+<li><strong>CANCEL</strong>: Cancels a pending request</li>
+<li><strong>REGISTER</strong>: Registers contact information</li>
+<li><strong>OPTIONS</strong>: Queries capabilities</li>
+</ol>
+<p>Additional methods defined in extensions include:</p>
+<ol start="7">
+<li><strong>SUBSCRIBE</strong>: Requests notification of an event</li>
+<li><strong>NOTIFY</strong>: Sends a notification of an event</li>
+<li><strong>MESSAGE</strong>: Sends an instant message</li>
+<li><strong>REFER</strong>: Asks recipient to issue a request</li>
+<li><strong>INFO</strong>: Sends mid-session information</li>
+<li><strong>UPDATE</strong>: Modifies session parameters</li>
+</ol>
+<p>Let's explore each of these methods in detail.</p>
+<h2 id="invite-requests"><a class="header" href="#invite-requests">INVITE Requests</a></h2>
+<p>The INVITE method is used to establish a session between user agents. It typically contains an SDP body describing the media capabilities of the caller.</p>
+<h3 id="detailed-invite-example"><a class="header" href="#detailed-invite-example">Detailed INVITE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8", "97"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .rtpmap("97", "iLBC/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let invite_request = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Add standard but optional headers
+    .content_type("application/sdp")
+    .user_agent("SIPClient/1.0")
+    .accept("application/sdp", None)
+    .allow_methods(vec![
+        Method::Invite, 
+        Method::Ack, 
+        Method::Cancel, 
+        Method::Bye, 
+        Method::Notify, 
+        Method::Refer, 
+        Method::Options
+    ])
+    .supported_tags(vec![
+        "replaces".to_string(), 
+        "100rel".to_string()
+    ])
+    // Session-specific headers
+    .session_expires(3600, Some(Refresher::Uac))
+    .min_se(90)
+    // Use the SDP we created
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-invite-headers"><a class="header" href="#important-invite-headers">Important INVITE Headers</a></h3>
+<ul>
+<li><strong>Contact</strong>: Specifies where subsequent requests should be sent</li>
+<li><strong>Allow</strong>: Lists methods supported by the UAC</li>
+<li><strong>Supported</strong>: Lists SIP extensions supported by the UAC</li>
+<li><strong>Session-Expires</strong>: Specifies session refresh interval</li>
+<li><strong>Min-SE</strong>: Minimum session expiration</li>
+<li><strong>Content-Type</strong>: Usually "application/sdp" for INVITE requests</li>
+</ul>
+<h2 id="register-requests"><a class="header" href="#register-requests">REGISTER Requests</a></h2>
+<p>The REGISTER method is used to register contact information for a user with a SIP registrar server. It associates a SIP URI (Address-of-Record) with one or more contact URIs where the user can be reached.</p>
+<h3 id="register-with-authentication"><a class="header" href="#register-with-authentication">REGISTER with Authentication</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let register_request = SimpleRequestBuilder::register("sip:registrar.example.com")?
+    .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    .to("Alice", "sip:alice@example.com", None)
+    .call_id("1j9FpLxk3uxtm8tn@alice-pc.example.com")
+    .cseq(2)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    .expires_seconds(3600)
+    // Add authentication header using AuthorizationExt
+    .authorization_digest(
+        "alice@example.com",                    // username
+        "example.com",                          // realm
+        "dcd98b7102dd2f0e8b11d0f600bfb0c093",   // nonce
+        "e6f99bf42fe01fc304d3d4eee7dddd44",     // response
+        Some("0a4f113b"),                       // cnonce
+        Some("auth"),                           // qop
+        Some("00000001"),                       // nc
+        Some("REGISTER"),                       // method
+        Some("sip:registrar.example.com"),      // uri
+        Some("MD5"),                            // algorithm
+        Some("5ccc069c403ebaf9f0171e9517f40e41") // opaque
+    )
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-register-headers"><a class="header" href="#important-register-headers">Important REGISTER Headers</a></h3>
+<ul>
+<li><strong>Contact</strong>: The URI where the user can be reached</li>
+<li><strong>Expires</strong>: How long the registration should be valid (in seconds)</li>
+<li><strong>Authorization</strong>: Credentials for authentication</li>
+<li><strong>To/From</strong>: Both typically contain the Address-of-Record being registered</li>
+</ul>
+<h2 id="subscribe-and-notify-requests"><a class="header" href="#subscribe-and-notify-requests">SUBSCRIBE and NOTIFY Requests</a></h2>
+<p>The SUBSCRIBE method is used to request notification of an event or set of events at a later time. The NOTIFY method is used to inform subscribers of events.</p>
+<h3 id="subscribe-example"><a class="header" href="#subscribe-example">SUBSCRIBE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let subscribe_request = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Event package and subscription details
+    .event_type(EventType::Token("presence".to_string()))
+    .accept("application/pidf+xml", Some(1.0))
+    .expires_seconds(3600)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-subscribe-headers"><a class="header" href="#important-subscribe-headers">Important SUBSCRIBE Headers</a></h3>
+<ul>
+<li><strong>Event</strong>: Specifies the event package being subscribed to</li>
+<li><strong>Accept</strong>: Specifies acceptable body formats for NOTIFY requests</li>
+<li><strong>Expires</strong>: How long the subscription should be valid</li>
+</ul>
+<h2 id="refer-requests"><a class="header" href="#refer-requests">REFER Requests</a></h2>
+<p>The REFER method is used to ask the recipient to issue a request. It's commonly used for call transfer scenarios.</p>
+<h3 id="refer-example"><a class="header" href="#refer-example">REFER Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let refer_request = SimpleRequestBuilder::new(Method::Refer, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(101)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Use ReferToExt trait's refer_to_uri method
+    .refer_to_uri("sip:carol@chicago.example.com")
+    // Use ReferredByExt trait's referred_by_str method
+    .referred_by_str("&lt;sip:alice@atlanta.example.com&gt;")?
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-refer-headers"><a class="header" href="#important-refer-headers">Important REFER Headers</a></h3>
+<ul>
+<li><strong>Refer-To</strong>: Specifies the URI that the recipient should send a request to</li>
+<li><strong>Referred-By</strong>: Indicates the identity of the referring party</li>
+</ul>
+<h2 id="message-requests"><a class="header" href="#message-requests">MESSAGE Requests</a></h2>
+<p>The MESSAGE method is used for instant messaging functionality within SIP. It carries the message content directly in the request body.</p>
+<h3 id="message-example"><a class="header" href="#message-example">MESSAGE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let message_request = SimpleRequestBuilder::new(Method::Message, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .content_type("text/plain")
+    .body("Hello Bob, this is Alice. Can we meet at 2pm today?")
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-message-headers"><a class="header" href="#important-message-headers">Important MESSAGE Headers</a></h3>
+<ul>
+<li><strong>Content-Type</strong>: Specifies the format of the message body (often "text/plain")</li>
+<li><strong>Content-Length</strong>: Size of the message body in bytes</li>
+</ul>
+<h2 id="update-requests"><a class="header" href="#update-requests">UPDATE Requests</a></h2>
+<p>The UPDATE method is used to modify the state of a session without changing the state of the dialog. It's often used for session timer refreshes or to update media parameters.</p>
+<h3 id="update-example"><a class="header" href="#update-example">UPDATE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP for the update using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844527", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let update_request = SimpleRequestBuilder::new(Method::Update, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(2)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    .content_type("application/sdp")
+    // Session timer headers
+    .session_expires(1800, Some(Refresher::Uac))
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-update-headers"><a class="header" href="#important-update-headers">Important UPDATE Headers</a></h3>
+<ul>
+<li><strong>Session-Expires</strong>: Updates the session refresh interval</li>
+<li><strong>Content-Type</strong>: Usually "application/sdp" when updating media parameters</li>
+</ul>
+<h2 id="options-requests"><a class="header" href="#options-requests">OPTIONS Requests</a></h2>
+<p>The OPTIONS method is used to query the capabilities of a server or another user agent. The response typically includes Allow, Accept, and other capability-related headers.</p>
+<h3 id="options-example"><a class="header" href="#options-example">OPTIONS Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let options_request = SimpleRequestBuilder::options("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .accept("application/sdp", None)
+    .accept_language("en", Some(1.0))
+    .accept_encoding("identity", Some(1.0))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-options-headers"><a class="header" href="#important-options-headers">Important OPTIONS Headers</a></h3>
+<ul>
+<li><strong>Accept</strong>: Specifies acceptable body formats</li>
+<li><strong>Accept-Language</strong>: Specifies acceptable languages</li>
+<li><strong>Accept-Encoding</strong>: Specifies acceptable encodings</li>
+</ul>
+<h2 id="ack-requests"><a class="header" href="#ack-requests">ACK Requests</a></h2>
+<p>The ACK method is used to acknowledge receipt of a final response to an INVITE request. It's part of the three-way handshake for establishing a session.</p>
+<h3 id="ack-example"><a class="header" href="#ack-example">ACK Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let ack_request = SimpleRequestBuilder::ack("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)  // Must match the INVITE CSeq number
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnewbranch"))
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-ack-headers"><a class="header" href="#important-ack-headers">Important ACK Headers</a></h3>
+<ul>
+<li><strong>CSeq</strong>: Must match the CSeq number of the INVITE being acknowledged</li>
+<li><strong>Via</strong>: Typically contains a new branch parameter</li>
+</ul>
+<h2 id="cancel-requests"><a class="header" href="#cancel-requests">CANCEL Requests</a></h2>
+<p>The CANCEL method is used to cancel a pending request. It's commonly used to cancel an INVITE that hasn't received a final response yet.</p>
+<h3 id="cancel-example"><a class="header" href="#cancel-example">CANCEL Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let cancel_request = SimpleRequestBuilder::cancel("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)  // Must match the request being canceled
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bK776asdhds"))  // Must match the request being canceled
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-cancel-headers"><a class="header" href="#important-cancel-headers">Important CANCEL Headers</a></h3>
+<ul>
+<li><strong>Call-ID</strong>: Must match the Call-ID of the request being canceled</li>
+<li><strong>To/From/CSeq</strong>: Must match the request being canceled</li>
+<li><strong>Via</strong>: Must match the topmost Via header of the request being canceled</li>
+</ul>
+<h2 id="bye-requests"><a class="header" href="#bye-requests">BYE Requests</a></h2>
+<p>The BYE method is used to terminate an established session.</p>
+<h3 id="bye-example"><a class="header" href="#bye-example">BYE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let bye_request = SimpleRequestBuilder::bye("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(2)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds8"))
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="common-request-headers"><a class="header" href="#common-request-headers">Common Request Headers</a></h2>
+<p>All SIP requests share a common set of headers:</p>
+<ol>
+<li><strong>From</strong>: Identifies the initiator of the request</li>
+<li><strong>To</strong>: Identifies the intended recipient of the request</li>
+<li><strong>Call-ID</strong>: Unique identifier for the call</li>
+<li><strong>CSeq</strong>: Command sequence number</li>
+<li><strong>Via</strong>: Indicates the path taken by the request</li>
+<li><strong>Max-Forwards</strong>: Limits the number of hops to the destination</li>
+</ol>
+<p>Additional common headers include:</p>
+<ol start="7">
+<li><strong>Contact</strong>: Where subsequent requests should be sent</li>
+<li><strong>Content-Type</strong>: Format of the message body</li>
+<li><strong>Content-Length</strong>: Size of the message body in bytes</li>
+<li><strong>User-Agent</strong>: Information about the client software</li>
+</ol>
+<h2 id="request-uris"><a class="header" href="#request-uris">Request URIs</a></h2>
+<p>The Request-URI is a SIP or SIPS URI that identifies the resource to which the request is being addressed. It appears in the start-line of the request and determines where the request is sent.</p>
+<pre><code>INVITE sip:bob@biloxi.example.com SIP/2.0
+</code></pre>
+<p>Here, <code>sip:bob@biloxi.example.com</code> is the Request-URI.</p>
+<p>The Request-URI can contain various parameters:</p>
+<pre><code>sip:bob@biloxi.example.com:5060;transport=tcp;lr
+</code></pre>
+<p>This URI specifies:</p>
+<ul>
+<li>User: bob</li>
+<li>Domain: biloxi.example.com</li>
+<li>Port: 5060</li>
+<li>Transport: TCP</li>
+<li>Parameter: lr (loose routing)</li>
+</ul>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>SIP requests are the building blocks of SIP-based communication. Each request type serves a specific purpose in the lifecycle of a SIP session, from establishment to termination. The <code>rvoip-sip-core</code> library provides a flexible and intuitive builder pattern for creating these requests with all their required and optional headers.</p>
+<p>In the next tutorial, we'll explore SIP responses in depth, learning how to create and handle the various response types that correspond to these requests.</p>
+<h2 id="exercises"><a class="header" href="#exercises">Exercises</a></h2>
+<ol>
+<li>Create an INVITE request with a custom SDP body that offers both audio and video media.</li>
+<li>Create a REGISTER request for multiple contacts with different expiration times.</li>
+<li>Create a REFER request for attended transfer (with a Replaces header).</li>
+<li>Create a MESSAGE request with a multipart/mixed body containing both text and an image.</li>
+<li>Create an OPTIONS request that queries for specific capabilities (e.g., support for specific SIP extensions).</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../part1/tutorial_03.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../part1/tutorial_05.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../part1/tutorial_03.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../part1/tutorial_05.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

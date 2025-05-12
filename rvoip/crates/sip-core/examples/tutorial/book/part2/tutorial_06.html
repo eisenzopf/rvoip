@@ -1,0 +1,358 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Introduction to SDP</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="introduction-to-sdp"><a class="header" href="#introduction-to-sdp">Introduction to SDP</a></h1>
+<p>Session Description Protocol (SDP) is a format for describing multimedia communication sessions for the purposes of session announcement, session invitation, and other forms of multimedia session establishment. SDP is defined in <a href="https://datatracker.ietf.org/doc/html/rfc8866">RFC 8866</a>.</p>
+<h2 id="purpose-of-sdp"><a class="header" href="#purpose-of-sdp">Purpose of SDP</a></h2>
+<p>In SIP, SDP is used to describe the parameters of the media session being established. It enables the communicating parties to:</p>
+<ol>
+<li>Specify which media types will be used (audio, video, etc.)</li>
+<li>Define the codecs and formats for each media type</li>
+<li>Indicate network transport addresses for each media stream</li>
+<li>Negotiate session parameters like bandwidth, encryption, and other attributes</li>
+</ol>
+<p>SDP doesn't transport any media itself; it merely describes the media session for the endpoints to establish direct media communication.</p>
+<h2 id="sdp-message-structure"><a class="header" href="#sdp-message-structure">SDP Message Structure</a></h2>
+<p>SDP messages are plain text and consist of a series of lines, with each line having a type (single character), equals sign, and value:</p>
+<pre><code>&lt;type&gt;=&lt;value&gt;
+</code></pre>
+<p>An SDP message has three main sections:</p>
+<ol>
+<li><strong>Session-level information</strong> (applies to the entire session)</li>
+<li><strong>Time description</strong> (when the session is active)</li>
+<li><strong>Media descriptions</strong> (one or more, each describing a media stream)</li>
+</ol>
+<h3 id="session-level-fields"><a class="header" href="#session-level-fields">Session-level Fields</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>v=</td><td>Protocol version (always 0)</td><td>Yes</td></tr>
+<tr><td>o=</td><td>Origin (username, session ID, version, network type, address type, address)</td><td>Yes</td></tr>
+<tr><td>s=</td><td>Session name</td><td>Yes</td></tr>
+<tr><td>i=</td><td>Session information</td><td>No</td></tr>
+<tr><td>u=</td><td>URI of description</td><td>No</td></tr>
+<tr><td>e=</td><td>Email address</td><td>No</td></tr>
+<tr><td>p=</td><td>Phone number</td><td>No</td></tr>
+<tr><td>c=</td><td>Connection information (network type, address type, address)</td><td>No*</td></tr>
+<tr><td>b=</td><td>Bandwidth information</td><td>No</td></tr>
+<tr><td>z=</td><td>Time zone adjustments</td><td>No</td></tr>
+<tr><td>k=</td><td>Encryption key</td><td>No</td></tr>
+<tr><td>a=</td><td>Session attributes</td><td>No</td></tr>
+</tbody></table>
+</div>
+<p>*Connection information is required either at session-level or in each media description</p>
+<h3 id="time-description"><a class="header" href="#time-description">Time Description</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>t=</td><td>Time the session is active (start, stop)</td><td>Yes</td></tr>
+<tr><td>r=</td><td>Repeat times</td><td>No</td></tr>
+</tbody></table>
+</div>
+<h3 id="media-description"><a class="header" href="#media-description">Media Description</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>m=</td><td>Media name, port, protocol, and format descriptions</td><td>Yes</td></tr>
+<tr><td>i=</td><td>Media title</td><td>No</td></tr>
+<tr><td>c=</td><td>Connection information</td><td>No*</td></tr>
+<tr><td>b=</td><td>Bandwidth information</td><td>No</td></tr>
+<tr><td>k=</td><td>Encryption key</td><td>No</td></tr>
+<tr><td>a=</td><td>Media attributes</td><td>No</td></tr>
+</tbody></table>
+</div>
+<p>*Connection information is required if not specified at session-level</p>
+<h2 id="common-examples-in-sip-signaling"><a class="header" href="#common-examples-in-sip-signaling">Common Examples in SIP Signaling</a></h2>
+<h3 id="audio-only-call-offer"><a class="header" href="#audio-only-call-offer">Audio-only Call Offer</a></h3>
+<pre><code>v=0
+o=alice 2890844526 2890844526 IN IP4 alice.example.com
+s=Audio Call
+c=IN IP4 alice.example.com
+t=0 0
+m=audio 49170 RTP/AVP 0 8 96
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:96 telephone-event/8000
+a=sendrecv
+</code></pre>
+<p>This SDP describes:</p>
+<ul>
+<li>A session originated by "alice" from alice.example.com</li>
+<li>A single audio stream on port 49170</li>
+<li>Three supported codecs: PCMU (G.711 μ-law), PCMA (G.711 A-law), and telephone-event (for DTMF)</li>
+<li>Bidirectional communication (sendrecv)</li>
+</ul>
+<h3 id="audio-and-video-call-offer"><a class="header" href="#audio-and-video-call-offer">Audio and Video Call Offer</a></h3>
+<pre><code>v=0
+o=bob 2890844527 2890844527 IN IP4 bob.example.com
+s=Audio/Video Call
+c=IN IP4 bob.example.com
+t=0 0
+m=audio 49170 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+m=video 51372 RTP/AVP 97
+a=rtpmap:97 H264/90000
+a=sendrecv
+</code></pre>
+<p>This SDP describes:</p>
+<ul>
+<li>A session with both audio and video streams</li>
+<li>Audio on port 49170 with PCMU and PCMA codecs</li>
+<li>Video on port 51372 using H.264 codec</li>
+<li>Both streams are bidirectional</li>
+</ul>
+<h2 id="sdp-in-sip-messages"><a class="header" href="#sdp-in-sip-messages">SDP in SIP Messages</a></h2>
+<p>SDP is typically carried in SIP messages within the body of:</p>
+<ul>
+<li>INVITE requests (SDP offer)</li>
+<li>200 OK responses to INVITEs (SDP answer)</li>
+<li>ACK requests (in some scenarios)</li>
+<li>UPDATE or re-INVITE requests (for session modifications)</li>
+</ul>
+<p>The Content-Type header in the SIP message indicates the presence of SDP: <code>Content-Type: application/sdp</code></p>
+<h2 id="sdp-offeranswer-model"><a class="header" href="#sdp-offeranswer-model">SDP Offer/Answer Model</a></h2>
+<p>SIP uses the SDP Offer/Answer model defined in <a href="https://datatracker.ietf.org/doc/html/rfc3264">RFC 3264</a>. The basic process is:</p>
+<ol>
+<li><strong>Offer</strong>: The initiator sends an SDP describing the media streams they wish to establish</li>
+<li><strong>Answer</strong>: The recipient responds with an SDP describing the media streams they are willing to accept</li>
+</ol>
+<p>This negotiation process allows both parties to agree on compatible media parameters.</p>
+<h2 id="sdp-attributes"><a class="header" href="#sdp-attributes">SDP Attributes</a></h2>
+<p>Attributes (a= lines) are extremely flexible and can appear at either session-level or media-level. Some common attributes in SIP/SDP include:</p>
+<ul>
+<li><strong>a=sendrecv, a=sendonly, a=recvonly, a=inactive</strong>: Media direction</li>
+<li><strong>a=rtpmap</strong>: RTP payload type mapping to encoding name, clock rate, and parameters</li>
+<li><strong>a=fmtp</strong>: Format parameters for a codec</li>
+<li><strong>a=ptime</strong>: Preferred packet duration</li>
+<li><strong>a=maxptime</strong>: Maximum packet duration</li>
+<li><strong>a=rtcp</strong>: RTCP port information</li>
+<li><strong>a=setup</strong>: Role in DTLS setup (used with WebRTC)</li>
+<li><strong>a=fingerprint</strong>: DTLS fingerprint (used with WebRTC)</li>
+<li><strong>a=ice-ufrag, a=ice-pwd</strong>: ICE credentials (used with WebRTC)</li>
+</ul>
+<h2 id="building-sdp-with-rvoip-sip-core"><a class="header" href="#building-sdp-with-rvoip-sip-core">Building SDP with rvoip-sip-core</a></h2>
+<p>Our library provides a convenient builder pattern for creating SDP messages. Here's a simple example:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+
+let sdp = SdpBuilder::new("Audio Call")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+    .connection("IN", "IP4", "alice.example.com")
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8", "96"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .rtpmap("96", "telephone-event/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>In the next tutorial, we'll dive deeper into creating more complex SDP messages using our builder API and handling SDP parsing.</p>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>SDP is a critical component in SIP-based communication, responsible for describing the media sessions being established. Understanding SDP is essential for implementing any SIP-based multimedia application.</p>
+<p>The text-based format makes SDP easy to debug, but it can also be complex due to the many optional fields and attributes available. Our library provides a builder pattern to simplify SDP creation and ensure validity of the resulting messages.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../part1/tutorial_05.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../part2/tutorial_07.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../part1/tutorial_05.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../part2/tutorial_07.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
