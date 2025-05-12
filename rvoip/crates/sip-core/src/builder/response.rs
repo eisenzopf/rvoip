@@ -961,6 +961,7 @@ impl SimpleResponseBuilder {
             TypedHeader::ReplyTo(_) |
             TypedHeader::Event(_) |
             TypedHeader::SubscriptionState(_) |
+            TypedHeader::MinSE(_) |
             TypedHeader::MinExpires(_) |
             TypedHeader::Date(_) |
             TypedHeader::Timestamp(_) => {

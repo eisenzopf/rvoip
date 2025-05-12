@@ -51,11 +51,12 @@ pub mod authentication_info;
 pub mod uri_with_params; // Added
 pub mod session_expires; // Added for Session-Expires header
 pub mod event; // Added for Event header
+pub mod media_type;
+pub mod min_se; // Added
 
 // Keep internal modules private
 mod server_val;
 mod token_list;
-mod media_type;
 
 // Re-export public parser functions
 pub use via::parse_via;
@@ -107,6 +108,11 @@ pub use proxy_authorization::parse_proxy_authorization;
 pub use authentication_info::parse_authentication_info;
 pub use session_expires::parse_session_expires_header;
 pub use event::parse_event_header_value; // Added for Event header value parsing
+pub use media_type::media_type as parse_media_type;
+pub use mime_version::parse_mime_version as parse_mime_version_value;
+pub use min_expires::parse_min_expires as parse_min_expires_value;
+pub use min_se::parse_min_se_value; // Added
+pub use organization::parse_organization as parse_organization_value;
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};
@@ -119,7 +125,10 @@ mod tests {
     use super::*;
     use crate::parser::ParseResult;
     use crate::types::event::EventType;
+    use crate::types::headers::HeaderName;
     use crate::types::event::ParamValue;
+    use crate::types::MinSE; // For the new test
+    use nom::error::VerboseError;
 
     /// Test to verify that exported parser functions are correctly accessible
     #[test]
@@ -221,5 +230,19 @@ mod tests {
             assert_eq!(event_header.id, Some("123".to_string()));
             assert_eq!(event_header.params.get("foo"), Some(&ParamValue::Value("bar".to_string())));
         }
+    }
+
+    #[test]
+    fn test_parse_min_se_header_value_export() {
+        let input = b"120";
+        let result = parse_min_se_value::<VerboseError<&[u8]>>(input);
+        assert!(result.is_ok(), "Failed to parse valid Min-SE value: {:?}", result);
+        let (remaining, min_se_val) = result.unwrap();
+        assert_eq!(remaining, b"", "Input not fully consumed");
+        assert_eq!(min_se_val, MinSE::new(120));
+
+        let input_invalid = b"abc";
+        let result_invalid = parse_min_se_value::<VerboseError<&[u8]>>(input_invalid);
+        assert!(result_invalid.is_err(), "Parsed invalid Min-SE value successfully");
     }
 }

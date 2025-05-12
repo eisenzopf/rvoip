@@ -1,6 +1,7 @@
 use crate::types::{
     headers::HeaderName,
     TypedHeader,
+    mime_version::MimeVersion as MimeVersionType,
 };
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
@@ -152,28 +153,28 @@ pub trait MimeVersionBuilderExt {
 
 impl MimeVersionBuilderExt for SimpleRequestBuilder {
     fn mime_version_1_0(self) -> Self {
-        self.header(TypedHeader::MimeVersion((1, 0)))
+        self.header(TypedHeader::MimeVersion(MimeVersionType::new(1, 0)))
     }
     
     fn mime_version(self, major: u32, minor: u32) -> Self {
-        self.header(TypedHeader::MimeVersion((major, minor)))
+        self.header(TypedHeader::MimeVersion(MimeVersionType::new(major, minor)))
     }
 }
 
 impl MimeVersionBuilderExt for SimpleResponseBuilder {
     fn mime_version_1_0(self) -> Self {
-        self.header(TypedHeader::MimeVersion((1, 0)))
+        self.header(TypedHeader::MimeVersion(MimeVersionType::new(1, 0)))
     }
     
     fn mime_version(self, major: u32, minor: u32) -> Self {
-        self.header(TypedHeader::MimeVersion((major, minor)))
+        self.header(TypedHeader::MimeVersion(MimeVersionType::new(major, minor)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
+    use crate::types::{Method, StatusCode, mime_version::MimeVersion as MimeVersionType};
     use crate::types::headers::HeaderAccess;
     
     #[test]
@@ -185,9 +186,9 @@ mod tests {
         let mime_version_headers = request.headers(&HeaderName::MimeVersion);
             
         assert_eq!(mime_version_headers.len(), 1);
-        if let TypedHeader::MimeVersion((major, minor)) = mime_version_headers[0] {
-            assert_eq!(*major, 1);
-            assert_eq!(*minor, 0);
+        if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
+            assert_eq!(version_struct.major(), 1);
+            assert_eq!(version_struct.minor(), 0);
         } else {
             panic!("Expected MimeVersion header");
         }
@@ -202,9 +203,9 @@ mod tests {
         let mime_version_headers = request.headers(&HeaderName::MimeVersion);
             
         assert_eq!(mime_version_headers.len(), 1);
-        if let TypedHeader::MimeVersion((major, minor)) = mime_version_headers[0] {
-            assert_eq!(*major, 2);
-            assert_eq!(*minor, 1);
+        if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
+            assert_eq!(version_struct.major(), 2);
+            assert_eq!(version_struct.minor(), 1);
         } else {
             panic!("Expected MimeVersion header");
         }
@@ -219,9 +220,9 @@ mod tests {
         let mime_version_headers = response.headers(&HeaderName::MimeVersion);
             
         assert_eq!(mime_version_headers.len(), 1);
-        if let TypedHeader::MimeVersion((major, minor)) = mime_version_headers[0] {
-            assert_eq!(*major, 1);
-            assert_eq!(*minor, 0);
+        if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
+            assert_eq!(version_struct.major(), 1);
+            assert_eq!(version_struct.minor(), 0);
         } else {
             panic!("Expected MimeVersion header");
         }
@@ -236,9 +237,9 @@ mod tests {
         let mime_version_headers = response.headers(&HeaderName::MimeVersion);
             
         assert_eq!(mime_version_headers.len(), 1);
-        if let TypedHeader::MimeVersion((major, minor)) = mime_version_headers[0] {
-            assert_eq!(*major, 2);
-            assert_eq!(*minor, 1);
+        if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
+            assert_eq!(version_struct.major(), 2);
+            assert_eq!(version_struct.minor(), 1);
         } else {
             panic!("Expected MimeVersion header");
         }

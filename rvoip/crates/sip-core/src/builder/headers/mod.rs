@@ -94,6 +94,7 @@ pub mod refer_to;
 pub mod referred_by;
 pub mod session_expires;
 pub mod event;
+pub mod min_se;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -142,4 +143,5 @@ pub use refer_to::ReferToExt;
 pub use referred_by::ReferredByExt;
 pub use session_expires::SessionExpiresExt;
 pub use event::EventBuilderExt;
+pub use min_se::MinSEBuilderExt;
 

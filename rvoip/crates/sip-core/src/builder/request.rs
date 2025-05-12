@@ -1148,7 +1148,8 @@ impl SimpleRequestBuilder {
             TypedHeader::Reason(_) |
             TypedHeader::Timestamp(_) |
             TypedHeader::Event(_) |
-            TypedHeader::SubscriptionState(_) => {
+            TypedHeader::SubscriptionState(_) |
+            TypedHeader::MinSE(_) => {
                  self.request.headers.retain(|h| h.name() != new_header_name);
             }
             // Appendable headers: These headers can appear multiple times.

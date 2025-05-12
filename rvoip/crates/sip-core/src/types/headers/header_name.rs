@@ -139,6 +139,8 @@ pub enum HeaderName {
     Reason,
     /// Session-Expires: Session expiration information (RFC 4028)
     SessionExpires,
+    /// MinSE: Minimum Session Expires header
+    MinSE,
 }
 
 impl HeaderName {
@@ -198,6 +200,7 @@ impl HeaderName {
             HeaderName::Reason => "Reason",
             HeaderName::SessionExpires => "Session-Expires",
             HeaderName::Other(s) => s,
+            HeaderName::MinSE => "Min-SE",
         }
     }
 }
@@ -246,7 +249,7 @@ impl FromStr for HeaderName {
             "accept" => Ok(HeaderName::Accept),
             "accept-encoding" => Ok(HeaderName::AcceptEncoding),
             "accept-language" => Ok(HeaderName::AcceptLanguage),
-            "content-disposition" => Ok(HeaderName::ContentDisposition),
+            "content-disposition" | "d" => Ok(HeaderName::ContentDisposition),
             "content-encoding" | "e" => Ok(HeaderName::ContentEncoding),
             "content-language" => Ok(HeaderName::ContentLanguage),
             "warning" => Ok(HeaderName::Warning),
@@ -263,14 +266,15 @@ impl FromStr for HeaderName {
             "date" => Ok(HeaderName::Date),
             "mime-version" => Ok(HeaderName::MimeVersion),
             "in-reply-to" => Ok(HeaderName::InReplyTo),
-            "alert-info" => Ok(HeaderName::AlertInfo),
+            "alert-info" | "alert" => Ok(HeaderName::AlertInfo),
             "call-info" => Ok(HeaderName::CallInfo),
-            "error-info" => Ok(HeaderName::ErrorInfo),
+            "error-info" | "error" => Ok(HeaderName::ErrorInfo),
             "proxy-require" => Ok(HeaderName::ProxyRequire),
-            "unsupported" => Ok(HeaderName::Unsupported),
+            "unsupported" | "u" => Ok(HeaderName::Unsupported),
             "path" => Ok(HeaderName::Path),
             "reason" => Ok(HeaderName::Reason),
             "session-expires" | "x" => Ok(HeaderName::SessionExpires),
+            "min-se" => Ok(HeaderName::MinSE),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

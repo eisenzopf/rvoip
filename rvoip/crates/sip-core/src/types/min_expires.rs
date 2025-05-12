@@ -151,7 +151,7 @@ impl TypedHeaderTrait for MinExpires {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
             return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
+                format!("Expected {} header, got {}", Self::header_name().as_str(), header.name.as_str())
             ));
         }
 
@@ -161,22 +161,15 @@ impl TypedHeaderTrait for MinExpires {
                     MinExpires::from_str(s.trim())
                 } else {
                     Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                        format!("Invalid UTF-8 in {} header", Self::header_name().as_str())
                     ))
                 }
-            },
-            HeaderValue::Integer(value) => {
-                // Ensure value fits in u32
-                if *value >= 0 && *value <= u32::MAX as i64 {
-                    Ok(MinExpires(*value as u32))
-                } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid {} value: {} (out of range)", Self::header_name(), value)
-                    ))
-                }
-            },
+            }
             _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
+                format!("Unexpected header value type for {}: {:?}. Expected Raw for FromStr.", 
+                    Self::header_name().as_str(), 
+                    header.value
+                )
             )),
         }
     }
@@ -225,8 +218,8 @@ mod tests {
         let min_expires2 = MinExpires::from_header(&header).unwrap();
         assert_eq!(min_expires.value(), min_expires2.value());
         
-        // Test with Integer HeaderValue
-        let integer_header = Header::new(HeaderName::MinExpires, HeaderValue::Integer(3600));
+        // Test with HeaderValue::integer() which creates a Raw variant internally
+        let integer_header = Header::new(HeaderName::MinExpires, HeaderValue::integer(3600));
         let min_expires3 = MinExpires::from_header(&integer_header).unwrap();
         assert_eq!(min_expires3.value(), 3600);
         

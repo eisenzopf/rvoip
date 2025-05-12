@@ -8,6 +8,7 @@ use ordered_float::NotNan;
 use chrono::{DateTime, FixedOffset};
 use std::str::FromStr;
 use log::debug;
+use std::any::Any;
 
 // Add missing imports needed for implementation
 extern crate log;
@@ -56,6 +57,10 @@ use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
 use crate::types::referred_by::ReferredBy;
 use crate::types::session_expires::SessionExpires;
 use crate::types::event::{Event as EventTypeData}; // Alias to avoid clash if Event struct is also used locally
+use crate::types::MimeVersion;
+use crate::types::min_expires::MinExpires;
+use crate::types::min_se::MinSE;
+use crate::types::organization::Organization;
 
 // Import parser components
 use crate::parser;
@@ -139,14 +144,14 @@ pub enum TypedHeader {
     ContentLanguage(ContentLanguage),
     AcceptEncoding(AcceptEncoding), // Use our AcceptEncoding type
     AcceptLanguage(AcceptLanguage), // Use our new AcceptLanguage type instead of Vec<AcceptLanguageValue>
-    MinExpires(u32), // Assuming types::MinExpires doesn't exist yet
-    MimeVersion((u32, u32)), // Keep tuple if no types::* yet
+    MinExpires(MinExpires),
+    MimeVersion(MimeVersion),
     Supported(Supported), // Use types::Supported instead of Vec<String>
     Unsupported(Unsupported), // Use types::Unsupported instead of Vec<String>
     ProxyRequire(crate::types::proxy_require::ProxyRequire),
     Date(DateTime<FixedOffset>), // Use imported chrono types
     Timestamp((NotNan<f32>, Option<NotNan<f32>>)), // Use imported NotNan
-    Organization(crate::types::Organization), // Use our new Organization type
+    Organization(Organization),
     Priority(crate::types::priority::Priority), // Use types::Priority
     Server(Vec<String>), // Replace with types::server::ServerVal when defined
     UserAgent(Vec<String>), // Replace with types::server::ServerVal when defined
@@ -158,6 +163,7 @@ pub enum TypedHeader {
     Path(crate::types::path::Path), // Add Path header variant
     Reason(crate::types::reason::Reason), // Add Reason header variant
     SessionExpires(SessionExpires), // Added SessionExpires variant
+    MinSE(MinSE),
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -218,6 +224,7 @@ impl TypedHeader {
             TypedHeader::Path(_) => HeaderName::Path, // Add Path header case
             TypedHeader::Reason(_) => HeaderName::Reason, // Add Reason header case
             TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
+            TypedHeader::MinSE(_) => HeaderName::MinSE,
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -281,6 +288,8 @@ impl TypedHeader {
                 Some(unsafe { &*(h as *const _ as *const T) }),
             TypedHeader::Event(h) if type_id_t == std::any::TypeId::of::<crate::types::event::Event>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::MinSE(h) if type_id_t == std::any::TypeId::of::<crate::types::min_se::MinSE>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,
         }
     }
@@ -328,7 +337,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::AcceptEncoding(accept_encoding) => write!(f, "{}: {}", HeaderName::AcceptEncoding, accept_encoding),
             TypedHeader::AcceptLanguage(accept_language) => write!(f, "{}: {}", HeaderName::AcceptLanguage, accept_language),
             TypedHeader::MinExpires(min_expires) => write!(f, "{}: {}", HeaderName::MinExpires, min_expires),
-            TypedHeader::MimeVersion((major, minor)) => write!(f, "{}: {}.{}", HeaderName::MimeVersion, major, minor),
+            TypedHeader::MimeVersion(val) => write!(f, "{}: {}", HeaderName::MimeVersion, val),
             TypedHeader::Require(require) => {
                 write!(f, "{}: {}", HeaderName::Require, require)
             },
@@ -386,6 +395,7 @@ impl fmt::Display for TypedHeader {
             },
             TypedHeader::Reason(reason) => write!(f, "{}: {}", HeaderName::Reason, reason),
             TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
+            TypedHeader::MinSE(val) => write!(f, "{}: {}", HeaderName::MinSE, val),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -474,6 +484,7 @@ impl From<&TypedHeader> for HeaderName {
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
             TypedHeader::ContentLanguage(_) => HeaderName::ContentLanguage,
             TypedHeader::Path(_) => HeaderName::Path,
+            TypedHeader::MinSE(_) => HeaderName::MinSE,
             _ => header.name(),
         }
     }
@@ -849,11 +860,21 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, v)| TypedHeader::Expires(Expires(v)))
                 .map_err(Error::from),
             HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)(value_bytes)
-                .map(|(_, v)| TypedHeader::MinExpires(v))
-                .map_err(Error::from),
+                .map_err(Error::from)
+                .and_then(|(_, v_u32)| {
+                    MinExpires::from_str(&v_u32.to_string())
+                        .map(TypedHeader::MinExpires)
+                }),
             HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)(value_bytes)
-                .map(|(_, v)| TypedHeader::MimeVersion((v.major.into(), v.minor.into())))
-                .map_err(Error::from),
+                .map_err(Error::from)
+                .map(|(_, parsed_version_u8)| {
+                    TypedHeader::MimeVersion(
+                        crate::types::mime_version::MimeVersion::new(
+                            parsed_version_u8.major.into(),
+                            parsed_version_u8.minor.into()
+                        )
+                    )
+                }),
             HeaderName::WwwAuthenticate => {
                 // Check if we're already dealing with a HeaderValue::WwwAuthenticate
                 // This case should have been handled earlier in the special cases
@@ -1106,10 +1127,15 @@ impl TryFrom<Header> for TypedHeader {
                 .map(|(_, (delta, refresher, params))| TypedHeader::SessionExpires(SessionExpires::new_with_params(delta, refresher, params)))
                 .map_err(Error::from),
             HeaderName::Event => {
-                // Use the FromStr trait of types::event::Event, which calls the parser
-                std::str::from_utf8(value_bytes)
-                    .map_err(|e| Error::Parser(format!("Invalid UTF-8 in Event header value: {}", e)))
-                    .and_then(|s| crate::types::event::Event::from_str(s).map(TypedHeader::Event))
+                // Assuming value_bytes is the string representation of the header value bytes
+                let value_str = std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in Event header value: {}", e)))?;
+                Ok(TypedHeader::Event(EventTypeData::from_str(value_str)?))
+            },
+            HeaderName::MinSE => {
+                let value_str = std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in MinSE header value: {}", e)))?;
+                Ok(TypedHeader::MinSE(MinSE::from_str(value_str)?))
             },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };

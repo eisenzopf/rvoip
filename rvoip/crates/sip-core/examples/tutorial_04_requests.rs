@@ -12,6 +12,7 @@ use rvoip_sip_core::builder::headers::ReferToExt;
 use rvoip_sip_core::builder::headers::ReferredByExt;
 use rvoip_sip_core::builder::headers::SessionExpiresExt;
 use rvoip_sip_core::builder::headers::EventBuilderExt;
+use rvoip_sip_core::builder::headers::MinSEBuilderExt;
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
 use rvoip_sip_core::types::TypedHeader;
@@ -103,8 +104,7 @@ fn create_detailed_invite() -> Result<Message> {
         ])
         // Session-specific headers
         .session_expires(3600, Some(Refresher::Uac))
-        .header(TypedHeader::Other(HeaderName::Other("Min-SE".to_string()), 
-                HeaderValue::text("90")))
+        .min_se(90)
         // Use the SDP we created
         .body(sdp.to_string())
         .build();

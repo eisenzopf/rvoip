@@ -199,7 +199,7 @@ impl TypedHeaderTrait for MimeVersion {
     type Name = HeaderName;
 
     fn header_name() -> Self::Name {
-        HeaderName::MIMEVersion
+        HeaderName::MimeVersion
     }
 
     fn to_header(&self) -> Header {
@@ -219,15 +219,15 @@ impl TypedHeaderTrait for MimeVersion {
                     MimeVersion::from_str(s.trim())
                 } else {
                     Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
+                        format!("Invalid UTF-8 in {} header", Self::header_name().as_str())
                     ))
                 }
             },
-            HeaderValue::MIMEVersion(major, minor) => {
+            HeaderValue::MimeVersion((major, minor)) => {
                 Ok(MimeVersion::new(*major as u32, *minor as u32))
             },
             _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
+                format!("Unexpected header value type for {}: {:?}", Self::header_name().as_str(), header.value)
             )),
         }
     }
@@ -297,25 +297,31 @@ mod tests {
     
     #[test]
     fn test_typed_header_trait() {
-        // Create a header
-        let mime_version = MimeVersion::new(1, 0);
-        let header = mime_version.to_header();
-        
-        assert_eq!(header.name, HeaderName::MIMEVersion);
-        
-        // Convert back from Header
-        let mime_version2 = MimeVersion::from_header(&header).unwrap();
-        assert_eq!(mime_version.major(), mime_version2.major());
-        assert_eq!(mime_version.minor(), mime_version2.minor());
-        
-        // Test with MIMEVersion HeaderValue
-        let version_header = Header::new(HeaderName::MIMEVersion, HeaderValue::MIMEVersion(1, 0));
-        let mime_version3 = MimeVersion::from_header(&version_header).unwrap();
-        assert_eq!(mime_version3.major(), 1);
-        assert_eq!(mime_version3.minor(), 0);
-        
-        // Test invalid header name
-        let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
-        assert!(MimeVersion::from_header(&wrong_header).is_err());
+        let version = MimeVersion::new(1, 0);
+        let header = version.to_header();
+
+        assert_eq!(header.name, HeaderName::MimeVersion);
+        assert_eq!(header.value.as_text().unwrap(), "1.0");
+
+        // Test parsing from a Header with the correct MimeVersion variant if possible
+        // HeaderValue::MimeVersion stores (u8, u8)
+        let direct_header_value = HeaderValue::MimeVersion((1, 0));
+        let direct_header = Header::new(HeaderName::MimeVersion, direct_header_value);
+        let parsed_direct = MimeVersion::from_header(&direct_header).unwrap();
+        assert_eq!(parsed_direct, MimeVersion::new(1, 0));
+
+        // Test parsing from Raw
+        let raw_header_value = HeaderValue::Raw(b"1.0".to_vec());
+        let raw_header = Header::new(HeaderName::MimeVersion, raw_header_value);
+        let parsed_from_raw = MimeVersion::from_header(&raw_header).unwrap();
+        assert_eq!(parsed_from_raw, version);
+
+        // Example from previous error log (line 312)
+        let version_header = Header::new(HeaderName::MimeVersion, HeaderValue::MimeVersion((1,0)));
+        let parsed_version_header = MimeVersion::from_header(&version_header).unwrap();
+        assert_eq!(parsed_version_header, MimeVersion::new(1,0));
+
+        let invalid_header = Header::new(HeaderName::ContentType, HeaderValue::text("text/plain"));
+        assert!(MimeVersion::from_header(&invalid_header).is_err());
     }
 } 

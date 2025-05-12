@@ -391,6 +391,7 @@ pub mod alert_info;
 pub mod session_expires;
 pub mod date;
 pub mod event;
+pub mod timestamp;
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
@@ -425,13 +426,15 @@ pub use priority::*;
 pub use server::*;
 pub use retry_after::*;
 pub use error_info::*;
-pub use supported::Supported;
+pub use supported::{Supported};
 pub use unsupported::Unsupported;
 pub use reason::Reason;
 pub use alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
-pub use session_expires::SessionExpires;
+pub use session_expires::{SessionExpires, Refresher};
 pub use date::Date;
 pub use event::{Event, EventType};
+pub use timestamp::Timestamp;
+pub use to::To;
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {
@@ -444,3 +447,10 @@ impl AsRef<Message> for Message {
 pub mod user_agent;
 
 pub use user_agent::UserAgent;
+
+pub mod mime_version;
+pub mod min_expires;
+pub mod min_se;
+pub use mime_version::MimeVersion;
+pub use min_expires::MinExpires;
+pub use min_se::MinSE;
