@@ -50,10 +50,10 @@ use crate::builder::headers::HeaderSetter;
 /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::MinSEBuilderExt};
 ///
 /// // Scenario: UAC wants a 30-minute session but will accept no less than 5 minutes.
-/// let invite = SimpleRequestBuilder::invite("sip:bob@example.com ").unwrap()
-///     .from("Alice", "sip:alice@example.com ", Some("call-123"))
-///     .to("Bob", "sip:bob@example.com ", None)
-///     // .header("Session-Expires ", "1800;refresher=uac ") // Session-Expires would also be set
+/// let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("call-123"))
+///     .to("Bob", "sip:bob@example.com", None)
+///     // Session-Expires would also be set
 ///     .min_se(300) // Min-SE: 300 seconds (5 minutes)
 ///     .build();
 ///
@@ -68,11 +68,11 @@ use crate::builder::headers::HeaderSetter;
 ///
 /// // Scenario: UAS receives an INVITE with Session-Expires of 60s, but its minimum is 90s.
 /// let response_422 = SimpleResponseBuilder::new(
-///         StatusCode::SessionIntervalTooSmall,
-///         Some("Session Interval Too Small ")
+///         StatusCode::from_u16(422).expect("422 is a valid status code"),
+///         Some("Session Interval Too Small")
 ///     )
-///     .from("Bob", "sip:bob@example.com ", Some("uas-tag-1"))
-///     .to("Alice", "sip:alice@example.com ", Some("uac-tag-xyz "))
+///     .from("Bob", "sip:bob@example.com", Some("uas-tag-1"))
+///     .to("Alice", "sip:alice@example.com", Some("uac-tag-xyz"))
 ///     .call_id("call-123")
 ///     .cseq(1, Method::Invite)
 ///     .min_se(90) // Min-SE: 90 (UAS's minimum)
@@ -102,7 +102,7 @@ pub trait MinSEBuilderExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::MinSEBuilderExt};
     ///
     /// // UAC indicates it supports a minimum session timer of 120 seconds.
-    /// let invite = SimpleRequestBuilder::invite("sip:bob@example.com ").unwrap()
+    /// let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .min_se(120)
     ///     .build();
     /// ```

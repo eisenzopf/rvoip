@@ -4,6 +4,7 @@ use crate::types::{
 };
 use crate::builder::headers::HeaderSetter;
 use std::collections::BTreeMap;
+use crate::builder::headers::expires::ExpiresExt;
 
 /// # SIP Event Header Builder
 ///
@@ -67,17 +68,17 @@ use std::collections::BTreeMap;
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::EventBuilderExt};
+/// use rvoip_sip_core::builder::headers::expires::ExpiresExt;
 /// use rvoip_sip_core::types::event::EventType;
 ///
-/// // Scenario: Alice subscribes to Bob's presence status
 /// let subscribe_request = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("sub1"))
 ///     .to("Bob", "sip:bob@example.com", None)
 ///     .contact("<sip:alice@192.0.2.101>", None)
 ///     // Specify the 'presence' event package with a unique ID for this subscription
 ///     .event_id(EventType::Token("presence".to_string()), "unique-presence-id-123")
+///     .accept("application/pidf+xml", None) // Expected content type for presence notifications
 ///     .expires(3600) // Subscription duration
-///     .accept("application/pidf+xml") // Expected content type for presence notifications
 ///     .build();
 ///
 /// // The server will now attempt to establish a presence subscription for Alice to Bob.
@@ -112,7 +113,6 @@ use std::collections::BTreeMap;
 ///         Some("conf-sub-789"),
 ///         conference_params
 ///     )
-///     .header("Subscription-State", "active;expires=3599")
 ///     .content_type("application/conference-info+xml")
 ///     // .body(...) // XML body describing conference state
 ///     .build();
@@ -123,30 +123,47 @@ use std::collections::BTreeMap;
 ///
 /// ### Dialog Event Package (e.g., for Blind Transfer Monitoring)
 ///
+/// A SUBSCRIBE request with the dialog event package is often used to monitor
+/// call state within a SIP dialog.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::EventBuilderExt};
+/// use rvoip_sip_core::builder::headers::expires::ExpiresExt;
+/// use rvoip_sip_core::types::event::EventType;
+///
+/// let subscribe_to_dialog = SimpleRequestBuilder::new(Method::Invite, "sip:transferor@example.com")
+///     .unwrap()
+///     .from("Transfer Target", "sip:target@example.com", Some("diag-sub"))
+///     .to("Transferor", "sip:transferor@example.com", None)
+///     // Contact where notifications should be sent
+///     .contact("<sip:target@192.0.2.5>", None)
+///     // Make this a dialog event subscription with an identifier
+///     .event_id(EventType::Token("dialog".to_string()), "transfer-monitor-456")
+///     .expires(600)
+///     .build();
+/// // Results in a SUBSCRIBE request with "Event: dialog;id=transfer-monitor-456"
+/// // and "Expires: 600" headers
+/// ```
+///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::EventBuilderExt};
 /// use rvoip_sip_core::types::event::EventType;
+/// use rvoip_sip_core::types::headers::TypedHeader;
 ///
-/// // Scenario: Monitoring the status of a blind transfer initiated via REFER
-/// // The recipient of the REFER (the transfer target) might subscribe to the
-/// // dialog state of the transferor.
-///
-/// let subscribe_to_dialog = SimpleRequestBuilder::new(Method::Subscribe, "sip:transferor@example.com")
+/// // Create a NOTIFY request with custom Event package
+/// let notification = SimpleRequestBuilder::new(Method::Notify, "sip:alice@atlanta.example.com")
 ///     .unwrap()
-///     .from("Transfer Target", "sip:target@example.com", Some("diag-sub"))
-///     .to("Transferor", "sip:transferor@example.com", None)
-///     .contact("<sip:target@192.0.2.202>", None)
-///     // Subscribing to the 'dialog' event package, with a specific ID.
-///     // The dialog to be monitored is typically identified by Call-ID, From-tag, To-tag
-///     // in the body of the SUBSCRIBE, or implicitly by the dialog SUBSCRIBE is sent on.
-///     .event_id(EventType::Token("dialog".to_string()), "transfer-monitor-456")
-///     .expires(600)
-///     .accept("application/dialog-info+xml")
+///     .from("Bob", "sip:bob@biloxi.example.com", Some("a73kszlfl"))
+///     .to("Alice", "sip:alice@atlanta.example.com", Some("1j9FpLxk3"))
+///     .event_id(EventType::Token("presence".to_string()), "pres-qw452")
+///     // Add a Content-Type header
+///     .content_type("application/pidf+xml")
 ///     .build();
-///
-/// // Notifications would then use 'Event: dialog;id=transfer-monitor-456'
-/// // and carry XML describing the state of the dialog involved in the transfer.
+/// // Results in a NOTIFY with "Event: presence;id=pres-qw452" header
 /// ```
 pub trait EventBuilderExt {
     /// Sets the Event header using a pre-constructed `Event` object.

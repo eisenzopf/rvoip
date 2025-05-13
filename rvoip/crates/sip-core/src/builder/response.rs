@@ -272,17 +272,17 @@ impl SimpleResponseBuilder {
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleResponseBuilder;
-    /// use rvoip_sip_core::types::{StatusCode, Request};
-    /// 
+    /// use rvoip_sip_core::types::{StatusCode, Request, Method, Version};
+    /// use rvoip_sip_core::Uri;
+    /// use std::str::FromStr;
+    ///
+    /// // In a real example, you'd receive an actual request from a client
+    /// // Here we just create a minimal request for demonstration
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let request = Request::new(Method::Invite, uri);
+    ///
     /// // Create a 200 OK response with all appropriate headers copied
-    /// let response_builder = SimpleResponseBuilder::response_from_request(
-    ///     &request, 
-    ///     StatusCode::Ok, 
-    ///     None
-    /// );
-    /// 
-    /// // Add any additional headers or modifications
-    /// let response = response_builder
+    /// let ok_response = SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, None)
     ///     .contact("sip:bob@192.168.1.2:5060", None)
     ///     .build();
     /// ```
@@ -425,7 +425,17 @@ impl SimpleResponseBuilder {
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleResponseBuilder;
-    /// use rvoip_sip_core::types::{StatusCode, Request};
+    /// use rvoip_sip_core::types::{StatusCode, Request, Method, Version};
+    /// use rvoip_sip_core::Uri;
+    /// use std::str::FromStr;
+    /// use rvoip_sip_core::types::from::From as FromType;
+    /// use rvoip_sip_core::types::to::To as ToType;
+    /// use rvoip_sip_core::types::call_id::CallId;
+    ///
+    /// // In a real example, you'd receive an actual request from a client
+    /// // Here we just create a minimal request for demonstration
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let request = Request::new(Method::Invite, uri);
     ///
     /// // Create a 200 OK response for dialog establishment
     /// let ok_response = SimpleResponseBuilder::dialog_response(&request, StatusCode::Ok, None)
@@ -473,7 +483,17 @@ impl SimpleResponseBuilder {
     ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleResponseBuilder;
-    /// use rvoip_sip_core::types::{StatusCode, Request};
+    /// use rvoip_sip_core::types::{StatusCode, Request, Method, Version};
+    /// use rvoip_sip_core::Uri;
+    /// use std::str::FromStr;
+    /// use rvoip_sip_core::types::from::From as FromType;
+    /// use rvoip_sip_core::types::to::To as ToType;
+    /// use rvoip_sip_core::types::call_id::CallId;
+    ///
+    /// // In a real example, you'd receive an actual request from a client
+    /// // Here we just create a minimal request for demonstration
+    /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+    /// let request = Request::new(Method::Invite, uri);
     ///
     /// // Create a 404 Not Found error response
     /// let not_found = SimpleResponseBuilder::error_response(&request, StatusCode::NotFound, None)

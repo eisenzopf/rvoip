@@ -1,49 +1,3 @@
-//! # Referred-By Header Extension
-//!
-//! This module provides extension traits for easily adding Referred-By headers
-//! to SIP requests and responses. The Referred-By header is defined in 
-//! [RFC 3892](https://datatracker.ietf.org/doc/html/rfc3892) and is used
-//! to identify the entity that requested the current referral.
-//!
-//! ## Purpose of Referred-By Header
-//!
-//! The Referred-By header serves several important purposes in SIP:
-//!
-//! 1. It provides identity information about the referring party in a REFER transaction
-//! 2. It offers a more secure way to communicate who initiated a referral
-//! 3. It can include an authenticated identity using S/MIME body parts
-//! 4. It helps distinguish between different referral scenarios (e.g., call transfers)
-//!
-//! ## Structure and Format
-//!
-//! The Referred-By header contains an address specification (URI and optional display name)
-//! that identifies the referring party. It can optionally include a "cid" parameter
-//! that references an S/MIME body part containing a signature.
-//!
-//! ## Common Use Cases
-//!
-//! - **Call Transfer Scenarios**: Identify who initiated a call transfer
-//! - **Consultation Transfers**: Track the origin of a consultation transfer
-//! - **Click-to-Dial Applications**: Identify the web page or service initiating a call
-//! - **Call Centers**: Track who transferred a call to which agent
-//!
-//! ## Example usage:
-//!
-//! ```rust
-//! # use rvoip_sip_core::prelude::*;
-//! # use std::str::FromStr;
-//! let mut request = RequestBuilder::new(Method::Refer, "sip:alice@example.com");
-//! 
-//! // Add a Referred-By header with a URI
-//! let uri = Uri::from_str("sip:bob@example.com").unwrap();
-//! request.referred_by_uri(uri);
-//! 
-//! // Or add a Referred-By header with Address (display name + URI)
-//! let uri = Uri::from_str("sip:carol@example.com").unwrap();
-//! let address = Address::new_with_display_name("Carol", uri);
-//! request.referred_by(address);
-//! ```
-
 use crate::error::{Error, Result};
 use crate::types::uri::Uri;
 use crate::types::address::Address;
@@ -54,6 +8,56 @@ use crate::types::headers::typed_header::TypedHeaderTrait;
 use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
 
+/// # Referred-By Header Extension
+///
+/// This module provides extension traits for easily adding Referred-By headers
+/// to SIP requests and responses. The Referred-By header is defined in 
+/// [RFC 3892](https://datatracker.ietf.org/doc/html/rfc3892) and is used
+/// to identify the entity that requested the current referral.
+///
+/// ## Purpose of Referred-By Header
+///
+/// The Referred-By header serves several important purposes in SIP:
+///
+/// 1. It provides identity information about the referring party in a REFER transaction
+/// 2. It offers a more secure way to communicate who initiated a referral
+/// 3. It can include an authenticated identity using S/MIME body parts
+/// 4. It helps distinguish between different referral scenarios (e.g., call transfers)
+///
+/// ## Structure and Format
+///
+/// The Referred-By header contains an address specification (URI and optional display name)
+/// that identifies the referring party. It can optionally include a "cid" parameter
+/// that references an S/MIME body part containing a signature.
+///
+/// ## Common Use Cases
+///
+/// - **Call Transfer Scenarios**: Identify who initiated a call transfer
+/// - **Consultation Transfers**: Track the origin of a consultation transfer
+/// - **Click-to-Dial Applications**: Identify the web page or service initiating a call
+/// - **Call Centers**: Track who transferred a call to which agent
+///
+/// ## Example usage:
+///
+/// ```rust
+/// use rvoip_sip_core::prelude::*;
+/// use std::str::FromStr;
+/// 
+/// // Create a new request builder
+/// let mut request = RequestBuilder::new(Method::Refer, "sip:alice@example.com").unwrap();
+/// 
+/// // Add a Referred-By header with a URI
+/// let uri = Uri::from_str("sip:bob@example.com").unwrap();
+/// request = request.referred_by_uri(uri);
+/// 
+/// // Or add a Referred-By header with Address (display name + URI)
+/// let uri = Uri::from_str("sip:carol@example.com").unwrap();
+/// let address = Address::new_with_display_name("Carol", uri);
+/// request = request.referred_by(address);
+/// 
+/// // Build the request
+/// let refer_request = request.build();
+/// ```
 /// Extension trait for adding Referred-By headers to SIP messages.
 ///
 /// This trait extends the message builders to make it easier to add
@@ -88,7 +92,7 @@ use super::HeaderSetter;
 /// // Scenario: Alice transfers Bob to Carol
 ///
 /// // Create a REFER request to Bob, referring him to Carol
-/// let refer = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+/// let refer = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
 ///     // Add Alice as the referring party
 ///     .referred_by_uri(Uri::from_str("sip:alice@example.com").unwrap())
 ///     .build();
@@ -108,7 +112,7 @@ use super::HeaderSetter;
 /// let uri = Uri::from_str("sip:helpdesk@example.com").unwrap();
 /// let agent = Address::new_with_display_name("Helpdesk Agent #42", uri);
 ///
-/// let refer = RequestBuilder::new(Method::Refer, "sip:customer@example.com")
+/// let refer = RequestBuilder::new(Method::Refer, "sip:customer@example.com").unwrap()
 ///     // Add helpdesk agent identity with display name
 ///     .referred_by(agent)
 ///     .build();
@@ -137,7 +141,7 @@ pub trait ReferredByExt {
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// let address = Address::new_with_display_name("Alice Smith", uri);
     ///
-    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by(address)
     ///     .build();
     /// ```
@@ -163,7 +167,7 @@ pub trait ReferredByExt {
     /// # use std::str::FromStr;
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     ///
-    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by_uri(uri)
     ///     .build();
     /// ```
@@ -186,7 +190,7 @@ pub trait ReferredByExt {
     ///
     /// ```rust
     /// # use rvoip_sip_core::prelude::*;
-    /// let result = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+    /// let result = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by_str("<sip:alice@example.com>");
     /// 
     /// match result {
@@ -221,7 +225,7 @@ pub trait ReferredByExt {
     /// # use std::str::FromStr;
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     ///
-    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by_uri_with_cid(uri, Some("12345@example.com"))
     ///     .build();
     /// ```
@@ -249,7 +253,7 @@ pub trait ReferredByExt {
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// let address = Address::new_with_display_name("Alice", uri);
     ///
-    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+    /// let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by_with_cid(address, Some("12345@example.com"))
     ///     .build();
     /// ```
