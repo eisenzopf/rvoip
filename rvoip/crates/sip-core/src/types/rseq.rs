@@ -19,14 +19,18 @@
 //!
 //! ## Format
 //!
-//! ```
-//! RSeq: 1
+//! ```rust
+//! use rvoip_sip_core::types::RSeq;
+//! 
+//! // Format: RSeq: 1
+//! let rseq = RSeq::new(1);
+//! assert_eq!(format!("RSeq: {}", rseq), "RSeq: 1");
 //! ```
 //!
 //! ## Examples
 //!
 //! ```rust
-//! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::RSeq;
 //! use std::str::FromStr;
 //!
 //! // Create a new RSeq header
@@ -59,7 +63,7 @@ use crate::types::headers::header_access::HeaderAccess;
 /// # Examples
 ///
 /// ```rust
-/// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::types::RSeq;
 ///
 /// // Create a new RSeq header for the first reliable provisional response
 /// let rseq = RSeq::new(1);
@@ -90,7 +94,7 @@ impl RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::RSeq;
     ///
     /// // Create an RSeq header with value 1
     /// let rseq = RSeq::new(1);
@@ -116,7 +120,7 @@ impl RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::RSeq;
     ///
     /// let rseq1 = RSeq::new(1);
     /// let rseq2 = rseq1.next();
@@ -138,7 +142,7 @@ impl fmt::Display for RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::RSeq;
     /// use std::fmt::Display;
     ///
     /// let rseq = RSeq::new(42);
@@ -166,7 +170,7 @@ impl FromStr for RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::RSeq;
     /// use std::str::FromStr;
     ///
     /// // Parse a simple value
@@ -214,7 +218,7 @@ impl TypedHeaderTrait for RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{RSeq, HeaderName, TypedHeaderTrait};
     ///
     /// let rseq = RSeq::new(42);
     /// let header = rseq.to_header();
@@ -242,7 +246,7 @@ impl TypedHeaderTrait for RSeq {
     /// # Examples
     ///
     /// ```rust
-    /// use rvoip_sip_core::prelude::*;
+    /// use rvoip_sip_core::types::{RSeq, Header, HeaderName, HeaderValue, TypedHeaderTrait};
     ///
     /// // Create a header with raw value
     /// let header = Header::new(

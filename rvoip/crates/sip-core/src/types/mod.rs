@@ -267,7 +267,7 @@
 //! ```rust
 //! use rvoip_sip_core::types::{Uri, Address, Param};
 //! use rvoip_sip_core::types::route::Route;
-//! use rvoip_core::types::{TypedHeader, HeaderName};
+//! use rvoip_sip_core::types::{TypedHeader, HeaderName};
 //! use rvoip_sip_core::builder::SimpleRequestBuilder;
 //! use rvoip_sip_core::types::Method;
 //! use std::str::FromStr;

@@ -366,12 +366,16 @@ impl fmt::Display for ReferredBy {
     /// let address = Address::new_with_display_name("Bob", uri);
     /// let referred_by = ReferredBy::new(address);
     /// // Depending on the implementation, display names may be quoted or not
-    /// assert!(referred_by.to_string() == "Bob <sip:bob@example.com>" ||
-    ///         referred_by.to_string() == "\"Bob\" <sip:bob@example.com>");
+    /// let display_str = referred_by.to_string();
+    /// assert!(display_str == "Bob <sip:bob@example.com>" || 
+    ///        display_str == "\"Bob\" <sip:bob@example.com>");
     ///
     /// // In a complete header
     /// let header = format!("Referred-By: {}", referred_by);
-    /// assert_eq!(header, "Referred-By: <sip:alice@example.com>");
+    /// // The header includes the Referred-By name and the address with display name
+    /// assert!(header.starts_with("Referred-By:"));
+    /// assert!(header.contains("Bob"));
+    /// assert!(header.contains("sip:bob@example.com"));
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to Address display

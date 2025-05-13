@@ -85,6 +85,15 @@ pub enum ParamValue {
     None, // Represents a valueless parameter (a flag)
 }
 
+impl fmt::Display for ParamValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParamValue::Value(val) => write!(f, "{}", val),
+            ParamValue::None => write!(f, ""),
+        }
+    }
+}
+
 /// Type alias for a collection of generic parameters in an Event header.
 /// Keys are parameter names (String) and values are `ParamValue`.
 ///

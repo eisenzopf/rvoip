@@ -102,7 +102,7 @@ pub trait SessionExpiresExt {
     /// # use rvoip_sip_core::types::session_expires::Refresher;
     /// # use rvoip_sip_core::types::param::Param;
     /// # use rvoip_sip_core::builder::headers::SessionExpiresExt;
-    /// let custom_params = vec![Param::new("x-custom-se-flag", None), Param::new("x-info", Some("timer-A"))];
+    /// let custom_params = vec![Param::new("x-custom-se-flag", None::<String>), Param::new("x-info", Some("timer-A"))];
     /// let request = RequestBuilder::new(Method::Invite, "sip:carol@example.com").unwrap()
     ///     .session_expires_with_params(1200, Some(Refresher::Uac), custom_params)
     ///     .build();
