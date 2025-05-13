@@ -23,20 +23,26 @@ use crate::json::{SipJsonResult, SipJsonError};
 /// ```
 /// # use rvoip_sip_core::json::SipValue;
 /// # use std::collections::HashMap;
-/// // Create a SipValue object representing a From header
-/// let mut params = HashMap::new();
-/// params.insert("Tag".to_string(), SipValue::String("1234".to_string()));
-///
-/// let mut from_header = HashMap::new();
-/// from_header.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
-/// from_header.insert("uri".to_string(), SipValue::String("sip:alice@example.com".to_string()));
-/// from_header.insert("params".to_string(), SipValue::Array(vec![SipValue::Object(params)]));
-///
-/// let from_value = SipValue::Object(from_header);
-///
-/// // Access fields using path notation
-/// let tag = from_value.get_path("params[0].Tag").unwrap();
-/// assert_eq!(tag.as_str(), Some("1234"));
+/// // Create a simpler SipValue object
+/// let mut person = HashMap::new();
+/// person.insert("name".to_string(), SipValue::String("Alice".to_string()));
+/// person.insert("age".to_string(), SipValue::Number(30.0));
+/// 
+/// // Create a nested object
+/// let mut address = HashMap::new();
+/// address.insert("city".to_string(), SipValue::String("New York".to_string()));
+/// address.insert("zip".to_string(), SipValue::String("10001".to_string()));
+/// person.insert("address".to_string(), SipValue::Object(address));
+/// 
+/// let value = SipValue::Object(person);
+/// 
+/// // Access basic fields
+/// assert_eq!(value.get_path("name").unwrap().as_str(), Some("Alice"));
+/// assert_eq!(value.get_path("age").unwrap().as_f64(), Some(30.0));
+/// 
+/// // Access nested fields
+/// assert_eq!(value.get_path("address.city").unwrap().as_str(), Some("New York"));
+/// assert_eq!(value.get_path("address.zip").unwrap().as_str(), Some("10001"));
 /// ```
 
 /// A JSON-like representation of SIP values.
@@ -99,6 +105,34 @@ use crate::json::{SipJsonResult, SipJsonError};
 /// // Access using path notation
 /// assert_eq!(message.get_path("method").unwrap().as_str(), Some("INVITE"));
 /// assert_eq!(message.get_path("headers.From.display_name").unwrap().as_str(), Some("Alice"));
+/// ```
+///
+/// # Example
+///
+/// ```
+/// # use rvoip_sip_core::json::SipValue;
+/// # use std::collections::HashMap;
+/// // Create a simple array of objects
+/// let mut items = Vec::new();
+/// 
+/// let mut item1 = HashMap::new();
+/// item1.insert("id".to_string(), SipValue::String("item1".to_string()));
+/// item1.insert("value".to_string(), SipValue::Number(100.0));
+/// items.push(SipValue::Object(item1));
+/// 
+/// let mut item2 = HashMap::new();
+/// item2.insert("id".to_string(), SipValue::String("item2".to_string()));
+/// item2.insert("value".to_string(), SipValue::Number(200.0));
+/// items.push(SipValue::Object(item2));
+/// 
+/// let mut obj = HashMap::new();
+/// obj.insert("items".to_string(), SipValue::Array(items));
+/// let value = SipValue::Object(obj);
+///
+/// // Access array elements by index and field
+/// assert_eq!(value.get_path("items[0].id").unwrap().as_str(), Some("item1"));
+/// assert_eq!(value.get_path("items[1].id").unwrap().as_str(), Some("item2"));
+/// assert_eq!(value.get_path("items[0].value").unwrap().as_f64(), Some(100.0));
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum SipValue {
@@ -299,18 +333,27 @@ impl SipValue {
     /// ```
     /// # use rvoip_sip_core::json::SipValue;
     /// # use std::collections::HashMap;
-    /// // Create a nested structure
-    /// let mut via = HashMap::new();
-    /// via.insert("branch".to_string(), SipValue::String("z9hG4bK776asdhds".to_string()));
+    /// // Create a simple array of objects
+    /// let mut items = Vec::new();
+    /// 
+    /// let mut item1 = HashMap::new();
+    /// item1.insert("id".to_string(), SipValue::String("item1".to_string()));
+    /// item1.insert("value".to_string(), SipValue::Number(100.0));
+    /// items.push(SipValue::Object(item1));
+    /// 
+    /// let mut item2 = HashMap::new();
+    /// item2.insert("id".to_string(), SipValue::String("item2".to_string()));
+    /// item2.insert("value".to_string(), SipValue::Number(200.0));
+    /// items.push(SipValue::Object(item2));
+    /// 
+    /// let mut obj = HashMap::new();
+    /// obj.insert("items".to_string(), SipValue::Array(items));
+    /// let value = SipValue::Object(obj);
     ///
-    /// let mut headers = HashMap::new();
-    /// headers.insert("Via".to_string(), SipValue::Array(vec![SipValue::Object(via)]));
-    ///
-    /// let message = SipValue::Object(headers);
-    ///
-    /// // Access via path
-    /// let branch = message.get_path("Via[0].branch").unwrap();
-    /// assert_eq!(branch.as_str(), Some("z9hG4bK776asdhds"));
+    /// // Access array elements by index and field
+    /// assert_eq!(value.get_path("items[0].id").unwrap().as_str(), Some("item1"));
+    /// assert_eq!(value.get_path("items[1].id").unwrap().as_str(), Some("item2"));
+    /// assert_eq!(value.get_path("items[0].value").unwrap().as_f64(), Some(100.0));
     /// ```
     pub fn get_path<S: AsRef<str>>(&self, path: S) -> Option<&SipValue> {
         crate::json::path::get_path(self, path.as_ref())

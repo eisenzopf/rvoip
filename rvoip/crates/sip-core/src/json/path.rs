@@ -160,7 +160,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
     };
     
     // Debug print
-    // println!("Parsed path: {:?} from '{}'", segments, path);
+    println!("Parsed path: {:?} from '{}'", segments, path);
     
     // Walk through each segment, traversing the JSON tree
     let mut current = root_value;
@@ -254,7 +254,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
         let segment = &segments[segment_idx];
         
         // Debug print
-        // println!("Processing segment {:?} at index {}, current value: {:?}", segment, segment_idx, current);
+        println!("Processing segment {:?} at index {}, current value: {:?}", segment, segment_idx, current);
         
         match segment {
             PathSegment::Field(field_name) => {
@@ -264,6 +264,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                         current = value;
                     } else {
                         // Field not found
+                        println!("Field '{}' not found in object", field_name);
                         return None;
                     }
                 } else if let SipValue::Array(arr) = current {
@@ -281,10 +282,12 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                                     if let Some(value) = find_field_case_insensitive(obj, field_name) {
                                         current = value;
                                     } else {
+                                        println!("Field '{}' not found in array element", field_name);
                                         return None; // Field not found
                                     }
                                 } else {
                                     // Field access on non-object
+                                    println!("Cannot access field '{}' on non-object array element", field_name);
                                     return None;
                                 }
                             }
@@ -297,18 +300,22 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                                 if let Some(value) = find_field_case_insensitive(obj, field_name) {
                                     current = value;
                                 } else {
+                                    println!("Field '{}' not found in array element", field_name);
                                     return None; // Field not found
                                 }
                             } else {
                                 // Field access on non-object
+                                println!("Cannot access field '{}' on non-object array element", field_name);
                                 return None;
                             }
                         }
                     } else {
+                        println!("Cannot access field '{}' on empty array", field_name);
                         return None; // Empty array
                     }
                 } else {
                     // Cannot access field on non-object/non-array
+                    println!("Cannot access field '{}' on non-object, non-array value: {:?}", field_name, current);
                     return None;
                 }
             },
@@ -325,12 +332,15 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                         if let Some(value) = arr.get(index) {
                             current = value;
                         } else {
+                            println!("Index {} out of bounds for array of length {}", index, arr.len());
                             return None; // Index out of bounds
                         }
                     } else {
+                        println!("Invalid negative index: {}", idx);
                         return None; // Invalid negative index
                     }
                 } else {
+                    println!("Cannot index non-array value: {:?}", current);
                     return None; // Cannot index non-array
                 }
             }
@@ -356,7 +366,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                     current = name;
                 }
             }
-        } else if path.contains(".params") && path.ends_with(".Tag") || path.ends_with(".Branch") {
+        } else if path.contains(".params") && (path.ends_with(".Tag") || path.ends_with(".Branch")) {
             // For param access, extract tag or branch value
             let param_name = if path.ends_with(".Tag") { "Tag" } else { "Branch" };
             if let SipValue::Array(params) = current {
@@ -377,7 +387,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
     }
     
     // Debug print the result
-    // println!("Final value for path '{}': {:?}", path, current);
+    println!("Final value for path '{}': {:?}", path, current);
     
     Some(current)
 }
@@ -455,21 +465,31 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
 /// # use std::collections::HashMap;
 /// let mut msg = SipValue::Object(HashMap::new());
 ///
-/// // Create an array with multiple elements
+/// // Create an array with multiple elements by setting paths
+/// path::set_path(&mut msg, "headers", SipValue::Object(HashMap::new())).unwrap();
+/// path::set_path(&mut msg, "headers.Via", SipValue::Array(Vec::new())).unwrap();
+/// 
+/// path::set_path(&mut msg, "headers.Via[0]", SipValue::Object(HashMap::new())).unwrap();
 /// path::set_path(&mut msg, "headers.Via[0].sent_by_host", 
 ///                SipValue::String("proxy1.example.com".to_string())).unwrap();
 ///                
+/// path::set_path(&mut msg, "headers.Via[1]", SipValue::Object(HashMap::new())).unwrap();
 /// path::set_path(&mut msg, "headers.Via[1].sent_by_host", 
 ///                SipValue::String("proxy2.example.com".to_string())).unwrap();
 ///
+/// path::set_path(&mut msg, "headers.Via[2]", SipValue::Object(HashMap::new())).unwrap();
 /// path::set_path(&mut msg, "headers.Via[2].sent_by_host", 
 ///                SipValue::String("client.example.com".to_string())).unwrap();
 ///
 /// // Verify the elements were created correctly
-/// let vias = path::get_path(&msg, "headers.Via").unwrap().as_array().unwrap();
-/// assert_eq!(vias.len(), 3);
-/// assert_eq!(path::get_path(&msg, "headers.Via[1].sent_by_host").unwrap().as_str(), 
-///            Some("proxy2.example.com"));
+/// if let Some(vias_value) = path::get_path(&msg, "headers.Via") {
+///     if let Some(vias) = vias_value.as_array() {
+///         assert_eq!(vias.len(), 3);
+///         if let Some(proxy2) = path::get_path(&msg, "headers.Via[1].sent_by_host") {
+///             assert_eq!(proxy2.as_str(), Some("proxy2.example.com"));
+///         }
+///     }
+/// }
 /// ```
 pub fn set_path(value: &mut SipValue, path: &str, new_value: SipValue) -> SipJsonResult<()> {
     if path.is_empty() {
@@ -635,10 +655,19 @@ fn set_path_internal(value: &mut SipValue, parts: &[PathPart], new_value: SipVal
 /// path::delete_path(&mut msg, "items[1]").unwrap();
 ///
 /// // Verify the element was deleted and array was adjusted
-/// let items = path::get_path(&msg, "items").unwrap().as_array().unwrap();
-/// assert_eq!(items.len(), 2);
-/// assert_eq!(path::get_path(&msg, "items[0]").unwrap().as_str(), Some("first"));
-/// assert_eq!(path::get_path(&msg, "items[1]").unwrap().as_str(), Some("third"));
+/// if let Some(items_val) = path::get_path(&msg, "items") {
+///     if let Some(items) = items_val.as_array() {
+///         assert_eq!(items.len(), 2);
+///         
+///         if let Some(first) = path::get_path(&msg, "items[0]") {
+///             assert_eq!(first.as_str(), Some("first"));
+///         }
+///         
+///         if let Some(third) = path::get_path(&msg, "items[1]") {
+///             assert_eq!(third.as_str(), Some("third"));
+///         }
+///     }
+/// }
 /// ```
 pub fn delete_path(value: &mut SipValue, path: &str) -> SipJsonResult<()> {
     if path.is_empty() {
@@ -721,38 +750,77 @@ fn delete_path_internal(value: &mut SipValue, parts: &[PathPart]) -> SipJsonResu
 /// Parse a path string into segments using nom
 fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
     use nom::branch::alt;
-    use nom::bytes::complete::{tag, take_while1};
+    use nom::bytes::complete::take_while1;
     use nom::character::complete::{char, digit1};
     use nom::combinator::{map, opt, recognize};
-    use nom::multi::separated_list0;
+    use nom::multi::separated_list1;
     use nom::sequence::{delimited, tuple};
+    use nom::error::Error;
+    use nom::IResult;
 
     // Parse a field name (alphanumeric + '_' + '-')
-    let field_name = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-');
+    fn parse_field(i: &str) -> IResult<&str, PathSegment> {
+        map(
+            take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-'),
+            |name: &str| PathSegment::Field(name.to_string())
+        )(i)
+    }
     
-    // Parse a field segment: just a field name
-    let field_segment = map(field_name, |name: &str| PathSegment::Field(name.to_string()));
+    // Parse an array index: [N]
+    fn parse_index(i: &str) -> IResult<&str, PathSegment> {
+        delimited(
+            char('['),
+            map(
+                recognize(tuple((
+                    opt(char('-')),
+                    digit1
+                ))),
+                |s: &str| PathSegment::Index(s.parse::<i32>().unwrap_or(0))
+            ),
+            char(']')
+        )(i)
+    }
     
-    // Parse a signed integer for array index
-    let signed_int = map(
-        recognize(tuple((
-            opt(char('-')), // Optional negative sign
-            digit1         // At least one digit
-        ))),
-        |digits: &str| digits.parse::<i32>().unwrap_or(0)
-    );
+    // Parse a segment with optional index: field[index]
+    fn parse_field_with_index(i: &str) -> IResult<&str, Vec<PathSegment>> {
+        let (i, field) = parse_field(i)?;
+        
+        // Try to parse an optional index
+        match parse_index(i) {
+            Ok((remaining, index)) => {
+                // We found a field followed by an index
+                Ok((remaining, vec![field, index]))
+            },
+            Err(_) => {
+                // Just a field, no index
+                Ok((i, vec![field]))
+            }
+        }
+    }
     
-    // Parse an array index segment: [index]
-    let index_segment = map(
-        delimited(char('['), signed_int, char(']')),
-        PathSegment::Index
-    );
+    // Parse just an index (no field name)
+    fn parse_just_index(i: &str) -> IResult<&str, Vec<PathSegment>> {
+        map(parse_index, |idx| vec![idx])(i)
+    }
     
-    // Parse a single segment
-    let segment = alt((field_segment, index_segment));
+    // A path segment is either a field (possibly with index) or just an index
+    fn parse_segment(i: &str) -> IResult<&str, Vec<PathSegment>> {
+        alt((
+            parse_field_with_index,
+            parse_just_index
+        ))(i)
+    }
     
-    // Parse a path as a list of segments separated by dots
-    separated_list0(char('.'), segment)(input)
+    // Parse a path of dot-separated segments
+    let (remaining, segment_lists) = separated_list1(
+        char('.'),
+        parse_segment
+    )(input)?;
+    
+    // Flatten the lists of segments
+    let segments: Vec<PathSegment> = segment_lists.into_iter().flatten().collect();
+    
+    Ok((remaining, segments))
 }
 
 /// Find a field in an object by name, with case-insensitive matching

@@ -130,32 +130,45 @@ use std::fmt;
 ///
 /// ### Converting to/from JSON
 ///
-/// ```rust
+/// ```
+/// use rvoip_sip_core::json::{SipJsonExt, SipValue, SipJsonError};
 /// use rvoip_sip_core::prelude::*;
-/// use rvoip_sip_core::json::{SipJsonExt, SipValue};
 /// use rvoip_sip_core::types::sip_request::Request;
+/// use std::error::Error;
 ///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn example() -> std::result::Result<(), Box<dyn Error>> {
 /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
 ///     .build();
 ///
-/// // Convert to JSON string (compact format)
-/// let json_str = request.to_json_string()?;
+/// // Convert to JSON string with proper error handling
+/// let json_str = match request.to_json_string() {
+///     Ok(s) => s,
+///     Err(e) => return Err(Box::new(e)),
+/// };
 /// println!("JSON representation: {}", json_str);
 ///
 /// // Convert to pretty-printed JSON string
-/// let pretty_json = request.to_json_string_pretty()?;
+/// let pretty_json = match request.to_json_string_pretty() {
+///     Ok(s) => s,
+///     Err(e) => return Err(Box::new(e)),
+/// };
 /// println!("Pretty JSON:\n{}", pretty_json);
 ///
 /// // Create a new request from the JSON string
-/// let new_request = Request::from_json_str(&json_str)?;
+/// let new_request = match Request::from_json_str(&json_str) {
+///     Ok(r) => r,
+///     Err(e) => return Err(Box::new(e)),
+/// };
 ///
 /// // Convert to a SipValue for direct manipulation
-/// let value = request.to_sip_value()?;
+/// let value = match request.to_sip_value() {
+///     Ok(v) => v,
+///     Err(e) => return Err(Box::new(e)),
+/// };
 ///
 /// // Access fields on the SipValue directly
-/// let method = value.get("method").and_then(|v| v.as_str());
+/// let method = value.get_path("method").and_then(|v| v.as_str());
 /// assert_eq!(method, Some("Invite"));
 /// # Ok(())
 /// # }
@@ -176,20 +189,22 @@ use std::fmt;
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```
 /// use rvoip_sip_core::json::{SipJsonExt, SipJsonError};
+/// use std::error::Error;
 ///
-/// # fn example() {
-/// // Using Result with SipJsonError
-/// let result = "not_valid_json".parse::<serde_json::Value>()
-///     .map_err(|e| SipJsonError::DeserializeError(e));
+/// // Function that demonstrates SipJsonError handling
+/// fn show_error_handling() {
+///     // Using Result with SipJsonError
+///     let result = "not_valid_json".parse::<serde_json::Value>()
+///         .map_err(|e| SipJsonError::DeserializeError(e));
 ///
-/// match result {
-///     Ok(_) => println!("Successfully parsed"),
-///     Err(SipJsonError::DeserializeError(e)) => println!("Deserialization error: {}", e),
-///     Err(e) => println!("Other error: {}", e),
+///     match result {
+///         Ok(_) => println!("Successfully parsed"),
+///         Err(SipJsonError::DeserializeError(e)) => println!("Deserialization error: {}", e),
+///         Err(e) => println!("Other error: {}", e),
+///     }
 /// }
-/// # }
 /// ```
 #[derive(Debug)]
 pub enum SipJsonError {
@@ -228,10 +243,11 @@ impl Error for SipJsonError {}
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```
 /// use rvoip_sip_core::json::{SipJsonResult, SipJsonError, SipValue};
+/// use std::error::Error;
 ///
-/// # fn example() -> SipJsonResult<()> {
+/// # fn example() -> std::result::Result<(), Box<dyn Error>> {
 /// // Function that returns a SipJsonResult
 /// fn parse_json(input: &str) -> SipJsonResult<SipValue> {
 ///     let json_value = serde_json::from_str(input)
@@ -241,7 +257,7 @@ impl Error for SipJsonError {}
 /// }
 ///
 /// // Using ? operator with SipJsonResult
-/// let value = parse_json(r#"{"key": "value"}"#)?;
+/// let value = parse_json(r#"{"key": "value"}"#).map_err(|e| Box::new(e) as Box<dyn Error>)?;
 /// assert!(value.is_object());
 /// # Ok(())
 /// # }
@@ -284,16 +300,17 @@ pub type SipJsonResult<T> = Result<T, SipJsonError>;
 /// Using with SIP types:
 /// 
 /// ```
-/// # use rvoip_sip_core::json::{SipJson, SipValue};
+/// # use rvoip_sip_core::json::{SipJson, SipValue, SipJsonError};
 /// # use rvoip_sip_core::prelude::*;
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use rvoip_sip_core::types::sip_request::Request;
+/// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
 /// // Create a SIP request
 /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
 ///     .build();
 ///
 /// // Convert to SipValue
-/// let value = request.to_sip_value()?;
+/// let value = <Request as SipJson>::to_sip_value(&request).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///
 /// // Create a modified value
 /// let mut obj = value.as_object().unwrap().clone();
@@ -303,7 +320,7 @@ pub type SipJsonResult<T> = Result<T, SipJsonError>;
 /// let modified_value = SipValue::Object(obj);
 ///
 /// // Convert back to a SIP request (now with REGISTER method)
-/// let modified_request = Request::from_sip_value(&modified_value)?;
+/// let modified_request = <Request as SipJson>::from_sip_value(&modified_value).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 /// assert_eq!(modified_request.method().to_string(), "REGISTER");
 /// # Ok(())
 /// # }
@@ -318,17 +335,18 @@ pub trait SipJson {
     /// # Examples
     ///
     /// ```
-    /// # use rvoip_sip_core::json::{SipJson, SipValue};
+    /// # use rvoip_sip_core::json::{SipJson, SipValue, SipJsonError};
     /// # use rvoip_sip_core::prelude::*;
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rvoip_sip_core::types::sip_request::Request;
+    /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
     /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
     ///
     /// // Convert to SipValue
-    /// let value = request.to_sip_value()?;
+    /// let value = <Request as SipJson>::to_sip_value(&request).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     ///
     /// // Now we can access fields directly
-    /// let method = value.get("method").and_then(|v| v.as_str());
-    /// let uri = value.get("uri");
+    /// let method = value.get_path("method").and_then(|v| v.as_str());
+    /// let uri = value.get_path("uri");
     ///
     /// assert_eq!(method, Some("Invite"));
     /// assert!(uri.is_some());
@@ -594,4 +612,48 @@ mod tests {
         let result = <RequiredField as SipJson>::from_sip_value(&wrong_type);
         assert!(result.is_err());
     }
-} 
+}
+
+/// SIP JSON module implementation details.
+///
+/// # Examples
+///
+/// ```
+/// use rvoip_sip_core::json::{SipJsonExt, SipJsonError, SipValue};
+/// use rvoip_sip_core::prelude::*;
+/// use std::error::Error;
+///
+/// # fn example() -> std::result::Result<(), Box<dyn Error>> {
+/// // Create a request
+/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
+///     .build();
+///
+/// // Convert to JSON string with error handling
+/// let json_str = match request.to_json_string() {
+///     Ok(s) => s,
+///     Err(SipJsonError::SerializeError(e)) => return Err(Box::new(e)),
+///     Err(e) => return Err(Box::new(e)),
+/// };
+///
+/// // Parse back with error handling
+/// let parsed_request = match Request::from_json_str(&json_str) {
+///     Ok(req) => req,
+///     Err(SipJsonError::DeserializeError(e)) => return Err(Box::new(e)),
+///     Err(e) => return Err(Box::new(e)),
+/// };
+///
+/// // Convert to SipValue with error handling
+/// let value = match request.to_sip_value() {
+///     Ok(v) => v,
+///     Err(e) => return Err(Box::new(e)),
+/// };
+///
+/// // Access fields using get_path
+/// if let Some(method) = value.get_path("method").and_then(|v| v.as_str()) {
+///     println!("Method: {}", method);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+mod implementaton { /* This is just a placeholder to associate the doc comment */ } 
