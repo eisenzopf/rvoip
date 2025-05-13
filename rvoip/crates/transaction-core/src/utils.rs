@@ -38,7 +38,7 @@ pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
 
 /// Create a response based on a request
 pub fn create_response(request: &Request, status: StatusCode) -> Response {
-    let mut builder = ResponseBuilder::new(status);
+    let mut builder = ResponseBuilder::new(status, None);
     
     // Copy needed headers from request to response using the header method
     if let Some(header) = request.header(&HeaderName::Via) {

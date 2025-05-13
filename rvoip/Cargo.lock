@@ -2041,6 +2041,7 @@ name = "rvoip-sip-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.21.7",
  "bytes",
  "chrono",
@@ -2049,6 +2050,8 @@ dependencies = [
  "ordered-float",
  "proptest",
  "rand",
+ "rvoip-sip-transport",
+ "rvoip-transaction-core",
  "serde",
  "serde_bytes",
  "serde_json",

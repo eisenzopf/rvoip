@@ -1073,7 +1073,7 @@ mod test_helpers {
             _ => panic!("Expected Request message"),
         };
         
-        let mut response_builder = ResponseBuilder::new(status);
+        let mut response_builder = ResponseBuilder::new(status, None);
         
         // Copy essential headers
         if let Some(header) = request.header(&HeaderName::Via) {
@@ -1265,7 +1265,7 @@ mod tests {
     
     // Helper to create a response from a request
     fn create_response(request: &Request, status_code: StatusCode) -> Response {
-        let mut builder = ResponseBuilder::new(status_code);
+        let mut builder = ResponseBuilder::new(status_code, None);
         
         // Copy essential headers
         if let Some(header) = request.header(&HeaderName::Via) {

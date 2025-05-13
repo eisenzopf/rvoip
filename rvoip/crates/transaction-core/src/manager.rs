@@ -28,7 +28,7 @@ use crate::transaction::{ // Updated imports
 // Remove crate::context::TransactionContext if not used
 use crate::utils; // Keep utils import
 use rvoip_sip_core::parse_message; // Import explicitly if needed for stray messages
-use rvoip_sip_core::types::builder::ViaBuilder; // Import ViaBuilder
+use rvoip_sip_core::builder::headers::ViaBuilderExt; // Import ViaBuilderExt correctly
 
 /// Transaction timer data
 struct TransactionTimer {
@@ -313,7 +313,7 @@ impl TransactionManager {
              warn!(%key, source = %source, "Received CANCEL for non-existent transaction");
              // Respond 481 Transaction Does Not Exist
              // CANCEL shares same branch as INVITE, but TU handles response
-             let response = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist)
+             let response = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist, None)
                 .copy_essential_headers(&request)? // Use Result from copy_essential_headers
                 .build(); // Assuming build is infallible or handled
              if let Err(e) = transport.send_message(Message::Response(response), source).await {

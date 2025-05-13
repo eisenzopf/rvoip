@@ -40,6 +40,9 @@ chrono = { version = "0.4", features = ["serde"] }
 proptest = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-sip-transport = { path = "../sip-transport" }
+async-trait = "0.1"
 
 # Integration tests configuration
 [[test]]
@@ -75,3 +78,7 @@ path = "examples/01_basic_parsing/01_invite_request_query.rs"
 [[example]]
 name = "01_invite_request_path"
 path = "examples/01_basic_parsing/01_invite_request_path.rs"
+
+[[example]]
+name = "tutorial_10_sip_transactions"
+path = "examples/tutorial_10_sip_transactions.rs"
