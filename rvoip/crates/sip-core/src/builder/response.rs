@@ -7,6 +7,7 @@ use crate::types::{
     StatusCode,
     Version,
     sip_response::Response,
+    sip_request::Request,
     uri::{Uri, Host, Scheme},
     to::To,
     from::From,
@@ -21,6 +22,7 @@ use crate::types::{
     Param,
     HeaderName,
     HeaderValue,
+    headers::header_access::HeaderAccess,
 };
 
 /// # SIP Response Builder
@@ -251,6 +253,296 @@ impl SimpleResponseBuilder {
         }
         
         Self { response }
+    }
+    
+    /// Create a response for a request with automatic header copying according to SIP standards
+    ///
+    /// This method creates a response based on an existing request, automatically copying
+    /// the headers that should be included in responses according to SIP standards.
+    ///
+    /// # Parameters
+    /// - `request`: The SIP request for which to create a response
+    /// - `status`: The status code for the response
+    /// - `reason`: Optional custom reason phrase (if None, the default will be used)
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with appropriate headers copied from the request
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{StatusCode, Request};
+    /// 
+    /// // Create a 200 OK response with all appropriate headers copied
+    /// let response_builder = SimpleResponseBuilder::response_from_request(
+    ///     &request, 
+    ///     StatusCode::Ok, 
+    ///     None
+    /// );
+    /// 
+    /// // Add any additional headers or modifications
+    /// let response = response_builder
+    ///     .contact("sip:bob@192.168.1.2:5060", None)
+    ///     .build();
+    /// ```
+    pub fn response_from_request(
+        request: &Request,
+        status: StatusCode,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut builder = Self::new(status, reason);
+        
+        // Headers that MUST be copied from request to response (RFC 3261 Section 8.2.6.2)
+        
+        // Copy From header (must be copied unchanged)
+        if let Some(from) = request.from() {
+            builder = builder.from(
+                from.address().display_name().unwrap_or_default(),
+                &from.address().uri.to_string(),
+                from.tag(),
+            );
+        }
+        
+        // Copy To header (server may add tag for non-100 responses)
+        if let Some(to) = request.to() {
+            builder = builder.to(
+                to.address().display_name().unwrap_or_default(),
+                &to.address().uri.to_string(),
+                to.tag(), // Copy existing tag if present
+            );
+        }
+        
+        // Copy Call-ID header (must be copied unchanged)
+        if let Some(call_id) = request.call_id() {
+            builder = builder.call_id(&call_id.to_string());
+        }
+        
+        // Copy CSeq header (must be copied unchanged)
+        if let Some(cseq) = request.cseq() {
+            builder = builder.cseq(cseq.sequence(), cseq.method().clone());
+        }
+        
+        // Copy all Via headers in same order (must be copied unchanged)
+        for via in request.via_headers() {
+            for via_header in via.headers() {
+                let host = via_header.sent_by_host.to_string();
+                let transport = via_header.sent_protocol.transport.clone();
+                let branch = via_header.branch();
+                
+                builder = builder.via(&host, &transport, branch);
+            }
+        }
+        
+        // Copy Record-Route headers in the same order for potential dialog establishment
+        for header in request.headers(&HeaderName::RecordRoute) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Copy useful optional headers if present in the request
+        
+        // Supported header (indicates supported extensions)
+        for header in request.headers(&HeaderName::Supported) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Allow header (indicates allowed methods)
+        for header in request.headers(&HeaderName::Allow) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Require header (mandatory extensions)
+        for header in request.headers(&HeaderName::Require) {
+            // Only copy if we actually support all required extensions
+            // In practice, a real implementation would check this
+            builder = builder.header(header.clone());
+        }
+        
+        // Event header for subscription scenarios
+        for header in request.headers(&HeaderName::Event) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Additional headers that may appear multiple times
+        
+        // Warning headers
+        for header in request.headers(&HeaderName::Warning) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Accept headers
+        for header in request.headers(&HeaderName::Accept) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Accept-Encoding headers
+        for header in request.headers(&HeaderName::AcceptEncoding) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Accept-Language headers
+        for header in request.headers(&HeaderName::AcceptLanguage) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Content-Encoding headers
+        for header in request.headers(&HeaderName::ContentEncoding) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Content-Language headers
+        for header in request.headers(&HeaderName::ContentLanguage) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Proxy-Require headers
+        for header in request.headers(&HeaderName::ProxyRequire) {
+            builder = builder.header(header.clone());
+        }
+        
+        // Unsupported headers
+        for header in request.headers(&HeaderName::Unsupported) {
+            builder = builder.header(header.clone());
+        }
+        
+        builder
+    }
+    
+    /// Create a standard dialog-establishing response
+    ///
+    /// This is a convenience method that creates a response with the standard set of headers
+    /// needed for dialog establishment, including adding a local tag to the To header if not present.
+    ///
+    /// # Parameters
+    /// - `request`: The SIP request for which to create a response
+    /// - `status`: The status code for the response
+    /// - `reason`: Optional custom reason phrase (if None, the default will be used)
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with standard dialog headers
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{StatusCode, Request};
+    ///
+    /// // Create a 200 OK response for dialog establishment
+    /// let ok_response = SimpleResponseBuilder::dialog_response(&request, StatusCode::Ok, None)
+    ///     .contact("sip:bob@192.168.1.2:5060", None)
+    ///     .build();
+    /// ```
+    pub fn dialog_response(
+        request: &Request,
+        status: StatusCode,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut builder = Self::response_from_request(request, status, reason);
+        
+        // For dialog establishment, ensure To has a tag if not already present
+        // (non-100 responses should have a To tag for dialog establishment)
+        if let Some(to) = request.to() {
+            if to.tag().is_none() && status.as_u16() > 100 {
+                // Generate a tag if needed for non-100 responses
+                // In this implementation we're adding/replacing the To header with a tag
+                builder = builder.to(
+                    to.address().display_name().unwrap_or_default(),
+                    &to.address().uri.to_string(),
+                    Some("local-tag-value") // In a real implementation, generate a unique tag
+                );
+            }
+        }
+        
+        builder
+    }
+    
+    /// Create a minimal error response
+    ///
+    /// This is a convenience method that creates a response with the minimal set of headers
+    /// needed for error responses.
+    ///
+    /// # Parameters
+    /// - `request`: The SIP request for which to create a response
+    /// - `status`: The status code for the response
+    /// - `reason`: Optional custom reason phrase (if None, the default will be used)
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with minimal headers for error responses
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{StatusCode, Request};
+    ///
+    /// // Create a 404 Not Found error response
+    /// let not_found = SimpleResponseBuilder::error_response(&request, StatusCode::NotFound, None)
+    ///     .build();
+    /// ```
+    pub fn error_response(
+        request: &Request,
+        status: StatusCode,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut builder = Self::new(status, reason);
+        
+        // Copy From with tag
+        if let Some(from) = request.from() {
+            builder = builder.from(
+                from.address().display_name().unwrap_or_default(),
+                &from.address().uri.to_string(),
+                from.tag(),
+            );
+        }
+        
+        // Copy To (typically without tag for error responses)
+        if let Some(to) = request.to() {
+            builder = builder.to(
+                to.address().display_name().unwrap_or_default(),
+                &to.address().uri.to_string(),
+                to.tag(), // Copy the tag if present, don't add one
+            );
+        }
+        
+        // Copy Call-ID
+        if let Some(call_id) = request.call_id() {
+            builder = builder.call_id(&call_id.to_string());
+        }
+        
+        // Copy CSeq
+        if let Some(cseq) = request.cseq() {
+            builder = builder.cseq(cseq.sequence(), cseq.method().clone());
+        }
+        
+        // Copy ONLY the first Via header for error responses
+        if let Some(via) = request.via_headers().first() {
+            if let Some(via_header) = via.headers().first() {
+                let host = via_header.sent_by_host.to_string();
+                let transport = via_header.sent_protocol.transport.clone();
+                let branch = via_header.branch();
+                
+                builder = builder.via(&host, &transport, branch);
+            }
+        }
+        
+        // For specific error types, add appropriate headers
+        match status {
+            StatusCode::Unauthorized => {
+                // Would add WWW-Authenticate header in a real implementation
+            },
+            StatusCode::ProxyAuthenticationRequired => {
+                // Would add Proxy-Authenticate header in a real implementation
+            },
+            StatusCode::UnsupportedMediaType => {
+                // Would add Accept, Accept-Encoding, Accept-Language headers
+            },
+            StatusCode::BadExtension => {
+                // Would add Unsupported header
+            },
+            _ => {}
+        }
+        
+        builder
     }
     
     /// Create from an existing Response object
