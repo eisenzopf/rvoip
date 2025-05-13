@@ -165,13 +165,19 @@ impl ClientInviteTransaction {
             )),
         }
 
+        // Store previous state before changing
+        let previous_state = self.data.state;
         self.data.state = new_state;
 
         // Start timers for the new state
         self.start_timers_for_state(new_state);
 
-        // Notify TU about state change (optional, depends on required granularity)
-        // self.data.events_tx.send(TransactionEvent::StateChanged { transaction_id: self.data.id.clone(), state: new_state }).await?;
+        // Notify TU about state change
+        let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+            transaction_id: self.data.id.clone(), 
+            previous_state,
+            new_state 
+        }).await;
 
         Ok(())
     }
@@ -258,7 +264,7 @@ impl ClientInviteTransaction {
     }
 
 
-    /// Handle internal timer events dispatched from the manager.
+    /// Handle internal timer events.
     async fn on_timer(&mut self, timer: &str) -> Result<()> {
         match timer {
             "A" => {
@@ -666,8 +672,19 @@ impl ClientNonInviteTransaction {
             )),
         }
 
+        // Store previous state before changing
+        let previous_state = self.data.state;
         self.data.state = new_state;
+        
         self.start_timers_for_state(new_state);
+        
+        // Notify TU about state change
+        let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+            transaction_id: self.data.id.clone(), 
+            previous_state,
+            new_state 
+        }).await;
+        
         Ok(())
     }
 
@@ -729,13 +746,32 @@ impl ClientNonInviteTransaction {
         let interval = TIMER_K_WAIT_RESPONSE;
         let events_tx = self.data.events_tx.clone();
         let id = self.data.id.clone();
+        
+        // For Timer K, we'll have it directly transition the transaction to Terminated
+        // This avoids race conditions or issues with the timer event not being processed
         self.timer_k_task = Some(tokio::spawn(async move {
             tokio::time::sleep(interval).await;
-            debug!(id=%id, "Timer K fired");
-             let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "K".to_string() }).await;
-         }));
-         trace!(id=%self.data.id, interval = ?interval, "Started Timer K");
-     }
+            debug!(id=%id, "Timer K fired, directly terminating transaction");
+            
+            // Send state change event to indicate the transition
+            let _ = events_tx.send(TransactionEvent::StateChanged { 
+                transaction_id: id.clone(), 
+                previous_state: TransactionState::Completed,
+                new_state: TransactionState::Terminated 
+            }).await;
+            
+            // Send termination event directly
+            if let Err(e) = events_tx.send(TransactionEvent::TransactionTerminated { 
+                transaction_id: id.clone() 
+            }).await {
+                error!(id=%id, error=%e, "Failed to send termination event");
+            } else {
+                debug!(id=%id, "Transaction termination event sent successfully");
+            }
+        }));
+        
+        trace!(id=%self.data.id, interval = ?interval, "Started Timer K");
+    }
 
      /// Handle internal timer events.
      async fn on_timer(&mut self, timer: &str) -> Result<()> {
@@ -761,11 +797,11 @@ impl ClientNonInviteTransaction {
              "F" => {
                  // Timer F logic (timeout)
                  if self.data.state == TransactionState::Trying || self.data.state == TransactionState::Proceeding {
-                     warn!(id=%self.data.id, "Timer F (Timeout) fired");
+                     warn!(id=%self.data.id, "Timer F (Timeout) fired, terminating transaction");
                      self.transition_to(TransactionState::Terminated).await?;
-                     // Inform TU
+                     // Inform TU about timeout
                      self.data.events_tx.send(TransactionEvent::TransactionTimeout {
-                         transaction_id: self.data.id.clone(),
+                        transaction_id: self.data.id.clone(),
                      }).await?;
                  } else {
                      trace!(id=%self.data.id, state=?self.data.state, "Timer F fired in invalid state, ignoring.");
@@ -775,7 +811,34 @@ impl ClientNonInviteTransaction {
                  // Timer K logic (terminate after waiting for retransmissions)
                  if self.data.state == TransactionState::Completed {
                      debug!(id=%self.data.id, "Timer K fired in Completed state, terminating");
-                     self.transition_to(TransactionState::Terminated).await?;
+                     
+                     // Store the previous state
+                     let previous_state = self.data.state;
+                     
+                     // Force the state to Terminated without relying on transition_to
+                     self.data.state = TransactionState::Terminated;
+                     
+                     // Cancel all timers
+                     self.cancel_timers();
+                     
+                     // Signal termination if channel exists
+                     if let Some(sender) = self.data.terminate_signal.take() {
+                         let _ = sender.send(()); // Ignore result, receiver might have dropped
+                     }
+                     
+                     // Send state change event manually since we're bypassing transition_to
+                     let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+                         transaction_id: self.data.id.clone(), 
+                         previous_state,
+                         new_state: TransactionState::Terminated 
+                     }).await;
+                     
+                     // Send an explicit termination event to ensure the transaction manager can clean up
+                     self.data.events_tx.send(TransactionEvent::TransactionTerminated { 
+                         transaction_id: self.data.id.clone() 
+                     }).await?;
+                     
+                     debug!(id=%self.data.id, "Transaction forcefully terminated");
                  } else {
                      trace!(id=%self.data.id, state=?self.data.state, "Timer K fired in invalid state, ignoring.");
                  }

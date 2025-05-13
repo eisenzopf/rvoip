@@ -130,6 +130,21 @@ pub enum TransactionEvent {
          source: SocketAddr,
     },
 
+    // --- Transaction Lifecycle Events ---
+    /// The transaction has reached the Terminated state and should be removed from the manager.
+    /// This is sent when a transaction transitions to Terminated state.
+    TransactionTerminated {
+        transaction_id: TransactionKey,
+    },
+    
+    /// A transaction has changed state.
+    /// This event allows applications to track the full state machine progression.
+    StateChanged {
+        transaction_id: TransactionKey,
+        previous_state: TransactionState,
+        new_state: TransactionState,
+    },
+
     // --- Timer Events (Internal to Transaction Layer) ---
     /// Internal event used to trigger timer logic within the transaction.
     #[doc(hidden)] // Should not be exposed directly to TU
@@ -140,8 +155,6 @@ pub enum TransactionEvent {
 
      // --- Optional events for finer-grained state tracking ---
      // TransactionCreated { transaction_id: TransactionKey },
-     // TransactionTerminated { transaction_id: TransactionKey },
-     // StateChanged { transaction_id: TransactionKey, state: TransactionState },
 }
 
 

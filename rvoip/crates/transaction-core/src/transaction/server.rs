@@ -175,8 +175,19 @@ impl ServerInviteTransaction {
              )),
         }
 
+        // Store previous state before changing
+        let previous_state = self.data.state;
         self.data.state = new_state;
+        
         self.start_timers_for_state(new_state);
+        
+        // Notify TU about state change
+        let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+            transaction_id: self.data.id.clone(), 
+            previous_state,
+            new_state 
+        }).await;
+        
         Ok(())
     }
 
@@ -558,8 +569,19 @@ impl ServerNonInviteTransaction {
               )),
          }
 
+        // Store previous state before changing
+        let previous_state = self.data.state;
         self.data.state = new_state;
+        
         self.start_timers_for_state(new_state);
+        
+        // Notify TU about state change
+        let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+            transaction_id: self.data.id.clone(), 
+            previous_state,
+            new_state 
+        }).await;
+        
         Ok(())
     }
 
@@ -584,13 +606,32 @@ impl ServerNonInviteTransaction {
          let interval = TIMER_J_WAIT;
          let events_tx = self.data.events_tx.clone();
          let id = self.data.id.clone();
+         
+         // For Timer J, we'll have it directly send the termination event
+         // This avoids race conditions or issues with the timer event not being processed
          self.timer_j_task = Some(Box::pin(async move {
              tokio::time::sleep(interval).await;
-              debug!(id=%id, "Timer J fired");
-              let _ = events_tx.send(TransactionEvent::TimerTriggered { transaction_id: id, timer: "J".to_string() }).await;
-          }));
-          trace!(id=%self.data.id, interval = ?interval, "Started Timer J");
-      }
+             debug!(id=%id, "Timer J fired, directly terminating transaction");
+             
+             // Send state change event to indicate the transition
+             let _ = events_tx.send(TransactionEvent::StateChanged { 
+                 transaction_id: id.clone(), 
+                 previous_state: TransactionState::Completed,
+                 new_state: TransactionState::Terminated 
+             }).await;
+             
+             // Send termination event directly
+             if let Err(e) = events_tx.send(TransactionEvent::TransactionTerminated { 
+                 transaction_id: id.clone() 
+             }).await {
+                 error!(id=%id, error=%e, "Failed to send termination event");
+             } else {
+                 debug!(id=%id, "Transaction termination event sent successfully");
+             }
+         }));
+         
+         trace!(id=%self.data.id, interval = ?interval, "Started Timer J");
+     }
 
      /// Handle internal timer events.
      async fn on_timer(&mut self, timer: &str) -> Result<()> {
@@ -599,10 +640,34 @@ impl ServerNonInviteTransaction {
                  // Timer J logic (terminate after waiting for request retransmissions)
                  if self.data.state == TransactionState::Completed {
                      debug!(id=%self.data.id, "Timer J fired, terminating transaction");
-                     if let Err(e) = self.transition_to(TransactionState::Terminated).await {
-                         error!(id=%self.data.id, error=%e, "Failed to transition to Terminated state after Timer J");
-                         return Err(e);
+                     
+                     // Store the previous state
+                     let previous_state = self.data.state;
+                     
+                     // Force the state to Terminated without relying on transition_to
+                     self.data.state = TransactionState::Terminated;
+                     
+                     // Cancel all timers
+                     self.cancel_timers();
+                     
+                     // Signal termination if channel exists
+                     if let Some(sender) = self.data.terminate_signal.take() {
+                         let _ = sender.send(()); // Ignore result, receiver might have dropped
                      }
+                     
+                     // Send state change event manually since we're bypassing transition_to
+                     let _ = self.data.events_tx.send(TransactionEvent::StateChanged { 
+                         transaction_id: self.data.id.clone(), 
+                         previous_state,
+                         new_state: TransactionState::Terminated 
+                     }).await;
+                     
+                     // Send an explicit termination event to ensure the transaction manager can clean up
+                     self.data.events_tx.send(TransactionEvent::TransactionTerminated { 
+                         transaction_id: self.data.id.clone() 
+                     }).await?;
+                     
+                     debug!(id=%self.data.id, "Transaction forcefully terminated");
                  } else {
                      trace!(id=%self.data.id, state=?self.data.state, "Timer J fired in invalid state, ignoring.");
                  }

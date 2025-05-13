@@ -44,6 +44,7 @@ type BoxedServerTransaction = Box<dyn ServerTransaction + Send>;
 type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
 
 /// Manages SIP transactions
+#[derive(Clone)]
 pub struct TransactionManager {
     /// Transport to use for messages
     transport: Arc<dyn Transport>,
@@ -111,43 +112,40 @@ impl TransactionManager {
         }
     }
 
-    // Helper to broadcast events
+    /// Broadcast events to primary and all subscriber channels
     async fn broadcast_event(
         event: TransactionEvent,
         primary_tx: &mpsc::Sender<TransactionEvent>,
         subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     ) {
-        if let Err(e) = primary_tx.send(event.clone()).await {
-            error!("Failed to send event to primary channel: {}", e);
+        // If this is a termination event, handle it specially
+        if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
+            // Log the termination event
+            debug!(%transaction_id, "Transaction termination event received in broadcast_event");
+            
+            // We need to send to the primary channel so the manager can process it
+            if let Err(e) = primary_tx.send(event).await {
+                error!("Failed to send termination event to primary channel: {}", e);
+            }
+            
+            // Don't forward to subscribers - this is an internal event
+            return;
         }
-
-        let mut subs = subscribers.lock().await;
-        // Clone senders before spawning tasks to avoid lifetime issues
-        let current_subs: Vec<_> = subs.iter().cloned().collect();
-        subs.clear(); // Clear the original list to repopulate with active ones
-
-        for tx in current_subs {
-            let event_clone = event.clone();
-            let tx_clone = tx.clone(); // Clone sender for the task
-            tokio::spawn(async move {
-                if tx_clone.send(event_clone).await.is_err() {
-                     error!("Failed to send event to subscriber, removing.");
-                     // Don't re-add tx_clone to the list
-                 } else {
-                    // Need to re-add the sender back to the shared list, requires locking again.
-                    // This approach is complex. A simpler way is to clean up periodically
-                    // or use a broadcast channel if exact delivery isn't critical.
-                    // For now, we just won't remove failed subscribers efficiently here.
-                 }
-             });
-             // Re-add the original sender if it's likely still valid (optimistic)
-             // A better approach is needed for robust subscriber management.
-             if !tx.is_closed() {
-                subs.push(tx);
-             }
+        
+        // Send to primary channel
+        if let Err(e) = primary_tx.send(event.clone()).await {
+            warn!("Failed to send event to primary channel: {}", e);
+        }
+        
+        // Send to all subscribers
+        let subscriber_channels = subscribers.lock().await.clone();
+        for subscriber in subscriber_channels {
+            if let Err(e) = subscriber.send(event.clone()).await {
+                warn!("Failed to send event to subscriber: {}", e);
+                // TODO: Consider subscriber cleanup
+            }
         }
     }
-
 
     /// Start processing incoming transport messages
     fn start_message_loop(&self) {
@@ -158,9 +156,56 @@ impl TransactionManager {
         let transport_rx = self.transport_rx.clone();
         let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
+        let manager_arc = self.clone();
 
         tokio::spawn(async move {
             debug!("Starting transaction message loop");
+            
+            // Create a separate channel to receive events from transactions
+            // This allows the message loop to process events from transactions
+            let (internal_tx, mut internal_rx) = mpsc::channel::<TransactionEvent>(100);
+            
+            // Setup internal event listener
+            tokio::spawn({
+                let events_tx = events_tx.clone();
+                let event_subscribers = event_subscribers.clone();
+                let manager = manager_arc.clone();
+                async move {
+                    while let Some(event) = internal_rx.recv().await {
+                        match &event {
+                            TransactionEvent::TransactionTerminated { transaction_id } => {
+                                debug!(%transaction_id, "Received transaction termination event");
+                                // Process termination event and clean up transaction
+                                manager.process_transaction_terminated(transaction_id).await;
+                            },
+                            _ => {
+                                // Forward other events to subscribers
+                                Self::broadcast_event(
+                                    event,
+                                    &events_tx,
+                                    &event_subscribers
+                                ).await;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Setup direct event listener for the main event channel
+            // This is necessary because some events might come directly through the main channel
+            tokio::spawn({
+                let manager = manager_arc.clone();
+                let mut rx = manager.subscribe();
+                async move {
+                    while let Some(event) = rx.recv().await {
+                        if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
+                            debug!(%transaction_id, "Received transaction termination event in main channel");
+                            // Process termination event and clean up transaction
+                            manager.process_transaction_terminated(transaction_id).await;
+                        }
+                    }
+                }
+            });
 
             while *running.lock().await {
                 let event = match transport_rx.lock().await.recv().await {
@@ -189,7 +234,7 @@ impl TransactionManager {
                                              destination, // Assuming destination is local address
                                              &transport_arc, // Pass Arc
                                              &server_transactions,
-                                             &events_tx,
+                                             &internal_tx, // Use internal channel
                                              &event_subscribers,
                                          ).await {
                                              error!(error = %e, source = %source, "Failed to process request");
@@ -201,7 +246,7 @@ impl TransactionManager {
                                              response,
                                              source,
                                              &client_transactions,
-                                             &events_tx,
+                                             &internal_tx, // Use internal channel
                                              &event_subscribers,
                                          ).await {
                                              error!(error = %e, source = %source, "Failed to process response");
@@ -616,6 +661,34 @@ impl TransactionManager {
          });
 
         rx
+    }
+
+    /// Handle transaction termination event and clean up terminated transactions
+    async fn process_transaction_terminated(&self, transaction_id: &TransactionKey) {
+        debug!(%transaction_id, "Processing transaction termination");
+        
+        // Try to remove from client transactions
+        {
+            let mut client_txs = self.client_transactions.lock().await;
+            if client_txs.remove(transaction_id).is_some() {
+                debug!(%transaction_id, "Removed terminated client transaction");
+                // Also remove from destinations map
+                let mut destinations = self.transaction_destinations.lock().await;
+                destinations.remove(transaction_id);
+                return;
+            }
+        }
+        
+        // Try to remove from server transactions
+        {
+            let mut server_txs = self.server_transactions.lock().await;
+            if server_txs.remove(transaction_id).is_some() {
+                debug!(%transaction_id, "Removed terminated server transaction");
+                return;
+            }
+        }
+        
+        debug!(%transaction_id, "Transaction not found for termination - may have been already removed");
     }
 
     /// Send an ACK for a 2xx response
