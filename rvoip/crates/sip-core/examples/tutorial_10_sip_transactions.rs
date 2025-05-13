@@ -1,34 +1,38 @@
-# SIP Transactions
-
-In the previous tutorials, we explored SIP messages and SDP media negotiation. Now we'll move to a higher level of abstraction and learn about SIP transactions - the fundamental building blocks of SIP communication.
-
-## Understanding SIP Transactions
-
-A SIP transaction consists of a client request and all server responses to that request. Transactions are crucial for reliable message delivery in an unreliable network environment like the Internet.
-
-### Types of SIP Transactions
-
-SIP defines two main types of transactions:
-
-1. **INVITE Transactions**: Used for session establishment. These have special handling due to their complexity and importance.
-2. **Non-INVITE Transactions**: Used for all other types of requests (REGISTER, OPTIONS, BYE, etc.).
-
-Each of these transaction types has distinct behaviors and state machines.
-
-## Transaction State Machines
-
-SIP transactions follow defined state machines described in RFC 3261. These state machines handle message retransmissions, timeouts, and ensure reliable message delivery.
-
-### Client Transaction State Machine
-
-A client transaction is created when a client sends a request. It manages retransmissions and handles responses from the server.
-
-```rust
+// Example code for Tutorial 10: SIP Transactions
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::transaction::{ClientTransaction, TransactionState};
+use rvoip_sip_core::transaction::{
+    ClientTransaction, ServerTransaction, TransactionManager, TransactionState
+};
 use std::time::{Duration, Instant};
+use std::thread::sleep;
 
-// Example of a simplified client transaction state machine
+fn main() -> Result<()> {
+    println!("Tutorial 10: SIP Transactions\n");
+    
+    // Example 1: Client Transaction State Machine
+    println!("Example 1: Client Transaction State Machine\n");
+    demonstrate_client_transaction()?;
+    
+    // Example 2: Server Transaction State Machine
+    println!("\nExample 2: Server Transaction State Machine\n");
+    demonstrate_server_transaction()?;
+    
+    // Example 3: INVITE Transaction
+    println!("\nExample 3: INVITE Transaction\n");
+    demonstrate_invite_client_transaction()?;
+    
+    // Example 4: Transaction Manager
+    println!("\nExample 4: Transaction Manager\n");
+    demonstrate_transaction_manager()?;
+    
+    // Example 5: Complete Transaction Flow
+    println!("\nExample 5: Complete Transaction Flow\n");
+    run_complete_transaction_example()?;
+    
+    Ok(())
+}
+
+// Example 1: Demonstrate a basic client transaction state machine
 fn demonstrate_client_transaction() -> Result<()> {
     // Create a client transaction for a non-INVITE request
     let request = RequestBuilder::new(Method::Register, "sip:example.com")?
@@ -84,18 +88,8 @@ fn demonstrate_client_transaction() -> Result<()> {
     
     Ok(())
 }
-```
 
-### Server Transaction State Machine
-
-A server transaction is created when a server receives a request. It manages the sending of responses and handles retransmissions of the final response if needed.
-
-```rust
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::transaction::{ServerTransaction, TransactionState};
-use std::time::{Duration, Instant};
-
-// Example of a simplified server transaction state machine
+// Example 2: Demonstrate a basic server transaction state machine
 fn demonstrate_server_transaction() -> Result<()> {
     // Simulate receiving a request
     let request = RequestBuilder::new(Method::Register, "sip:example.com")?
@@ -150,21 +144,14 @@ fn demonstrate_server_transaction() -> Result<()> {
     
     if let Some(response) = retransmitted_response {
         println!("Retransmitting the last response: {}", response);
+    } else {
+        println!("No response to retransmit");
     }
     
     Ok(())
 }
-```
 
-## INVITE Transactions
-
-INVITE transactions are more complex because they establish dialogs and sessions, which may persist for an extended period.
-
-### INVITE Client Transaction
-
-The INVITE client transaction has more states to handle the two-phase nature of call setup (initial acceptance and final acknowledgment).
-
-```rust
+// Example 3: Demonstrate an INVITE client transaction
 fn demonstrate_invite_client_transaction() -> Result<()> {
     // Create an INVITE request
     let request = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
@@ -241,19 +228,8 @@ fn demonstrate_invite_client_transaction() -> Result<()> {
     
     Ok(())
 }
-```
 
-## Transaction Manager
-
-In practice, you'll want to use a transaction manager to track and manage all active transactions in your SIP application. The transaction manager associates incoming messages with the proper transaction based on the branch parameter.
-
-```rust
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::transaction::{
-    ClientTransaction, ServerTransaction, TransactionManager, TransactionState
-};
-use std::time::{Duration, Instant};
-
+// Example 4: Demonstrate a transaction manager
 fn demonstrate_transaction_manager() -> Result<()> {
     // Create a transaction manager
     let mut manager = TransactionManager::new();
@@ -306,55 +282,8 @@ fn demonstrate_transaction_manager() -> Result<()> {
     
     Ok(())
 }
-```
 
-## Transaction Timeouts and Reliability
-
-SIP transactions include built-in reliability mechanisms through timers:
-
-1. **Timer A**: Controls request retransmissions for unreliable transports (UDP)
-2. **Timer B**: Controls the timeout for INVITE transactions
-3. **Timer C**: Controls the timeout for provisional responses
-4. **Timer D**: Time to wait for retransmissions of responses
-5. **Timer E**: Controls non-INVITE request retransmissions
-6. **Timer F**: Non-INVITE transaction timeout
-7. **Timer G**: INVITE response retransmission interval
-8. **Timer H**: Wait time for ACK receipt
-9. **Timer I**: Wait time for ACK retransmissions
-10. **Timer J**: Wait time for non-INVITE request retransmissions
-11. **Timer K**: Time to wait for response retransmissions
-
-Here's how to implement basic timer handling:
-
-```rust
-fn handle_transaction_timers(manager: &mut TransactionManager) -> Result<()> {
-    // This would typically be called in a main event loop
-    
-    // Process timeouts and retransmissions
-    manager.process_timers();
-    
-    // This approach handles:
-    // - Retransmitting requests when needed
-    // - Retransmitting responses when needed
-    // - Timing out transactions that have been pending too long
-    // - Cleaning up completed transactions after appropriate wait time
-    
-    Ok(())
-}
-```
-
-## Complete Transaction Example
-
-Let's put everything together in a complete example that demonstrates a client sending a request and handling responses:
-
-```rust
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::transaction::{
-    ClientTransaction, ServerTransaction, TransactionManager, TransactionState
-};
-use std::time::{Duration, Instant};
-use std::thread::sleep;
-
+// Example 5: Complete transaction flow with timers and network simulation
 fn run_complete_transaction_example() -> Result<()> {
     // Create a transaction manager
     let mut manager = TransactionManager::new();
@@ -389,6 +318,9 @@ fn run_complete_transaction_example() -> Result<()> {
     println!("Simulating network delay...");
     sleep(Duration::from_millis(500));
     
+    // Process timers while waiting (would be done in a real event loop)
+    manager.process_timers();
+    
     // Simulate a 200 OK response from the server
     let response = ResponseBuilder::new(StatusCode::Ok, None)
         .from("Alice", "sip:alice@atlanta.example.com", Some("a73kszlfl"))
@@ -407,31 +339,22 @@ fn run_complete_transaction_example() -> Result<()> {
     if let Some(transaction) = manager.find_transaction_for_response(&response_message) {
         println!("Found matching transaction with branch: {}", transaction.branch());
         manager.handle_response(&response_message);
+    } else {
+        println!("No matching transaction found for response");
     }
     
     // Simulate the passage of time for transaction cleanup
     println!("Waiting for transaction timeout...");
     sleep(Duration::from_secs(1));
     
+    // Process timers again
+    manager.process_timers();
+    
     // Clean up completed transactions
     manager.clean_completed_transactions();
     println!("Active transactions after cleanup: {}", manager.active_transactions());
     
+    println!("\nAll examples completed successfully!");
+    
     Ok(())
-}
-```
-
-## Best Practices for Transaction Handling
-
-1. **Branch Parameter Uniqueness**: Always ensure branch parameters in Via headers are unique for each new transaction.
-2. **Transaction Matching**: When receiving a message, always check if it belongs to an existing transaction.
-3. **Timer Management**: Regularly process transaction timers to handle retransmissions and timeouts.
-4. **Transaction Cleanup**: Periodically clean up completed transactions to prevent memory leaks.
-5. **Error Handling**: Handle transaction failures gracefully and notify the application.
-6. **Idempotency**: Design your transaction handlers to be idempotent, as requests may be retransmitted.
-
-## Conclusion
-
-SIP transactions provide a reliable message exchange mechanism in an unreliable network. By understanding and implementing SIP transaction state machines, you can build robust SIP applications that properly handle retransmissions, timeouts, and ensure message delivery.
-
-In the next tutorial, we'll explore SIP dialogs, which are higher-level abstractions built on top of transactions for managing SIP sessions.
+} 

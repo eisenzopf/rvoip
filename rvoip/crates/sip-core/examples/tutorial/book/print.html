@@ -1,0 +1,3427 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title></title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="sip-core-interactive-tutorial"><a class="header" href="#sip-core-interactive-tutorial">SIP Core Interactive Tutorial</a></h1>
+<p>Welcome to the interactive tutorial for the <code>rvoip-sip-core</code> library! This tutorial will guide you through building and parsing SIP/SDP messages, from basic concepts to advanced real-world applications.</p>
+<h2 id="what-youll-learn"><a class="header" href="#what-youll-learn">What You'll Learn</a></h2>
+<p>This tutorial covers:</p>
+<ul>
+<li>SIP message structure and components</li>
+<li>Parsing SIP messages using the <code>json</code> module</li>
+<li>Creating SIP messages with the <code>builder</code> pattern</li>
+<li>SDP media negotiation</li>
+<li>SIP dialogs and transactions</li>
+<li>Authentication and security</li>
+<li>Real-world applications</li>
+</ul>
+<h2 id="how-to-use-this-tutorial"><a class="header" href="#how-to-use-this-tutorial">How to Use This Tutorial</a></h2>
+<p>Each chapter contains:</p>
+<ul>
+<li><strong>Explanations</strong> of key concepts</li>
+<li><strong>Code examples</strong> that you can run and modify directly in your browser</li>
+<li><strong>Exercises</strong> to test your understanding</li>
+<li><strong>References</strong> to relevant RFCs and documentation</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>To get the most out of this tutorial, you should have:</p>
+<ul>
+<li>Basic knowledge of Rust programming</li>
+<li>Understanding of networking concepts</li>
+<li>Familiarity with client-server architecture</li>
+</ul>
+<p>No prior knowledge of SIP or VoIP is required.</p>
+<h2 id="running-examples-locally"><a class="header" href="#running-examples-locally">Running Examples Locally</a></h2>
+<p>All examples in this tutorial can be run locally. To do this:</p>
+<pre><code class="language-bash"># Clone the repository
+git clone https://github.com/rudeless/rvoip.git
+cd rvoip/crates/sip-core
+
+# Run a specific tutorial example
+cargo run --example tutorial_01_intro
+
+# Run with logging enabled
+RUST_LOG=debug cargo run --example tutorial_02_parsing
+</code></pre>
+<h2 id="getting-help"><a class="header" href="#getting-help">Getting Help</a></h2>
+<p>If you have questions or encounter issues:</p>
+<ul>
+<li>Check the <a href="appendix/glossary.html">Glossary</a> for terminology</li>
+<li>Refer to the <a href="appendix/rfc_references.html">SIP RFCs</a> for protocol details</li>
+<li>Open an issue on the <a href="https://github.com/rudeless/rvoip">GitHub repository</a></li>
+</ul>
+<p>Let's get started with <a href="part1/tutorial_01.html">Introduction to SIP</a>!</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="introduction-to-sip"><a class="header" href="#introduction-to-sip">Introduction to SIP</a></h1>
+<p>Session Initiation Protocol (SIP) is a signaling protocol used for initiating, maintaining, and terminating real-time sessions that include voice, video, and messaging applications. In this tutorial, we'll explore the fundamentals of SIP and how it works.</p>
+<h2 id="what-is-sip"><a class="header" href="#what-is-sip">What is SIP?</a></h2>
+<p>SIP is an application-layer control protocol that can establish, modify, and terminate multimedia sessions such as Internet telephony calls. SIP is text-based, similar to HTTP, making it relatively easy to debug and work with.</p>
+<p>Key characteristics of SIP:</p>
+<ul>
+<li><strong>Text-based protocol</strong>: SIP messages are human-readable text</li>
+<li><strong>Client-server architecture</strong>: Involves User Agent Clients (UACs) and User Agent Servers (UASs)</li>
+<li><strong>Request-response model</strong>: Similar to HTTP with requests and responses</li>
+<li><strong>Transport-independent</strong>: Can run over TCP, UDP, TLS, or other transport protocols</li>
+<li><strong>Extensible</strong>: Can be extended with new headers and methods</li>
+</ul>
+<h2 id="sip-architecture"><a class="header" href="#sip-architecture">SIP Architecture</a></h2>
+<p>SIP operates in a distributed architecture that includes several types of network elements:</p>
+<ul>
+<li>
+<p><strong>User Agents (UAs)</strong>: End devices that initiate and receive SIP sessions</p>
+<ul>
+<li><strong>User Agent Client (UAC)</strong>: Initiates SIP requests</li>
+<li><strong>User Agent Server (UAS)</strong>: Responds to SIP requests</li>
+</ul>
+</li>
+<li>
+<p><strong>SIP Servers</strong>:</p>
+<ul>
+<li><strong>Proxy Server</strong>: Forwards requests to other servers</li>
+<li><strong>Registrar</strong>: Accepts registration requests from users</li>
+<li><strong>Redirect Server</strong>: Returns the location of requested users</li>
+<li><strong>Back-to-Back User Agent (B2BUA)</strong>: Acts as both UAC and UAS</li>
+</ul>
+</li>
+</ul>
+<h2 id="sip-message-structure"><a class="header" href="#sip-message-structure">SIP Message Structure</a></h2>
+<p>SIP messages consist of a start-line, headers, and an optional body. There are two types of SIP messages:</p>
+<ol>
+<li><strong>Requests</strong>: Messages sent from a client to a server</li>
+<li><strong>Responses</strong>: Messages sent from a server to a client</li>
+</ol>
+<h3 id="sip-request-structure"><a class="header" href="#sip-request-structure">SIP Request Structure</a></h3>
+<pre><code>METHOD Request-URI SIP/2.0
+Header1: Value1
+Header2: Value2
+...
+Content-Length: &lt;length&gt;
+
+&lt;message body&gt;
+</code></pre>
+<h3 id="sip-response-structure"><a class="header" href="#sip-response-structure">SIP Response Structure</a></h3>
+<pre><code>SIP/2.0 Status-Code Reason-Phrase
+Header1: Value1
+Header2: Value2
+...
+Content-Length: &lt;length&gt;
+
+&lt;message body&gt;
+</code></pre>
+<h2 id="sip-uris"><a class="header" href="#sip-uris">SIP URIs</a></h2>
+<p>SIP uses Uniform Resource Identifiers (URIs) to identify users. A SIP URI looks like:</p>
+<pre><code>sip:username@domain.com:5060;uri-parameters?headers
+</code></pre>
+<p>Components:</p>
+<ul>
+<li><strong>Scheme</strong>: "sip:" or "sips:" (secure SIP)</li>
+<li><strong>User</strong>: The username part</li>
+<li><strong>Host</strong>: Domain name or IP address</li>
+<li><strong>Port</strong>: Optional port number (default is 5060 for SIP, 5061 for SIPS)</li>
+<li><strong>URI Parameters</strong>: Optional parameters separated by semicolons</li>
+<li><strong>Headers</strong>: Optional headers separated by ampersands</li>
+</ul>
+<h2 id="sip-methods"><a class="header" href="#sip-methods">SIP Methods</a></h2>
+<p>SIP defines several methods (or request types):</p>
+<div class="table-wrapper"><table><thead><tr><th>Method</th><th>Description</th></tr></thead><tbody>
+<tr><td>INVITE</td><td>Initiates a session</td></tr>
+<tr><td>ACK</td><td>Acknowledges receipt of a final response to INVITE</td></tr>
+<tr><td>BYE</td><td>Terminates a session</td></tr>
+<tr><td>CANCEL</td><td>Cancels a pending request</td></tr>
+<tr><td>REGISTER</td><td>Registers a user's location</td></tr>
+<tr><td>OPTIONS</td><td>Queries capabilities of servers</td></tr>
+<tr><td>INFO</td><td>Sends mid-session information</td></tr>
+<tr><td>UPDATE</td><td>Updates session parameters</td></tr>
+<tr><td>REFER</td><td>Asks recipient to issue a request</td></tr>
+<tr><td>SUBSCRIBE</td><td>Requests notification of an event</td></tr>
+<tr><td>NOTIFY</td><td>Provides information about an event</td></tr>
+<tr><td>MESSAGE</td><td>Transports instant messages</td></tr>
+</tbody></table>
+</div>
+<h2 id="sip-response-codes"><a class="header" href="#sip-response-codes">SIP Response Codes</a></h2>
+<p>SIP responses are categorized by their status codes:</p>
+<div class="table-wrapper"><table><thead><tr><th>Range</th><th>Category</th><th>Description</th></tr></thead><tbody>
+<tr><td>1xx</td><td>Provisional</td><td>Request received, continuing to process</td></tr>
+<tr><td>2xx</td><td>Success</td><td>Action successfully received, understood, and accepted</td></tr>
+<tr><td>3xx</td><td>Redirection</td><td>Further action needs to be taken</td></tr>
+<tr><td>4xx</td><td>Client Error</td><td>Request contains bad syntax or cannot be fulfilled</td></tr>
+<tr><td>5xx</td><td>Server Error</td><td>Server failed to fulfill a valid request</td></tr>
+<tr><td>6xx</td><td>Global Failure</td><td>Request cannot be fulfilled at any server</td></tr>
+</tbody></table>
+</div>
+<h2 id="sip-headers"><a class="header" href="#sip-headers">SIP Headers</a></h2>
+<p>SIP messages include headers that provide additional information about the message. Some common headers include:</p>
+<ul>
+<li><strong>Via</strong>: Shows the path taken by the request</li>
+<li><strong>From</strong>: Indicates the initiator of the request</li>
+<li><strong>To</strong>: Indicates the recipient of the request</li>
+<li><strong>Call-ID</strong>: Unique identifier for the call</li>
+<li><strong>CSeq</strong>: Command sequence number</li>
+<li><strong>Contact</strong>: Provides a URI for direct communication</li>
+<li><strong>Content-Type</strong>: Indicates the type of the message body</li>
+<li><strong>Content-Length</strong>: Indicates the size of the message body</li>
+</ul>
+<h2 id="basic-sip-call-flow"><a class="header" href="#basic-sip-call-flow">Basic SIP Call Flow</a></h2>
+<p>A basic SIP call flow involves the following steps:</p>
+<ol>
+<li><strong>INVITE</strong>: Caller sends an INVITE request to initiate a session</li>
+<li><strong>100 Trying</strong>: Server acknowledges receipt of INVITE</li>
+<li><strong>180 Ringing</strong>: Callee's phone is ringing</li>
+<li><strong>200 OK</strong>: Callee accepts the call</li>
+<li><strong>ACK</strong>: Caller acknowledges receipt of 200 OK</li>
+<li>Media session established (RTP/RTCP)</li>
+<li><strong>BYE</strong>: Either party terminates the session</li>
+<li><strong>200 OK</strong>: Acknowledgment of session termination</li>
+</ol>
+<p>Here's a simplified diagram:</p>
+<pre><code>    Caller                    Callee
+      |                         |
+      |-------INVITE-----------&gt;|
+      |&lt;------100 Trying--------|
+      |&lt;------180 Ringing-------|
+      |&lt;------200 OK------------|
+      |--------ACK-------------&gt;|
+      |&lt;====Media Session======&gt;|
+      |--------BYE-------------&gt;|
+      |&lt;------200 OK------------|
+      |                         |
+</code></pre>
+<h2 id="lets-examine-a-sip-message"><a class="header" href="#lets-examine-a-sip-message">Let's Examine a SIP Message</a></h2>
+<p>Here's an example of a SIP INVITE request:</p>
+<pre><code>INVITE sip:bob@example.com SIP/2.0
+Via: SIP/2.0/UDP alice-pc.example.com:5060;branch=z9hG4bK776asdhds
+Max-Forwards: 70
+To: Bob &lt;sip:bob@example.com&gt;
+From: Alice &lt;sip:alice@example.com&gt;;tag=1928301774
+Call-ID: a84b4c76e66710@alice-pc.example.com
+CSeq: 314159 INVITE
+Contact: &lt;sip:alice@alice-pc.example.com&gt;
+Content-Type: application/sdp
+Content-Length: 142
+
+v=0
+o=alice 2890844526 2890844526 IN IP4 alice-pc.example.com
+s=Session SDP
+c=IN IP4 alice-pc.example.com
+t=0 0
+m=audio 49170 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+</code></pre>
+<p>In this example:</p>
+<ul>
+<li>The request method is INVITE</li>
+<li>The Request-URI is sip:bob@example.com</li>
+<li>Various headers provide additional information</li>
+<li>The message body contains SDP for media negotiation</li>
+</ul>
+<h2 id="sip-vs-other-protocols"><a class="header" href="#sip-vs-other-protocols">SIP vs Other Protocols</a></h2>
+<p>SIP is often compared to other signaling protocols:</p>
+<ul>
+<li><strong>H.323</strong>: An older, binary protocol for multimedia communications</li>
+<li><strong>MGCP/Megaco</strong>: Protocols for controlling media gateways</li>
+<li><strong>WebRTC</strong>: Browser-based real-time communications (often uses SIP for signaling)</li>
+<li><strong>XMPP</strong>: Extensible messaging protocol that can also handle VoIP</li>
+</ul>
+<p>SIP's advantages include its text-based nature, extensibility, and wide adoption in the telecommunications industry.</p>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>In this tutorial, we've covered the basics of SIP, including its architecture, message structure, and call flow. In the next tutorial, we'll dive into parsing SIP messages using the <code>rvoip-sip-core</code> library.</p>
+<h2 id="exercise"><a class="header" href="#exercise">Exercise</a></h2>
+<ol>
+<li>Identify the different components in this SIP message:</li>
+</ol>
+<pre><code>REGISTER sip:registrar.example.com SIP/2.0
+Via: SIP/2.0/UDP user-pc.example.com:5060;branch=z9hG4bKnashds7
+Max-Forwards: 70
+To: User &lt;sip:user@example.com&gt;
+From: User &lt;sip:user@example.com&gt;;tag=a73kszlfl
+Call-ID: 1j9FpLxk3uxtm8tn@user-pc.example.com
+CSeq: 1 REGISTER
+Contact: &lt;sip:user@user-pc.example.com&gt;
+Expires: 3600
+Content-Length: 0
+</code></pre>
+<ol start="2">
+<li>What would a 200 OK response to this REGISTER request look like?</li>
+</ol>
+<h2 id="references"><a class="header" href="#references">References</a></h2>
+<ul>
+<li><a href="https://datatracker.ietf.org/doc/html/rfc3261">RFC 3261: SIP: Session Initiation Protocol</a></li>
+<li><a href="https://datatracker.ietf.org/doc/html/rfc3665">RFC 3665: SIP Basic Call Flow Examples</a></li>
+<li><a href="https://datatracker.ietf.org/doc/html/rfc5359">RFC 5359: Session Initiation Protocol Service Examples</a></li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="parsing-your-first-sip-message"><a class="header" href="#parsing-your-first-sip-message">Parsing Your First SIP Message</a></h1>
+<p>In this tutorial, we'll explore how to parse SIP messages using the <code>rvoip-sip-core</code> library. We'll focus on different approaches to accessing message components, with special emphasis on the JSON path accessor approach.</p>
+<h2 id="sip-message-structure-recap"><a class="header" href="#sip-message-structure-recap">SIP Message Structure Recap</a></h2>
+<p>Before diving into parsing, let's recall the basic structure of a SIP message:</p>
+<ol>
+<li>
+<p><strong>Start Line</strong>:</p>
+<ul>
+<li>For requests: <code>METHOD URI SIP/VERSION</code></li>
+<li>For responses: <code>SIP/VERSION STATUS_CODE REASON_PHRASE</code></li>
+</ul>
+</li>
+<li>
+<p><strong>Headers</strong>: Multiple <code>Name: Value</code> pairs</p>
+</li>
+<li>
+<p><strong>Empty Line</strong>: Separates headers from body</p>
+</li>
+<li>
+<p><strong>Body</strong> (optional): Message content (e.g., SDP for media negotiation)</p>
+</li>
+</ol>
+<h2 id="parsing-approaches"><a class="header" href="#parsing-approaches">Parsing Approaches</a></h2>
+<p>The <code>rvoip-sip-core</code> library provides several ways to parse and access SIP message components:</p>
+<ol>
+<li><strong>JSON Path Accessors</strong>: Flexible string-based access to any part of the message</li>
+<li><strong>Native Methods</strong>: Type-safe, direct access to common fields</li>
+<li><strong>Header Access Traits</strong>: For working with multiple headers of the same type</li>
+</ol>
+<p>Let's explore each approach with examples.</p>
+<h2 id="parsing-a-sip-message"><a class="header" href="#parsing-a-sip-message">Parsing a SIP Message</a></h2>
+<p>To parse a SIP message, we use the <code>parse_message</code> function:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::prelude::*;
+use bytes::Bytes;
+
+// Raw SIP message as bytes
+let data = Bytes::from(message_string);
+
+// Parse the message
+match parse_message(&amp;data) {
+    Ok(message) =&gt; {
+        // Work with the parsed message
+    },
+    Err(e) =&gt; {
+        println!("Failed to parse message: {:?}", e);
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>parse_message</code> function returns a <code>Result&lt;Message&gt;</code>, where <code>Message</code> is an enum with variants for <code>Request</code> and <code>Response</code>.</p>
+<h2 id="json-path-accessors"><a class="header" href="#json-path-accessors">JSON Path Accessors</a></h2>
+<p>The JSON path accessor approach provides a flexible way to access any part of a SIP message using dot notation paths. This is especially useful for quick prototyping or when you need to access deeply nested fields.</p>
+<p>To use JSON path accessors, import the <code>SipJsonExt</code> trait:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::json::SipJsonExt;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="path-accessor-methods"><a class="header" href="#path-accessor-methods">Path Accessor Methods</a></h3>
+<p>There are two main path accessor methods:</p>
+<ol>
+<li><strong>path()</strong>: Returns <code>Option&lt;SipValue&gt;</code>, preserving the original type</li>
+<li><strong>path_str_or()</strong>: Returns <code>String</code>, with a default value if the path is not found</li>
+</ol>
+<h3 id="example-accessing-request-fields"><a class="header" href="#example-accessing-request-fields">Example: Accessing Request Fields</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>if let Message::Request(request) = message {
+    // Basic request information
+    println!("Method: {}", request.path_str_or("method", "(unknown)"));
+    println!("URI: {}", request.path_str_or("uri", "(unknown)"));
+    println!("Version: {}", request.path_str_or("version", "(unknown)"));
+    
+    // Headers
+    println!("From: {}", 
+        request.path_str_or("headers.From.display_name", "(unknown)"));
+    println!("To: {}", 
+        request.path_str_or("headers.To.display_name", "(unknown)"));
+    println!("Call-ID: {}", 
+        request.path_str_or("headers.CallId", "(none)"));
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="example-accessing-response-fields"><a class="header" href="#example-accessing-response-fields">Example: Accessing Response Fields</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>if let Message::Response(response) = message {
+    // Basic response information
+    println!("Status Code: {}", response.path_str_or("status_code", "(unknown)"));
+    println!("Reason: {}", response.path_str_or("reason", "(unknown)"));
+    
+    // Headers (same as for requests)
+    println!("From: {}", 
+        response.path_str_or("headers.From.display_name", "(unknown)"));
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="working-with-numeric-values"><a class="header" href="#working-with-numeric-values">Working with Numeric Values</a></h3>
+<p>For numeric values, you might want to preserve the type. Here's how to do it with <code>path()</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match request.path("headers.CSeq.seq") {
+    Some(val) =&gt; {
+        if let Some(num) = val.as_i64() {
+            println!("CSeq number: {} (numeric value)", num);
+            // Now you can use num in arithmetic operations
+        }
+    },
+    None =&gt; println!("CSeq number not found"),
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="native-methods"><a class="header" href="#native-methods">Native Methods</a></h2>
+<p>The library also provides native methods for accessing common fields in a type-safe way:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Basic request information
+println!("Method: {}", request.method());
+println!("URI: {}", request.uri());
+println!("Version: {}", request.version());
+
+// Common headers
+if let Some(from) = request.from() {
+    println!("From: {}", from);
+}
+
+if let Some(to) = request.to() {
+    println!("To: {}", to);
+}
+
+if let Some(via) = request.first_via() {
+    println!("Via: {}", via);
+}
+
+if let Some(call_id) = request.call_id() {
+    println!("Call-ID: {}", call_id);
+}
+
+if let Some(cseq) = request.cseq() {
+    println!("CSeq: {} {}", cseq.seq, cseq.method);
+}
+<span class="boring">}</span></code></pre></pre>
+<p>For responses, similar methods are available:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Basic response information
+println!("Status Code: {}", response.status_code());
+println!("Reason: {}", response.reason_phrase());
+println!("Version: {}", response.version());
+
+// Headers (same as for requests)
+<span class="boring">}</span></code></pre></pre>
+<h2 id="working-with-multiple-headers"><a class="header" href="#working-with-multiple-headers">Working with Multiple Headers</a></h2>
+<p>SIP messages can contain multiple headers of the same type (e.g., multiple Via headers). To access them:</p>
+<h3 id="using-path-accessors"><a class="header" href="#using-path-accessors">Using Path Accessors</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Access first Via header
+println!("First Via: {}", 
+    request.path_str_or("headers.Via[0].sent_protocol.transport", "(unknown)"));
+
+// Access second Via header
+println!("Second Via: {}", 
+    request.path_str_or("headers.Via[1].sent_protocol.transport", "(unknown)"));
+<span class="boring">}</span></code></pre></pre>
+<h3 id="using-native-methods"><a class="header" href="#using-native-methods">Using Native Methods</a></h3>
+<p>To work with multiple headers, use the <code>HeaderAccess</code> trait:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::types::headers::HeaderAccess;
+
+// Get all Via headers
+let via_headers = request.via_headers();
+for (i, via) in via_headers.iter().enumerate() {
+    println!("Via #{}: {}", i+1, via);
+}
+
+// Get all headers of a specific name
+let record_route_headers = request.headers_by_name("Record-Route");
+for (i, rr) in record_route_headers.iter().enumerate() {
+    println!("Record-Route #{}: {}", i+1, rr);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="working-with-sip-uris"><a class="header" href="#working-with-sip-uris">Working with SIP URIs</a></h2>
+<p>SIP URIs are a fundamental part of SIP messages. Here's how to parse and work with them:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use std::str::FromStr;
+
+let uri_str = "sip:user:password@example.com:5060;transport=tcp?subject=Meeting";
+match Uri::from_str(uri_str) {
+    Ok(uri) =&gt; {
+        println!("Scheme: {}", uri.scheme);
+        println!("User: {}", uri.user.unwrap_or_default());
+        
+        if let Some(password) = uri.password {
+            println!("Password: {}", password);
+        }
+        
+        println!("Host: {}", uri.host);
+        
+        if let Some(port) = uri.port {
+            println!("Port: {}", port);
+        }
+        
+        // URI parameters
+        for param in &amp;uri.parameters {
+            match param {
+                Param::Transport(transport) =&gt; println!("Transport: {}", transport),
+                Param::Ttl(ttl) =&gt; println!("TTL: {}", ttl),
+                Param::Other(name, Some(value)) =&gt; println!("{}: {}", name, value),
+                Param::Other(name, None) =&gt; println!("{}", name),
+                _ =&gt; println!("{:?}", param),
+            }
+        }
+        
+        // URI headers
+        for (name, value) in &amp;uri.headers {
+            println!("{}: {}", name, value);
+        }
+    },
+    Err(e) =&gt; {
+        println!("Failed to parse URI: {}", e);
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="working-with-message-bodies"><a class="header" href="#working-with-message-bodies">Working with Message Bodies</a></h2>
+<p>SIP messages can contain bodies, such as SDP for media negotiation:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Access Content-Type and Content-Length headers
+if let Some(header) = request.header(&amp;HeaderName::ContentType) {
+    println!("Content-Type: {}", header);
+}
+
+if let Some(header) = request.header(&amp;HeaderName::ContentLength) {
+    println!("Content-Length: {}", header);
+}
+
+// Access the body
+let body = request.body();
+println!("Body: {} bytes", body.len());
+
+// Convert body to string (if it's text-based)
+if let Ok(body_str) = std::str::from_utf8(body) {
+    println!("Body (as string):\n{}", body_str);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="when-to-use-each-approach"><a class="header" href="#when-to-use-each-approach">When to Use Each Approach</a></h2>
+<ul>
+<li>
+<p><strong>JSON Path Accessors</strong>:</p>
+<ul>
+<li>For quick prototyping</li>
+<li>When accessing deeply nested fields</li>
+<li>When working with custom or non-standard headers</li>
+<li>When you need string representations</li>
+</ul>
+</li>
+<li>
+<p><strong>Native Methods</strong>:</p>
+<ul>
+<li>For type safety</li>
+<li>For common headers and fields</li>
+<li>When you need the full power of the typed objects</li>
+</ul>
+</li>
+<li>
+<p><strong>Header Access Traits</strong>:</p>
+<ul>
+<li>When working with multiple headers of the same type</li>
+<li>For advanced header manipulation</li>
+</ul>
+</li>
+</ul>
+<h2 id="conclusion-1"><a class="header" href="#conclusion-1">Conclusion</a></h2>
+<p>In this tutorial, we've explored different ways to parse and access SIP message components using the <code>rvoip-sip-core</code> library. The JSON path accessor approach provides flexibility, while native methods offer type safety. Choose the approach that best suits your needs.</p>
+<p>In the next tutorial, we'll learn how to create SIP messages using the builder pattern.</p>
+<h2 id="exercise-1"><a class="header" href="#exercise-1">Exercise</a></h2>
+<ol>
+<li>Parse a SIP INVITE request and extract all Via headers.</li>
+<li>Parse a SIP 200 OK response and extract the To header with tag parameter.</li>
+<li>Parse a SIP URI with multiple parameters and headers.</li>
+</ol>
+<h2 id="references-1"><a class="header" href="#references-1">References</a></h2>
+<ul>
+<li><a href="https://datatracker.ietf.org/doc/html/rfc3261">RFC 3261: SIP: Session Initiation Protocol</a></li>
+<li><a href="https://datatracker.ietf.org/doc/html/rfc3986">RFC 3986: URI Generic Syntax</a></li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="creating-sip-messages-with-the-builder-pattern"><a class="header" href="#creating-sip-messages-with-the-builder-pattern">Creating SIP Messages with the Builder Pattern</a></h1>
+<p>In this tutorial, we'll explore how to create SIP messages using the builder pattern provided by the <code>rvoip-sip-core</code> library. The builder pattern offers a fluent, easy-to-use interface for constructing complex SIP messages without having to worry about the underlying details of the protocol.</p>
+<h2 id="introduction-to-the-builder-pattern"><a class="header" href="#introduction-to-the-builder-pattern">Introduction to the Builder Pattern</a></h2>
+<p>The builder pattern is a design pattern that allows for the step-by-step construction of complex objects. It's particularly useful for creating objects with many optional parameters or when the construction process involves multiple steps.</p>
+<p>In the context of SIP messages, the builder pattern helps us:</p>
+<ol>
+<li>Create well-formed SIP messages with minimal code</li>
+<li>Ensure all required headers are present</li>
+<li>Validate the message structure as we build it</li>
+<li>Provide a fluent, chainable API for better readability</li>
+</ol>
+<h2 id="sip-message-builders-in-rvoip-sip-core"><a class="header" href="#sip-message-builders-in-rvoip-sip-core">SIP Message Builders in rvoip-sip-core</a></h2>
+<p>The <code>rvoip-sip-core</code> library provides several builder classes for creating SIP messages:</p>
+<ol>
+<li><strong>SimpleRequestBuilder</strong>: For creating SIP request messages (INVITE, REGISTER, etc.)</li>
+<li><strong>ResponseBuilder</strong>: For creating SIP response messages (200 OK, 180 Ringing, etc.)</li>
+<li><strong>SdpBuilder</strong>: For creating SDP bodies for media negotiation</li>
+</ol>
+<p>Let's explore each of these builders with practical examples.</p>
+<h2 id="creating-sip-requests"><a class="header" href="#creating-sip-requests">Creating SIP Requests</a></h2>
+<h3 id="basic-request-structure"><a class="header" href="#basic-request-structure">Basic Request Structure</a></h3>
+<p>A SIP request typically contains:</p>
+<ul>
+<li>A request line with method, URI, and SIP version</li>
+<li>A set of headers (From, To, Call-ID, CSeq, Via, etc.)</li>
+<li>An optional message body</li>
+</ul>
+<h3 id="using-simplerequestbuilder"><a class="header" href="#using-simplerequestbuilder">Using SimpleRequestBuilder</a></h3>
+<p>The <code>SimpleRequestBuilder</code> provides a fluent interface for creating SIP requests:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+// Create a basic INVITE request
+let invite_request = SimpleRequestBuilder::invite("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314159)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bK776asdhds"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    .build();
+
+println!("{}", invite_request);
+<span class="boring">}</span></code></pre></pre>
+<p>This produces a well-formed SIP INVITE request:</p>
+<pre><code>INVITE sip:bob@example.com SIP/2.0
+From: Alice &lt;sip:alice@example.com&gt;;tag=1928301774
+To: Bob &lt;sip:bob@example.com&gt;
+Call-ID: a84b4c76e66710@alice-pc.example.com
+CSeq: 314159 INVITE
+Via: SIP/2.0/UDP alice-pc.example.com:5060;branch=z9hG4bK776asdhds
+Max-Forwards: 70
+Contact: &lt;sip:alice@alice-pc.example.com&gt;
+</code></pre>
+<h3 id="method-specific-builders"><a class="header" href="#method-specific-builders">Method-Specific Builders</a></h3>
+<p>The <code>SimpleRequestBuilder</code> provides convenience constructors for common SIP methods:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// REGISTER request
+let register_request = SimpleRequestBuilder::register("sip:registrar.example.com")?
+    .from("User", "sip:user@example.com", Some("a73kszlfl"))
+    .to("User", "sip:user@example.com", None)
+    .call_id("1j9FpLxk3uxtm8tn@user-pc.example.com")
+    .cseq(1)
+    .via("user-pc.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:user@user-pc.example.com", None)
+    .expires_seconds(3600)
+    .build();
+
+// BYE request
+let bye_request = SimpleRequestBuilder::bye("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", Some("8675309"))
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314160)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bKasd123"))
+    .max_forwards(70)
+    .build();
+
+// OPTIONS request
+let options_request = SimpleRequestBuilder::options("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314161)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bKasd456"))
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>Other available method-specific builders include:</p>
+<ul>
+<li><code>SimpleRequestBuilder::ack()</code></li>
+<li><code>SimpleRequestBuilder::cancel()</code></li>
+<li><code>SimpleRequestBuilder::new()</code> (for any method)</li>
+</ul>
+<h2 id="creating-sip-responses"><a class="header" href="#creating-sip-responses">Creating SIP Responses</a></h2>
+<h3 id="basic-response-structure"><a class="header" href="#basic-response-structure">Basic Response Structure</a></h3>
+<p>A SIP response typically contains:</p>
+<ul>
+<li>A status line with SIP version, status code, and reason phrase</li>
+<li>A set of headers (From, To, Call-ID, CSeq, Via, etc.)</li>
+<li>An optional message body</li>
+</ul>
+<h3 id="using-responsebuilder"><a class="header" href="#using-responsebuilder">Using ResponseBuilder</a></h3>
+<p>The <code>ResponseBuilder</code> provides a fluent interface for creating SIP responses:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::builder::CSeqBuilderExt;
+
+// Create a 200 OK response to an INVITE
+let response = ResponseBuilder::new(StatusCode::Ok, None)
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", Some("8675309"))
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq_with_method(314159, Method::Invite)
+    .via("alice-pc.example.com", "UDP", Some("z9hG4bK776asdhds"))
+    .contact("sip:bob@bob-pc.example.com", None)
+    .build();
+
+println!("{}", response);
+<span class="boring">}</span></code></pre></pre>
+<p>This produces a well-formed SIP 200 OK response:</p>
+<pre><code>SIP/2.0 200 OK
+From: Alice &lt;sip:alice@example.com&gt;;tag=1928301774
+To: Bob &lt;sip:bob@example.com&gt;;tag=8675309
+Call-ID: a84b4c76e66710@alice-pc.example.com
+CSeq: 314159 INVITE
+Via: SIP/2.0/UDP alice-pc.example.com;branch=z9hG4bK776asdhds
+Contact: &lt;sip:bob@bob-pc.example.com&gt;
+</code></pre>
+<h3 id="creating-different-response-types"><a class="header" href="#creating-different-response-types">Creating Different Response Types</a></h3>
+<p>You can create various response types by specifying different status codes:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// 100 Trying
+let trying_response = ResponseBuilder::new(StatusCode::Trying, None)
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq_with_method(314159, Method::Invite)
+    .via("alice-pc.example.com", "UDP", Some("z9hG4bK776asdhds"))
+    .build();
+
+// 180 Ringing
+let ringing_response = ResponseBuilder::new(StatusCode::Ringing, None)
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", Some("8675309"))
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq_with_method(314159, Method::Invite)
+    .via("alice-pc.example.com", "UDP", Some("z9hG4bK776asdhds"))
+    .contact("sip:bob@bob-pc.example.com", None)
+    .build();
+
+// 404 Not Found
+let not_found_response = ResponseBuilder::new(StatusCode::NotFound, None)
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", Some("8675309"))
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq_with_method(314159, Method::Invite)
+    .via("alice-pc.example.com", "UDP", Some("z9hG4bK776asdhds"))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="advanced-builder-features"><a class="header" href="#advanced-builder-features">Advanced Builder Features</a></h2>
+<h3 id="working-with-multiple-headers-1"><a class="header" href="#working-with-multiple-headers-1">Working with Multiple Headers</a></h3>
+<p>Some SIP headers, like Via, can appear multiple times in a message. The builder pattern handles this elegantly:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// INVITE request with multiple Via headers
+let multi_via_request = SimpleRequestBuilder::invite("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314159)
+    // First Via header (proxy)
+    .via("proxy1.example.com:5060", "UDP", Some("z9hG4bK87asdks7"))
+    // Second Via header (client)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="adding-custom-headers"><a class="header" href="#adding-custom-headers">Adding Custom Headers</a></h3>
+<p>You can add custom headers using the <code>header</code> method with <code>TypedHeader::Other</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// INVITE request with custom headers
+let custom_headers_request = SimpleRequestBuilder::invite("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314159)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bK776asdhds"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    // Add custom headers using TypedHeader::Other
+    .header(TypedHeader::Other(HeaderName::Other("X-Custom-Header".to_string()), HeaderValue::text("Custom Value")))
+    .header(TypedHeader::Other(HeaderName::Other("X-Priority".to_string()), HeaderValue::text("1 (Highest)")))
+    .header(TypedHeader::Other(HeaderName::Other("X-Session-ID".to_string()), HeaderValue::text("abc123")))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="working-with-complex-uris"><a class="header" href="#working-with-complex-uris">Working with Complex URIs</a></h3>
+<p>The builder can handle complex SIP URIs with parameters:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Parse a complex URI
+let complex_uri_str = "sip:bob@example.com:5060;transport=tcp;lr";
+
+// Create a request with this URI
+let complex_uri_request = SimpleRequestBuilder::new(Method::Message, complex_uri_str)?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314159)
+    .via("alice-pc.example.com:5060", "TCP", Some("z9hG4bK776asdhds"))
+    .max_forwards(70)
+    .content_type("text/plain")
+    .body("Hello, Bob! This is a SIP MESSAGE.")
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="building-sdp-messages"><a class="header" href="#building-sdp-messages">Building SDP Messages</a></h2>
+<p>SDP (Session Description Protocol) is commonly used with SIP for media negotiation. The <code>SdpBuilder</code> provides a fluent interface for creating SDP messages:</p>
+<h3 id="basic-audio-sdp"><a class="header" href="#basic-audio-sdp">Basic Audio SDP</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+
+// Create a basic audio-only SDP
+let basic_sdp = SdpBuilder::new("Audio Call")
+    .origin("-", "1234567890", "1", "IN", "IP4", "192.168.1.100")
+    .connection("IN", "IP4", "192.168.1.100")
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+println!("Basic Audio SDP:\n{}", basic_sdp);
+<span class="boring">}</span></code></pre></pre>
+<h3 id="audiovideo-sdp"><a class="header" href="#audiovideo-sdp">Audio/Video SDP</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create a more complex SDP with audio and video
+let complex_sdp = SdpBuilder::new("Audio/Video Call")
+    .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
+    .connection("IN", "IP4", "192.168.1.100")
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .media_video(51372, "RTP/AVP")
+        .formats(&amp;["96", "97"])
+        .rtpmap("96", "VP8/90000")
+        .rtpmap("97", "H264/90000")
+        .fmtp("97", "profile-level-id=42e01f;level-asymmetry-allowed=1")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="webrtc-sdp"><a class="header" href="#webrtc-sdp">WebRTC SDP</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create a WebRTC-style SDP with ICE and DTLS
+let webrtc_sdp = SdpBuilder::new("WebRTC Session")
+    .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
+    .connection("IN", "IP4", "192.168.1.100")
+    .time("0", "0")
+    .group("BUNDLE", &amp;["audio", "video"])
+    .ice_ufrag("F7gI")
+    .ice_pwd("x9cml/YzichV2+XlhiMu8g")
+    .fingerprint("sha-256", "D2:FA:0E:C3:22:59:5E:14:95:69:92:3D:13:B4:84:24")
+    .media_audio(9, "UDP/TLS/RTP/SAVPF")
+        .formats(&amp;["111", "103"])
+        .rtpmap("111", "opus/48000/2")
+        .rtpmap("103", "ISAC/16000")
+        .fmtp("111", "minptime=10;useinbandfec=1")
+        .rtcp_mux()
+        .mid("audio")
+        .direction(MediaDirection::SendRecv)
+        .setup("actpass")
+        .ice_ufrag("F7gI")
+        .ice_pwd("x9cml/YzichV2+XlhiMu8g")
+        .ice_candidate("1 1 UDP 2130706431 192.168.1.100 9 typ host")
+        .done()
+    .media_video(9, "UDP/TLS/RTP/SAVPF")
+        .formats(&amp;["96", "97"])
+        .rtpmap("96", "VP8/90000")
+        .rtpmap("97", "H264/90000")
+        .rtcp_fb("96", "nack", Some("pli"))
+        .rtcp_fb("96", "ccm", Some("fir"))
+        .rtcp_mux()
+        .mid("video")
+        .direction(MediaDirection::SendRecv)
+        .setup("actpass")
+        .ice_ufrag("F7gI")
+        .ice_pwd("x9cml/YzichV2+XlhiMu8g")
+        .ice_candidate("1 1 UDP 2130706431 192.168.1.100 9 typ host")
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="combining-sip-and-sdp"><a class="header" href="#combining-sip-and-sdp">Combining SIP and SDP</a></h2>
+<p>To include an SDP body in a SIP message, you can use the <code>body</code> method:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create an SDP offer using the builder
+let sdp_offer = SdpBuilder::new("Call Offer")
+    .origin("-", "1234567890", "1", "IN", "IP4", "192.168.1.100")
+    .connection("IN", "IP4", "192.168.1.100")
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+// Use the SDP in an INVITE request
+let invite_with_sdp = SimpleRequestBuilder::invite("sip:bob@example.com")?
+    .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("a84b4c76e66710@alice-pc.example.com")
+    .cseq(314159)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bK776asdhds"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    .content_type("application/sdp")
+    .body(sdp_offer.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="important-builder-methods"><a class="header" href="#important-builder-methods">Important Builder Methods</a></h2>
+<p>Here are some of the most commonly used builder methods:</p>
+<h3 id="request-builder-methods"><a class="header" href="#request-builder-methods">Request Builder Methods</a></h3>
+<ul>
+<li><code>from()</code>: Sets the From header</li>
+<li><code>to()</code>: Sets the To header</li>
+<li><code>call_id()</code>: Sets the Call-ID header</li>
+<li><code>cseq()</code>: Sets the CSeq header</li>
+<li><code>via()</code>: Adds a Via header</li>
+<li><code>max_forwards()</code>: Sets the Max-Forwards header</li>
+<li><code>contact()</code>: Sets the Contact header</li>
+<li><code>content_type()</code>: Sets the Content-Type header</li>
+<li><code>body()</code>: Sets the message body</li>
+<li><code>header()</code>: Adds a custom header</li>
+<li><code>build()</code>: Finalizes and returns the built message</li>
+</ul>
+<h3 id="sdp-builder-methods"><a class="header" href="#sdp-builder-methods">SDP Builder Methods</a></h3>
+<ul>
+<li><code>origin()</code>: Sets the origin (o=) field</li>
+<li><code>connection()</code>: Sets the connection (c=) field</li>
+<li><code>time()</code>: Sets the time (t=) field</li>
+<li><code>media_audio()</code>: Starts building an audio media section</li>
+<li><code>media_video()</code>: Starts building a video media section</li>
+<li><code>formats()</code>: Sets the media formats</li>
+<li><code>rtpmap()</code>: Adds an rtpmap attribute</li>
+<li><code>fmtp()</code>: Adds an fmtp attribute</li>
+<li><code>direction()</code>: Sets the media direction</li>
+<li><code>done()</code>: Completes a media section</li>
+<li><code>build()</code>: Finalizes and returns the built SDP</li>
+</ul>
+<h2 id="conclusion-2"><a class="header" href="#conclusion-2">Conclusion</a></h2>
+<p>The builder pattern provides a clean, intuitive way to create SIP and SDP messages. By chaining method calls, you can construct complex messages with minimal code and ensure that they adhere to the SIP and SDP specifications.</p>
+<p>In the next tutorial, we'll dive deeper into SIP requests, exploring the different request methods, their specific requirements, and how to handle them properly.</p>
+<h2 id="exercise-2"><a class="header" href="#exercise-2">Exercise</a></h2>
+<ol>
+<li>Create a SIP REGISTER request with multiple Contact headers and an Expires header.</li>
+<li>Create a SIP 302 Moved Temporarily response with a Contact header pointing to a new location.</li>
+<li>Create an SDP message for a video call with H.264 and VP8 codecs, then include it in a SIP INVITE request.</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-requests-in-depth"><a class="header" href="#sip-requests-in-depth">SIP Requests in Depth</a></h1>
+<p>In this tutorial, we'll dive deeper into SIP requests, exploring the different request methods, their specific requirements, and how to implement them using the <code>rvoip-sip-core</code> library. Building on what we learned about the builder pattern in the previous tutorial, we'll now focus on the semantics and usage of each request type.</p>
+<h2 id="sip-request-methods"><a class="header" href="#sip-request-methods">SIP Request Methods</a></h2>
+<p>The SIP protocol defines several request methods, each serving a specific purpose in establishing, managing, or terminating sessions. The core methods defined in <a href="https://tools.ietf.org/html/rfc3261">RFC 3261</a> are:</p>
+<ol>
+<li><strong>INVITE</strong>: Initiates a session</li>
+<li><strong>ACK</strong>: Confirms receipt of a final response to INVITE</li>
+<li><strong>BYE</strong>: Terminates a session</li>
+<li><strong>CANCEL</strong>: Cancels a pending request</li>
+<li><strong>REGISTER</strong>: Registers contact information</li>
+<li><strong>OPTIONS</strong>: Queries capabilities</li>
+</ol>
+<p>Additional methods defined in extensions include:</p>
+<ol start="7">
+<li><strong>SUBSCRIBE</strong>: Requests notification of an event</li>
+<li><strong>NOTIFY</strong>: Sends a notification of an event</li>
+<li><strong>MESSAGE</strong>: Sends an instant message</li>
+<li><strong>REFER</strong>: Asks recipient to issue a request</li>
+<li><strong>INFO</strong>: Sends mid-session information</li>
+<li><strong>UPDATE</strong>: Modifies session parameters</li>
+</ol>
+<p>Let's explore each of these methods in detail.</p>
+<h2 id="invite-requests"><a class="header" href="#invite-requests">INVITE Requests</a></h2>
+<p>The INVITE method is used to establish a session between user agents. It typically contains an SDP body describing the media capabilities of the caller.</p>
+<h3 id="detailed-invite-example"><a class="header" href="#detailed-invite-example">Detailed INVITE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8", "97"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .rtpmap("97", "iLBC/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let invite_request = SimpleRequestBuilder::invite("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Add standard but optional headers
+    .content_type("application/sdp")
+    .user_agent("SIPClient/1.0")
+    .accept("application/sdp", None)
+    .allow_methods(vec![
+        Method::Invite, 
+        Method::Ack, 
+        Method::Cancel, 
+        Method::Bye, 
+        Method::Notify, 
+        Method::Refer, 
+        Method::Options
+    ])
+    .supported_tags(vec![
+        "replaces".to_string(), 
+        "100rel".to_string()
+    ])
+    // Session-specific headers
+    .session_expires(3600, Some(Refresher::Uac))
+    .min_se(90)
+    // Use the SDP we created
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-invite-headers"><a class="header" href="#important-invite-headers">Important INVITE Headers</a></h3>
+<ul>
+<li><strong>Contact</strong>: Specifies where subsequent requests should be sent</li>
+<li><strong>Allow</strong>: Lists methods supported by the UAC</li>
+<li><strong>Supported</strong>: Lists SIP extensions supported by the UAC</li>
+<li><strong>Session-Expires</strong>: Specifies session refresh interval</li>
+<li><strong>Min-SE</strong>: Minimum session expiration</li>
+<li><strong>Content-Type</strong>: Usually "application/sdp" for INVITE requests</li>
+</ul>
+<h2 id="register-requests"><a class="header" href="#register-requests">REGISTER Requests</a></h2>
+<p>The REGISTER method is used to register contact information for a user with a SIP registrar server. It associates a SIP URI (Address-of-Record) with one or more contact URIs where the user can be reached.</p>
+<h3 id="register-with-authentication"><a class="header" href="#register-with-authentication">REGISTER with Authentication</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let register_request = SimpleRequestBuilder::register("sip:registrar.example.com")?
+    .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))
+    .to("Alice", "sip:alice@example.com", None)
+    .call_id("1j9FpLxk3uxtm8tn@alice-pc.example.com")
+    .cseq(2)
+    .via("alice-pc.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@alice-pc.example.com", None)
+    .expires_seconds(3600)
+    // Add authentication header using AuthorizationExt
+    .authorization_digest(
+        "alice@example.com",                    // username
+        "example.com",                          // realm
+        "dcd98b7102dd2f0e8b11d0f600bfb0c093",   // nonce
+        "e6f99bf42fe01fc304d3d4eee7dddd44",     // response
+        Some("0a4f113b"),                       // cnonce
+        Some("auth"),                           // qop
+        Some("00000001"),                       // nc
+        Some("REGISTER"),                       // method
+        Some("sip:registrar.example.com"),      // uri
+        Some("MD5"),                            // algorithm
+        Some("5ccc069c403ebaf9f0171e9517f40e41") // opaque
+    )
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-register-headers"><a class="header" href="#important-register-headers">Important REGISTER Headers</a></h3>
+<ul>
+<li><strong>Contact</strong>: The URI where the user can be reached</li>
+<li><strong>Expires</strong>: How long the registration should be valid (in seconds)</li>
+<li><strong>Authorization</strong>: Credentials for authentication</li>
+<li><strong>To/From</strong>: Both typically contain the Address-of-Record being registered</li>
+</ul>
+<h2 id="subscribe-and-notify-requests"><a class="header" href="#subscribe-and-notify-requests">SUBSCRIBE and NOTIFY Requests</a></h2>
+<p>The SUBSCRIBE method is used to request notification of an event or set of events at a later time. The NOTIFY method is used to inform subscribers of events.</p>
+<h3 id="subscribe-example"><a class="header" href="#subscribe-example">SUBSCRIBE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let subscribe_request = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Event package and subscription details
+    .event_type(EventType::Token("presence".to_string()))
+    .accept("application/pidf+xml", Some(1.0))
+    .expires_seconds(3600)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-subscribe-headers"><a class="header" href="#important-subscribe-headers">Important SUBSCRIBE Headers</a></h3>
+<ul>
+<li><strong>Event</strong>: Specifies the event package being subscribed to</li>
+<li><strong>Accept</strong>: Specifies acceptable body formats for NOTIFY requests</li>
+<li><strong>Expires</strong>: How long the subscription should be valid</li>
+</ul>
+<h2 id="refer-requests"><a class="header" href="#refer-requests">REFER Requests</a></h2>
+<p>The REFER method is used to ask the recipient to issue a request. It's commonly used for call transfer scenarios.</p>
+<h3 id="refer-example"><a class="header" href="#refer-example">REFER Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let refer_request = SimpleRequestBuilder::new(Method::Refer, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(101)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    // Use ReferToExt trait's refer_to_uri method
+    .refer_to_uri("sip:carol@chicago.example.com")
+    // Use ReferredByExt trait's referred_by_str method
+    .referred_by_str("&lt;sip:alice@atlanta.example.com&gt;")?
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-refer-headers"><a class="header" href="#important-refer-headers">Important REFER Headers</a></h3>
+<ul>
+<li><strong>Refer-To</strong>: Specifies the URI that the recipient should send a request to</li>
+<li><strong>Referred-By</strong>: Indicates the identity of the referring party</li>
+</ul>
+<h2 id="message-requests"><a class="header" href="#message-requests">MESSAGE Requests</a></h2>
+<p>The MESSAGE method is used for instant messaging functionality within SIP. It carries the message content directly in the request body.</p>
+<h3 id="message-example"><a class="header" href="#message-example">MESSAGE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let message_request = SimpleRequestBuilder::new(Method::Message, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .content_type("text/plain")
+    .body("Hello Bob, this is Alice. Can we meet at 2pm today?")
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-message-headers"><a class="header" href="#important-message-headers">Important MESSAGE Headers</a></h3>
+<ul>
+<li><strong>Content-Type</strong>: Specifies the format of the message body (often "text/plain")</li>
+<li><strong>Content-Length</strong>: Size of the message body in bytes</li>
+</ul>
+<h2 id="update-requests"><a class="header" href="#update-requests">UPDATE Requests</a></h2>
+<p>The UPDATE method is used to modify the state of a session without changing the state of the dialog. It's often used for session timer refreshes or to update media parameters.</p>
+<h3 id="update-example"><a class="header" href="#update-example">UPDATE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP for the update using SdpBuilder
+let sdp = SdpBuilder::new("Call with Bob")
+    .origin("alice", "2890844526", "2890844527", "IN", "IP4", "atlanta.example.com")
+    .connection("IN", "IP4", "atlanta.example.com") 
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let update_request = SimpleRequestBuilder::new(Method::Update, "sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(2)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .contact("sip:alice@atlanta.example.com", None)
+    .content_type("application/sdp")
+    // Session timer headers
+    .session_expires(1800, Some(Refresher::Uac))
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-update-headers"><a class="header" href="#important-update-headers">Important UPDATE Headers</a></h3>
+<ul>
+<li><strong>Session-Expires</strong>: Updates the session refresh interval</li>
+<li><strong>Content-Type</strong>: Usually "application/sdp" when updating media parameters</li>
+</ul>
+<h2 id="options-requests"><a class="header" href="#options-requests">OPTIONS Requests</a></h2>
+<p>The OPTIONS method is used to query the capabilities of a server or another user agent. The response typically includes Allow, Accept, and other capability-related headers.</p>
+<h3 id="options-example"><a class="header" href="#options-example">OPTIONS Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let options_request = SimpleRequestBuilder::options("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .max_forwards(70)
+    .accept("application/sdp", None)
+    .accept_language("en", Some(1.0))
+    .accept_encoding("identity", Some(1.0))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-options-headers"><a class="header" href="#important-options-headers">Important OPTIONS Headers</a></h3>
+<ul>
+<li><strong>Accept</strong>: Specifies acceptable body formats</li>
+<li><strong>Accept-Language</strong>: Specifies acceptable languages</li>
+<li><strong>Accept-Encoding</strong>: Specifies acceptable encodings</li>
+</ul>
+<h2 id="ack-requests"><a class="header" href="#ack-requests">ACK Requests</a></h2>
+<p>The ACK method is used to acknowledge receipt of a final response to an INVITE request. It's part of the three-way handshake for establishing a session.</p>
+<h3 id="ack-example"><a class="header" href="#ack-example">ACK Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let ack_request = SimpleRequestBuilder::ack("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)  // Must match the INVITE CSeq number
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnewbranch"))
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-ack-headers"><a class="header" href="#important-ack-headers">Important ACK Headers</a></h3>
+<ul>
+<li><strong>CSeq</strong>: Must match the CSeq number of the INVITE being acknowledged</li>
+<li><strong>Via</strong>: Typically contains a new branch parameter</li>
+</ul>
+<h2 id="cancel-requests"><a class="header" href="#cancel-requests">CANCEL Requests</a></h2>
+<p>The CANCEL method is used to cancel a pending request. It's commonly used to cancel an INVITE that hasn't received a final response yet.</p>
+<h3 id="cancel-example"><a class="header" href="#cancel-example">CANCEL Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let cancel_request = SimpleRequestBuilder::cancel("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", None)
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159)  // Must match the request being canceled
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bK776asdhds"))  // Must match the request being canceled
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="important-cancel-headers"><a class="header" href="#important-cancel-headers">Important CANCEL Headers</a></h3>
+<ul>
+<li><strong>Call-ID</strong>: Must match the Call-ID of the request being canceled</li>
+<li><strong>To/From/CSeq</strong>: Must match the request being canceled</li>
+<li><strong>Via</strong>: Must match the topmost Via header of the request being canceled</li>
+</ul>
+<h2 id="bye-requests"><a class="header" href="#bye-requests">BYE Requests</a></h2>
+<p>The BYE method is used to terminate an established session.</p>
+<h3 id="bye-example"><a class="header" href="#bye-example">BYE Example</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let bye_request = SimpleRequestBuilder::bye("sip:bob@biloxi.example.com")?
+    .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .to("Bob", "sip:bob@biloxi.example.com", Some("314159"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(2)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds8"))
+    .max_forwards(70)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="common-request-headers"><a class="header" href="#common-request-headers">Common Request Headers</a></h2>
+<p>All SIP requests share a common set of headers:</p>
+<ol>
+<li><strong>From</strong>: Identifies the initiator of the request</li>
+<li><strong>To</strong>: Identifies the intended recipient of the request</li>
+<li><strong>Call-ID</strong>: Unique identifier for the call</li>
+<li><strong>CSeq</strong>: Command sequence number</li>
+<li><strong>Via</strong>: Indicates the path taken by the request</li>
+<li><strong>Max-Forwards</strong>: Limits the number of hops to the destination</li>
+</ol>
+<p>Additional common headers include:</p>
+<ol start="7">
+<li><strong>Contact</strong>: Where subsequent requests should be sent</li>
+<li><strong>Content-Type</strong>: Format of the message body</li>
+<li><strong>Content-Length</strong>: Size of the message body in bytes</li>
+<li><strong>User-Agent</strong>: Information about the client software</li>
+</ol>
+<h2 id="request-uris"><a class="header" href="#request-uris">Request URIs</a></h2>
+<p>The Request-URI is a SIP or SIPS URI that identifies the resource to which the request is being addressed. It appears in the start-line of the request and determines where the request is sent.</p>
+<pre><code>INVITE sip:bob@biloxi.example.com SIP/2.0
+</code></pre>
+<p>Here, <code>sip:bob@biloxi.example.com</code> is the Request-URI.</p>
+<p>The Request-URI can contain various parameters:</p>
+<pre><code>sip:bob@biloxi.example.com:5060;transport=tcp;lr
+</code></pre>
+<p>This URI specifies:</p>
+<ul>
+<li>User: bob</li>
+<li>Domain: biloxi.example.com</li>
+<li>Port: 5060</li>
+<li>Transport: TCP</li>
+<li>Parameter: lr (loose routing)</li>
+</ul>
+<h2 id="conclusion-3"><a class="header" href="#conclusion-3">Conclusion</a></h2>
+<p>SIP requests are the building blocks of SIP-based communication. Each request type serves a specific purpose in the lifecycle of a SIP session, from establishment to termination. The <code>rvoip-sip-core</code> library provides a flexible and intuitive builder pattern for creating these requests with all their required and optional headers.</p>
+<p>In the next tutorial, we'll explore SIP responses in depth, learning how to create and handle the various response types that correspond to these requests.</p>
+<h2 id="exercises"><a class="header" href="#exercises">Exercises</a></h2>
+<ol>
+<li>Create an INVITE request with a custom SDP body that offers both audio and video media.</li>
+<li>Create a REGISTER request for multiple contacts with different expiration times.</li>
+<li>Create a REFER request for attended transfer (with a Replaces header).</li>
+<li>Create a MESSAGE request with a multipart/mixed body containing both text and an image.</li>
+<li>Create an OPTIONS request that queries for specific capabilities (e.g., support for specific SIP extensions).</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-responses-in-depth"><a class="header" href="#sip-responses-in-depth">SIP Responses in Depth</a></h1>
+<p>In this tutorial, we'll explore SIP responses - the messages sent by servers and user agents in reply to SIP requests. Building on what we've learned about the builder pattern, we'll look at the structure, categories, and common types of SIP responses, and implement them using the <code>rvoip-sip-core</code> library.</p>
+<h2 id="sip-response-structure-1"><a class="header" href="#sip-response-structure-1">SIP Response Structure</a></h2>
+<p>A SIP response consists of:</p>
+<ol>
+<li><strong>Status Line</strong>: Contains the SIP version, status code, and a reason phrase</li>
+<li><strong>Headers</strong>: Various headers providing information about the response</li>
+<li><strong>Message Body</strong> (optional): Contains additional data like SDP for media negotiation</li>
+</ol>
+<p>The status line format is:</p>
+<pre><code>SIP/2.0 [Status Code] [Reason Phrase]
+</code></pre>
+<p>For example:</p>
+<pre><code>SIP/2.0 200 OK
+</code></pre>
+<h2 id="response-categories"><a class="header" href="#response-categories">Response Categories</a></h2>
+<p>SIP responses are grouped into six categories based on their status codes:</p>
+<div class="table-wrapper"><table><thead><tr><th>Category</th><th>Range</th><th>Description</th></tr></thead><tbody>
+<tr><td>Provisional</td><td>1xx</td><td>Request received and being processed</td></tr>
+<tr><td>Success</td><td>2xx</td><td>Request was successfully received, understood, and accepted</td></tr>
+<tr><td>Redirection</td><td>3xx</td><td>Further action needs to be taken to complete the request</td></tr>
+<tr><td>Client Error</td><td>4xx</td><td>The request contains bad syntax or cannot be fulfilled at this server</td></tr>
+<tr><td>Server Error</td><td>5xx</td><td>The server failed to fulfill a valid request</td></tr>
+<tr><td>Global Failure</td><td>6xx</td><td>The request cannot be fulfilled at any server</td></tr>
+</tbody></table>
+</div>
+<p>Let's examine each category and how to create responses using the <code>ResponseBuilder</code> in <code>rvoip-sip-core</code>.</p>
+<h2 id="1xx---provisional-responses"><a class="header" href="#1xx---provisional-responses">1xx - Provisional Responses</a></h2>
+<p>Provisional responses indicate that a request has been received and is being processed, but no final determination has been made. Common 1xx responses include:</p>
+<ul>
+<li><strong>100 Trying</strong>: The request has been received and is being processed</li>
+<li><strong>180 Ringing</strong>: The destination user agent has received the INVITE and is alerting the user</li>
+<li><strong>183 Session Progress</strong>: Used to convey information about the progress of the call that's not otherwise classified</li>
+</ul>
+<h3 id="100-trying-response"><a class="header" href="#100-trying-response">100 Trying Response</a></h3>
+<p>The 100 Trying response is typically sent by a proxy server to indicate that it has received the request and is working on routing it. It stops retransmissions of the request and is not forwarded to other servers.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Trying, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>Note that a 100 Trying response doesn't include a Contact header, as it's typically generated by intermediaries.</p>
+<h3 id="180-ringing-response"><a class="header" href="#180-ringing-response">180 Ringing Response</a></h3>
+<p>The 180 Ringing response indicates that the destination user agent has received the INVITE and is alerting the user (e.g., playing a ringtone).</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Ringing, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:bob@biloxi.example.com", None)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="183-session-progress-with-early-media"><a class="header" href="#183-session-progress-with-early-media">183 Session Progress with Early Media</a></h3>
+<p>The 183 Session Progress response is often used to send early media (like ringback tones or announcements) before the call is answered. It typically includes an SDP body.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP for early media
+let sdp = SdpBuilder::new("Session Progress")
+    .origin("bob", "2890844527", "2890844527", "IN", "IP4", "biloxi.example.com")
+    .connection("IN", "IP4", "biloxi.example.com") 
+    .time("0", "0")
+    .media_audio(49172, "RTP/AVP")
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendOnly) // One-way early media
+        .done()
+    .build()?;
+
+let require = Require::with_tag("100rel");
+
+let response = ResponseBuilder::new(StatusCode::SessionProgress, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:bob@biloxi.example.com", None)
+    .content_type("application/sdp")
+    .header(TypedHeader::Require(require)) // Requires reliable provisional responses
+    .rseq(1) // RSeq header for reliability
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>100rel</code> extension (RFC 3262) provides reliability for provisional responses, which is important when they contain SDP. The RSeq header is used in conjunction with PRACK requests to confirm receipt of reliable provisional responses.</p>
+<h2 id="2xx---success-responses"><a class="header" href="#2xx---success-responses">2xx - Success Responses</a></h2>
+<p>Success responses indicate that a request was successfully received, understood, and accepted. The most common 2xx response is 200 OK.</p>
+<h3 id="200-ok-response-to-invite"><a class="header" href="#200-ok-response-to-invite">200 OK Response to INVITE</a></h3>
+<p>A 200 OK response to an INVITE includes an SDP answer and establishes a session.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create SDP answer
+let sdp = SdpBuilder::new("Call with Alice")
+    .origin("bob", "2890844527", "2890844527", "IN", "IP4", "biloxi.example.com")
+    .connection("IN", "IP4", "biloxi.example.com") 
+    .time("0", "0")
+    .media_audio(49172, "RTP/AVP")
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+
+let response = ResponseBuilder::new(StatusCode::Ok, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:bob@biloxi.example.com", None)
+    .content_type("application/sdp")
+    .allow_methods(vec![
+        Method::Invite,
+        Method::Ack,
+        Method::Cancel,
+        Method::Bye,
+        Method::Refer,
+        Method::Notify,
+        Method::Options
+    ])
+    .supported_tags(vec![
+        "replaces".to_string(),
+        "100rel".to_string()
+    ])
+    .session_expires(3600, Some(Refresher::Uas))
+    .body(sdp.to_string())
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>Important headers for 200 OK responses to INVITE:</p>
+<ul>
+<li><strong>Contact</strong>: Where subsequent requests in the dialog should be sent</li>
+<li><strong>Allow</strong>: Lists methods supported by the UA</li>
+<li><strong>Supported</strong>: Lists SIP extensions supported by the UA</li>
+<li><strong>Session-Expires</strong>: Session refresh interval and refresher role</li>
+</ul>
+<h3 id="202-accepted-response"><a class="header" href="#202-accepted-response">202 Accepted Response</a></h3>
+<p>The 202 Accepted response is typically used for asynchronous operations like SUBSCRIBE requests.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Accepted, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("7a9f2f899ndf98f7a8fd9f890as87f9a")
+    .cseq(1, Method::Subscribe)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:bob@biloxi.example.com", None)
+    .expires_seconds(3600) // How long the subscription is accepted for
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>For SUBSCRIBE requests, the Expires header indicates how long the subscription is valid.</p>
+<h2 id="3xx---redirection-responses"><a class="header" href="#3xx---redirection-responses">3xx - Redirection Responses</a></h2>
+<p>Redirection responses indicate that further action needs to be taken to complete the request. They typically contain a Contact header with an alternative address.</p>
+<h3 id="302-moved-temporarily-response"><a class="header" href="#302-moved-temporarily-response">302 Moved Temporarily Response</a></h3>
+<p>The 302 Moved Temporarily response indicates that the user is temporarily available at a different address.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::MovedTemporarily, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:bob@chicago.example.com", None) // New contact address
+    .expires_seconds(1800) // For how long this redirection is valid
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>The Contact header in a redirection response contains the new address where the request should be directed. The Expires header (if present) indicates how long the redirection is valid.</p>
+<h3 id="305-use-proxy-response"><a class="header" href="#305-use-proxy-response">305 Use Proxy Response</a></h3>
+<p>The 305 Use Proxy response indicates that the request should be sent through a specific proxy.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::UseProxy, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .contact("sip:proxy.biloxi.example.com", None) // Proxy address
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="4xx---client-error-responses"><a class="header" href="#4xx---client-error-responses">4xx - Client Error Responses</a></h2>
+<p>Client error responses indicate that the request contains bad syntax or cannot be fulfilled at the server. The client should modify the request before retrying.</p>
+<h3 id="400-bad-request-response"><a class="header" href="#400-bad-request-response">400 Bad Request Response</a></h3>
+<p>The 400 Bad Request response indicates that the request was malformed or contained an invalid parameter.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::BadRequest, Some("Missing Required Header"))
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>Note the optional reason phrase parameter in the constructor, which allows you to provide a specific reason for the error.</p>
+<h3 id="401-unauthorized-response"><a class="header" href="#401-unauthorized-response">401 Unauthorized Response</a></h3>
+<p>The 401 Unauthorized response indicates that authentication credentials are required. It includes a WWW-Authenticate header with challenge information.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Unauthorized, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .www_authenticate_digest(
+        "biloxi.example.com",                  // realm
+        "dcd98b7102dd2f0e8b11d0f600bfb0c093",  // nonce
+        Some("auth"),                          // qop
+        Some("MD5"),                           // algorithm
+        Some(vec!["5ccc069c403ebaf9f0171e9517f40e41"]), // opaque
+        None,                                  // stale
+        None                                   // domain
+    )
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>The WWW-Authenticate header provides parameters for the client to use in formulating an authentication response.</p>
+<h3 id="403-forbidden-response"><a class="header" href="#403-forbidden-response">403 Forbidden Response</a></h3>
+<p>The 403 Forbidden response indicates that the server understood the request but refuses to fulfill it.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Forbidden, Some("User blocked"))
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="404-not-found-response"><a class="header" href="#404-not-found-response">404 Not Found Response</a></h3>
+<p>The 404 Not Found response indicates that the server has definitive information that the user does not exist at the domain specified in the Request-URI.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::NotFound, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="406-not-acceptable-response"><a class="header" href="#406-not-acceptable-response">406 Not Acceptable Response</a></h3>
+<p>The 406 Not Acceptable response indicates that the server cannot generate a response that matches the Accept header criteria in the request.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::NotAcceptable, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .accept("application/sdp", None) // Only accept SDP
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="486-busy-here-response"><a class="header" href="#486-busy-here-response">486 Busy Here Response</a></h3>
+<p>The 486 Busy Here response indicates that the user is currently busy and cannot take the call.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::BusyHere, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .retry_after_with_comment(60, "User in another call") // Try again in 1 minute
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>The Retry-After header suggests when the client should try the request again.</p>
+<h2 id="5xx---server-error-responses"><a class="header" href="#5xx---server-error-responses">5xx - Server Error Responses</a></h2>
+<p>Server error responses indicate that the server failed to fulfill an apparently valid request.</p>
+<h3 id="500-server-internal-error-response"><a class="header" href="#500-server-internal-error-response">500 Server Internal Error Response</a></h3>
+<p>The 500 Server Internal Error response indicates that the server encountered an unexpected condition that prevented it from fulfilling the request.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::ServerInternalError, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .retry_after_duration(300, 0, Some("Server maintenance")) // Retry after 5 minutes
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h3 id="503-service-unavailable-response"><a class="header" href="#503-service-unavailable-response">503 Service Unavailable Response</a></h3>
+<p>The 503 Service Unavailable response indicates that the server is temporarily unable to handle the request due to overload or maintenance.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .retry_after(120) // Retry after 2 minutes
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="6xx---global-failure-responses"><a class="header" href="#6xx---global-failure-responses">6xx - Global Failure Responses</a></h2>
+<p>Global failure responses indicate that the request cannot be fulfilled at any server.</p>
+<h3 id="603-decline-response"><a class="header" href="#603-decline-response">603 Decline Response</a></h3>
+<p>The 603 Decline response indicates that the user explicitly does not wish to participate in the call.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let response = ResponseBuilder::new(StatusCode::Decline, None)
+    .from("Bob", "sip:bob@biloxi.example.com", None)
+    .to("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+    .call_id("3848276298220188511@atlanta.example.com")
+    .cseq(314159, Method::Invite)
+    .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+    .retry_after_with_comment(3600, "User unavailable") // Try again in 1 hour
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="common-response-headers"><a class="header" href="#common-response-headers">Common Response Headers</a></h2>
+<p>All SIP responses share a common set of headers:</p>
+<ol>
+<li><strong>From</strong>: Identifies the initiator of the request</li>
+<li><strong>To</strong>: Identifies the intended recipient of the request</li>
+<li><strong>Call-ID</strong>: Unique identifier for the call</li>
+<li><strong>CSeq</strong>: Command sequence number and method</li>
+<li><strong>Via</strong>: Indicates the path taken by the request</li>
+</ol>
+<p>Additional common headers include:</p>
+<ol start="6">
+<li><strong>Contact</strong>: Where subsequent requests should be sent</li>
+<li><strong>Content-Type</strong>: Format of the message body</li>
+<li><strong>Content-Length</strong>: Size of the message body in bytes</li>
+<li><strong>Server</strong>: Information about the server software</li>
+</ol>
+<h2 id="creating-responses-from-requests"><a class="header" href="#creating-responses-from-requests">Creating Responses from Requests</a></h2>
+<p>In real-world applications, responses are often created based on incoming requests. The <code>ResponseBuilder</code> provides convenience methods to create responses directly from requests:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let incoming_request = /* ... */;
+
+// Create a 200 OK response
+let ok_response = ResponseBuilder::response_from_request(incoming_request, StatusCode::Ok, None)
+    .contact("sip:bob@biloxi.example.com", None)
+    .build();
+
+// Create a 404 Not Found response
+let not_found = ResponseBuilder::response_from_request(incoming_request, StatusCode::NotFound, None)
+    .build();
+<span class="boring">}</span></code></pre></pre>
+<p>This approach ensures that all necessary headers from the request are properly reflected in the response.</p>
+<h2 id="response-processing"><a class="header" href="#response-processing">Response Processing</a></h2>
+<p>When processing a response, a client should:</p>
+<ol>
+<li>Examine the status code to determine the outcome of the request</li>
+<li>For 3xx responses, extract the Contact header to determine the new target</li>
+<li>For 401/407 responses, extract authentication details to formulate a new request</li>
+<li>For 2xx responses to INVITE, extract the SDP to establish the media session</li>
+</ol>
+<h2 id="conclusion-4"><a class="header" href="#conclusion-4">Conclusion</a></h2>
+<p>SIP responses are the other half of the request-response protocol model. Understanding how to generate and interpret different types of responses is essential for implementing SIP applications.</p>
+<p>In the next tutorial, we'll move on to explore Session Description Protocol (SDP), which is a key component in establishing media sessions through SIP.</p>
+<h2 id="exercises-1"><a class="header" href="#exercises-1">Exercises</a></h2>
+<ol>
+<li>Create a 180 Ringing response with a require header specifying "100rel" for reliable provisional responses.</li>
+<li>Create a 407 Proxy Authentication Required response with appropriate challenge headers.</li>
+<li>Create a 302 Moved Temporarily response with multiple Contact headers for load balancing.</li>
+<li>Create a 420 Bad Extension response that indicates which extensions were not understood.</li>
+<li>Create a 200 OK response to an OPTIONS request that includes comprehensive capability information.</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="introduction-to-sdp"><a class="header" href="#introduction-to-sdp">Introduction to SDP</a></h1>
+<p>Session Description Protocol (SDP) is a format for describing multimedia communication sessions for the purposes of session announcement, session invitation, and other forms of multimedia session establishment. SDP is defined in <a href="https://datatracker.ietf.org/doc/html/rfc8866">RFC 8866</a>.</p>
+<h2 id="purpose-of-sdp"><a class="header" href="#purpose-of-sdp">Purpose of SDP</a></h2>
+<p>In SIP, SDP is used to describe the parameters of the media session being established. It enables the communicating parties to:</p>
+<ol>
+<li>Specify which media types will be used (audio, video, etc.)</li>
+<li>Define the codecs and formats for each media type</li>
+<li>Indicate network transport addresses for each media stream</li>
+<li>Negotiate session parameters like bandwidth, encryption, and other attributes</li>
+</ol>
+<p>SDP doesn't transport any media itself; it merely describes the media session for the endpoints to establish direct media communication.</p>
+<h2 id="sdp-message-structure"><a class="header" href="#sdp-message-structure">SDP Message Structure</a></h2>
+<p>SDP messages are plain text and consist of a series of lines, with each line having a type (single character), equals sign, and value:</p>
+<pre><code>&lt;type&gt;=&lt;value&gt;
+</code></pre>
+<p>An SDP message has three main sections:</p>
+<ol>
+<li><strong>Session-level information</strong> (applies to the entire session)</li>
+<li><strong>Time description</strong> (when the session is active)</li>
+<li><strong>Media descriptions</strong> (one or more, each describing a media stream)</li>
+</ol>
+<h3 id="session-level-fields"><a class="header" href="#session-level-fields">Session-level Fields</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>v=</td><td>Protocol version (always 0)</td><td>Yes</td></tr>
+<tr><td>o=</td><td>Origin (username, session ID, version, network type, address type, address)</td><td>Yes</td></tr>
+<tr><td>s=</td><td>Session name</td><td>Yes</td></tr>
+<tr><td>i=</td><td>Session information</td><td>No</td></tr>
+<tr><td>u=</td><td>URI of description</td><td>No</td></tr>
+<tr><td>e=</td><td>Email address</td><td>No</td></tr>
+<tr><td>p=</td><td>Phone number</td><td>No</td></tr>
+<tr><td>c=</td><td>Connection information (network type, address type, address)</td><td>No*</td></tr>
+<tr><td>b=</td><td>Bandwidth information</td><td>No</td></tr>
+<tr><td>z=</td><td>Time zone adjustments</td><td>No</td></tr>
+<tr><td>k=</td><td>Encryption key</td><td>No</td></tr>
+<tr><td>a=</td><td>Session attributes</td><td>No</td></tr>
+</tbody></table>
+</div>
+<p>*Connection information is required either at session-level or in each media description</p>
+<h3 id="time-description"><a class="header" href="#time-description">Time Description</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>t=</td><td>Time the session is active (start, stop)</td><td>Yes</td></tr>
+<tr><td>r=</td><td>Repeat times</td><td>No</td></tr>
+</tbody></table>
+</div>
+<h3 id="media-description"><a class="header" href="#media-description">Media Description</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Required</th></tr></thead><tbody>
+<tr><td>m=</td><td>Media name, port, protocol, and format descriptions</td><td>Yes</td></tr>
+<tr><td>i=</td><td>Media title</td><td>No</td></tr>
+<tr><td>c=</td><td>Connection information</td><td>No*</td></tr>
+<tr><td>b=</td><td>Bandwidth information</td><td>No</td></tr>
+<tr><td>k=</td><td>Encryption key</td><td>No</td></tr>
+<tr><td>a=</td><td>Media attributes</td><td>No</td></tr>
+</tbody></table>
+</div>
+<p>*Connection information is required if not specified at session-level</p>
+<h2 id="common-examples-in-sip-signaling"><a class="header" href="#common-examples-in-sip-signaling">Common Examples in SIP Signaling</a></h2>
+<h3 id="audio-only-call-offer"><a class="header" href="#audio-only-call-offer">Audio-only Call Offer</a></h3>
+<pre><code>v=0
+o=alice 2890844526 2890844526 IN IP4 alice.example.com
+s=Audio Call
+c=IN IP4 alice.example.com
+t=0 0
+m=audio 49170 RTP/AVP 0 8 96
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:96 telephone-event/8000
+a=sendrecv
+</code></pre>
+<p>This SDP describes:</p>
+<ul>
+<li>A session originated by "alice" from alice.example.com</li>
+<li>A single audio stream on port 49170</li>
+<li>Three supported codecs: PCMU (G.711 μ-law), PCMA (G.711 A-law), and telephone-event (for DTMF)</li>
+<li>Bidirectional communication (sendrecv)</li>
+</ul>
+<h3 id="audio-and-video-call-offer"><a class="header" href="#audio-and-video-call-offer">Audio and Video Call Offer</a></h3>
+<pre><code>v=0
+o=bob 2890844527 2890844527 IN IP4 bob.example.com
+s=Audio/Video Call
+c=IN IP4 bob.example.com
+t=0 0
+m=audio 49170 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+m=video 51372 RTP/AVP 97
+a=rtpmap:97 H264/90000
+a=sendrecv
+</code></pre>
+<p>This SDP describes:</p>
+<ul>
+<li>A session with both audio and video streams</li>
+<li>Audio on port 49170 with PCMU and PCMA codecs</li>
+<li>Video on port 51372 using H.264 codec</li>
+<li>Both streams are bidirectional</li>
+</ul>
+<h2 id="sdp-in-sip-messages"><a class="header" href="#sdp-in-sip-messages">SDP in SIP Messages</a></h2>
+<p>SDP is typically carried in SIP messages within the body of:</p>
+<ul>
+<li>INVITE requests (SDP offer)</li>
+<li>200 OK responses to INVITEs (SDP answer)</li>
+<li>ACK requests (in some scenarios)</li>
+<li>UPDATE or re-INVITE requests (for session modifications)</li>
+</ul>
+<p>The Content-Type header in the SIP message indicates the presence of SDP: <code>Content-Type: application/sdp</code></p>
+<h2 id="sdp-offeranswer-model"><a class="header" href="#sdp-offeranswer-model">SDP Offer/Answer Model</a></h2>
+<p>SIP uses the SDP Offer/Answer model defined in <a href="https://datatracker.ietf.org/doc/html/rfc3264">RFC 3264</a>. The basic process is:</p>
+<ol>
+<li><strong>Offer</strong>: The initiator sends an SDP describing the media streams they wish to establish</li>
+<li><strong>Answer</strong>: The recipient responds with an SDP describing the media streams they are willing to accept</li>
+</ol>
+<p>This negotiation process allows both parties to agree on compatible media parameters.</p>
+<h2 id="sdp-attributes"><a class="header" href="#sdp-attributes">SDP Attributes</a></h2>
+<p>Attributes (a= lines) are extremely flexible and can appear at either session-level or media-level. Some common attributes in SIP/SDP include:</p>
+<ul>
+<li><strong>a=sendrecv, a=sendonly, a=recvonly, a=inactive</strong>: Media direction</li>
+<li><strong>a=rtpmap</strong>: RTP payload type mapping to encoding name, clock rate, and parameters</li>
+<li><strong>a=fmtp</strong>: Format parameters for a codec</li>
+<li><strong>a=ptime</strong>: Preferred packet duration</li>
+<li><strong>a=maxptime</strong>: Maximum packet duration</li>
+<li><strong>a=rtcp</strong>: RTCP port information</li>
+<li><strong>a=setup</strong>: Role in DTLS setup (used with WebRTC)</li>
+<li><strong>a=fingerprint</strong>: DTLS fingerprint (used with WebRTC)</li>
+<li><strong>a=ice-ufrag, a=ice-pwd</strong>: ICE credentials (used with WebRTC)</li>
+</ul>
+<h2 id="building-sdp-with-rvoip-sip-core"><a class="header" href="#building-sdp-with-rvoip-sip-core">Building SDP with rvoip-sip-core</a></h2>
+<p>Our library provides a convenient builder pattern for creating SDP messages. Here's a simple example:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+
+let sdp = SdpBuilder::new("Audio Call")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+    .connection("IN", "IP4", "alice.example.com")
+    .time("0", "0")
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["0", "8", "96"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .rtpmap("96", "telephone-event/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>In the next tutorial, we'll dive deeper into creating more complex SDP messages using our builder API and handling SDP parsing.</p>
+<h2 id="conclusion-5"><a class="header" href="#conclusion-5">Conclusion</a></h2>
+<p>SDP is a critical component in SIP-based communication, responsible for describing the media sessions being established. Understanding SDP is essential for implementing any SIP-based multimedia application.</p>
+<p>The text-based format makes SDP easy to debug, but it can also be complex due to the many optional fields and attributes available. Our library provides a builder pattern to simplify SDP creation and ensure validity of the resulting messages.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="creating-sdp-messages"><a class="header" href="#creating-sdp-messages">Creating SDP Messages</a></h1>
+<p>In the previous tutorial, we introduced SDP and its structure. Now, we'll dive deeper into creating more complex SDP messages using the <code>rvoip-sip-core</code> library's builder pattern.</p>
+<h2 id="advanced-sdp-creation"><a class="header" href="#advanced-sdp-creation">Advanced SDP Creation</a></h2>
+<p>The SdpBuilder API provides a fluent interface for creating SDP messages of varying complexity. In this tutorial, we'll explore:</p>
+<ol>
+<li>Creating sophisticated multi-stream SDP messages</li>
+<li>Setting up codec-specific parameters</li>
+<li>Working with bandwidth and quality of service (QoS) parameters</li>
+<li>Advanced attributes for WebRTC applications</li>
+<li>Creating SDP answers based on offers</li>
+</ol>
+<h2 id="building-multi-stream-sessions"><a class="header" href="#building-multi-stream-sessions">Building Multi-Stream Sessions</a></h2>
+<p>Real-world SIP applications often need to establish sessions with multiple media streams, each with different characteristics. Let's look at how to create an SDP with multiple audio and video streams:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let sdp = SdpBuilder::new("Multi-Stream Session")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+    .connection("IN", "IP4", "alice.example.com")
+    .time("0", "0")
+    // Primary audio stream (high quality)
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["109", "0", "8"])
+        .rtpmap("109", "opus/48000/2")
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .fmtp("109", "maxplaybackrate=48000;stereo=1;maxaveragebitrate=256000")
+        .ptime(20)
+        .direction(MediaDirection::SendRecv)
+        .done()
+    // Secondary audio stream (backup narrowband)
+    .media_audio(49172, "RTP/AVP")
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    // Main video stream (HD)
+    .media_video(49174, "RTP/AVP")
+        .formats(&amp;["97", "98"])
+        .rtpmap("97", "H264/90000")
+        .rtpmap("98", "VP8/90000")
+        .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    // Secondary video stream (SD)
+    .media_video(49176, "RTP/AVP")
+        .formats(&amp;["97"])
+        .rtpmap("97", "H264/90000")
+        .fmtp("97", "profile-level-id=42e00c;packetization-mode=1")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>This example creates an SDP with four media streams: two audio and two video. Each has different characteristics:</p>
+<ul>
+<li>The primary audio stream offers Opus (high quality) with G.711 fallback</li>
+<li>The secondary audio stream only offers G.711 μ-law</li>
+<li>The main video stream offers both H.264 and VP8 in HD</li>
+<li>The secondary video stream offers H.264 in SD quality</li>
+</ul>
+<h2 id="working-with-codec-parameters"><a class="header" href="#working-with-codec-parameters">Working with Codec Parameters</a></h2>
+<p>The format parameters (fmtp) attribute allows for detailed configuration of codecs. Each codec has its own specific parameters:</p>
+<h3 id="opus-audio-parameters"><a class="header" href="#opus-audio-parameters">Opus Audio Parameters</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>.fmtp("109", "maxplaybackrate=48000;stereo=1;maxaveragebitrate=256000")
+<span class="boring">}</span></code></pre></pre>
+<p>These parameters configure:</p>
+<ul>
+<li>Maximum playback rate (48kHz)</li>
+<li>Stereo audio (2 channels)</li>
+<li>Maximum bitrate (256 kbps)</li>
+</ul>
+<h3 id="h264-video-parameters"><a class="header" href="#h264-video-parameters">H.264 Video Parameters</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>.fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+<span class="boring">}</span></code></pre></pre>
+<p>These parameters specify:</p>
+<ul>
+<li>Profile level ID (Baseline Profile, Level 3.1)</li>
+<li>Packetization mode (1 = Non-Interleaved Mode)</li>
+</ul>
+<h3 id="vp8-video-parameters"><a class="header" href="#vp8-video-parameters">VP8 Video Parameters</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>.fmtp("98", "max-fr=30;max-fs=8160")
+<span class="boring">}</span></code></pre></pre>
+<p>These parameters set:</p>
+<ul>
+<li>Maximum frame rate (30 fps)</li>
+<li>Maximum frame size (8160 macroblocks, roughly 720p)</li>
+</ul>
+<h2 id="bandwidth-and-qos-parameters"><a class="header" href="#bandwidth-and-qos-parameters">Bandwidth and QoS Parameters</a></h2>
+<p>SDP allows you to specify bandwidth constraints for the session or individual media streams:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let sdp = SdpBuilder::new("Session with Bandwidth")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+    .connection("IN", "IP4", "alice.example.com")
+    .time("0", "0")
+    // Session-level bandwidth constraint
+    .bandwidth("AS", 1024)  // 1024 kbps total bandwidth
+    .media_audio(49170, "RTP/AVP")
+        .formats(&amp;["109"])
+        .rtpmap("109", "opus/48000/2")
+        // Media-level bandwidth constraint
+        .bandwidth("TIAS", 128000)  // 128 kbps for audio (Transport Independent Application Specific)
+        .done()
+    .media_video(49172, "RTP/AVP")
+        .formats(&amp;["97"])
+        .rtpmap("97", "H264/90000")
+        // Media-level bandwidth constraint
+        .bandwidth("AS", 896)  // 896 kbps for video (Application Specific)
+        .bandwidth("TIAS", 896000)  // Same in Transport Independent Application Specific units
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>Different bandwidth specifiers serve different purposes:</p>
+<ul>
+<li><strong>AS</strong>: Application Specific - overall bandwidth for all media components</li>
+<li><strong>CT</strong>: Conference Total - bandwidth shared by all conference participants</li>
+<li><strong>TIAS</strong>: Transport Independent Application Specific - most precise way to specify bandwidth</li>
+</ul>
+<h2 id="webrtc-specific-sdp-features"><a class="header" href="#webrtc-specific-sdp-features">WebRTC-Specific SDP Features</a></h2>
+<p>WebRTC uses SDP for session negotiation but requires additional attributes for features like ICE, DTLS, and RTCP feedback:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let sdp = SdpBuilder::new("WebRTC Session")
+    .origin("webrtc", "2890844527", "1", "IN", "IP4", "0.0.0.0")
+    .connection("IN", "IP4", "0.0.0.0")
+    .time("0", "0")
+    // Session-level WebRTC attributes
+    .group("BUNDLE", &amp;["audio", "video"])  // Bundle audio and video on same transport
+    .ice_ufrag("8hhY")
+    .ice_pwd("asd88fgpdd777uzjYhagZg")
+    .fingerprint("sha-256", "39:4A:09:1E:0E:27:00:19:5D:30:9A:34:3C:1A:EB:69:43:33:51:35:AE:8F:EC:56:4C:35:6A:A7:41:3A:14:3C")
+    .media_audio(9, "UDP/TLS/RTP/SAVPF")
+        .formats(&amp;["111", "103"])
+        .rtpmap("111", "opus/48000/2")
+        .rtpmap("103", "ISAC/16000")
+        .fmtp("111", "minptime=10;useinbandfec=1")
+        .mid("audio")
+        .rtcp_mux()  // Multiplex RTP and RTCP on same port
+        .rtcp_fb("111", "nack", None::&lt;String&gt;)  // NACK feedback for Opus
+        .direction(MediaDirection::SendRecv)
+        .setup("actpass")  // DTLS role
+        .ice_ufrag("8hhY")
+        .ice_pwd("asd88fgpdd777uzjYhagZg")
+        .ice_candidate("1 1 UDP 2113937151 192.168.1.100 9 typ host")
+        .extmap(1, None::&lt;String&gt;, "urn:ietf:params:rtp-hdrext:ssrc-audio-level", None::&lt;String&gt;)
+        .done()
+    .media_video(9, "UDP/TLS/RTP/SAVPF")
+        .formats(&amp;["96", "97"])
+        .rtpmap("96", "VP8/90000")
+        .rtpmap("97", "rtx/90000")
+        .fmtp("97", "apt=96")  // RTX repair format for VP8
+        .mid("video")
+        .rtcp_mux()
+        .rtcp_fb("96", "nack", None::&lt;String&gt;)  // Negative acknowledgment for VP8
+        .rtcp_fb("96", "nack", Some("pli"))  // Picture loss indication for VP8
+        .rtcp_fb("96", "ccm", Some("fir"))  // Full intra request for VP8
+        .direction(MediaDirection::SendRecv)
+        .setup("actpass")
+        .ice_ufrag("8hhY")
+        .ice_pwd("asd88fgpdd777uzjYhagZg")
+        .ice_candidate("1 1 UDP 2113937151 192.168.1.100 9 typ host")
+        .extmap(2, None::&lt;String&gt;, "urn:ietf:params:rtp-hdrext:toffset", None::&lt;String&gt;)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>Key WebRTC features include:</p>
+<ul>
+<li><strong>ICE candidates</strong> for NAT traversal</li>
+<li><strong>DTLS fingerprints</strong> for secure key exchange</li>
+<li><strong>RTCP feedback mechanisms</strong> for congestion control and stream quality</li>
+<li><strong>RTP header extensions</strong> for additional metadata</li>
+<li><strong>Bundling</strong> for efficient use of network resources</li>
+</ul>
+<h2 id="working-with-simulcast-and-svc"><a class="header" href="#working-with-simulcast-and-svc">Working with Simulcast and SVC</a></h2>
+<p>For applications requiring scalable video, SDP can describe simulcast or scalable video coding (SVC):</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let sdp = SdpBuilder::new("Simulcast Session")
+    .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+    .connection("IN", "IP4", "alice.example.com")
+    .time("0", "0")
+    .media_video(49174, "RTP/AVP")
+        .formats(&amp;["96", "97", "98"])
+        .rtpmap("96", "VP8/90000")
+        .rtpmap("97", "VP8/90000")
+        .rtpmap("98", "VP8/90000")
+        // RID (Restriction Identifiers) for simulcast streams
+        .rid("high", rvoip_sip_core::sdp::attributes::rid::RidDirection::Send, &amp;["96"], &amp;[("max-width", "1280"), ("max-height", "720")])
+        .rid("medium", rvoip_sip_core::sdp::attributes::rid::RidDirection::Send, &amp;["97"], &amp;[("max-width", "640"), ("max-height", "360")])
+        .rid("low", rvoip_sip_core::sdp::attributes::rid::RidDirection::Send, &amp;["98"], &amp;[("max-width", "320"), ("max-height", "180")])
+        // Simulcast description
+        .simulcast(vec!["high;medium;low".to_string()], Vec::&lt;String&gt;::new())
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>This example creates an SDP that offers three simulcast streams (high, medium, and low resolution) of VP8 video.</p>
+<h2 id="creating-sdp-answers"><a class="header" href="#creating-sdp-answers">Creating SDP Answers</a></h2>
+<p>When responding to an SDP offer, you need to create an SDP answer that selects from the offered capabilities:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Assuming we received an offer SDP
+let offer = received_sdp;
+
+// Create an answer based on the offer
+let answer = offer.into_builder()
+    // Update origin with our information
+    .origin("bob", "9876543210", "1", "IN", "IP4", "bob.example.com")
+    // Update connection with our address
+    .connection("IN", "IP4", "bob.example.com")
+    // Keep the offered media streams but potentially modify them
+    .media_audio(49170, "RTP/AVP")
+        // Choose only one of the offered codecs
+        .formats(&amp;["0"])
+        .rtpmap("0", "PCMU/8000")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .media_video(49172, "RTP/AVP")
+        // Choose only H.264 from the offered codecs
+        .formats(&amp;["97"])
+        .rtpmap("97", "H264/90000")
+        .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+        .direction(MediaDirection::SendRecv)
+        .done()
+    .build()?;
+<span class="boring">}</span></code></pre></pre>
+<p>When creating an answer, it's important to:</p>
+<ol>
+<li>Only include media types that were in the offer</li>
+<li>Only select codecs that were offered</li>
+<li>Ensure compatibility of parameters</li>
+<li>Set appropriate connection information</li>
+<li>Match the offered session structure</li>
+</ol>
+<h2 id="sdp-validation-and-error-handling"><a class="header" href="#sdp-validation-and-error-handling">SDP Validation and Error Handling</a></h2>
+<p>The <code>build()</code> method on SdpBuilder performs validation before returning the SdpSession:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match sdp_builder.build() {
+    Ok(sdp) =&gt; {
+        println!("Valid SDP created:");
+        println!("{}", sdp);
+    },
+    Err(e) =&gt; {
+        println!("Failed to create valid SDP: {}", e);
+        // Handle the error - perhaps fix the issues in the builder
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Common validation failures include:</p>
+<ul>
+<li>Missing required fields (like origin, session name, time description)</li>
+<li>Invalid connection information</li>
+<li>Media sections without formats</li>
+<li>ICE candidates with invalid IP addresses</li>
+<li>Inconsistent media formats and rtpmap entries</li>
+</ul>
+<h2 id="best-practices-for-creating-sdp"><a class="header" href="#best-practices-for-creating-sdp">Best Practices for Creating SDP</a></h2>
+<ol>
+<li><strong>Always include required fields</strong>: v=, o=, s=, t=, and either session-level or media-level c=</li>
+<li><strong>Use specific format identifiers</strong>: Prefer specific dynamic payload types for each codec</li>
+<li><strong>Include rtpmap for all dynamic payload types</strong>: Always map payload types &gt;95 with rtpmap</li>
+<li><strong>Set appropriate directions</strong>: Be explicit about the media direction (sendrecv, sendonly, recvonly, inactive)</li>
+<li><strong>Reuse session-level attributes</strong>: When attributes apply to all media sections, define them at session level</li>
+<li><strong>Be consistent with transport</strong>: Ensure protocol compatibility across the entire session</li>
+<li><strong>Handle time properly</strong>: Use "0 0" for persistent sessions</li>
+<li><strong>Validate before sending</strong>: Always call <code>build()</code> to verify the SDP is valid</li>
+</ol>
+<h2 id="conclusion-6"><a class="header" href="#conclusion-6">Conclusion</a></h2>
+<p>Creating effective SDP messages is crucial for establishing compatible and efficient media sessions. The <code>rvoip-sip-core</code> SdpBuilder provides a robust API for creating SDP messages of varying complexity, from simple audio calls to sophisticated WebRTC applications with multiple streams, simulcast, and advanced media features.</p>
+<p>In the next tutorial, we'll explore how to integrate SDP with SIP messages to establish complete multimedia sessions.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="integrating-sdp-with-sip"><a class="header" href="#integrating-sdp-with-sip">Integrating SDP with SIP</a></h1>
+<p>In the previous tutorials, we explored SIP messaging and SDP creation separately. In this tutorial, we'll bring these two protocols together to establish multimedia sessions. SIP and SDP work hand-in-hand, with SIP handling the signaling and session management, while SDP describes the media parameters.</p>
+<h2 id="sdp-as-a-sip-message-body"><a class="header" href="#sdp-as-a-sip-message-body">SDP as a SIP Message Body</a></h2>
+<p>SIP messages can carry various content types in their message bodies. For multimedia session establishment, SDP is the standard format. When including SDP in a SIP message:</p>
+<ol>
+<li>The Content-Type header must be set to <code>application/sdp</code></li>
+<li>The Content-Length header must reflect the size of the SDP body</li>
+<li>The SDP content follows the headers, separated by a blank line</li>
+</ol>
+<p>Here's how to include SDP in a SIP INVITE request using the <code>rvoip-sip-core</code> library:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::{RequestBuilder, ResponseBuilder};
+use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+use rvoip_sip_core::types::sdp::SdpSession;
+use rvoip_sip_core::json::SipJsonExt;  // Import for JSON access
+use rvoip_sip_core::json::ext::SipMessageJson; // Import for SIP header convenience methods
+use std::error::Error as StdError;
+use std::str::FromStr;
+use bytes::Bytes;
+
+fn create_invite_with_sdp() -&gt; Result&lt;Message, Box&lt;dyn StdError&gt;&gt; {
+    // 1. Create the SDP offer
+    let sdp = SdpBuilder::new("Audio Call")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0", "8", "96"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("96", "telephone-event/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    // 2. Convert SDP to string for inclusion in SIP message
+    let sdp_string = sdp.to_string();
+    
+    // 3. Create SIP INVITE request with SDP offer
+    let invite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
+        .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
+        .to("Bob", "sip:bob@biloxi.example.com", None)
+        .call_id("3848276298220188511@atlanta.example.com")
+        .cseq(314159)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.example.com", None)
+        // Set Content-Type header for SDP
+        .content_type("application/sdp")
+        // Include SDP as body (using Bytes)
+        .body(Bytes::from(sdp_string))
+        .build();
+    
+    Ok(Message::Request(invite))
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The key components are:</p>
+<ul>
+<li>Using <code>.content_type("application/sdp")</code> to specify the body format</li>
+<li>Using <code>.body(Bytes::from(sdp_string))</code> to include the SDP content as bytes</li>
+</ul>
+<h2 id="extracting-sdp-from-sip-messages"><a class="header" href="#extracting-sdp-from-sip-messages">Extracting SDP from SIP Messages</a></h2>
+<p>When receiving a SIP message with an SDP body, you need to extract and parse it. Here's a robust method:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn extract_sdp_from_message(message: &amp;Message) -&gt; Option&lt;std::result::Result&lt;SdpSession, Error&gt;&gt; {
+    // Check for body content
+    let bytes = message.body();
+    if !bytes.is_empty() {
+        // Convert bytes to string
+        if let Ok(body_str) = std::str::from_utf8(bytes) {
+            // Verify this looks like SDP (starts with v=0)
+            if body_str.trim_start().starts_with("v=0") {
+                return Some(SdpSession::from_str(body_str));
+            }
+        }
+    }
+    
+    None
+}
+<span class="boring">}</span></code></pre></pre>
+<p>This function:</p>
+<ol>
+<li>Gets the raw bytes from the message body</li>
+<li>Converts them to a UTF-8 string</li>
+<li>Verifies it looks like SDP by checking for "v=0" at the start</li>
+<li>Returns a Result containing the parsed SDP session or an error</li>
+</ol>
+<h2 id="the-sipsdp-offeranswer-model"><a class="header" href="#the-sipsdp-offeranswer-model">The SIP/SDP Offer/Answer Model</a></h2>
+<p>SIP uses the offer/answer model defined in <a href="https://datatracker.ietf.org/doc/html/rfc3264">RFC 3264</a> for negotiating media sessions. The basic flow is:</p>
+<ol>
+<li>The caller sends an INVITE with an SDP offer</li>
+<li>The callee responds with a 200 OK including an SDP answer</li>
+<li>The caller acknowledges with an ACK</li>
+</ol>
+<p>Let's implement responding to an INVITE with a 200 OK containing an SDP answer:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn create_response_with_sdp_answer(invite: &amp;Message) -&gt; Result&lt;Message, Error&gt; {
+    // Extract the SDP offer from the INVITE
+    let incoming_sdp = if let Some(sdp_result) = extract_sdp_from_message(invite) {
+        sdp_result?
+    } else {
+        return Err(Error::Parser("No SDP in INVITE".into()));
+    };
+    
+    // Create SDP answer based on the offer
+    let sdp_answer = SdpBuilder::new("Answer Session")
+        .origin("bob", "2890844527", "2890844527", "IN", "IP4", "bob.example.com")
+        .connection("IN", "IP4", "bob.example.com")
+        .time("0", "0")
+        .media_audio(49180, "RTP/AVP")
+            // Select only one codec from the offer
+            .formats(&amp;["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    // Create 200 OK response with SDP answer
+    if let Message::Request(req) = invite {
+        // Use the dialog_response helper method
+        let response = ResponseBuilder::dialog_response(
+            req,
+            StatusCode::Ok,
+            None
+        )
+        .to("Bob", "sip:bob@biloxi.example.com", Some("8a8sdg87s")) // Add/override To with tag
+        .contact("sip:bob@biloxi.example.com", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(sdp_answer.to_string()))
+        .build();
+        
+        Ok(Message::Response(response))
+    } else {
+        Err(Error::Parser("Not a request".into()))
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Note the use of the <code>dialog_response</code> helper method, which creates a response that includes all the necessary headers for dialog establishment.</p>
+<h2 id="json-path-access-to-sip-headers"><a class="header" href="#json-path-access-to-sip-headers">JSON Path Access to SIP Headers</a></h2>
+<p>Our library provides powerful JSON path access to SIP message headers, making it easy to extract values nested deep within the message structure. This is essential for proper dialog handling:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Getting values with path accessors
+let to_display_name = response.path_str_or("headers.To.display_name", "");
+let to_uri = response.path_str_or("headers.To.uri", "");
+let to_tag = response.path_str("headers.To.params[0].Tag");
+
+// This also works for complex deeply nested structures like Via headers
+let branch = response.path_str("headers.Via[0].params[0].Branch");
+
+// You can use it to extract values with defaults
+let from_display_name = invite.path_str_or("headers.From.display_name", "Alice");
+<span class="boring">}</span></code></pre></pre>
+<p>These path accessors:</p>
+<ul>
+<li>Handle the internal Request/Response wrapping structure</li>
+<li>Provide case-insensitive header matching</li>
+<li>Support array indexing for multi-value headers</li>
+<li>Handle nested parameter structures like Via and From/To headers</li>
+</ul>
+<h2 id="creating-an-ack-to-complete-dialog-establishment"><a class="header" href="#creating-an-ack-to-complete-dialog-establishment">Creating an ACK to Complete Dialog Establishment</a></h2>
+<p>After receiving a 200 OK response, you need to send an ACK to complete the dialog establishment:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn create_ack_for_response(response: &amp;Message, original_invite: &amp;Message) -&gt; Result&lt;Message, Error&gt; {
+    // Get information from the response and original INVITE using JSON path accessors
+    let to_display_name = response.path_str_or("headers.To.display_name", "");
+    let to_uri = response.path_str_or("headers.To.uri", "");
+    let to_tag = response.path_str("headers.To.params[0].Tag");
+    
+    // Use a simple default for the contact URI or extract from Contact header
+    let contact_uri = "sip:bob@192.0.2.4";
+    
+    // Get From, Call-ID, and CSeq from original INVITE
+    let from_display_name = original_invite.path_str_or("headers.From.display_name", "Alice");
+    let from_uri = original_invite.path_str_or("headers.From.uri", "sip:alice@atlanta.example.com");
+    let from_tag = original_invite.path_str("headers.From.params[0].Tag");
+    let call_id = original_invite.path_str_or("headers.CallId", "3848276298220188511@atlanta.example.com");
+    let cseq = original_invite.path("headers.CSeq.seq")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(314159) as u32;
+    
+    // Create ACK request
+    let ack = RequestBuilder::new(Method::Ack, contact_uri)?
+        .from(&amp;from_display_name, &amp;from_uri, from_tag.as_deref())
+        .to(&amp;to_display_name, &amp;to_uri, to_tag.as_deref())
+        .call_id(&amp;call_id)
+        .cseq(cseq)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+        .max_forwards(70)
+        .build();
+    
+    Ok(Message::Request(ack))
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="session-modification-with-re-invite"><a class="header" href="#session-modification-with-re-invite">Session Modification with re-INVITE</a></h2>
+<p>After a session is established, either party can modify the session parameters by sending a re-INVITE with a new SDP offer:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn create_reinvite_with_updated_sdp(original_invite: &amp;Message) -&gt; Result&lt;Message, Error&gt; {
+    // Create updated SDP with video added
+    let updated_sdp = SdpBuilder::new("Audio/Video Call")
+        .origin("alice", "2890844526", "2890844528", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        // Existing audio stream
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        // New video stream
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["31"])
+            .rtpmap("31", "H261/90000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    // Get headers from the original INVITE using JSON path
+    let from_display_name = original_invite.path_str_or("headers.From.display_name", "Alice");
+    let from_uri = original_invite.path_str_or("headers.From.uri", "sip:alice@atlanta.example.com");
+    let from_tag = original_invite.path_str("headers.From.params[0].Tag");
+    let to_display_name = original_invite.path_str_or("headers.To.display_name", "Bob");
+    let to_uri = original_invite.path_str_or("headers.To.uri", "sip:bob@biloxi.example.com");
+    let call_id = original_invite.path_str_or("headers.CallId", "3848276298220188511@atlanta.example.com");
+    
+    // Get CSeq and increment
+    let cseq = original_invite.path("headers.CSeq.seq")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(314159) as u32 + 1;
+    
+    // Create re-INVITE with new SDP
+    let reinvite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
+        .from(&amp;from_display_name, &amp;from_uri, from_tag.as_deref())
+        .to(&amp;to_display_name, &amp;to_uri, None)  // No To tag for reinvite
+        .call_id(&amp;call_id)
+        .cseq(cseq)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds8"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.example.com", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(updated_sdp.to_string()))
+        .build();
+    
+    Ok(Message::Request(reinvite))
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Note that in the re-INVITE:</p>
+<ul>
+<li>We increment the CSeq number</li>
+<li>We include an updated SDP with a new origin version</li>
+<li>We use the JSON path accessor to extract headers from the original INVITE</li>
+</ul>
+<h2 id="handling-sdp-negotiation-failures"><a class="header" href="#handling-sdp-negotiation-failures">Handling SDP Negotiation Failures</a></h2>
+<p>Sometimes SDP negotiation fails because the endpoints cannot agree on compatible parameters:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn handle_incompatible_sdp(invite: &amp;Message) -&gt; Result&lt;Message, Error&gt; {
+    // Extract SDP from incoming INVITE
+    let sdp_option = extract_sdp_from_message(invite);
+    
+    // Check if the SDP is compatible
+    match sdp_option {
+        Some(Ok(sdp)) =&gt; {
+            // In a real implementation, we would check supported codecs
+            // For this example, we'll assume incompatibility
+            
+            println!("Received SDP with unsupported codecs:");
+            for media in &amp;sdp.media_descriptions {
+                if media.media == "audio" {
+                    println!("Audio formats: {:?}", media.formats);
+                    
+                    if let Message::Request(req) = invite {
+                        // Try parsing URI for warning
+                        let warning_agent = Uri::from_str("sip:biloxi.example.com").unwrap_or_else(|_| {
+                            // Fallback to domain with SIP scheme
+                            Uri::sip("biloxi.example.com")
+                        });
+                        
+                        // Create a 488 Not Acceptable Here response
+                        let response = ResponseBuilder::error_response(
+                            req,
+                            StatusCode::NotAcceptableHere, 
+                            None
+                        )
+                        .warning(304, warning_agent, "Incompatible media format")
+                        .build();
+                        
+                        return Ok(Message::Response(response));
+                    }
+                }
+            }
+        },
+        Some(Err(_)) =&gt; {
+            // SDP parsing failed
+            if let Message::Request(req) = invite {
+                // Create a 400 Bad Request response with "Invalid SDP" reason phrase
+                let response = ResponseBuilder::error_response(
+                    req,
+                    StatusCode::BadRequest,
+                    Some("Invalid SDP")
+                )
+                .build();
+                
+                return Ok(Message::Response(response));
+            }
+        },
+        None =&gt; {
+            // No SDP in the INVITE
+            if let Message::Request(req) = invite {
+                // Create a 406 Not Acceptable response with "SDP Required" reason phrase
+                let response = ResponseBuilder::error_response(
+                    req,
+                    StatusCode::NotAcceptable,
+                    Some("SDP Required")
+                )
+                .build();
+                
+                return Ok(Message::Response(response));
+            }
+        }
+    }
+    
+    // If we reach here, there's another issue with the request
+    if let Message::Request(req) = invite {
+        // Create a 400 Bad Request response
+        let response = ResponseBuilder::error_response(
+            req,
+            StatusCode::BadRequest,
+            None
+        )
+        .build();
+        
+        return Ok(Message::Response(response));
+    }
+    
+    Err(Error::Parser("Not a request".into()))
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Notice how the warning header is created with:</p>
+<ul>
+<li>An integer status code (304)</li>
+<li>A Uri object for the warning agent</li>
+<li>A text message explaining the issue</li>
+</ul>
+<h2 id="complete-sipsdp-dialog-flow"><a class="header" href="#complete-sipsdp-dialog-flow">Complete SIP/SDP Dialog Flow</a></h2>
+<p>Here's a complete dialog flow showing all stages from INVITE to BYE:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn demonstrate_complete_dialog_flow() -&gt; Result&lt;(), Error&gt; {
+    // Setup parameters
+    let call_id = "3848276298220188511@atlanta.example.com";
+    let from_tag = "9fxced76sl";
+    let to_tag = "8a8sdg87s";  // Will be added by Bob
+    let cseq = 314159;
+    
+    // Step 1: Create and send INVITE with SDP offer
+    println!("Step 1: Initial INVITE with SDP offer");
+    let invite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", None)
+        .call_id(call_id)
+        .cseq(cseq)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.example.com", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(create_offer_sdp("alice", "atlanta.example.com")?))
+        .build();
+    
+    println!("{}\n", Message::Request(invite));
+    
+    // Step 2: Receive 180 Ringing (no SDP)
+    println!("Step 2: 180 Ringing (no SDP)");
+    let ringing = ResponseBuilder::new(StatusCode::Ringing, None)
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq, Method::Invite)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+        .contact("sip:bob@192.0.2.4", None)
+        .build();
+    
+    println!("{}\n", Message::Response(ringing));
+    
+    // Step 3: Receive 200 OK with SDP answer
+    println!("Step 3: 200 OK with SDP answer");
+    let ok_response = ResponseBuilder::new(StatusCode::Ok, None)
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq, Method::Invite)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
+        .contact("sip:bob@192.0.2.4", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(create_answer_sdp("bob", "biloxi.example.com")?))
+        .build();
+    
+    println!("{}\n", Message::Response(ok_response));
+    
+    // Step 4: Send ACK to acknowledge the 200 OK
+    println!("Step 4: ACK to acknowledge 200 OK");
+    
+    // Using JSON path accessors to get contact URI
+    let contact_uri = "sip:bob@192.0.2.4".to_string();
+    
+    let ack = RequestBuilder::new(Method::Ack, &amp;contact_uri)?
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds9"))
+        .max_forwards(70)
+        .build();
+    
+    println!("{}\n", Message::Request(ack));
+    
+    // Step 5: After some time, send re-INVITE to add video
+    println!("Step 5: re-INVITE to add video");
+    
+    // Using convenience methods from SipMessageJson
+    let contact_uri = "sip:bob@192.0.2.4".to_string();
+    
+    let reinvite = RequestBuilder::new(Method::Invite, &amp;contact_uri)?
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 1)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds10"))
+        .max_forwards(70)
+        .contact("sip:alice@pc33.atlanta.example.com", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(create_updated_sdp("alice", "atlanta.example.com")?))
+        .build();
+    
+    println!("{}\n", Message::Request(reinvite));
+    
+    // Step 6: Receive 200 OK for re-INVITE with updated SDP
+    println!("Step 6: 200 OK for re-INVITE with updated SDP");
+    
+    let ok_reinvite = ResponseBuilder::new(StatusCode::Ok, None)
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 1, Method::Invite)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds10"))
+        .contact("sip:bob@192.0.2.4", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(create_video_answer_sdp("bob", "biloxi.example.com")?))
+        .build();
+    
+    println!("{}\n", Message::Response(ok_reinvite));
+    
+    // Step 7: ACK the 200 OK for re-INVITE
+    println!("Step 7: ACK for 200 OK of re-INVITE");
+    
+    // Using convenience methods to access URI
+    let contact_uri = "sip:bob@192.0.2.4".to_string();
+    
+    let ack_reinvite = RequestBuilder::new(Method::Ack, &amp;contact_uri)?
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 1)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds11"))
+        .max_forwards(70)
+        .build();
+    
+    println!("{}\n", Message::Request(ack_reinvite));
+    
+    // Step 8: Later, send BYE to terminate the session
+    println!("Step 8: BYE to terminate session");
+    
+    let bye = RequestBuilder::new(Method::Bye, &amp;contact_uri)?
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 2)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds12"))
+        .max_forwards(70)
+        .build();
+    
+    println!("{}\n", Message::Request(bye));
+    
+    // Step 9: Receive 200 OK for BYE
+    println!("Step 9: 200 OK for BYE");
+    
+    let ok_bye = ResponseBuilder::new(StatusCode::Ok, None)
+        .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
+        .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 2, Method::Bye)
+        .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds12"))
+        .build();
+    
+    println!("{}\n", Message::Response(ok_bye));
+    
+    println!("Dialog completed successfully!");
+    
+    Ok(())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="helper-functions-for-sdp-creation"><a class="header" href="#helper-functions-for-sdp-creation">Helper Functions for SDP Creation</a></h2>
+<p>These helper functions create different SDP messages for various stages of the call:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Initial offer for audio call
+fn create_offer_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Call Offer")
+        .origin(username, "2890844526", "2890844526", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+
+// Answer accepting only PCMU codec
+fn create_answer_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Call Answer")
+        .origin(username, "2890844527", "2890844527", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        .media_audio(49180, "RTP/AVP")
+            .formats(&amp;["0"])  // Choose only PCMU
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+
+// Updated offer adding video
+fn create_updated_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Updated Call Offer")
+        .origin(username, "2890844526", "2890844528", "IN", "IP4", domain)  // Increment version
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        // Existing audio stream
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        // New video stream
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["31", "34"])
+            .rtpmap("31", "H261/90000")
+            .rtpmap("34", "H263/90000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+
+// Answer accepting audio and one video codec
+fn create_video_answer_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Video Call Answer")
+        .origin(username, "2890844527", "2890844528", "IN", "IP4", domain)  // Increment version
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        // Audio stream
+        .media_audio(49180, "RTP/AVP")
+            .formats(&amp;["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        // Video stream - accept H.261 only
+        .media_video(49182, "RTP/AVP")
+            .formats(&amp;["31"])
+            .rtpmap("31", "H261/90000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="best-practices-for-sipsdp-integration"><a class="header" href="#best-practices-for-sipsdp-integration">Best Practices for SIP/SDP Integration</a></h2>
+<ol>
+<li><strong>Convert SDP to Bytes for Body</strong>: Always convert SDP strings to <code>Bytes</code> when using them as message bodies</li>
+<li><strong>JSON Path Access</strong>: Use the path accessor methods to extract values from complex SIP message structures</li>
+<li><strong>Dialog-Specific Helpers</strong>: Use the <code>dialog_response</code> method for 200 OK responses to establish dialogs</li>
+<li><strong>SDP Version Management</strong>: Increment the SDP version (in the origin line) when sending updated offers</li>
+<li><strong>Proper CSeq Handling</strong>: Increment CSeq numbers across transactions and maintain the same CSeq in final ACK</li>
+<li><strong>Branch ID Management</strong>: Use unique branch IDs in Via headers for each transaction</li>
+<li><strong>Tag Handling</strong>: Ensure the From tag remains consistent throughout the dialog, while the To tag (once added) is included in all subsequent messages</li>
+</ol>
+<h2 id="conclusion-7"><a class="header" href="#conclusion-7">Conclusion</a></h2>
+<p>In this tutorial, we've explored how to integrate SDP with SIP to establish, modify, and terminate multimedia sessions. We've covered:</p>
+<ul>
+<li>Including SDP bodies in SIP messages using the <code>Bytes</code> type</li>
+<li>Using JSON path accessors to extract headers and parameters from SIP messages</li>
+<li>Implementing the complete SDP offer/answer model with SIP signaling</li>
+<li>Creating and responding to re-INVITEs to modify a session</li>
+<li>Handling SDP negotiation failures</li>
+<li>Implementing a complete dialog flow from INVITE through BYE</li>
+</ul>
+<p>The rvoip-sip-core library provides powerful tools for working with SIP/SDP integration, making it easy to implement compliant and robust VoIP applications.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="media-negotiation-with-sdp"><a class="header" href="#media-negotiation-with-sdp">Media Negotiation with SDP</a></h1>
+<p>In the previous tutorial, we explored the basics of integrating SDP with SIP for establishing multimedia sessions. Now, we'll dive deeper into the complexities of media negotiation using SDP, covering advanced scenarios like multiple media streams, codec preferences, and handling special media operations.</p>
+<h2 id="advanced-media-stream-negotiation"><a class="header" href="#advanced-media-stream-negotiation">Advanced Media Stream Negotiation</a></h2>
+<p>Real-world VoIP and multimedia applications often involve multiple types of media streams and complex negotiation scenarios. Let's explore these in detail.</p>
+<h3 id="multiple-media-types-audio-video-application"><a class="header" href="#multiple-media-types-audio-video-application">Multiple Media Types (Audio, Video, Application)</a></h3>
+<p>SDP allows for the negotiation of multiple media streams of different types in a single session:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+use bytes::Bytes;
+
+// Create SDP with audio, video, and application data streams
+fn create_multi_stream_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Multi-Stream Session")
+        .origin(username, "2890844526", "2890844526", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        
+        // Audio stream
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0", "8", "96"])  // PCMU, PCMA, telephone-event
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("96", "telephone-event/8000")
+            .fmtp("96", "0-15")  // DTMF events
+            .direction(MediaDirection::SendRecv)
+            .done()
+            
+        // Video stream
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["97", "98"])
+            .rtpmap("97", "H264/90000")
+            .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+            .rtpmap("98", "VP8/90000")
+            .direction(MediaDirection::SendRecv)
+            .done()
+            
+        // Application data (for example, BFCP for floor control)
+        .media("application", 50000, "TCP/BFCP")
+            .formats(&amp;["*"])  // Add formats separately
+            .connection("IN", "IP4", domain)  // Per-media connection info
+            .attribute("setup", Some("actpass"))
+            .attribute("connection", Some("new"))
+            .attribute("floorctrl", Some("c-s"))
+            .attribute("confid", Some("4321"))
+            .attribute("userid", Some("1234"))
+            .done()
+            
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<p>When handling multiple media streams, it's important to:</p>
+<ol>
+<li>Maintain the same media streams in the same order in the answer</li>
+<li>Process each media stream independently in terms of codec selection</li>
+<li>Include connection information (c=) for each media when they differ</li>
+</ol>
+<h3 id="codec-preferences-and-ordering"><a class="header" href="#codec-preferences-and-ordering">Codec Preferences and Ordering</a></h3>
+<p>In SDP, the order of codecs in the format list indicates preference. The first codec is the most preferred:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Creating SDP with ordered codec preferences
+fn create_sdp_with_codec_preferences() -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Audio with Codec Preferences")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        
+        // Audio stream with ordered codec preferences
+        .media_audio(49170, "RTP/AVP")
+            // Most preferred codec first
+            .formats(&amp;["96", "97", "98", "99", "0", "8"])
+            .rtpmap("96", "opus/48000/2")     // Wideband, high quality
+            .rtpmap("97", "AMR-WB/16000/1")   // Wideband
+            .rtpmap("98", "EVS/32000/1")      // Super-wideband
+            .rtpmap("99", "telephone-event/8000")
+            .rtpmap("0", "PCMU/8000")         // Fallback
+            .rtpmap("8", "PCMA/8000")         // Last fallback
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<p>When responding to an offer, your answer should:</p>
+<ol>
+<li>Only include codecs that were in the original offer</li>
+<li>Order them according to your preferences</li>
+<li>You may use a subset of the offered codecs, but cannot add new ones</li>
+</ol>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Function to select codecs from an offer based on preferences
+fn select_preferred_codecs(offer_sdp: &amp;SdpSession) -&gt; Vec&lt;String&gt; {
+    let mut selected_codecs = Vec::new();
+    
+    // Our codec preferences in order
+    let codec_preferences = ["opus", "AMR-WB", "EVS", "PCMU", "PCMA"];
+    
+    // Find the audio media description
+    if let Some(audio_media) = offer_sdp.media_descriptions.iter().find(|m| m.media == "audio") {
+        // Get all rtpmap attributes to map payload types to codec names
+        let mut codec_map = std::collections::HashMap::new();
+        
+        // Access the rtpmap attributes directly 
+        for rtpmap in audio_media.rtpmaps() {
+            let pt = rtpmap.payload_type.to_string();
+            let codec_name = rtpmap.encoding_name.to_lowercase();
+            codec_map.insert(codec_name, pt);
+        }
+        
+        // Add codecs in our preferred order if they're in the offer
+        for preferred_codec in &amp;codec_preferences {
+            if let Some(pt) = codec_map.get(*preferred_codec) {
+                selected_codecs.push(pt.clone());
+            }
+        }
+    }
+    
+    selected_codecs
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="bandwidth-and-quality-considerations"><a class="header" href="#bandwidth-and-quality-considerations">Bandwidth and Quality Considerations</a></h3>
+<p>SDP allows for specifying bandwidth requirements for each media stream:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Adding bandwidth parameters to SDP
+fn create_sdp_with_bandwidth() -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("High Quality Video")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        
+        // High-def video with bandwidth limit
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["97"])
+            .rtpmap("97", "H264/90000")
+            .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+            .attribute("bandwidth", Some("AS:2000"))  // Application Specific: 2 Mbps
+            .attribute("bandwidth", Some("TIAS:2000000"))  // Transport Independent: 2 Mbps
+            .direction(MediaDirection::SendRecv)
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="handling-special-media-operations"><a class="header" href="#handling-special-media-operations">Handling Special Media Operations</a></h2>
+<h3 id="media-hold-and-resume"><a class="header" href="#media-hold-and-resume">Media Hold and Resume</a></h3>
+<p>Placing a call on hold is a common operation that's handled through SDP renegotiation:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// SDP for placing a call on hold
+fn create_hold_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    // Note the "sendonly" direction - this indicates hold
+    let sdp = SdpBuilder::new("Call On Hold")
+        .origin(username, "2890844526", "2890844527", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendOnly)  // SendOnly for hold
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+
+// SDP for resuming a call that was on hold
+fn create_resume_sdp(username: &amp;str, domain: &amp;str) -&gt; Result&lt;String, Error&gt; {
+    // Back to sendrecv for resuming the call
+    let sdp = SdpBuilder::new("Call Resumed")
+        .origin(username, "2890844526", "2890844528", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0")
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)  // SendRecv for resuming
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Key points about hold/resume operations:</p>
+<ul>
+<li>For hold, change direction to <code>SendOnly</code> or <code>Inactive</code></li>
+<li>For resume, change direction back to <code>SendRecv</code></li>
+<li>Always increment the SDP version in the origin line</li>
+<li>Send a re-INVITE with the updated SDP</li>
+</ul>
+<h3 id="codec-switching"><a class="header" href="#codec-switching">Codec Switching</a></h3>
+<p>Sometimes you need to switch or update codecs mid-call:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// SDP for switching to a different codec
+fn create_codec_switch_sdp(username: &amp;str, domain: &amp;str, use_high_quality: bool) -&gt; Result&lt;String, Error&gt; {
+    let sdp_builder = SdpBuilder::new("Codec Update")
+        .origin(username, "2890844526", "2890844529", "IN", "IP4", domain)
+        .connection("IN", "IP4", domain)
+        .time("0", "0");
+    
+    // Choose codecs based on quality preference
+    let (formats, audio_builder) = if use_high_quality {
+        // High quality: Opus wideband
+        let formats = &amp;["96"];
+        let audio_builder = sdp_builder.media_audio(49170, "RTP/AVP")
+            .formats(formats)
+            .rtpmap("96", "opus/48000/2")
+            .fmtp("96", "stereo=1;sprop-stereo=1;maxplaybackrate=48000");
+        (formats, audio_builder)
+    } else {
+        // Low quality: PCMU narrowband
+        let formats = &amp;["0"];
+        let audio_builder = sdp_builder.media_audio(49170, "RTP/AVP")
+            .formats(formats)
+            .rtpmap("0", "PCMU/8000");
+        (formats, audio_builder)
+    };
+    
+    // Complete and build the SDP
+    let sdp = audio_builder
+        .direction(MediaDirection::SendRecv)
+        .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="ice-and-nat-traversal"><a class="header" href="#ice-and-nat-traversal">ICE and NAT Traversal</a></h2>
+<p>Interactive Connectivity Establishment (ICE) is a protocol for NAT traversal that's commonly used with SIP/SDP:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Adding ICE candidates to SDP
+fn create_sdp_with_ice() -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("ICE Session")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "0.0.0.0")  // IP is determined by ICE
+        .time("0", "0")
+        
+        // Session level ICE attributes
+        .attribute("ice-pwd", Some("asd88fgpdd777uzjYhagZg"))
+        .attribute("ice-ufrag", Some("8hhY"))
+        .attribute("ice-options", Some("trickle"))
+        
+        // Audio stream with ICE candidates
+        .media_audio(9, "RTP/AVP")  // Port 9 is a placeholder
+            .formats(&amp;["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)
+            
+            // ICE candidates
+            .attribute("candidate", Some("1 1 UDP 2130706431 10.0.1.1 8998 typ host"))
+            .attribute("candidate", Some("1 2 UDP 2130706430 10.0.1.1 8999 typ host"))
+            .attribute("candidate", Some("2 1 UDP 1694498815 192.0.2.3 45664 typ srflx raddr 10.0.1.1 rport 8998"))
+            .attribute("candidate", Some("2 2 UDP 1694498814 192.0.2.3 45665 typ srflx raddr 10.0.1.1 rport 8999"))
+            
+            // RTCP multiplexing
+            .attribute("rtcp-mux", Some(""))
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="implementing-trickle-ice"><a class="header" href="#implementing-trickle-ice">Implementing Trickle ICE</a></h2>
+<p>Trickle ICE is an extension that allows candidates to be sent incrementally:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Initial SDP for Trickle ICE
+fn create_initial_trickle_ice_sdp() -&gt; Result&lt;String, Error&gt; {
+    let sdp = SdpBuilder::new("Trickle ICE Session")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "0.0.0.0")
+        .time("0", "0")
+        
+        // Session-level ICE attributes
+        .attribute("ice-options", Some("trickle"))
+        .attribute("ice-pwd", Some("asd88fgpdd777uzjYhagZg"))
+        .attribute("ice-ufrag", Some("8hhY"))
+        
+        // Media section with minimal ICE
+        .media_audio(9, "RTP/AVP")
+            .formats(&amp;["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(MediaDirection::SendRecv)
+            
+            // Just include host candidates initially
+            .attribute("candidate", Some("1 1 UDP 2130706431 10.0.1.1 8998 typ host"))
+            .attribute("candidate", Some("1 2 UDP 2130706430 10.0.1.1 8999 typ host"))
+            
+            // Mark that more candidates may come
+            .attribute("end-of-candidates", Some(""))  // Not yet the end
+            .done()
+        .build()?;
+    
+    Ok(sdp.to_string())
+}
+
+// Additional ICE candidates sent via INFO messages or other means
+fn send_additional_ice_candidate(sdp_mid: &amp;str, m_line_index: u32, candidate: &amp;str) {
+    // In a real application, this would be sent as an INFO message
+    // with application/trickle-ice+sdpfrag content type
+    println!("Send Trickle ICE candidate:");
+    println!("a=mid:{}", sdp_mid);
+    println!("a=ice-ufrag:8hhY");
+    println!("a=ice-pwd:asd88fgpdd777uzjYhagZg");
+    println!("a=candidate:{}", candidate);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="complete-media-negotiation-example"><a class="header" href="#complete-media-negotiation-example">Complete Media Negotiation Example</a></h2>
+<p>Here's a complete example that handles a more complex SDP negotiation scenario:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::{RequestBuilder, ResponseBuilder};
+use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
+use rvoip_sip_core::types::sdp::SdpSession;
+use rvoip_sip_core::json::SipJsonExt;
+use bytes::Bytes;
+use std::str::FromStr;
+
+fn advanced_media_negotiation_example() -&gt; Result&lt;(), Error&gt; {
+    // Initial parameters
+    let call_id = "adv-media-call-1@example.com";
+    let from_tag = "alice-tag-1";
+    let cseq = 100;
+    
+    // Step 1: Alice sends INVITE with complex SDP offer
+    println!("Step 1: Starting the VoIP call with advanced media");
+    
+    let alice_sdp = SdpBuilder::new("Advanced Media Call")
+        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        
+        // Session-level attributes
+        .attribute("ice-options", Some("trickle"))
+        .attribute("ice-pwd", Some("alice-ice-password-1"))
+        .attribute("ice-ufrag", Some("alice-ice-1"))
+        
+        // High-quality audio
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["96", "0", "8"])
+            .rtpmap("96", "opus/48000/2")  // Preferred: Opus
+            .rtpmap("0", "PCMU/8000")      // Fallback: PCMU
+            .rtpmap("8", "PCMA/8000")      // Last fallback: PCMA
+            .direction(MediaDirection::SendRecv)
+            .attribute("rtcp-mux", Some(""))
+            .attribute("candidate", Some("1 1 UDP 2130706431 192.168.1.1 49170 typ host"))
+            .done()
+            
+        // Video
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["97", "98"])
+            .rtpmap("97", "H264/90000")
+            .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
+            .rtpmap("98", "VP8/90000")
+            .direction(MediaDirection::SendRecv)
+            .attribute("rtcp-mux", Some(""))
+            .attribute("candidate", Some("1 1 UDP 2130706431 192.168.1.1 49174 typ host"))
+            .done()
+        
+        .build()?;
+    
+    let alice_sdp_str = alice_sdp.to_string();
+    
+    let invite = RequestBuilder::new(Method::Invite, "sip:bob@example.com")?
+        .from("Alice", "sip:alice@example.com", Some(from_tag))
+        .to("Bob", "sip:bob@example.com", None)
+        .call_id(call_id)
+        .cseq(cseq)
+        .via("example.com", "UDP", Some("z9hG4bKabc123"))
+        .max_forwards(70)
+        .contact("sip:alice@192.168.1.1", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(alice_sdp_str))
+        .build();
+    
+    println!("INVITE with advanced media offer:\n{}\n", Message::Request(invite.clone()));
+    
+    // Step 2: Bob processes the offer and creates an answer
+    println!("Step 2: Bob answers the call with codec selection");
+    
+    // Parse the SDP offer
+    let alice_sdp_text = std::str::from_utf8(&amp;invite.body()[..]).unwrap();
+    let alice_sdp_parsed = SdpSession::from_str(alice_sdp_text)?;
+    
+    // Bob's preferences and capabilities:
+    // - Supports Opus for audio, prefers it
+    // - Only supports VP8 for video (not H.264)
+    // - Has own ICE credentials
+    
+    let bob_sdp = SdpBuilder::new("Advanced Media Response")
+        .origin("bob", "3890844527", "3890844527", "IN", "IP4", "bob.example.com")
+        .connection("IN", "IP4", "bob.example.com")
+        .time("0", "0")
+        
+        // Session-level attributes
+        .attribute("ice-options", Some("trickle"))
+        .attribute("ice-pwd", Some("bob-ice-password-1"))
+        .attribute("ice-ufrag", Some("bob-ice-1"))
+        
+        // Audio - select Opus as preferred
+        .media_audio(59170, "RTP/AVP")
+            .formats(&amp;["96"])  // Just Opus, which we prefer
+            .rtpmap("96", "opus/48000/2")
+            .direction(MediaDirection::SendRecv)
+            .attribute("rtcp-mux", Some(""))
+            .attribute("candidate", Some("1 1 UDP 2130706431 192.168.1.2 59170 typ host"))
+            .done()
+            
+        // Video - select VP8 only (no H.264 support)
+        .media_video(59174, "RTP/AVP")
+            .formats(&amp;["98"])  // Just VP8
+            .rtpmap("98", "VP8/90000")
+            .direction(MediaDirection::SendRecv)
+            .attribute("rtcp-mux", Some(""))
+            .attribute("candidate", Some("1 1 UDP 2130706431 192.168.1.2 59174 typ host"))
+            .done()
+        
+        .build()?;
+    
+    let bob_sdp_str = bob_sdp.to_string();
+    
+    let to_tag = "bob-tag-1";
+    let ok_response = ResponseBuilder::dialog_response(
+        &amp;invite,
+        StatusCode::Ok,
+        None
+    )
+    .to("Bob", "sip:bob@example.com", Some(to_tag))
+    .contact("sip:bob@192.168.1.2", None)
+    .content_type("application/sdp")
+    .body(Bytes::from(bob_sdp_str))
+    .build();
+    
+    println!("200 OK with advanced media answer:\n{}\n", Message::Response(ok_response.clone()));
+    
+    // Step 3: Alice sends ACK to establish the session
+    println!("Step 3: Alice acknowledges the call");
+    
+    let ack = RequestBuilder::new(Method::Ack, "sip:bob@192.168.1.2")?
+        .from("Alice", "sip:alice@example.com", Some(from_tag))
+        .to("Bob", "sip:bob@example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq)
+        .via("example.com", "UDP", Some("z9hG4bKdef456"))
+        .max_forwards(70)
+        .build();
+    
+    println!("ACK to establish session:\n{}\n", Message::Request(ack));
+    
+    // Step 4: Alice sends additional ICE candidates via INFO (Trickle ICE)
+    println!("Step 4: Alice sends additional ICE candidates");
+    
+    let info = RequestBuilder::new(Method::Info, "sip:bob@192.168.1.2")?
+        .from("Alice", "sip:alice@example.com", Some(from_tag))
+        .to("Bob", "sip:bob@example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 1)
+        .via("example.com", "UDP", Some("z9hG4bKghi789"))
+        .max_forwards(70)
+        .content_type("application/trickle-ice-sdpfrag")
+        .body(Bytes::from(
+            "a=ice-pwd:alice-ice-password-1\r\n\
+             a=ice-ufrag:alice-ice-1\r\n\
+             a=candidate:2 1 UDP 1694498815 203.0.113.3 56789 typ srflx raddr 192.168.1.1 rport 49170\r\n"
+        ))
+        .build();
+    
+    println!("INFO with additional ICE candidates:\n{}\n", Message::Request(info));
+    
+    // Step 5: Later, Alice sends re-INVITE to change to hold
+    println!("Step 5: Alice puts the call on hold");
+    
+    let alice_hold_sdp = SdpBuilder::new("Call On Hold")
+        .origin("alice", "2890844526", "2890844527", "IN", "IP4", "alice.example.com")
+        .connection("IN", "IP4", "alice.example.com")
+        .time("0", "0")
+        
+        // Audio on hold (sendonly)
+        .media_audio(49170, "RTP/AVP")
+            .formats(&amp;["96"])
+            .rtpmap("96", "opus/48000/2")
+            .direction(MediaDirection::SendOnly)  // Hold
+            .attribute("rtcp-mux", Some(""))
+            .done()
+            
+        // Video on hold too
+        .media_video(49174, "RTP/AVP")
+            .formats(&amp;["98"])
+            .rtpmap("98", "VP8/90000")
+            .direction(MediaDirection::SendOnly)  // Hold
+            .attribute("rtcp-mux", Some(""))
+            .done()
+        
+        .build()?;
+    
+    let alice_hold_sdp_str = alice_hold_sdp.to_string();
+    
+    let reinvite = RequestBuilder::new(Method::Invite, "sip:bob@192.168.1.2")?
+        .from("Alice", "sip:alice@example.com", Some(from_tag))
+        .to("Bob", "sip:bob@example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(cseq + 2)
+        .via("example.com", "UDP", Some("z9hG4bKjkl012"))
+        .max_forwards(70)
+        .contact("sip:alice@192.168.1.1", None)
+        .content_type("application/sdp")
+        .body(Bytes::from(alice_hold_sdp_str))
+        .build();
+    
+    println!("re-INVITE to put call on hold:\n{}\n", Message::Request(reinvite));
+    
+    Ok(())
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="best-practices-for-sdp-media-negotiation"><a class="header" href="#best-practices-for-sdp-media-negotiation">Best Practices for SDP Media Negotiation</a></h2>
+<ol>
+<li><strong>Codec Compatibility</strong>: Ensure any codecs included in your answer were in the original offer</li>
+<li><strong>Media Stream Preservation</strong>: Maintain the same number and type of media streams in the answer as in the offer</li>
+<li><strong>Direction Management</strong>: Choose appropriate directions (sendrecv, sendonly, recvonly, inactive) for each media stream</li>
+<li><strong>Bandwidth Control</strong>: Use bandwidth attributes to manage quality and network usage</li>
+<li><strong>ICE Integration</strong>: Support ICE for NAT traversal; consider Trickle ICE for faster connection establishment</li>
+<li><strong>Version Management</strong>: Increment the SDP version in the o= line for each new SDP in the same session</li>
+<li><strong>Quality Fallback</strong>: Order codecs to gracefully handle varying bandwidth conditions</li>
+</ol>
+<h2 id="conclusion-8"><a class="header" href="#conclusion-8">Conclusion</a></h2>
+<p>Advanced media negotiation with SDP is critical for creating robust real-time communication applications. With the <code>rvoip-sip-core</code> library, you can:</p>
+<ul>
+<li>Negotiate complex media scenarios with multiple streams</li>
+<li>Implement codec priorities and preferences</li>
+<li>Handle special operations like hold/resume and codec switching</li>
+<li>Integrate ICE for NAT traversal</li>
+</ul>
+<p>In the next tutorial, we'll move into Part 3 of our series, exploring SIP Transactions and the state machines that govern SIP message exchanges.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-transactions"><a class="header" href="#sip-transactions">SIP Transactions</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-dialogs"><a class="header" href="#sip-dialogs">SIP Dialogs</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="complete-call-flow"><a class="header" href="#complete-call-flow">Complete Call Flow</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="authentication"><a class="header" href="#authentication">Authentication</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-registration"><a class="header" href="#sip-registration">SIP Registration</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-proxying-and-routing"><a class="header" href="#sip-proxying-and-routing">SIP Proxying and Routing</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="event-notification-framework"><a class="header" href="#event-notification-framework">Event Notification Framework</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="building-a-sip-client"><a class="header" href="#building-a-sip-client">Building a SIP Client</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="webrtc-integration"><a class="header" href="#webrtc-integration">WebRTC Integration</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="sip-troubleshooting"><a class="header" href="#sip-troubleshooting">SIP Troubleshooting</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="advanced-use-cases"><a class="header" href="#advanced-use-cases">Advanced Use Cases</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="appendix-sip-rfcs"><a class="header" href="#appendix-sip-rfcs">Appendix: SIP RFCs</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="glossary"><a class="header" href="#glossary">Glossary</a></h1>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+    </div>
+    </body>
+</html>

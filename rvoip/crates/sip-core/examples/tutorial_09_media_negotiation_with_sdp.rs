@@ -1,22 +1,54 @@
-# Media Negotiation with SDP
-
-In the previous tutorial, we explored the basics of integrating SDP with SIP for establishing multimedia sessions. Now, we'll dive deeper into the complexities of media negotiation using SDP, covering advanced scenarios like multiple media streams, codec preferences, and handling special media operations.
-
-## Advanced Media Stream Negotiation
-
-Real-world VoIP and multimedia applications often involve multiple types of media streams and complex negotiation scenarios. Let's explore these in detail.
-
-### Multiple Media Types (Audio, Video, Application)
-
-SDP allows for the negotiation of multiple media streams of different types in a single session:
-
-```rust
+// Example code for Tutorial 09: Media Negotiation with SDP
+use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::{RequestBuilder, ResponseBuilder};
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::sdp::attributes::MediaDirection;
+use rvoip_sip_core::types::sdp::SdpSession;
+use rvoip_sip_core::json::SipJsonExt;
+use std::error::Error as StdError;
+use std::str::FromStr;
 use bytes::Bytes;
 
-// Create SDP with audio, video, and application data streams
-fn create_multi_stream_sdp(username: &str, domain: &str) -> Result<String, Error> {
+fn main() -> Result<()> {
+    println!("Tutorial 09: Media Negotiation with SDP\n");
+    
+    // Example 1: Creating SDP with multiple media streams
+    println!("Example 1: SDP with Multiple Media Streams\n");
+    let multi_stream_sdp = create_multi_stream_sdp("alice", "alice.example.com")?;
+    println!("{}\n", multi_stream_sdp);
+    
+    // Example 2: Codec preferences and selection
+    println!("Example 2: SDP with Codec Preferences\n");
+    let codec_pref_sdp = create_sdp_with_codec_preferences()?;
+    println!("{}\n", codec_pref_sdp);
+    
+    // Parse the SDP to demonstrate codec selection
+    let sdp_session = SdpSession::from_str(&codec_pref_sdp)?;
+    let selected_codecs = select_preferred_codecs(&sdp_session);
+    println!("Selected codecs: {:?}\n", selected_codecs);
+    
+    // Example 3: Hold and resume operations
+    println!("Example 3: Media Hold and Resume\n");
+    let hold_sdp = create_hold_sdp("alice", "alice.example.com")?;
+    println!("SDP for placing call on hold:\n{}\n", hold_sdp);
+    
+    let resume_sdp = create_resume_sdp("alice", "alice.example.com")?;
+    println!("SDP for resuming call:\n{}\n", resume_sdp);
+    
+    // Example 4: ICE candidates in SDP
+    println!("Example 4: SDP with ICE Candidates\n");
+    let ice_sdp = create_sdp_with_ice()?;
+    println!("{}\n", ice_sdp);
+    
+    // Example 5: Complete advanced media negotiation flow
+    println!("Example 5: Complete Advanced Media Negotiation\n");
+    demonstrate_advanced_media_negotiation()?;
+    
+    Ok(())
+}
+
+// Example 1: Create SDP with multiple media streams
+fn create_multi_stream_sdp(username: &str, domain: &str) -> Result<String> {
     let sdp = SdpBuilder::new("Multi-Stream Session")
         .origin(username, "2890844526", "2890844526", "IN", "IP4", domain)
         .connection("IN", "IP4", domain)
@@ -56,21 +88,9 @@ fn create_multi_stream_sdp(username: &str, domain: &str) -> Result<String, Error
     
     Ok(sdp.to_string())
 }
-```
 
-When handling multiple media streams, it's important to:
-
-1. Maintain the same media streams in the same order in the answer
-2. Process each media stream independently in terms of codec selection
-3. Include connection information (c=) for each media when they differ
-
-### Codec Preferences and Ordering
-
-In SDP, the order of codecs in the format list indicates preference. The first codec is the most preferred:
-
-```rust
-// Creating SDP with ordered codec preferences
-fn create_sdp_with_codec_preferences() -> Result<String, Error> {
+// Example 2: Creating SDP with ordered codec preferences
+fn create_sdp_with_codec_preferences() -> Result<String> {
     let sdp = SdpBuilder::new("Audio with Codec Preferences")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "alice.example.com")
@@ -92,15 +112,7 @@ fn create_sdp_with_codec_preferences() -> Result<String, Error> {
     
     Ok(sdp.to_string())
 }
-```
 
-When responding to an offer, your answer should:
-
-1. Only include codecs that were in the original offer
-2. Order them according to your preferences
-3. You may use a subset of the offered codecs, but cannot add new ones
-
-```rust
 // Function to select codecs from an offer based on preferences
 fn select_preferred_codecs(offer_sdp: &SdpSession) -> Vec<String> {
     let mut selected_codecs = Vec::new();
@@ -130,44 +142,9 @@ fn select_preferred_codecs(offer_sdp: &SdpSession) -> Vec<String> {
     
     selected_codecs
 }
-```
 
-### Bandwidth and Quality Considerations
-
-SDP allows for specifying bandwidth requirements for each media stream:
-
-```rust
-// Adding bandwidth parameters to SDP
-fn create_sdp_with_bandwidth() -> Result<String, Error> {
-    let sdp = SdpBuilder::new("High Quality Video")
-        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
-        .connection("IN", "IP4", "alice.example.com")
-        .time("0", "0")
-        
-        // High-def video with bandwidth limit
-        .media_video(49174, "RTP/AVP")
-            .formats(&["97"])
-            .rtpmap("97", "H264/90000")
-            .fmtp("97", "profile-level-id=42e01f;packetization-mode=1")
-            .attribute("bandwidth", Some("AS:2000"))  // Application Specific: 2 Mbps
-            .attribute("bandwidth", Some("TIAS:2000000"))  // Transport Independent: 2 Mbps
-            .direction(MediaDirection::SendRecv)
-            .done()
-        .build()?;
-    
-    Ok(sdp.to_string())
-}
-```
-
-## Handling Special Media Operations
-
-### Media Hold and Resume
-
-Placing a call on hold is a common operation that's handled through SDP renegotiation:
-
-```rust
-// SDP for placing a call on hold
-fn create_hold_sdp(username: &str, domain: &str) -> Result<String, Error> {
+// Example 3: SDP for placing a call on hold
+fn create_hold_sdp(username: &str, domain: &str) -> Result<String> {
     // Note the "sendonly" direction - this indicates hold
     let sdp = SdpBuilder::new("Call On Hold")
         .origin(username, "2890844526", "2890844527", "IN", "IP4", domain)
@@ -185,7 +162,7 @@ fn create_hold_sdp(username: &str, domain: &str) -> Result<String, Error> {
 }
 
 // SDP for resuming a call that was on hold
-fn create_resume_sdp(username: &str, domain: &str) -> Result<String, Error> {
+fn create_resume_sdp(username: &str, domain: &str) -> Result<String> {
     // Back to sendrecv for resuming the call
     let sdp = SdpBuilder::new("Call Resumed")
         .origin(username, "2890844526", "2890844528", "IN", "IP4", domain)
@@ -201,61 +178,9 @@ fn create_resume_sdp(username: &str, domain: &str) -> Result<String, Error> {
     
     Ok(sdp.to_string())
 }
-```
 
-Key points about hold/resume operations:
-- For hold, change direction to `SendOnly` or `Inactive`
-- For resume, change direction back to `SendRecv`
-- Always increment the SDP version in the origin line
-- Send a re-INVITE with the updated SDP
-
-### Codec Switching
-
-Sometimes you need to switch or update codecs mid-call:
-
-```rust
-// SDP for switching to a different codec
-fn create_codec_switch_sdp(username: &str, domain: &str, use_high_quality: bool) -> Result<String, Error> {
-    let sdp_builder = SdpBuilder::new("Codec Update")
-        .origin(username, "2890844526", "2890844529", "IN", "IP4", domain)
-        .connection("IN", "IP4", domain)
-        .time("0", "0");
-    
-    // Choose codecs based on quality preference
-    let (formats, audio_builder) = if use_high_quality {
-        // High quality: Opus wideband
-        let formats = &["96"];
-        let audio_builder = sdp_builder.media_audio(49170, "RTP/AVP")
-            .formats(formats)
-            .rtpmap("96", "opus/48000/2")
-            .fmtp("96", "stereo=1;sprop-stereo=1;maxplaybackrate=48000");
-        (formats, audio_builder)
-    } else {
-        // Low quality: PCMU narrowband
-        let formats = &["0"];
-        let audio_builder = sdp_builder.media_audio(49170, "RTP/AVP")
-            .formats(formats)
-            .rtpmap("0", "PCMU/8000");
-        (formats, audio_builder)
-    };
-    
-    // Complete and build the SDP
-    let sdp = audio_builder
-        .direction(MediaDirection::SendRecv)
-        .done()
-        .build()?;
-    
-    Ok(sdp.to_string())
-}
-```
-
-## ICE and NAT Traversal
-
-Interactive Connectivity Establishment (ICE) is a protocol for NAT traversal that's commonly used with SIP/SDP:
-
-```rust
-// Adding ICE candidates to SDP
-fn create_sdp_with_ice() -> Result<String, Error> {
+// Example 4: Adding ICE candidates to SDP
+fn create_sdp_with_ice() -> Result<String> {
     let sdp = SdpBuilder::new("ICE Session")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "0.0.0.0")  // IP is determined by ICE
@@ -286,70 +211,9 @@ fn create_sdp_with_ice() -> Result<String, Error> {
     
     Ok(sdp.to_string())
 }
-```
 
-## Implementing Trickle ICE
-
-Trickle ICE is an extension that allows candidates to be sent incrementally:
-
-```rust
-// Initial SDP for Trickle ICE
-fn create_initial_trickle_ice_sdp() -> Result<String, Error> {
-    let sdp = SdpBuilder::new("Trickle ICE Session")
-        .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
-        .connection("IN", "IP4", "0.0.0.0")
-        .time("0", "0")
-        
-        // Session-level ICE attributes
-        .attribute("ice-options", Some("trickle"))
-        .attribute("ice-pwd", Some("asd88fgpdd777uzjYhagZg"))
-        .attribute("ice-ufrag", Some("8hhY"))
-        
-        // Media section with minimal ICE
-        .media_audio(9, "RTP/AVP")
-            .formats(&["0"])
-            .rtpmap("0", "PCMU/8000")
-            .direction(MediaDirection::SendRecv)
-            
-            // Just include host candidates initially
-            .attribute("candidate", Some("1 1 UDP 2130706431 10.0.1.1 8998 typ host"))
-            .attribute("candidate", Some("1 2 UDP 2130706430 10.0.1.1 8999 typ host"))
-            
-            // Mark that more candidates may come
-            .attribute("end-of-candidates", Some(""))  // Not yet the end
-            .done()
-        .build()?;
-    
-    Ok(sdp.to_string())
-}
-
-// Additional ICE candidates sent via INFO messages or other means
-fn send_additional_ice_candidate(sdp_mid: &str, m_line_index: u32, candidate: &str) {
-    // In a real application, this would be sent as an INFO message
-    // with application/trickle-ice+sdpfrag content type
-    println!("Send Trickle ICE candidate:");
-    println!("a=mid:{}", sdp_mid);
-    println!("a=ice-ufrag:8hhY");
-    println!("a=ice-pwd:asd88fgpdd777uzjYhagZg");
-    println!("a=candidate:{}", candidate);
-}
-```
-
-## Complete Media Negotiation Example
-
-Here's a complete example that handles a more complex SDP negotiation scenario:
-
-```rust
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::{RequestBuilder, ResponseBuilder};
-use rvoip_sip_core::sdp::SdpBuilder;
-use rvoip_sip_core::sdp::attributes::MediaDirection;
-use rvoip_sip_core::types::sdp::SdpSession;
-use rvoip_sip_core::json::SipJsonExt;
-use bytes::Bytes;
-use std::str::FromStr;
-
-fn advanced_media_negotiation_example() -> Result<(), Error> {
+// Example 5: Complete advanced media negotiation flow
+fn demonstrate_advanced_media_negotiation() -> Result<()> {
     // Initial parameters
     let call_id = "adv-media-call-1@example.com";
     let from_tag = "alice-tag-1";
@@ -542,27 +406,7 @@ fn advanced_media_negotiation_example() -> Result<(), Error> {
     
     println!("re-INVITE to put call on hold:\n{}\n", Message::Request(reinvite));
     
+    println!("All examples completed successfully!");
+    
     Ok(())
-}
-```
-
-## Best Practices for SDP Media Negotiation
-
-1. **Codec Compatibility**: Ensure any codecs included in your answer were in the original offer
-2. **Media Stream Preservation**: Maintain the same number and type of media streams in the answer as in the offer
-3. **Direction Management**: Choose appropriate directions (sendrecv, sendonly, recvonly, inactive) for each media stream
-4. **Bandwidth Control**: Use bandwidth attributes to manage quality and network usage
-5. **ICE Integration**: Support ICE for NAT traversal; consider Trickle ICE for faster connection establishment
-6. **Version Management**: Increment the SDP version in the o= line for each new SDP in the same session
-7. **Quality Fallback**: Order codecs to gracefully handle varying bandwidth conditions
-
-## Conclusion
-
-Advanced media negotiation with SDP is critical for creating robust real-time communication applications. With the `rvoip-sip-core` library, you can:
-
-- Negotiate complex media scenarios with multiple streams
-- Implement codec priorities and preferences
-- Handle special operations like hold/resume and codec switching
-- Integrate ICE for NAT traversal
-
-In the next tutorial, we'll move into Part 3 of our series, exploring SIP Transactions and the state machines that govern SIP message exchanges.
+} 

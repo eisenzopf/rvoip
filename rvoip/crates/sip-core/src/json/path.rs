@@ -162,8 +162,18 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
     // Debug print
     println!("Parsed path: {:?} from '{}'", segments, path);
     
-    // Walk through each segment, traversing the JSON tree
+    // Unwrap request/response if needed
     let mut current = root_value;
+    
+    // Check if we need to look inside a Request or Response object
+    if let SipValue::Object(obj) = current {
+        if obj.contains_key("Request") {
+            current = &obj["Request"];
+        } else if obj.contains_key("Response") {
+            current = &obj["Response"];
+        }
+    }
+    
     let mut segment_idx = 0;
     
     // Special case for headers - direct access to common headers
