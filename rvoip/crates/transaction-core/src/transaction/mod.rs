@@ -7,11 +7,14 @@ use rvoip_sip_transport::Transport;
 
 use crate::error::{Error, Result};
 
-pub mod state;
-pub mod key;
+pub mod common_logic;
 pub mod event;
+pub mod key;
 pub mod logic;
 pub mod runner;
+pub mod state;
+pub mod timer_utils;
+pub mod validators;
 
 pub use state::*;
 pub use key::*;
@@ -54,6 +57,16 @@ pub enum TransactionKind {
     /// A server transaction initiated by receiving a non-INVITE request.
     /// Follows the state machine in RFC 3261, Section 17.2.2.
     NonInviteServer,
+    /// A client transaction initiated by sending a CANCEL request.
+    /// Functions as a special type of non-INVITE transaction but with specific
+    /// semantics for cancelling a pending INVITE request.
+    /// Follows the state machine in RFC 3261 Section 17.1.2 with special handling per Section 9.1.
+    CancelClient,
+    /// A client transaction initiated by sending an UPDATE request.
+    /// Functions as a special type of non-INVITE transaction but specifically for
+    /// modifying session characteristics of an existing dialog.
+    /// Follows the state machine in RFC 3261 Section 17.1.2 with specialization per RFC 3311.
+    UpdateClient,
 }
 
 /// Represents commands that can be sent to a transaction's internal processing logic,
@@ -247,6 +260,8 @@ mod tests {
         let _non_invite_client = TransactionKind::NonInviteClient;
         let _invite_server = TransactionKind::InviteServer;
         let _non_invite_server = TransactionKind::NonInviteServer;
+        let _cancel_client = TransactionKind::CancelClient;
+        let _update_client = TransactionKind::UpdateClient;
         // Simply ensuring they can be constructed and used (e.g. in matches) is enough.
     }
 
@@ -283,4 +298,4 @@ mod tests {
         assert_eq!(req.method(), Method::Register); // As per current implementation
         assert_eq!(req.uri().to_string(), "sip:example.com");
     }
-} 
+}

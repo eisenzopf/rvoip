@@ -242,10 +242,16 @@ impl AtomicTransactionState {
     /// - `Err(Error::InvalidStateTransition)` if the transition is not allowed by RFC 3261
     ///   for the given transaction kind (unless `new_state` is `Terminated`).
     pub fn validate_transition(
-        current_state: TransactionState, 
-        new_state: TransactionState, 
-        kind: TransactionKind
+        current_state: TransactionState,
+        new_state: TransactionState,
+        kind: TransactionKind,
     ) -> Result<()> {
+        // Return early if the transition is to the same state.
+        if current_state == new_state {
+            return Ok(());
+        }
+
+        // Always allow transition to Terminated from any state
         if new_state == TransactionState::Terminated {
             return Ok(());
         }
@@ -257,8 +263,6 @@ impl AtomicTransactionState {
                     (TransactionState::Calling, TransactionState::Proceeding) => Ok(()),
                     (TransactionState::Calling, TransactionState::Completed) => Ok(()),
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Completed, TransactionState::Terminated) => Ok(()),
-                    (s1, s2) if s1 == s2 => Ok(()),
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,
@@ -273,8 +277,34 @@ impl AtomicTransactionState {
                     (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
                     (TransactionState::Trying, TransactionState::Completed) => Ok(()),
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Completed, TransactionState::Terminated) => Ok(()),
-                    (s1, s2) if s1 == s2 => Ok(()),
+                    _ => Err(Error::invalid_state_transition(
+                        kind,
+                        current_state,
+                        new_state,
+                        None,
+                    )),
+                }
+            },
+            TransactionKind::CancelClient => {
+                match (current_state, new_state) {
+                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
+                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
+                    _ => Err(Error::invalid_state_transition(
+                        kind,
+                        current_state,
+                        new_state,
+                        None,
+                    )),
+                }
+            },
+            TransactionKind::UpdateClient => {
+                match (current_state, new_state) {
+                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
+                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,
@@ -288,11 +318,7 @@ impl AtomicTransactionState {
                     (TransactionState::Initial, TransactionState::Proceeding) => Ok(()), 
                     (TransactionState::Initial, TransactionState::Completed) => Ok(()), 
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Terminated) => Ok(()),
                     (TransactionState::Completed, TransactionState::Confirmed) => Ok(()), 
-                    (TransactionState::Completed, TransactionState::Terminated) => Ok(()), 
-                    (TransactionState::Confirmed, TransactionState::Terminated) => Ok(()), 
-                    (s1, s2) if s1 == s2 => Ok(()),
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,
@@ -307,8 +333,6 @@ impl AtomicTransactionState {
                     (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
                     (TransactionState::Trying, TransactionState::Completed) => Ok(()),
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Completed, TransactionState::Terminated) => Ok(()),
-                    (s1, s2) if s1 == s2 => Ok(()),
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,

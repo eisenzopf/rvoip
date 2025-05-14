@@ -29,7 +29,14 @@ use crate::transaction::{
     Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
     InternalTransactionCommand,
 };
-use crate::client::{ClientTransaction, ClientInviteTransaction, ClientNonInviteTransaction, TransactionExt};
+use crate::client::{
+    ClientTransaction, 
+    ClientInviteTransaction, 
+    ClientNonInviteTransaction,
+    ClientCancelTransaction,
+    ClientUpdateTransaction,
+    TransactionExt,
+};
 use crate::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction};
 use crate::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
 use crate::utils::{transaction_key_from_message, generate_branch, extract_cseq, create_ack_from_invite};
@@ -579,34 +586,67 @@ impl TransactionManager {
         }
         
         // Create transaction based on request type
-        if modified_request.method() == Method::Invite {
-            // Create an INVITE client transaction
-            let transaction = ClientInviteTransaction::new(
-                key.clone(),
-                modified_request,
-                destination,
-                self.transport.clone(),
-                self.events_tx.clone(),
-                Some(self.timer_settings.clone()),
-            )?;
-            
-            // Store the transaction
-            let mut client_txs = self.client_transactions.lock().await;
-            client_txs.insert(key.clone(), Box::new(transaction));
-        } else {
-            // Create a non-INVITE client transaction
-            let transaction = ClientNonInviteTransaction::new(
-                key.clone(),
-                modified_request,
-                destination,
-                self.transport.clone(),
-                self.events_tx.clone(),
-                Some(self.timer_settings.clone()),
-            )?;
-            
-            // Store the transaction
-            let mut client_txs = self.client_transactions.lock().await;
-            client_txs.insert(key.clone(), Box::new(transaction));
+        match modified_request.method() {
+            Method::Invite => {
+                // Create an INVITE client transaction
+                let transaction = ClientInviteTransaction::new(
+                    key.clone(),
+                    modified_request,
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    Some(self.timer_settings.clone()),
+                )?;
+                
+                // Store the transaction
+                let mut client_txs = self.client_transactions.lock().await;
+                client_txs.insert(key.clone(), Box::new(transaction));
+            },
+            Method::Cancel => {
+                // Create a CANCEL client transaction
+                let transaction = ClientCancelTransaction::new(
+                    modified_request,
+                    key.clone(),
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    Some(self.timer_settings.clone()),
+                )?;
+                
+                // Store the transaction
+                let mut client_txs = self.client_transactions.lock().await;
+                client_txs.insert(key.clone(), Box::new(transaction));
+            },
+            Method::Update => {
+                // Create an UPDATE client transaction
+                let transaction = ClientUpdateTransaction::new(
+                    key.clone(),
+                    modified_request,
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    Some(self.timer_settings.clone()),
+                )?;
+                
+                // Store the transaction
+                let mut client_txs = self.client_transactions.lock().await;
+                client_txs.insert(key.clone(), Box::new(transaction));
+            },
+            _ => {
+                // Create a non-INVITE client transaction for all other methods
+                let transaction = ClientNonInviteTransaction::new(
+                    key.clone(),
+                    modified_request,
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    Some(self.timer_settings.clone()),
+                )?;
+                
+                // Store the transaction
+                let mut client_txs = self.client_transactions.lock().await;
+                client_txs.insert(key.clone(), Box::new(transaction));
+            }
         }
         
         debug!(id=%key, "Created client transaction");

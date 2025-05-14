@@ -2,10 +2,14 @@ mod common;
 mod invite;
 mod non_invite;
 mod data;
+mod cancel;
+mod update;
 
 pub use common::*;
 pub use invite::ClientInviteTransaction;
 pub use non_invite::ClientNonInviteTransaction;
+pub use cancel::ClientCancelTransaction;
+pub use update::ClientUpdateTransaction;
 pub use data::{ClientTransactionData, CommandSender, CommandReceiver, CommonClientTransaction};
 
 use async_trait::async_trait;
@@ -43,17 +47,23 @@ impl<T: Transaction + ?Sized> TransactionExt for T {
         use crate::transaction::TransactionKind;
         
         match self.kind() {
-            TransactionKind::InviteClient | TransactionKind::NonInviteClient => {
+            TransactionKind::InviteClient | TransactionKind::NonInviteClient | 
+            TransactionKind::CancelClient | TransactionKind::UpdateClient => {
                 // Get the Any representation and try downcasting
                 self.as_any().downcast_ref::<Box<dyn ClientTransaction>>()
                     .map(|boxed| boxed.as_ref())
                     .or_else(|| {
                         // Try with specific implementations
-                        use crate::client::{ClientInviteTransaction, ClientNonInviteTransaction};
+                        use crate::client::{ClientInviteTransaction, ClientNonInviteTransaction, 
+                                           ClientCancelTransaction, ClientUpdateTransaction};
                         
                         if let Some(tx) = self.as_any().downcast_ref::<ClientInviteTransaction>() {
                             Some(tx as &dyn ClientTransaction)
                         } else if let Some(tx) = self.as_any().downcast_ref::<ClientNonInviteTransaction>() {
+                            Some(tx as &dyn ClientTransaction)
+                        } else if let Some(tx) = self.as_any().downcast_ref::<ClientCancelTransaction>() {
+                            Some(tx as &dyn ClientTransaction)
+                        } else if let Some(tx) = self.as_any().downcast_ref::<ClientUpdateTransaction>() {
                             Some(tx as &dyn ClientTransaction)
                         } else {
                             None

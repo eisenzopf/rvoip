@@ -26,35 +26,37 @@ use crate::transaction::timer_utils;
 use crate::transaction::validators;
 use crate::transaction::common_logic;
 
-/// Client non-INVITE transaction (RFC 3261 Section 17.1.2)
+/// Client UPDATE transaction (RFC 3311)
+/// UPDATE follows the non-INVITE transaction model but is specialized for updating 
+/// session characteristics of an existing dialog without requiring a new INVITE
 #[derive(Debug, Clone)]
-pub struct ClientNonInviteTransaction {
+pub struct ClientUpdateTransaction {
     data: Arc<ClientTransactionData>,
-    logic: Arc<ClientNonInviteLogic>,
+    logic: Arc<ClientUpdateLogic>,
 }
 
-/// Holds JoinHandles and dynamic state for timers specific to Client Non-INVITE transactions.
+/// Holds JoinHandles and dynamic state for timers specific to Client UPDATE transactions.
 #[derive(Default, Debug)]
-struct ClientNonInviteTimerHandles {
+struct ClientUpdateTimerHandles {
     timer_e: Option<JoinHandle<()>>,
     current_timer_e_interval: Option<Duration>, // For backoff
     timer_f: Option<JoinHandle<()>>,
     timer_k: Option<JoinHandle<()>>,
 }
 
-/// Implements the TransactionLogic for Client Non-INVITE transactions.
+/// Implements the TransactionLogic for Client UPDATE transactions.
 #[derive(Debug, Clone, Default)]
-struct ClientNonInviteLogic {
+struct ClientUpdateLogic {
     _data_marker: std::marker::PhantomData<ClientTransactionData>,
     timer_factory: TimerFactory,
 }
 
-impl ClientNonInviteLogic {
+impl ClientUpdateLogic {
     // Helper method to start Timer E (retransmission timer) using timer utils
     async fn start_timer_e(
         &self,
         data: &Arc<ClientTransactionData>,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) {
         let tx_id = &data.id;
@@ -88,7 +90,7 @@ impl ClientNonInviteLogic {
     async fn start_timer_f(
         &self,
         data: &Arc<ClientTransactionData>,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) {
         let tx_id = &data.id;
@@ -121,7 +123,7 @@ impl ClientNonInviteLogic {
     async fn start_timer_k(
         &self,
         data: &Arc<ClientTransactionData>,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) {
         let tx_id = &data.id;
@@ -155,23 +157,23 @@ impl ClientNonInviteLogic {
     async fn handle_trying_state(
         &self,
         data: &Arc<ClientTransactionData>,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<()> {
         let tx_id = &data.id;
         
         // Send the initial request
-        debug!(id=%tx_id, "ClientNonInviteLogic: Sending initial request in Trying state");
+        debug!(id=%tx_id, "ClientUpdateLogic: Sending initial UPDATE request in Trying state");
         let request_guard = data.request.lock().await;
         if let Err(e) = data.transport.send_message(
             Message::Request(request_guard.clone()),
             data.remote_addr
         ).await {
-            error!(id=%tx_id, error=%e, "Failed to send initial request from Trying state");
+            error!(id=%tx_id, error=%e, "Failed to send initial UPDATE request from Trying state");
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
             let _ = command_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await;
-            return Err(Error::transport_error(e, "Failed to send initial request"));
+            return Err(Error::transport_error(e, "Failed to send initial UPDATE request"));
         }
         drop(request_guard); // Release lock
 
@@ -187,7 +189,7 @@ impl ClientNonInviteLogic {
         &self,
         data: &Arc<ClientTransactionData>,
         current_state: TransactionState,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
@@ -195,7 +197,7 @@ impl ClientNonInviteLogic {
         
         match current_state {
             TransactionState::Trying | TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Timer E triggered, retransmitting request");
+                debug!(id=%tx_id, "Timer E triggered, retransmitting UPDATE request");
                 
                 // Retransmit the request
                 let request_guard = data.request.lock().await;
@@ -203,7 +205,7 @@ impl ClientNonInviteLogic {
                     Message::Request(request_guard.clone()),
                     data.remote_addr
                 ).await {
-                    error!(id=%tx_id, error=%e, "Failed to retransmit request");
+                    error!(id=%tx_id, error=%e, "Failed to retransmit UPDATE request");
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Ok(Some(TransactionState::Terminated));
                 }
@@ -309,14 +311,13 @@ impl ClientNonInviteLogic {
             return Ok(None);
         }
         
-        // Use the common_logic handler which works for both INVITE and non-INVITE transactions
-        // For non-INVITE transactions, is_invite is false
+        // Use the common_logic handler which works for non-INVITE transactions
         let new_state = common_logic::handle_response_by_status(
             tx_id, 
             response.clone(), 
             current_state, 
             &data.events_tx,
-            false // non-INVITE
+            false // UPDATE follows non-INVITE pattern
         ).await;
         
         Ok(new_state)
@@ -324,9 +325,9 @@ impl ClientNonInviteLogic {
 }
 
 #[async_trait::async_trait]
-impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for ClientNonInviteLogic {
+impl TransactionLogic<ClientTransactionData, ClientUpdateTimerHandles> for ClientUpdateLogic {
     fn kind(&self) -> TransactionKind {
-        TransactionKind::NonInviteClient
+        TransactionKind::UpdateClient
     }
 
     fn initial_state(&self) -> TransactionState {
@@ -337,7 +338,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         &data.timer_config
     }
 
-    fn cancel_all_specific_timers(&self, timer_handles: &mut ClientNonInviteTimerHandles) {
+    fn cancel_all_specific_timers(&self, timer_handles: &mut ClientUpdateTimerHandles) {
         if let Some(handle) = timer_handles.timer_e.take() {
             handle.abort();
         }
@@ -347,7 +348,6 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         if let Some(handle) = timer_handles.timer_k.take() {
             handle.abort();
         }
-        // Resetting current_timer_e_interval here might be good practice
         timer_handles.current_timer_e_interval = None;
     }
 
@@ -356,8 +356,8 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         data: &Arc<ClientTransactionData>,
         new_state: TransactionState,
         previous_state: TransactionState,
-        timer_handles: &mut ClientNonInviteTimerHandles,
-        command_tx: mpsc::Sender<InternalTransactionCommand>, // This is the runner's command_tx
+        timer_handles: &mut ClientUpdateTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>, 
     ) -> Result<()> {
         let tx_id = &data.id;
 
@@ -387,13 +387,12 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         Ok(())
     }
 
-    // Original handle_timer method required by the trait
     async fn handle_timer(
         &self,
         data: &Arc<ClientTransactionData>,
         timer_name: &str,
         current_state: TransactionState,
-        timer_handles: &mut ClientNonInviteTimerHandles,
+        timer_handles: &mut ClientUpdateTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
         
@@ -405,7 +404,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         // Send timer triggered event using common logic
         common_logic::send_timer_triggered_event(tx_id, timer_name, &data.events_tx).await;
         
-        // Use the command_tx from data to set up retransmission timers
+        // Use the command_tx from data to set up timers
         let self_command_tx = data.cmd_tx.clone();
         
         match timer_name {
@@ -413,7 +412,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
             "F" => self.handle_timer_f_trigger(data, current_state, self_command_tx).await,
             "K" => self.handle_timer_k_trigger(data, current_state, self_command_tx).await,
             _ => {
-                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ClientNonInvite");
+                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ClientUpdate");
                 Ok(None)
             }
         }
@@ -447,8 +446,8 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
     }
 }
 
-impl ClientNonInviteTransaction {
-    /// Create a new client non-INVITE transaction.
+impl ClientUpdateTransaction {
+    /// Create a new client UPDATE transaction.
     pub fn new(
         id: TransactionKey,
         request: Request,
@@ -457,8 +456,12 @@ impl ClientNonInviteTransaction {
         events_tx: mpsc::Sender<TransactionEvent>,
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
+        if request.method() != Method::Update {
+            return Err(Error::Other("Request must be UPDATE for UPDATE client transaction".to_string()));
+        }
+
         let timer_config = timer_config_override.unwrap_or_default();
-        let (cmd_tx, local_cmd_rx) = mpsc::channel(32); // Renamed cmd_rx to local_cmd_rx to avoid conflict after ClientTransactionData change
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(32);
 
         let data = Arc::new(ClientTransactionData {
             id: id.clone(),
@@ -468,13 +471,12 @@ impl ClientNonInviteTransaction {
             remote_addr,
             transport,
             events_tx,
-            cmd_tx: cmd_tx.clone(), // For the transaction itself to send commands to its loop
-            // cmd_rx is no longer stored here; it's passed directly to the spawned loop
+            cmd_tx: cmd_tx.clone(),
             event_loop_handle: Arc::new(Mutex::new(None)),
             timer_config: timer_config.clone(),
         });
 
-        let logic = Arc::new(ClientNonInviteLogic {
+        let logic = Arc::new(ClientUpdateLogic {
             _data_marker: std::marker::PhantomData,
             timer_factory: TimerFactory::new(Some(timer_config), Arc::new(TimerManager::new(None))),
         });
@@ -484,7 +486,6 @@ impl ClientNonInviteTransaction {
 
         // Spawn the generic event loop runner
         let event_loop_handle = tokio::spawn(async move {
-            // local_cmd_rx is moved into the loop here
             run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
         });
 
@@ -495,11 +496,9 @@ impl ClientNonInviteTransaction {
         
         Ok(Self { data, logic })
     }
-    
-    // OLD start_event_loop IS REMOVED
 }
 
-impl ClientTransaction for ClientNonInviteTransaction {
+impl ClientTransaction for ClientUpdateTransaction {
     fn initiate(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data.clone();
         let kind = self.kind(); // Get kind for the error message
@@ -508,12 +507,11 @@ impl ClientTransaction for ClientNonInviteTransaction {
             let current_state = data.state.get();
             
             if current_state != TransactionState::Initial {
-                // Corrected Error::invalid_state_transition call
                 return Err(Error::invalid_state_transition(
-                    kind, // Pass the correct kind
+                    kind,
                     current_state,
                     TransactionState::Trying,
-                    Some(data.id.clone()), // Pass Option<TransactionKey>
+                    Some(data.id.clone()),
                 ));
             }
 
@@ -535,7 +533,6 @@ impl ClientTransaction for ClientNonInviteTransaction {
         })
     }
 
-    // Implement the missing original_request method
     fn original_request(&self) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + '_>> {
         let request_arc = self.data.request.clone();
         Box::pin(async move {
@@ -545,13 +542,13 @@ impl ClientTransaction for ClientNonInviteTransaction {
     }
 }
 
-impl Transaction for ClientNonInviteTransaction {
+impl Transaction for ClientUpdateTransaction {
     fn id(&self) -> &TransactionKey {
         &self.data.id
     }
 
     fn kind(&self) -> TransactionKind {
-        TransactionKind::NonInviteClient
+        TransactionKind::UpdateClient
     }
 
     fn state(&self) -> TransactionState {
@@ -563,12 +560,9 @@ impl Transaction for ClientNonInviteTransaction {
     }
     
     fn matches(&self, message: &Message) -> bool {
-        // Key matching logic (typically branch, method for non-INVITE client)
-        // This can be simplified using utils if response matching rules are consistent.
         // For a client transaction, it matches responses based on:
         // 1. Topmost Via header's branch parameter matching the transaction ID's branch.
         // 2. CSeq method matching the original request's CSeq method.
-        // (For non-INVITE, CSeq number doesn't have to match strictly for responses unlike INVITE ACK)
         if !message.is_response() { return false; }
         
         let response = match message {
@@ -588,7 +582,7 @@ impl Transaction for ClientNonInviteTransaction {
             return false; // No Via header or not of TypedHeader::Via type
         }
 
-        // Clone the method from the reference to get an owned Method
+        // Check CSeq method
         let original_request_method = self.data.id.method().clone();
         if let Some(TypedHeader::CSeq(cseq_header)) = response.header(&HeaderName::CSeq) {
             if cseq_header.method != original_request_method {
@@ -598,30 +592,7 @@ impl Transaction for ClientNonInviteTransaction {
             return false; // No CSeq header or not of TypedHeader::CSeq type
         }
         
-        // Call-ID, From tag, To tag must also match for strictness, though branch is primary.
-        // This simplified check assumes branch + CSeq method is sufficient for this context.
-        // RFC 3261 Section 17.1.3 provides full matching rules.
-        // The `utils::transaction_key_from_message` is more for *creating* keys.
-        // Here we are *matching* an incoming response to an existing client transaction.
-        // The ID of the transaction IS the key we are looking for.
-
-        // A more robust check would compare relevant fields directly or reconstruct a key from response
-        // and compare. For now, top Via branch and CSeq method matching is a good start.
-        // The most crucial part is that the response's top Via branch matches our transaction ID's branch.
-        // And the CSeq method also matches.
-        
-        // Let's refine using transaction_key_from_message if it's suitable for responses too.
-        // utils::transaction_key_from_message is primarily for requests.
-        // For responses, client matches on:
-        // - top Via branch == original request's top Via branch (which is stored in tx.id.branch)
-        // - sent-protocol in Via is the same
-        // - sent-by in Via matches the remote_addr we sent to (or is a NATed version)
-        // - CSeq method matches
-        // - For non-INVITE, CSeq num matching is not required for responses.
-
-        // Assuming self.data.id.branch is the branch we sent in the request's Via.
-        // Assuming self.data.id.method is the method of the original request.
-        true // If passed Via and CSeq checks above
+        true
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -629,18 +600,15 @@ impl Transaction for ClientNonInviteTransaction {
     }
 }
 
-impl TransactionAsync for ClientNonInviteTransaction {
+impl TransactionAsync for ClientUpdateTransaction {
     fn process_event<'a>(
         &'a self,
-        event_type: &'a str, // e.g. "response" from TransactionManager when it routes a message
+        event_type: &'a str,
         message: Option<Message>
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            // The TransactionManager, when it receives a message from transport and matches it
-            // to this transaction, will call `process_event` with "response" and the message.
-            // This should then send an InternalTransactionCommand::ProcessMessage to the runner.
             match event_type {
-                "response" => { // This name is illustrative, TM would use a specific trigger
+                "response" => {
                     if let Some(msg) = message {
                         self.data.cmd_tx.send(InternalTransactionCommand::ProcessMessage(msg)).await
                             .map_err(|e| Error::Other(format!("Failed to send ProcessMessage command: {}", e)))?;
@@ -648,8 +616,6 @@ impl TransactionAsync for ClientNonInviteTransaction {
                         return Err(Error::Other("Expected Message for 'response' event type".to_string()));
                     }
                 },
-                // Other event types if the TU or manager needs to directly interact via this generic method.
-                // For now, direct commands are preferred.
                 _ => return Err(Error::Other(format!("Unhandled event type in TransactionAsync::process_event: {}", event_type))),
             }
             Ok(())
@@ -686,19 +652,22 @@ impl TransactionAsync for ClientNonInviteTransaction {
     }
 }
 
+impl CommonClientTransaction for ClientUpdateTransaction {
+    fn data(&self) -> &Arc<ClientTransactionData> {
+        &self.data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender}; // For ClientTransactionData
-    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder}; // Added SimpleResponseBuilder
-    use rvoip_sip_core::types::status::StatusCode;
-    use rvoip_sip_core::Response as SipCoreResponse;
-    // use rvoip_sip_transport::TransportEvent as TransportLayerEvent; // This was unused
     use std::collections::VecDeque;
     use std::str::FromStr;
     use tokio::sync::Notify;
     use tokio::time::timeout as TokioTimeout;
-
+    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+    use rvoip_sip_core::types::status::StatusCode;
+    use rvoip_sip_core::Response as SipCoreResponse;
 
     // A simple mock transport for these unit tests
     #[derive(Debug, Clone)]
@@ -722,7 +691,6 @@ mod tests {
             self.sent_messages.lock().await.pop_front()
         }
 
-        // Return type changed to std::result::Result
         async fn wait_for_message_sent(&self, duration: Duration) -> std::result::Result<(), tokio::time::error::Elapsed> {
             TokioTimeout(duration, self.message_sent_notifier.notified()).await
         }
@@ -730,19 +698,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Transport for UnitTestMockTransport {
-        // Return type changed to std::result::Result<_, rvoip_sip_transport::Error>
         fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
             Ok(self.local_addr)
         }
 
-        // Return type changed
         async fn send_message(&self, message: Message, destination: SocketAddr) -> std::result::Result<(), rvoip_sip_transport::Error> {
             self.sent_messages.lock().await.push_back((message.clone(), destination));
             self.message_sent_notifier.notify_one(); // Notify that a message was "sent"
             Ok(())
         }
 
-        // Return type changed
         async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
             Ok(())
         }
@@ -753,26 +718,23 @@ mod tests {
     }
 
     struct TestSetup {
-        transaction: ClientNonInviteTransaction,
+        transaction: ClientUpdateTransaction,
         mock_transport: Arc<UnitTestMockTransport>,
         tu_events_rx: mpsc::Receiver<TransactionEvent>,
     }
 
-    async fn setup_test_environment(
-        request_method: Method,
-        target_uri_str: &str, // Changed to target_uri_str
-    ) -> TestSetup {
+    async fn setup_test_environment(target_uri_str: &str) -> TestSetup {
         let local_addr = "127.0.0.1:5090";
         let mock_transport = Arc::new(UnitTestMockTransport::new(local_addr));
         let (tu_events_tx, tu_events_rx) = mpsc::channel(100);
 
         let req_uri = Uri::from_str(target_uri_str).unwrap();
-        let builder = SimpleRequestBuilder::new(request_method, &req_uri.to_string())
+        let builder = SimpleRequestBuilder::new(Method::Update, &req_uri.to_string())
             .expect("Failed to create SimpleRequestBuilder")
             .from("Alice", "sip:test@test.com", Some("fromtag"))
-            .to("Bob", "sip:bob@target.com", None)
-            .call_id("callid-noninvite-test")
-            .cseq(1); // Remove the method parameter
+            .to("Bob", "sip:bob@target.com", Some("totag"))
+            .call_id("callid-update-test")
+            .cseq(1);
         
         let via_branch = format!("z9hG4bK.{}", uuid::Uuid::new_v4().as_simple());
         let builder = builder.via(mock_transport.local_addr.to_string().as_str(), "UDP", Some(&via_branch));
@@ -780,7 +742,6 @@ mod tests {
         let request = builder.build();
         
         let remote_addr = SocketAddr::from_str("127.0.0.1:5070").unwrap();
-        // Corrected TransactionKey::from_request call
         let tx_key = TransactionKey::from_request(&request).expect("Failed to create tx key from request");
 
         let settings = TimerSettings {
@@ -790,7 +751,7 @@ mod tests {
             ..Default::default()
         };
 
-        let transaction = ClientNonInviteTransaction::new(
+        let transaction = ClientUpdateTransaction::new(
             tx_key,
             request,
             remote_addr,
@@ -807,36 +768,23 @@ mod tests {
     }
     
     fn build_simple_response(status_code: StatusCode, original_request: &Request) -> SipCoreResponse {
-        let response_builder = SimpleResponseBuilder::response_from_request(
+        SimpleResponseBuilder::response_from_request(
             original_request,
             status_code,
             Some(status_code.reason_phrase())
-        );
-        
-        let response_builder = if original_request.to().unwrap().tag().is_none() {
-             response_builder.to(
-                original_request.to().unwrap().address().display_name().unwrap_or_default(),
-                &original_request.to().unwrap().address().uri().to_string(),
-                Some("totag-server")
-            )
-        } else {
-            response_builder
-        };
-        
-        response_builder.build()
+        ).build()
     }
 
-
     #[tokio::test]
-    async fn test_non_invite_client_creation_and_initial_state() {
-        let setup = setup_test_environment(Method::Options, "sip:bob@target.com").await;
+    async fn test_update_client_creation_and_initial_state() {
+        let setup = setup_test_environment("sip:bob@target.com").await;
         assert_eq!(setup.transaction.state(), TransactionState::Initial);
         assert!(setup.transaction.data.event_loop_handle.lock().await.is_some());
     }
 
     #[tokio::test]
-    async fn test_non_invite_client_initiate_sends_request_and_starts_timers() {
-        let mut setup = setup_test_environment(Method::Options, "sip:bob@target.com").await;
+    async fn test_update_client_initiate_sends_request() {
+        let mut setup = setup_test_environment("sip:bob@target.com").await;
         
         setup.transaction.initiate().await.expect("initiate should succeed");
 
@@ -849,74 +797,14 @@ mod tests {
         assert!(sent_msg_info.is_some(), "Request should have been sent");
         if let Some((msg, dest)) = sent_msg_info {
             assert!(msg.is_request());
-            assert_eq!(msg.method(), Some(Method::Options));
+            assert_eq!(msg.method(), Some(Method::Update));
             assert_eq!(dest, setup.transaction.remote_addr());
         }
-        
-        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.expect("Timer E retransmission failed to occur");
-        let retransmitted_msg_info = setup.mock_transport.get_sent_message().await;
-        assert!(retransmitted_msg_info.is_some(), "Request should have been retransmitted by Timer E");
-         if let Some((msg, _)) = retransmitted_msg_info {
-            assert!(msg.is_request());
-            assert_eq!(msg.method(), Some(Method::Options));
-        }
     }
 
     #[tokio::test]
-    async fn test_non_invite_client_provisional_response() {
-        let mut setup = setup_test_environment(Method::Options, "sip:bob@target.com").await;
-        setup.transaction.initiate().await.expect("initiate failed");
-        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.unwrap();
-        setup.mock_transport.get_sent_message().await;
-
-        // Wait for and ignore the StateChanged event
-        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
-            Ok(Some(TransactionEvent::StateChanged { .. })) => {
-                // Expected StateChanged event, continue
-            },
-            Ok(Some(other_event)) => panic!("Unexpected first event: {:?}", other_event),
-            _ => panic!("Expected StateChanged event"),
-        }
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(setup.transaction.state(), TransactionState::Trying);
-
-        let original_request_clone = setup.transaction.data.request.lock().await.clone();
-        let prov_response = build_simple_response(StatusCode::Ringing, &original_request_clone);
-        
-        setup.transaction.process_response(prov_response.clone()).await.expect("process_response failed");
-
-        // Wait for ProvisionalResponse event
-        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
-            Ok(Some(TransactionEvent::ProvisionalResponse { transaction_id, response, .. })) => {
-                assert_eq!(transaction_id, *setup.transaction.id());
-                assert_eq!(response.status_code(), StatusCode::Ringing.as_u16());
-            },
-            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
-            Ok(None) => panic!("Event channel closed"),
-            Err(_) => panic!("Timeout waiting for ProvisionalResponse event"),
-        }
-        
-        // Check for StateChanged from Trying to Proceeding
-        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
-            Ok(Some(TransactionEvent::StateChanged { transaction_id, previous_state, new_state })) => {
-                assert_eq!(transaction_id, *setup.transaction.id());
-                assert_eq!(previous_state, TransactionState::Trying);
-                assert_eq!(new_state, TransactionState::Proceeding);
-            },
-            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
-            _ => panic!("Expected StateChanged event"),
-        }
-        
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(setup.transaction.state(), TransactionState::Proceeding, "State should be Proceeding");
-
-        // No need to check for immediate message, Timer E is no longer applicable in the Proceeding state
-    }
-
-    #[tokio::test]
-    async fn test_non_invite_client_final_success_response() {
-        let mut setup = setup_test_environment(Method::Options, "sip:bob@target.com").await;
+    async fn test_update_client_success_response() {
+        let mut setup = setup_test_environment("sip:bob@target.com").await;
         setup.transaction.initiate().await.expect("initiate failed");
         setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.unwrap();
         setup.mock_transport.get_sent_message().await;
@@ -935,14 +823,12 @@ mod tests {
         
         setup.transaction.process_response(success_response.clone()).await.expect("process_response failed");
 
-        // Success response can come before or after state change, so collect events and check them all
+        // Success response should lead to Completed state and then Terminated after Timer K
         let mut success_response_received = false;
         let mut trying_to_completed_received = false;
-        let mut completed_to_terminated_received = false;
-        let mut transaction_terminated_received = false;
 
         // Collect all events until we get terminated or timeout
-        for _ in 0..5 {  // Give it 5 iterations max
+        for _ in 0..5 {
             match TokioTimeout(Duration::from_millis(150), setup.tu_events_rx.recv()).await {
                 Ok(Some(TransactionEvent::SuccessResponse { transaction_id, response, .. })) => {
                     assert_eq!(transaction_id, *setup.transaction.id());
@@ -953,38 +839,28 @@ mod tests {
                     assert_eq!(transaction_id, *setup.transaction.id());
                     if previous_state == TransactionState::Trying && new_state == TransactionState::Completed {
                         trying_to_completed_received = true;
-                    } else if previous_state == TransactionState::Completed && new_state == TransactionState::Terminated {
-                        completed_to_terminated_received = true;
-                    } else {
-                        panic!("Unexpected state transition: {:?} -> {:?}", previous_state, new_state);
                     }
-                },
-                Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. })) => {
-                    assert_eq!(transaction_id, *setup.transaction.id());
-                    transaction_terminated_received = true;
-                    break;  // We got the terminal event, can stop waiting
                 },
                 Ok(Some(TransactionEvent::TimerTriggered { .. })) => {
                     // Timer events can happen, ignore them
                     continue;
                 },
-                Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
+                Ok(Some(_)) => {
+                    // Other events can happen, ignore them
+                    continue;
+                },
                 Ok(None) => panic!("Event channel closed"),
                 Err(_) => {
                     // If we timed out but already got the necessary events, we're good
-                    if success_response_received && trying_to_completed_received && 
-                       (completed_to_terminated_received || transaction_terminated_received) {
+                    if success_response_received && trying_to_completed_received {
                         break;
-                    } else {
-                        // Otherwise, keep waiting
-                        continue;
                     }
+                    continue;
                 }
             }
             
             // If we got all the necessary events, we can stop waiting
-            if success_response_received && trying_to_completed_received && 
-               completed_to_terminated_received && transaction_terminated_received {
+            if success_response_received && trying_to_completed_received {
                 break;
             }
         }
@@ -993,76 +869,8 @@ mod tests {
         assert!(success_response_received, "SuccessResponse event not received");
         assert!(trying_to_completed_received, "StateChanged Trying->Completed event not received");
         
-        // The transaction should reach Terminated state
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait for Timer K to fire and transition to Terminated state
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(setup.transaction.state(), TransactionState::Terminated, "State should be Terminated after Timer K");
-    }
-    
-    #[tokio::test]
-    async fn test_non_invite_client_timer_f_timeout() {
-        let mut setup = setup_test_environment(Method::Options, "sip:bob@target.com").await;
-        setup.transaction.initiate().await.expect("initiate failed");
-
-        // Wait for and ignore the StateChanged event
-        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
-            Ok(Some(TransactionEvent::StateChanged { .. })) => {
-                // Expected StateChanged event, continue
-            },
-            Ok(Some(other_event)) => panic!("Unexpected first event: {:?}", other_event),
-            _ => panic!("Expected StateChanged event"),
-        }
-
-        let mut timeout_event_received = false;
-        let mut terminated_event_received = false;
-        let mut timer_f_received = false;
-
-        // Loop to catch multiple events, specifically TimerTriggered for E/F, then TransactionTimeout, then TransactionTerminated.
-        // Increased loop count and timeout to be more robust for E retransmissions before F.
-        for _ in 0..6 { 
-            match TokioTimeout(Duration::from_millis(150), setup.tu_events_rx.recv()).await { // Increased timeout per event
-                Ok(Some(TransactionEvent::TransactionTimeout { transaction_id, .. })) => {
-                    assert_eq!(transaction_id, *setup.transaction.id());
-                    timeout_event_received = true;
-                },
-                Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. })) => {
-                    assert_eq!(transaction_id, *setup.transaction.id());
-                    terminated_event_received = true;
-                },
-                Ok(Some(TransactionEvent::TimerTriggered { ref timer, .. })) => { // Used ref timer
-                    if timer == "E" { 
-                        debug!("Timer E triggered during F timeout test, continuing...");
-                        continue; 
-                    } else if timer == "F" {
-                        timer_f_received = true;
-                        continue;
-                    }
-                    panic!("Unexpected TimerTriggered event: {:?}", timer);
-                },
-                Ok(Some(TransactionEvent::StateChanged { .. })) => {
-                    // State transitions can happen, ignore them
-                    continue;
-                },
-                Ok(Some(other_event)) => {
-                    panic!("Unexpected event: {:?}", other_event);
-                },
-                Ok(None) => panic!("Event channel closed prematurely"),
-                Err(_) => { // Timeout from TokioTimeout
-                    // This timeout is for a single recv() call. If we haven't gotten both target events, continue test waiting.
-                    if !timeout_event_received || !terminated_event_received {
-                        debug!("TokioTimeout while waiting for F events, may be normal if timers are still running");
-                        // Continue to next iteration of the loop if not all events are received.
-                    } else {
-                        break; // Both events received, or one timed out after the other was received.
-                    }
-                }
-            }
-            if timeout_event_received && terminated_event_received { break; }
-        }
-        
-        assert!(timeout_event_received, "TransactionTimeout event not received");
-        assert!(terminated_event_received, "TransactionTerminated event not received");
-        
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(setup.transaction.state(), TransactionState::Terminated, "State should be Terminated after Timer F");
     }
 } 
