@@ -62,11 +62,21 @@ pub enum TransactionKind {
     /// semantics for cancelling a pending INVITE request.
     /// Follows the state machine in RFC 3261 Section 17.1.2 with special handling per Section 9.1.
     CancelClient,
+    /// A server transaction initiated by receiving a CANCEL request.
+    /// Functions as a special type of non-INVITE server transaction but with specific
+    /// semantics for handling a cancellation of a pending INVITE request.
+    /// Follows the state machine in RFC 3261 Section 17.2.2 with special handling per Section 9.2.
+    CancelServer,
     /// A client transaction initiated by sending an UPDATE request.
     /// Functions as a special type of non-INVITE transaction but specifically for
     /// modifying session characteristics of an existing dialog.
     /// Follows the state machine in RFC 3261 Section 17.1.2 with specialization per RFC 3311.
     UpdateClient,
+    /// A server transaction initiated by receiving an UPDATE request.
+    /// Functions as a special type of non-INVITE server transaction but specifically for
+    /// handling session characteristic modifications of an existing dialog.
+    /// Follows the state machine in RFC 3261 Section 17.2.2 with specialization per RFC 3311.
+    UpdateServer,
 }
 
 /// Represents commands that can be sent to a transaction's internal processing logic,
@@ -261,7 +271,9 @@ mod tests {
         let _invite_server = TransactionKind::InviteServer;
         let _non_invite_server = TransactionKind::NonInviteServer;
         let _cancel_client = TransactionKind::CancelClient;
+        let _cancel_server = TransactionKind::CancelServer;
         let _update_client = TransactionKind::UpdateClient;
+        let _update_server = TransactionKind::UpdateServer;
         // Simply ensuring they can be constructed and used (e.g. in matches) is enough.
     }
 

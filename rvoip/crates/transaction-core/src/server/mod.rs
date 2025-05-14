@@ -2,10 +2,14 @@ mod common;
 mod invite;
 mod non_invite;
 mod data;
+mod cancel;
+mod update;
 
 pub use common::*;
 pub use invite::ServerInviteTransaction;
 pub use non_invite::ServerNonInviteTransaction;
+pub use cancel::ServerCancelTransaction;
+pub use update::ServerUpdateTransaction;
 pub use data::{ServerTransactionData, CommandSender, CommandReceiver, CommonServerTransaction};
 
 use async_trait::async_trait;
@@ -15,12 +19,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::transaction::{Transaction, TransactionState, TransactionKey};
+use crate::transaction::{Transaction, TransactionState, TransactionKey, TransactionAsync};
 use rvoip_sip_core::prelude::*;
 
 /// Common interface for server transactions
 #[async_trait]
-pub trait ServerTransaction: Transaction + Send + Sync + 'static {
+pub trait ServerTransaction: Transaction + TransactionAsync + Send + Sync + 'static {
     /// Process an incoming request associated with this transaction (e.g., retransmission, ACK, CANCEL).
     fn process_request(&self, request: Request) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 
@@ -39,17 +43,21 @@ impl<T: Transaction + ?Sized> TransactionExt for T {
         use crate::transaction::TransactionKind;
         
         match self.kind() {
-            TransactionKind::InviteServer | TransactionKind::NonInviteServer => {
+            TransactionKind::InviteServer | TransactionKind::NonInviteServer | TransactionKind::CancelServer | TransactionKind::UpdateServer => {
                 // Get the Any representation and try downcasting
                 self.as_any().downcast_ref::<Box<dyn ServerTransaction>>()
                     .map(|boxed| boxed.as_ref())
                     .or_else(|| {
                         // Try with specific implementations
-                        use crate::server::{ServerInviteTransaction, ServerNonInviteTransaction};
+                        use crate::server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerCancelTransaction, ServerUpdateTransaction};
                         
                         if let Some(tx) = self.as_any().downcast_ref::<ServerInviteTransaction>() {
                             Some(tx as &dyn ServerTransaction)
                         } else if let Some(tx) = self.as_any().downcast_ref::<ServerNonInviteTransaction>() {
+                            Some(tx as &dyn ServerTransaction)
+                        } else if let Some(tx) = self.as_any().downcast_ref::<ServerCancelTransaction>() {
+                            Some(tx as &dyn ServerTransaction)
+                        } else if let Some(tx) = self.as_any().downcast_ref::<ServerUpdateTransaction>() {
                             Some(tx as &dyn ServerTransaction)
                         } else {
                             None

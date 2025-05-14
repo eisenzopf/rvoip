@@ -319,6 +319,7 @@ impl AtomicTransactionState {
                     (TransactionState::Initial, TransactionState::Completed) => Ok(()), 
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
                     (TransactionState::Completed, TransactionState::Confirmed) => Ok(()), 
+                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,
@@ -333,6 +334,35 @@ impl AtomicTransactionState {
                     (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
                     (TransactionState::Trying, TransactionState::Completed) => Ok(()),
                     (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
+                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
+                    _ => Err(Error::invalid_state_transition(
+                        kind,
+                        current_state,
+                        new_state,
+                        None,
+                    )),
+                }
+            },
+            TransactionKind::CancelServer => {
+                match (current_state, new_state) {
+                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
+                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
+                    _ => Err(Error::invalid_state_transition(
+                        kind,
+                        current_state,
+                        new_state,
+                        None,
+                    )),
+                }
+            },
+            TransactionKind::UpdateServer => {
+                match (current_state, new_state) {
+                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
+                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
+                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
+                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
                     _ => Err(Error::invalid_state_transition(
                         kind,
                         current_state,

@@ -26,7 +26,7 @@ pub async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
     client_transactions: &Arc<Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>>,
-    server_transactions: &Arc<Mutex<HashMap<TransactionKey, Box<dyn ServerTransaction + Send>>>>,
+    server_transactions: &Arc<Mutex<HashMap<TransactionKey, Arc<dyn ServerTransaction>>>>,
     events_tx: &mpsc::Sender<TransactionEvent>,
     event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
     manager: &TransactionManager,

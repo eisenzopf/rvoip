@@ -37,14 +37,16 @@ use crate::client::{
     ClientUpdateTransaction,
     TransactionExt,
 };
-use crate::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction};
+use crate::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, ServerCancelTransaction, ServerUpdateTransaction};
 use crate::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
 use crate::utils::{transaction_key_from_message, generate_branch, extract_cseq, create_ack_from_invite};
 
 // Type aliases without Sync requirement
 type BoxedTransaction = Box<dyn Transaction + Send>;
-type BoxedServerTransaction = Box<dyn ServerTransaction + Send>;
+/// Type alias for a boxed client transaction
 type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
+/// Type alias for an Arc wrapped server transaction
+type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
 /// Manages SIP transactions
 #[derive(Clone)]
@@ -54,7 +56,7 @@ pub struct TransactionManager {
     /// Active client transactions
     client_transactions: Arc<Mutex<HashMap<TransactionKey, BoxedClientTransaction>>>,
     /// Active server transactions
-    server_transactions: Arc<Mutex<HashMap<TransactionKey, BoxedServerTransaction>>>,
+    server_transactions: Arc<Mutex<HashMap<TransactionKey, Arc<dyn ServerTransaction>>>>,
     /// Transaction destinations - maps transaction IDs to their destinations
     transaction_destinations: Arc<Mutex<HashMap<TransactionKey, SocketAddr>>>,
     /// Event sender
@@ -742,48 +744,158 @@ impl TransactionManager {
         transactions.keys().map(|k| k.to_string()).collect()
     }
 
-    /// Create a server transaction from a request for testing purposes
-    #[cfg(test)]
+    /// Create a server transaction from an incoming request.
+    /// 
+    /// This is called when a new request is received from the transport layer.
+    /// It creates an appropriate transaction based on the request method.
     pub async fn create_server_transaction(
         &self,
-        transaction_id: TransactionKey,
         request: Request,
-        source_addr: SocketAddr,
-    ) -> Result<()> {
-        use crate::server::{ServerInviteTransaction, ServerNonInviteTransaction};
+        remote_addr: SocketAddr,
+    ) -> Result<Arc<dyn ServerTransaction>> {
+        // Check if this is a retransmission of an existing transaction
+        let request_tx_key = TransactionKey::from_request(&request).map(|mut key| {
+            key.is_server = true;
+            key
+        });
         
-        // Get the server transactions map
-        let mut server_txs = self.server_transactions.lock().await;
+        if let Some(key) = &request_tx_key {
+            let server_txs = self.server_transactions.lock().await;
+            if server_txs.contains_key(key) {
+                // This is a retransmission, get the existing transaction
+                let transaction = server_txs.get(key).unwrap().clone();
+                drop(server_txs); // Release lock
+                
+                // Process the request in the existing transaction
+                transaction.process_request(request.clone()).await?;
+                
+                debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");
+                return Ok(transaction);
+            }
+        }
         
-        // Create server transaction based on request type
-        let server_tx: Box<dyn crate::server::ServerTransaction + Send> = if request.method() == Method::Invite {
-            Box::new(ServerInviteTransaction::new(
-                transaction_id.clone(),
-                request.clone(),
-                source_addr,
-                self.transport.clone(),
-                self.events_tx.clone(),
-                Some(self.timer_settings.clone()),
-            )?)
-        } else {
-            Box::new(ServerNonInviteTransaction::new(
-                transaction_id.clone(),
-                request.clone(),
-                source_addr,
-                self.transport.clone(),
-                self.events_tx.clone(),
-                Some(self.timer_settings.clone()),
-            )?)
+        // Create a new transaction based on the request method
+        let transaction: Arc<dyn ServerTransaction> = match request.method() {
+            Method::Invite => {
+                let tx = Arc::new(ServerInviteTransaction::new(
+                    request_tx_key.clone().unwrap(),
+                    request.clone(),
+                    remote_addr,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    None, // No timer override
+                )?);
+                
+                info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
+                tx
+            },
+            Method::Cancel => {
+                // For CANCEL, try to find the target INVITE transaction
+                let mut target_invite_tx_id = None;
+                
+                // Extract the relevant headers to match the INVITE
+                if let (Some(TypedHeader::CallId(call_id)), 
+                         Some(TypedHeader::CSeq(cseq)),
+                         Some(TypedHeader::From(from)),
+                         Some(TypedHeader::To(to))) = 
+                    (request.header(&HeaderName::CallId), 
+                     request.header(&HeaderName::CSeq),
+                     request.header(&HeaderName::From),
+                     request.header(&HeaderName::To)) {
+                     
+                    // CANCEL should have the same Call-ID, From tag, To tag (if present) as the INVITE
+                    // The CSeq number should be the same but method would be different
+                    // Manually construct a prefix for the search - this is an approximation
+                    
+                    // Look through server transactions to find a matching INVITE
+                    let server_txs = self.server_transactions.lock().await;
+                    for (tx_id, tx) in server_txs.iter() {
+                        if tx.kind() == TransactionKind::InviteServer {
+                            // Get the request from the transaction
+                            if let Some(invite_req) = TransactionAsync::original_request(tx.as_ref()).await {
+                                // Check if this INVITE matches the CANCEL
+                                if let (Some(TypedHeader::CallId(invite_call_id)),
+                                         Some(TypedHeader::From(invite_from)),
+                                         Some(TypedHeader::To(invite_to))) =
+                                    (invite_req.header(&HeaderName::CallId),
+                                     invite_req.header(&HeaderName::From),
+                                     invite_req.header(&HeaderName::To)) {
+                                     
+                                    if *invite_call_id == *call_id && 
+                                       *invite_from == *from && 
+                                       *invite_to == *to {
+                                        // Found a matching INVITE transaction
+                                        target_invite_tx_id = Some(tx_id.clone());
+                                        
+                                        debug!(id=%tx_id, cancel_id=%request_tx_key.as_ref().unwrap_or(&TransactionKey::new("unknown".to_string(), Method::Cancel, true)), 
+                                              "Found matching INVITE transaction for CANCEL");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                let tx = Arc::new(ServerCancelTransaction::new(
+                    request.clone(),
+                    remote_addr,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    target_invite_tx_id,
+                    None, // No timer override
+                )?);
+                
+                info!(id=%tx.id(), method=%request.method(), "Created new ServerCancelTransaction");
+                tx
+            },
+            Method::Update => {
+                let tx = Arc::new(ServerUpdateTransaction::new(
+                    request_tx_key.clone().unwrap(),
+                    request.clone(),
+                    remote_addr,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    None, // No timer override
+                )?);
+                
+                info!(id=%tx.id(), method=%request.method(), "Created new ServerUpdateTransaction");
+                tx
+            },
+            _ => {
+                let tx = Arc::new(ServerNonInviteTransaction::new(
+                    request_tx_key.clone().unwrap(),
+                    request.clone(),
+                    remote_addr,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    None, // No timer override
+                )?);
+                
+                info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction");
+                tx
+            }
         };
         
-        // Store transaction
-        server_txs.insert(transaction_id.clone(), server_tx);
+        // Store the transaction
+        {
+            let mut server_txs = self.server_transactions.lock().await;
+            server_txs.insert(transaction.id().clone(), transaction.clone());
+        }
         
-        // Store destination
-        let mut destinations = self.transaction_destinations.lock().await;
-        destinations.insert(transaction_id, source_addr);
+        // Start the transaction in Trying state (for non-INVITE) or Proceeding (for INVITE)
+        let initial_state = match transaction.kind() {
+            TransactionKind::InviteServer => TransactionState::Proceeding,
+            _ => TransactionState::Trying,
+        };
         
-        Ok(())
+        // Transition to the initial active state
+        if let Err(e) = transaction.send_command(InternalTransactionCommand::TransitionTo(initial_state)).await {
+            error!(id=%transaction.id(), error=%e, "Failed to initialize new server transaction");
+            return Err(e);
+        }
+        
+        Ok(transaction)
     }
 }
 

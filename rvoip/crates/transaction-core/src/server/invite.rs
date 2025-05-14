@@ -16,16 +16,466 @@ use crate::transaction::{
     Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
     InternalTransactionCommand, AtomicTransactionState,
 };
-use crate::timer::{Timer, TimerType, TimerSettings};
+use crate::timer::{TimerSettings, TimerFactory, TimerManager, TimerType};
 use crate::server::{
     ServerTransaction, ServerTransactionData, CommonServerTransaction
 };
+use crate::transaction::logic::TransactionLogic;
+use crate::transaction::runner::{run_transaction_loop, HasCommandSender, AsRefKey};
+use crate::transaction::timer_utils;
+use crate::transaction::validators;
+use crate::transaction::common_logic;
 use crate::utils;
 
 /// Server INVITE transaction (RFC 3261 Section 17.2.1)
 #[derive(Debug, Clone)]
 pub struct ServerInviteTransaction {
     data: Arc<ServerTransactionData>,
+    logic: Arc<ServerInviteLogic>,
+}
+
+/// Holds JoinHandles and dynamic state for timers specific to Server INVITE transactions.
+#[derive(Default, Debug)]
+struct ServerInviteTimerHandles {
+    timer_g: Option<JoinHandle<()>>,
+    current_timer_g_interval: Option<Duration>, // For backoff
+    timer_h: Option<JoinHandle<()>>,
+    timer_i: Option<JoinHandle<()>>,
+}
+
+/// Implements the TransactionLogic for Server INVITE transactions.
+#[derive(Debug, Clone, Default)]
+struct ServerInviteLogic {
+    _data_marker: std::marker::PhantomData<ServerTransactionData>,
+    timer_factory: TimerFactory,
+}
+
+impl ServerInviteLogic {
+    // Helper method to start Timer G (retransmission timer) using timer utils
+    async fn start_timer_g(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) {
+        let tx_id = &data.id;
+        let timer_config = &data.timer_config;
+        
+        // Start Timer G (retransmission) with initial interval T1
+        let initial_interval_g = timer_handles.current_timer_g_interval.unwrap_or(timer_config.t1);
+        
+        // Use timer_utils to start the timer
+        let timer_manager = self.timer_factory.timer_manager();
+        match timer_utils::start_transaction_timer(
+            &timer_manager,
+            tx_id,
+            "G",
+            TimerType::G,
+            initial_interval_g,
+            command_tx
+        ).await {
+            Ok(handle) => {
+                timer_handles.timer_g = Some(handle);
+                trace!(id=%tx_id, interval=?initial_interval_g, "Started Timer G for Completed state");
+            },
+            Err(e) => {
+                error!(id=%tx_id, error=%e, "Failed to start Timer G");
+            }
+        }
+    }
+    
+    // Helper method to start Timer H (transaction timeout for ACK) using timer utils
+    async fn start_timer_h(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) {
+        let tx_id = &data.id;
+        let timer_config = &data.timer_config;
+        
+        // Start Timer H
+        let interval_h = timer_config.wait_time_h;
+        
+        // Use timer_utils to start the timer
+        let timer_manager = self.timer_factory.timer_manager();
+        match timer_utils::start_transaction_timer(
+            &timer_manager,
+            tx_id,
+            "H",
+            TimerType::H,
+            interval_h,
+            command_tx
+        ).await {
+            Ok(handle) => {
+                timer_handles.timer_h = Some(handle);
+                trace!(id=%tx_id, interval=?interval_h, "Started Timer H for Completed state");
+            },
+            Err(e) => {
+                error!(id=%tx_id, error=%e, "Failed to start Timer H");
+            }
+        }
+    }
+    
+    // Helper method to start Timer I (wait for retransmissions in Confirmed state) using timer utils with transition
+    async fn start_timer_i(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) {
+        let tx_id = &data.id;
+        let timer_config = &data.timer_config;
+        
+        // Start Timer I that automatically transitions to Terminated state when it fires
+        let interval_i = timer_config.wait_time_i;
+        
+        // Use timer_utils to start the timer with transition
+        let timer_manager = self.timer_factory.timer_manager();
+        match timer_utils::start_timer_with_transition(
+            &timer_manager,
+            tx_id,
+            "I",
+            TimerType::I,
+            interval_i,
+            command_tx,
+            TransactionState::Terminated
+        ).await {
+            Ok(handle) => {
+                timer_handles.timer_i = Some(handle);
+                trace!(id=%tx_id, interval=?interval_i, "Started Timer I for Confirmed state");
+            },
+            Err(e) => {
+                error!(id=%tx_id, error=%e, "Failed to start Timer I");
+            }
+        }
+    }
+
+    // Handle Timer G (retransmission in Completed state) trigger
+    async fn handle_timer_g_trigger(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        current_state: TransactionState,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        let timer_config = &data.timer_config;
+        
+        match current_state {
+            TransactionState::Completed => {
+                debug!(id=%tx_id, "Timer G triggered, retransmitting final response");
+                
+                // Retransmit the final response
+                let response_guard = data.last_response.lock().await;
+                if let Some(response) = &*response_guard {
+                    if let Err(e) = data.transport.send_message(
+                        Message::Response(response.clone()),
+                        data.remote_addr
+                    ).await {
+                        error!(id=%tx_id, error=%e, "Failed to retransmit response");
+                        common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
+                        return Ok(Some(TransactionState::Terminated));
+                    }
+                }
+                drop(response_guard);
+                
+                // Update and restart Timer G with increased interval using the utility function
+                let current_interval = timer_handles.current_timer_g_interval.unwrap_or(timer_config.t1);
+                let new_interval = timer_utils::calculate_backoff_interval(current_interval, timer_config);
+                timer_handles.current_timer_g_interval = Some(new_interval);
+                
+                // Start new Timer G with the increased interval
+                self.start_timer_g(data, timer_handles, command_tx).await;
+            },
+            _ => {
+                trace!(id=%tx_id, state=?current_state, "Timer G fired in invalid state, ignoring");
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    // Handle Timer H (wait for ACK in Completed state) trigger
+    async fn handle_timer_h_trigger(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        current_state: TransactionState,
+        _command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Completed => {
+                warn!(id=%tx_id, "Timer H (ACK Timeout) fired in Completed state");
+                
+                // Notify TU about timeout using common logic
+                common_logic::send_transaction_timeout_event(tx_id, &data.events_tx).await;
+                
+                // Return state transition
+                return Ok(Some(TransactionState::Terminated));
+            },
+            _ => {
+                trace!(id=%tx_id, state=?current_state, "Timer H fired in invalid state, ignoring");
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    // Handle Timer I (wait for retransmissions in Confirmed state) trigger
+    async fn handle_timer_i_trigger(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        current_state: TransactionState,
+        _command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Confirmed => {
+                debug!(id=%tx_id, "Timer I fired in Confirmed state, terminating");
+                // Timer I automatically transitions to Terminated, no need to return a state
+                Ok(None)
+            },
+            _ => {
+                trace!(id=%tx_id, state=?current_state, "Timer I fired in invalid state, ignoring");
+                Ok(None)
+            }
+        }
+    }
+    
+    // Process a retransmitted INVITE request
+    async fn process_invite_retransmission(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        _request: Request,
+        current_state: TransactionState,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Proceeding => {
+                debug!(id=%tx_id, "Received INVITE retransmission in Proceeding state");
+                
+                // Retransmit the last provisional response
+                let last_response = data.last_response.lock().await;
+                if let Some(response) = &*last_response {
+                    if let Err(e) = data.transport.send_message(
+                        Message::Response(response.clone()),
+                        data.remote_addr
+                    ).await {
+                        error!(id=%tx_id, error=%e, "Failed to retransmit response");
+                        return Ok(None);
+                    }
+                }
+                
+                // No state transition needed for INVITE retransmission
+                Ok(None)
+            },
+            _ => {
+                // INVITE retransmissions in other states are ignored
+                trace!(id=%tx_id, state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);
+                Ok(None)
+            }
+        }
+    }
+    
+    // Process an ACK request
+    async fn process_ack(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        request: Request,
+        current_state: TransactionState,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Completed => {
+                debug!(id=%tx_id, "Received ACK in Completed state");
+                
+                // Notify TU about ACK
+                let _ = data.events_tx.send(TransactionEvent::AckReceived {
+                    transaction_id: tx_id.clone(),
+                    request: request.clone(),
+                }).await;
+                
+                // Transition to Confirmed state
+                Ok(Some(TransactionState::Confirmed))
+            },
+            TransactionState::Confirmed => {
+                // ACK retransmission, already in Confirmed state
+                trace!(id=%tx_id, "Received duplicate ACK in Confirmed state, ignoring");
+                Ok(None)
+            },
+            _ => {
+                warn!(id=%tx_id, state=?current_state, "Received ACK in unexpected state");
+                Ok(None)
+            }
+        }
+    }
+    
+    // Process a CANCEL request
+    async fn process_cancel(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        request: Request,
+        current_state: TransactionState,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Proceeding => {
+                debug!(id=%tx_id, "Received CANCEL in Proceeding state");
+                
+                // Notify TU about CANCEL
+                let _ = data.events_tx.send(TransactionEvent::CancelReceived {
+                    transaction_id: tx_id.clone(),
+                    cancel_request: request.clone(),
+                }).await;
+                
+                // No state transition needed for CANCEL
+                Ok(None)
+            },
+            _ => {
+                trace!(id=%tx_id, state=?current_state, "Ignoring CANCEL in non-proceeding state");
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for ServerInviteLogic {
+    fn kind(&self) -> TransactionKind {
+        TransactionKind::InviteServer
+    }
+
+    fn initial_state(&self) -> TransactionState {
+        TransactionState::Proceeding
+    }
+
+    fn timer_settings<'a>(data: &'a Arc<ServerTransactionData>) -> &'a TimerSettings {
+        &data.timer_config
+    }
+
+    fn cancel_all_specific_timers(&self, timer_handles: &mut ServerInviteTimerHandles) {
+        if let Some(handle) = timer_handles.timer_g.take() {
+            handle.abort();
+        }
+        if let Some(handle) = timer_handles.timer_h.take() {
+            handle.abort();
+        }
+        if let Some(handle) = timer_handles.timer_i.take() {
+            handle.abort();
+        }
+        // Reset current_timer_g_interval
+        timer_handles.current_timer_g_interval = None;
+    }
+
+    async fn on_enter_state(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        new_state: TransactionState,
+        _previous_state: TransactionState,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<()> {
+        let tx_id = &data.id;
+
+        match new_state {
+            TransactionState::Proceeding => {
+                debug!(id=%tx_id, "Entered Proceeding state. No timers are started yet.");
+            }
+            TransactionState::Completed => {
+                debug!(id=%tx_id, "Entered Completed state after sending final response.");
+                // Start Timer G for retransmitting responses
+                timer_handles.current_timer_g_interval = Some(data.timer_config.t1);
+                self.start_timer_g(data, timer_handles, command_tx.clone()).await;
+                
+                // Start Timer H to guard against lost ACKs
+                self.start_timer_h(data, timer_handles, command_tx).await;
+            }
+            TransactionState::Confirmed => {
+                debug!(id=%tx_id, "Entered Confirmed state after receiving ACK.");
+                // Start Timer I for final cleanup
+                self.start_timer_i(data, timer_handles, command_tx).await;
+            }
+            TransactionState::Terminated => {
+                trace!(id=%tx_id, "Entered Terminated state. Specific timers should have been cancelled by runner.");
+                // Unregister from timer manager when terminated
+                let timer_manager = self.timer_factory.timer_manager();
+                timer_utils::unregister_transaction(&timer_manager, tx_id).await;
+            }
+            _ => {
+                trace!(id=%tx_id, "Entered unhandled state {:?} in on_enter_state", new_state);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_timer(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        timer_name: &str,
+        current_state: TransactionState,
+        timer_handles: &mut ServerInviteTimerHandles,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        // Clear the timer handle since it fired
+        match timer_name {
+            "G" => { timer_handles.timer_g.take(); }
+            "H" => { timer_handles.timer_h.take(); }
+            "I" => { timer_handles.timer_i.take(); }
+            _ => {}
+        }
+        
+        // Send timer triggered event using common logic
+        common_logic::send_timer_triggered_event(tx_id, timer_name, &data.events_tx).await;
+        
+        // Use the command_tx from data
+        let self_command_tx = data.cmd_tx.clone();
+        
+        match timer_name {
+            "G" => self.handle_timer_g_trigger(data, current_state, timer_handles, self_command_tx).await,
+            "H" => self.handle_timer_h_trigger(data, current_state, self_command_tx).await,
+            "I" => self.handle_timer_i_trigger(data, current_state, self_command_tx).await,
+            _ => {
+                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ServerInvite");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn process_message(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        message: Message,
+        current_state: TransactionState,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match message {
+            Message::Request(request) => {
+                let method = request.method();
+                
+                match method {
+                    Method::Invite => self.process_invite_retransmission(data, request, current_state).await,
+                    Method::Ack => self.process_ack(data, request, current_state).await,
+                    Method::Cancel => self.process_cancel(data, request, current_state).await,
+                    _ => {
+                        warn!(id=%tx_id, method=%method, "Received unexpected request method");
+                        Ok(None)
+                    }
+                }
+            },
+            Message::Response(_) => {
+                warn!(id=%tx_id, "Server transaction received a Response, ignoring");
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl ServerInviteTransaction {
@@ -36,478 +486,53 @@ impl ServerInviteTransaction {
         remote_addr: SocketAddr,
         transport: Arc<dyn Transport>,
         events_tx: mpsc::Sender<TransactionEvent>,
-        timer_config: Option<TimerSettings>,
+        timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
         if request.method() != Method::Invite {
             return Err(Error::Other("Request must be INVITE for INVITE server transaction".to_string()));
         }
 
-        // Create communication channels for the transaction
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        
-        let timer_config = timer_config.unwrap_or_default();
-        let state = Arc::new(crate::transaction::AtomicTransactionState::new(TransactionState::Proceeding));
-        
+        let timer_config = timer_config_override.unwrap_or_default();
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(32);
+
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),
-            state,
-            request: Arc::new(Mutex::new(request)),
+            state: Arc::new(AtomicTransactionState::new(TransactionState::Proceeding)),
+            request: Arc::new(Mutex::new(request.clone())),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
             transport,
             events_tx,
-            cmd_tx,
-            cmd_rx: Arc::new(Mutex::new(cmd_rx)),
+            cmd_tx: cmd_tx.clone(),
+            cmd_rx: Arc::new(Mutex::new(local_cmd_rx)),
             event_loop_handle: Arc::new(Mutex::new(None)),
-            timer_config,
+            timer_config: timer_config.clone(),
         });
+
+        let logic = Arc::new(ServerInviteLogic {
+            _data_marker: std::marker::PhantomData,
+            timer_factory: TimerFactory::new(Some(timer_config), Arc::new(TimerManager::new(None))),
+        });
+
+        let data_for_runner = data.clone();
+        let logic_for_runner = logic.clone();
         
-        let transaction = Self { data: data.clone() };
-        
-        // Start the event processing loop
-        let event_loop_handle = Self::start_event_loop(data.clone());
-        
+        // Spawn the generic event loop runner - get the receiver from the data first in a separate tokio task
+        let event_loop_handle = tokio::spawn(async move {
+            let mut cmd_rx_guard = data_for_runner.cmd_rx.lock().await;
+            // Take the receiver out of the Mutex, replacing it with a dummy receiver
+            let cmd_rx = std::mem::replace(&mut *cmd_rx_guard, mpsc::channel(1).1);
+            // Drop the guard to release the lock
+            drop(cmd_rx_guard);
+            run_transaction_loop(data_for_runner, logic_for_runner, cmd_rx).await;
+        });
+
         // Store the handle for cleanup
         if let Ok(mut handle_guard) = data.event_loop_handle.try_lock() {
             *handle_guard = Some(event_loop_handle);
         }
         
-        Ok(transaction)
-    }
-    
-    /// Start the main event processing loop for this transaction
-    fn start_event_loop(
-        data: Arc<ServerTransactionData>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let cmd_rx_mutex = data.cmd_rx.clone();
-            let mut cmd_rx = cmd_rx_mutex.lock().await;
-            
-            debug!(id=%data.id, "Starting INVITE server transaction event loop");
-            
-            // Track active timers
-            let mut timer_g_task: Option<JoinHandle<()>> = None;
-            let mut timer_h_task: Option<JoinHandle<()>> = None;
-            let mut timer_i_task: Option<JoinHandle<()>> = None;
-            let mut timer_j_task: Option<JoinHandle<()>> = None;
-            
-            // Timer G interval for retransmission
-            let mut timer_g_interval = data.timer_config.t1;
-            
-            // Function to cancel active timers
-            let cancel_timers = |g_task: &mut Option<JoinHandle<()>>, 
-                                 h_task: &mut Option<JoinHandle<()>>,
-                                 i_task: &mut Option<JoinHandle<()>>,
-                                 j_task: &mut Option<JoinHandle<()>>| {
-                if let Some(handle) = g_task.take() {
-                    handle.abort();
-                }
-                if let Some(handle) = h_task.take() {
-                    handle.abort();
-                }
-                if let Some(handle) = i_task.take() {
-                    handle.abort();
-                }
-                if let Some(handle) = j_task.take() {
-                    handle.abort();
-                }
-                trace!(id=%data.id, "Cancelled active timers");
-            };
-            
-            // Function to start Timer G (response retransmission)
-            let start_timer_g = |interval: Duration, data: Arc<ServerTransactionData>, g_task: &mut Option<JoinHandle<()>>| {
-                if let Some(old_task) = g_task.take() {
-                    old_task.abort();
-                }
-                
-                let id = data.id.clone();
-                let events_tx = data.events_tx.clone();
-                let cmd_tx = data.cmd_tx.clone();
-                
-                *g_task = Some(tokio::spawn(async move {
-                    tokio::time::sleep(interval).await;
-                    debug!(id=%id, "Timer G fired");
-                    
-                    // Notify about the timer event
-                    let _ = events_tx.send(TransactionEvent::TimerTriggered { 
-                        transaction_id: id.clone(), 
-                        timer: "G".to_string() 
-                    }).await;
-                    
-                    // Send command to process the timer
-                    let _ = cmd_tx.send(InternalTransactionCommand::Timer("G".to_string())).await;
-                }));
-                
-                trace!(id=%data.id, interval=?interval, "Started Timer G");
-            };
-            
-            // Function to start Timer H (wait time for ACK)
-            let start_timer_h = |data: Arc<ServerTransactionData>, h_task: &mut Option<JoinHandle<()>>| {
-                if let Some(old_task) = h_task.take() {
-                    old_task.abort();
-                }
-                
-                let interval = data.timer_config.wait_time_h;
-                let id = data.id.clone();
-                let events_tx = data.events_tx.clone();
-                let cmd_tx = data.cmd_tx.clone();
-                
-                *h_task = Some(tokio::spawn(async move {
-                    tokio::time::sleep(interval).await;
-                    debug!(id=%id, "Timer H fired");
-                    
-                    // Notify about the timer event
-                    let _ = events_tx.send(TransactionEvent::TimerTriggered { 
-                        transaction_id: id.clone(), 
-                        timer: "H".to_string() 
-                    }).await;
-                    
-                    // Send command to process the timer
-                    let _ = cmd_tx.send(InternalTransactionCommand::Timer("H".to_string())).await;
-                }));
-                
-                trace!(id=%data.id, interval=?interval, "Started Timer H");
-            };
-            
-            // Function to start Timer I (wait time in Confirmed state)
-            let start_timer_i = |data: Arc<ServerTransactionData>, i_task: &mut Option<JoinHandle<()>>| {
-                if let Some(old_task) = i_task.take() {
-                    old_task.abort();
-                }
-                
-                let interval = data.timer_config.wait_time_i;
-                let id = data.id.clone();
-                let events_tx = data.events_tx.clone();
-                let cmd_tx = data.cmd_tx.clone();
-                
-                *i_task = Some(tokio::spawn(async move {
-                    tokio::time::sleep(interval).await;
-                    debug!(id=%id, "Timer I fired");
-                    
-                    // Notify about the timer event
-                    let _ = events_tx.send(TransactionEvent::TimerTriggered { 
-                        transaction_id: id.clone(), 
-                        timer: "I".to_string() 
-                    }).await;
-                    
-                    // Send command to process the timer
-                    let _ = cmd_tx.send(InternalTransactionCommand::Timer("I".to_string())).await;
-                    
-                    // For Timer I, we can also directly send a command to transition to Terminated state
-                    let _ = cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await;
-                }));
-                
-                trace!(id=%data.id, interval=?interval, "Started Timer I");
-            };
-            
-            // Function to start Timer J (wait time for non-INVITE request retransmissions)
-            let start_timer_j = |data: Arc<ServerTransactionData>, j_task: &mut Option<JoinHandle<()>>| {
-                if let Some(old_task) = j_task.take() {
-                    old_task.abort();
-                }
-                
-                let interval = data.timer_config.wait_time_j;
-                let id = data.id.clone();
-                let events_tx = data.events_tx.clone();
-                let cmd_tx = data.cmd_tx.clone();
-                
-                *j_task = Some(tokio::spawn(async move {
-                    tokio::time::sleep(interval).await;
-                    debug!(id=%id, "Timer J fired");
-                    
-                    // Notify about the timer event
-                    let _ = events_tx.send(TransactionEvent::TimerTriggered { 
-                        transaction_id: id.clone(), 
-                        timer: "J".to_string() 
-                    }).await;
-                    
-                    // Send command to process the timer
-                    let _ = cmd_tx.send(InternalTransactionCommand::Timer("J".to_string())).await;
-                    
-                    // For Timer J, we can also directly send a command to transition to Terminated state
-                    let _ = cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await;
-                }));
-                
-                trace!(id=%data.id, interval=?interval, "Started Timer J");
-            };
-            
-            // Handle transition to a new state
-            let handle_transition = async |new_state: TransactionState, 
-                                   data: &Arc<ServerTransactionData>,
-                                   g_task: &mut Option<JoinHandle<()>>,
-                                   h_task: &mut Option<JoinHandle<()>>,
-                                   i_task: &mut Option<JoinHandle<()>>,
-                                   j_task: &mut Option<JoinHandle<()>>,
-                                   timer_g_interval: &mut Duration| -> Result<()> {
-                let current_state = data.state.get();
-                if current_state == new_state {
-                    return Ok(());
-                }
-                
-                // First validate the transition
-                AtomicTransactionState::validate_transition(current_state, new_state, TransactionKind::InviteServer)?;
-                
-                debug!(id=%data.id, "State transition: {:?} -> {:?}", current_state, new_state);
-                
-                // Cancel existing timers
-                cancel_timers(g_task, h_task, i_task, j_task);
-                
-                // Update the state
-                let prev_state = data.state.set(new_state);
-                
-                // Notify about state change
-                let _ = data.events_tx.send(TransactionEvent::StateChanged {
-                    transaction_id: data.id.clone(),
-                    previous_state: prev_state,
-                    new_state,
-                }).await;
-                
-                // Start appropriate timers for the new state
-                match new_state {
-                    TransactionState::Completed => {
-                        // Start Timer G for retransmitting the response
-                        start_timer_g(data.timer_config.t1, data.clone(), g_task);
-                        
-                        // Start Timer H to guard against lost ACKs
-                        start_timer_h(data.clone(), h_task);
-                        
-                        *timer_g_interval = data.timer_config.t1;
-                    },
-                    TransactionState::Confirmed => {
-                        // Start Timer I
-                        start_timer_i(data.clone(), i_task);
-                    },
-                    TransactionState::Terminated => {
-                        // If we're terminating, send a termination event
-                        let _ = data.events_tx.send(TransactionEvent::TransactionTerminated {
-                            transaction_id: data.id.clone(),
-                        }).await;
-                    },
-                    _ => {},
-                }
-                
-                Ok(())
-            };
-            
-            // Main event processing loop
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    InternalTransactionCommand::TransitionTo(new_state) => {
-                        if let Err(e) = handle_transition(
-                            new_state, 
-                            &data, 
-                            &mut timer_g_task, 
-                            &mut timer_h_task, 
-                            &mut timer_i_task,
-                            &mut timer_j_task,
-                            &mut timer_g_interval
-                        ).await {
-                            error!(id=%data.id, error=%e, "Failed to transition state");
-                            
-                            // If transition fails, notify TU about the error
-                            let _ = data.events_tx.send(TransactionEvent::Error {
-                                transaction_id: Some(data.id.clone()),
-                                error: e.to_string(),
-                            }).await;
-                        }
-                    },
-                    InternalTransactionCommand::ProcessMessage(msg) => {
-                        if let Message::Request(request) = msg {
-                            let method = request.method();
-                            let current_state = data.state.get();
-                            
-                            if method == Method::Invite {
-                                // INVITE retransmission
-                                if current_state == TransactionState::Proceeding {
-                                    debug!(id=%data.id, "Received INVITE retransmission in Proceeding state");
-                                    
-                                    // According to RFC 3261, resend the last provisional response
-                                    let last_response = data.last_response.lock().await;
-                                    if let Some(response) = &*last_response {
-                                        if let Err(e) = data.transport.send_message(
-                                            Message::Response(response.clone()),
-                                            data.remote_addr
-                                        ).await {
-                                            error!(id=%data.id, error=%e, "Failed to retransmit response");
-                                        }
-                                    }
-                                } else {
-                                    trace!(id=%data.id, state=?current_state, "Ignoring INVITE retransmission in non-proceeding state");
-                                }
-                            } else if method == Method::Ack {
-                                // ACK received
-                                if current_state == TransactionState::Completed {
-                                    debug!(id=%data.id, "Received ACK in Completed state");
-                                    
-                                    // Transition to Confirmed state
-                                    let _ = handle_transition(
-                                        TransactionState::Confirmed, 
-                                        &data, 
-                                        &mut timer_g_task, 
-                                        &mut timer_h_task, 
-                                        &mut timer_i_task,
-                                        &mut timer_j_task,
-                                        &mut timer_g_interval
-                                    ).await;
-                                    
-                                    // Notify TU about ACK
-                                    let _ = data.events_tx.send(TransactionEvent::AckReceived {
-                                        transaction_id: data.id.clone(),
-                                        request: request.clone(),
-                                    }).await;
-                                } else if current_state == TransactionState::Confirmed {
-                                    // ACK retransmission, already in Confirmed state
-                                    trace!(id=%data.id, "Received duplicate ACK in Confirmed state, ignoring");
-                                } else {
-                                    warn!(id=%data.id, state=?current_state, "Received ACK in unexpected state");
-                                }
-                            } else if method == Method::Cancel {
-                                // CANCEL request
-                                if current_state == TransactionState::Proceeding {
-                                    debug!(id=%data.id, "Received CANCEL in Proceeding state");
-                                    
-                                    // Notify TU about CANCEL
-                                    let _ = data.events_tx.send(TransactionEvent::CancelReceived {
-                                        transaction_id: data.id.clone(),
-                                        cancel_request: request.clone(),
-                                    }).await;
-                                } else {
-                                    trace!(id=%data.id, state=?current_state, "Ignoring CANCEL in non-proceeding state");
-                                }
-                            } else {
-                                warn!(id=%data.id, method=%method, "Received unexpected request method");
-                            }
-                        } else {
-                            warn!(id=%data.id, "Received non-request message");
-                        }
-                    },
-                    InternalTransactionCommand::Timer(timer) => {
-                        match timer.as_str() {
-                            "G" => {
-                                // Timer G logic - retransmit the final response
-                                let current_state = data.state.get();
-                                if current_state == TransactionState::Completed {
-                                    debug!(id=%data.id, "Timer G triggered, retransmitting final response");
-                                    
-                                    // Retransmit the final response
-                                    let response_guard = data.last_response.lock().await;
-                                    if let Some(response) = &*response_guard {
-                                        if let Err(e) = data.transport.send_message(
-                                            Message::Response(response.clone()),
-                                            data.remote_addr
-                                        ).await {
-                                            error!(id=%data.id, error=%e, "Failed to retransmit response");
-                                        }
-                                    }
-                                    
-                                    // Double interval, capped by T2
-                                    timer_g_interval = std::cmp::min(timer_g_interval * 2, data.timer_config.t2);
-                                    
-                                    // Restart timer G with new interval
-                                    start_timer_g(timer_g_interval, data.clone(), &mut timer_g_task);
-                                } else {
-                                    trace!(id=%data.id, state=?current_state, "Timer G fired in invalid state, ignoring");
-                                }
-                            },
-                            "H" => {
-                                // Timer H logic - ACK timeout
-                                let current_state = data.state.get();
-                                if current_state == TransactionState::Completed {
-                                    warn!(id=%data.id, "Timer H (ACK Timeout) fired in Completed state");
-                                    
-                                    // Transition to Terminated
-                                    let _ = handle_transition(
-                                        TransactionState::Terminated, 
-                                        &data, 
-                                        &mut timer_g_task, 
-                                        &mut timer_h_task, 
-                                        &mut timer_i_task,
-                                        &mut timer_j_task,
-                                        &mut timer_g_interval
-                                    ).await;
-                                    
-                                    // Notify TU about timeout
-                                    let _ = data.events_tx.send(TransactionEvent::TransactionTimeout {
-                                        transaction_id: data.id.clone(),
-                                    }).await;
-                                } else {
-                                    trace!(id=%data.id, state=?current_state, "Timer H fired in invalid state, ignoring");
-                                }
-                            },
-                            "I" => {
-                                // Timer I logic - terminate after waiting for retransmissions in Confirmed state
-                                let current_state = data.state.get();
-                                if current_state == TransactionState::Confirmed {
-                                    debug!(id=%data.id, "Timer I fired in Confirmed state, terminating");
-                                    
-                                    // Transition to Terminated
-                                    let _ = handle_transition(
-                                        TransactionState::Terminated, 
-                                        &data, 
-                                        &mut timer_g_task, 
-                                        &mut timer_h_task, 
-                                        &mut timer_i_task,
-                                        &mut timer_j_task,
-                                        &mut timer_g_interval
-                                    ).await;
-                                } else {
-                                    trace!(id=%data.id, state=?current_state, "Timer I fired in invalid state, ignoring");
-                                }
-                            },
-                            _ => {
-                                warn!(id=%data.id, timer=%timer, "Unknown timer triggered");
-                            }
-                        }
-                    },
-                    InternalTransactionCommand::TransportError => {
-                        error!(id=%data.id, "Transport error occurred, terminating transaction");
-                        
-                        // Transition to Terminated state
-                        let _ = handle_transition(
-                            TransactionState::Terminated, 
-                            &data, 
-                            &mut timer_g_task, 
-                            &mut timer_h_task, 
-                            &mut timer_i_task,
-                            &mut timer_j_task,
-                            &mut timer_g_interval
-                        ).await;
-                        
-                        // Notify TU about transport error
-                        let _ = data.events_tx.send(TransactionEvent::TransportError {
-                            transaction_id: data.id.clone(),
-                        }).await;
-                    },
-                    InternalTransactionCommand::Terminate => {
-                        debug!(id=%data.id, "Received explicit termination command");
-                        
-                        // Transition to Terminated state
-                        let _ = handle_transition(
-                            TransactionState::Terminated, 
-                            &data, 
-                            &mut timer_g_task, 
-                            &mut timer_h_task, 
-                            &mut timer_i_task,
-                            &mut timer_j_task,
-                            &mut timer_g_interval
-                        ).await;
-                        
-                        // Stop processing events
-                        break;
-                    }
-                }
-                
-                // If we've reached Terminated state, stop processing events
-                if data.state.get() == TransactionState::Terminated {
-                    debug!(id=%data.id, "Transaction reached Terminated state, stopping event loop");
-                    break;
-                }
-            }
-            
-            // Final cleanup
-            cancel_timers(&mut timer_g_task, &mut timer_h_task, &mut timer_i_task, &mut timer_j_task);
-            debug!(id=%data.id, "INVITE server transaction event loop ended");
-        })
+        Ok(Self { data, logic })
     }
 }
 
@@ -662,27 +687,287 @@ impl ServerTransaction for ServerInviteTransaction {
     }
 }
 
-// Implementation of the event loop for the server transaction
-impl ServerInviteTransaction {
-    // Send ACK received event to the TU
-    async fn handle_ack(&self, request: Request) -> Result<()> {
-        // Send to TU
-        debug!(id=%self.data.id, "Received ACK for non-2xx response");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use tokio::sync::Notify;
+    use tokio::time::timeout as TokioTimeout;
+    use std::collections::VecDeque;
+    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+    use rvoip_sip_core::types::status::StatusCode;
+
+    #[derive(Debug, Clone)]
+    struct UnitTestMockTransport {
+        sent_messages: Arc<Mutex<VecDeque<(Message, SocketAddr)>>>,
+        local_addr: SocketAddr,
+        message_sent_notifier: Arc<Notify>,
+    }
+
+    impl UnitTestMockTransport {
+        fn new(local_addr_str: &str) -> Self {
+            Self {
+                sent_messages: Arc::new(Mutex::new(VecDeque::new())),
+                local_addr: SocketAddr::from_str(local_addr_str).unwrap(),
+                message_sent_notifier: Arc::new(Notify::new()),
+            }
+        }
+
+        async fn get_sent_message(&self) -> Option<(Message, SocketAddr)> {
+            self.sent_messages.lock().await.pop_front()
+        }
+
+        async fn wait_for_message_sent(&self, duration: Duration) -> std::result::Result<(), tokio::time::error::Elapsed> {
+            TokioTimeout(duration, self.message_sent_notifier.notified()).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for UnitTestMockTransport {
+        fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(&self, message: Message, destination: SocketAddr) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            self.sent_messages.lock().await.push_back((message.clone(), destination));
+            self.message_sent_notifier.notify_one();
+            Ok(())
+        }
+
+        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    struct TestSetup {
+        transaction: ServerInviteTransaction,
+        mock_transport: Arc<UnitTestMockTransport>,
+        tu_events_rx: mpsc::Receiver<TransactionEvent>,
+    }
+
+    async fn setup_test_environment() -> TestSetup {
+        let local_addr = "127.0.0.1:5090";
+        let remote_addr = SocketAddr::from_str("127.0.0.1:5070").unwrap();
+        let mock_transport = Arc::new(UnitTestMockTransport::new(local_addr));
+        let (tu_events_tx, tu_events_rx) = mpsc::channel(100);
+
+        let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@target.com")
+            .expect("Failed to create SimpleRequestBuilder")
+            .from("Alice", "sip:alice@atlanta.com", Some("fromtag"))
+            .to("Bob", "sip:bob@target.com", None)
+            .call_id("callid-invite-server-test")
+            .cseq(1);
         
-        self.data.events_tx.send(TransactionEvent::AckReceived {
-            transaction_id: self.data.id.clone(),
-            request: request.clone(),
-        }).await.map_err(|_| Error::Other("Failed to send event".to_string()))
+        let via_branch = format!("z9hG4bK.{}", uuid::Uuid::new_v4().as_simple());
+        let builder = builder.via(remote_addr.to_string().as_str(), "UDP", Some(&via_branch));
+
+        let request = builder.build();
+        
+        let tx_key = TransactionKey::from_request(&request).expect("Failed to create tx key from request");
+
+        let settings = TimerSettings {
+            t1: Duration::from_millis(50),
+            t2: Duration::from_millis(100),
+            transaction_timeout: Duration::from_millis(200),
+            wait_time_h: Duration::from_millis(100),
+            wait_time_i: Duration::from_millis(100),
+            ..Default::default()
+        };
+
+        let transaction = ServerInviteTransaction::new(
+            tx_key,
+            request,
+            remote_addr,
+            mock_transport.clone() as Arc<dyn Transport>,
+            tu_events_tx,
+            Some(settings),
+        ).unwrap();
+
+        TestSetup {
+            transaction,
+            mock_transport,
+            tu_events_rx,
+        }
     }
     
-    // Handle CANCEL request
-    async fn handle_cancel(&self, request: Request) -> Result<()> {
-        debug!(id=%self.data.id, "Received CANCEL");
+    fn build_simple_response(status_code: StatusCode, original_request: &Request) -> Response {
+        SimpleResponseBuilder::response_from_request(
+            original_request,
+            status_code,
+            Some(status_code.reason_phrase())
+        ).build()
+    }
+
+    #[tokio::test]
+    async fn test_server_invite_creation() {
+        let setup = setup_test_environment().await;
+        assert_eq!(setup.transaction.state(), TransactionState::Proceeding);
+        assert!(setup.transaction.data.event_loop_handle.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_server_invite_send_provisional_response() {
+        let mut setup = setup_test_environment().await;
         
-        // Forward to TU
-        self.data.events_tx.send(TransactionEvent::CancelReceived {
-            transaction_id: self.data.id.clone(),
-            cancel_request: request.clone(),
-        }).await.map_err(|_| Error::Other("Failed to send event".to_string()))
+        // Create a provisional response
+        let original_request = setup.transaction.data.request.lock().await.clone();
+        let prov_response = build_simple_response(StatusCode::Ringing, &original_request);
+        
+        // Send the response
+        setup.transaction.send_response(prov_response.clone()).await.expect("send_response failed");
+        
+        // Wait for the response to be sent
+        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.expect("Response should be sent quickly");
+        
+        // Check sent message
+        let sent_msg_info = setup.mock_transport.get_sent_message().await;
+        assert!(sent_msg_info.is_some(), "Response should have been sent");
+        if let Some((msg, dest)) = sent_msg_info {
+            assert!(msg.is_response());
+            if let Message::Response(resp) = msg {
+                assert_eq!(resp.status_code(), StatusCode::Ringing.as_u16());
+            }
+            assert_eq!(dest, setup.transaction.remote_addr());
+        }
+        
+        // We should stay in Proceeding state for provisional responses
+        assert_eq!(setup.transaction.state(), TransactionState::Proceeding);
+    }
+
+    #[tokio::test]
+    async fn test_server_invite_send_final_error_response() {
+        let mut setup = setup_test_environment().await;
+        
+        // Create a final response
+        let original_request = setup.transaction.data.request.lock().await.clone();
+        let final_response = build_simple_response(StatusCode::NotFound, &original_request);
+        
+        // Send the response
+        setup.transaction.send_response(final_response.clone()).await.expect("send_response failed");
+        
+        // Wait for the response to be sent
+        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.expect("Response should be sent quickly");
+        
+        // Check sent message
+        let sent_msg_info = setup.mock_transport.get_sent_message().await;
+        assert!(sent_msg_info.is_some(), "Response should have been sent");
+        if let Some((msg, dest)) = sent_msg_info {
+            assert!(msg.is_response());
+            if let Message::Response(resp) = msg {
+                assert_eq!(resp.status_code(), StatusCode::NotFound.as_u16());
+            }
+            assert_eq!(dest, setup.transaction.remote_addr());
+        }
+        
+        // Check for state transition event
+        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, previous_state, new_state })) => {
+                assert_eq!(transaction_id, *setup.transaction.id());
+                assert_eq!(previous_state, TransactionState::Proceeding);
+                assert_eq!(new_state, TransactionState::Completed);
+            },
+            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
+            _ => panic!("Expected StateChanged event"),
+        }
+        
+        // Check state
+        assert_eq!(setup.transaction.state(), TransactionState::Completed);
+        
+        // Wait for Timer G to trigger a retransmission
+        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.expect("Response should be retransmitted");
+        let retrans_msg_info = setup.mock_transport.get_sent_message().await;
+        assert!(retrans_msg_info.is_some(), "Response should have been retransmitted");
+    }
+
+    #[tokio::test]
+    async fn test_server_invite_send_success_response() {
+        let mut setup = setup_test_environment().await;
+        
+        // Create a 2xx response
+        let original_request = setup.transaction.data.request.lock().await.clone();
+        let success_response = build_simple_response(StatusCode::Ok, &original_request);
+        
+        // Send the response
+        setup.transaction.send_response(success_response.clone()).await.expect("send_response failed");
+        
+        // Wait for the response to be sent
+        setup.mock_transport.wait_for_message_sent(Duration::from_millis(100)).await.expect("Response should be sent quickly");
+        
+        // Check for state transition event
+        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, previous_state, new_state })) => {
+                assert_eq!(transaction_id, *setup.transaction.id());
+                assert_eq!(previous_state, TransactionState::Proceeding);
+                assert_eq!(new_state, TransactionState::Terminated);
+            },
+            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
+            _ => panic!("Expected StateChanged event"),
+        }
+        
+        // Check state
+        assert_eq!(setup.transaction.state(), TransactionState::Terminated);
+    }
+
+    #[tokio::test]
+    async fn test_server_invite_ack_handling() {
+        let mut setup = setup_test_environment().await;
+        
+        // Create and send a final error response
+        let original_request = setup.transaction.data.request.lock().await.clone();
+        let final_response = build_simple_response(StatusCode::NotFound, &original_request);
+        setup.transaction.send_response(final_response.clone()).await.expect("send_response failed");
+        
+        // Wait for state transition to Completed
+        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
+            Ok(Some(TransactionEvent::StateChanged { new_state, .. })) => {
+                assert_eq!(new_state, TransactionState::Completed);
+            },
+            _ => panic!("Expected StateChanged event"),
+        }
+        
+        // Create an ACK request
+        let ack_request = SimpleRequestBuilder::new(Method::Ack, "sip:bob@target.com").unwrap()
+            .from("Alice", "sip:alice@atlanta.com", Some("fromtag"))
+            .to("Bob", "sip:bob@target.com", None)
+            .call_id("callid-invite-server-test")
+            .cseq(1)
+            .via(setup.transaction.remote_addr().to_string().as_str(), "UDP", 
+                 Some(setup.transaction.id().branch.as_str()))
+            .build();
+        
+        // Send the ACK
+        setup.transaction.process_request(ack_request.clone()).await.expect("process_request failed");
+        
+        // Check for AckReceived event
+        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
+            Ok(Some(TransactionEvent::AckReceived { transaction_id, request })) => {
+                assert_eq!(transaction_id, *setup.transaction.id());
+                assert_eq!(request.method(), Method::Ack);
+            },
+            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
+            _ => panic!("Expected AckReceived event"),
+        }
+        
+        // Check for state transition to Confirmed
+        match TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await {
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, previous_state, new_state })) => {
+                assert_eq!(transaction_id, *setup.transaction.id());
+                assert_eq!(previous_state, TransactionState::Completed);
+                assert_eq!(new_state, TransactionState::Confirmed);
+            },
+            Ok(Some(other_event)) => panic!("Unexpected event: {:?}", other_event),
+            _ => panic!("Expected StateChanged event"),
+        }
+        
+        // Check state
+        assert_eq!(setup.transaction.state(), TransactionState::Confirmed);
+        
+        // Wait for Timer I to fire and transition to Terminated
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(setup.transaction.state(), TransactionState::Terminated);
     }
 } 
