@@ -58,15 +58,14 @@ impl ClientInviteTransaction {
             transport,
             events_tx,
             cmd_tx,
-            cmd_rx: Arc::new(Mutex::new(cmd_rx)),
             event_loop_handle: Arc::new(Mutex::new(None)),
             timer_config,
         });
         
         let transaction = Self { data: data.clone() };
         
-        // Start the event processing loop
-        let event_loop_handle = Self::start_event_loop(data.clone());
+        // Start the event processing loop - pass cmd_rx as parameter
+        let event_loop_handle = Self::start_event_loop(data.clone(), cmd_rx);
         
         // Store the handle for cleanup
         if let Ok(mut handle_guard) = data.event_loop_handle.try_lock() {
@@ -79,11 +78,10 @@ impl ClientInviteTransaction {
     /// Start the main event processing loop for this transaction
     fn start_event_loop(
         data: Arc<ClientTransactionData>,
+        mut cmd_rx: CommandReceiver, // Take cmd_rx as parameter
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let cmd_rx_mutex = data.cmd_rx.clone();
-            let mut cmd_rx = cmd_rx_mutex.lock().await;
-            
+            // Remove the access to cmd_rx through data.cmd_rx
             debug!(id=%data.id, "Starting INVITE client transaction event loop");
             
             // Track active timers

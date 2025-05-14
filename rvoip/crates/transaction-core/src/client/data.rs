@@ -16,6 +16,7 @@ use crate::transaction::{
     InternalTransactionCommand, AtomicTransactionState
 };
 use crate::timer::TimerSettings;
+use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender};
 
 /// Command sender type for transaction
 pub type CommandSender = mpsc::Sender<InternalTransactionCommand>;
@@ -41,8 +42,6 @@ pub struct ClientTransactionData {
     pub events_tx: mpsc::Sender<TransactionEvent>,
     /// Channel for sending commands to the transaction's event loop
     pub cmd_tx: CommandSender,
-    /// Channel for receiving commands in the transaction's event loop
-    pub cmd_rx: Arc<Mutex<CommandReceiver>>,
     /// Handle to the event loop task
     pub event_loop_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Timer configuration
@@ -91,5 +90,35 @@ impl fmt::Debug for ClientTransactionData {
             .field("remote_addr", &self.remote_addr)
             .field("has_event_loop", &self.event_loop_handle.try_lock().map(|h| h.is_some()).unwrap_or(false))
             .finish()
+    }
+}
+
+impl AsRefState for ClientTransactionData {
+    fn as_ref_state(&self) -> &Arc<AtomicTransactionState> {
+        &self.state
+    }
+}
+
+impl AsRefKey for ClientTransactionData {
+    fn as_ref_key(&self) -> &TransactionKey {
+        &self.id
+    }
+}
+
+impl HasTransactionEvents for ClientTransactionData {
+    fn get_tu_event_sender(&self) -> mpsc::Sender<TransactionEvent> {
+        self.events_tx.clone()
+    }
+}
+
+impl HasTransport for ClientTransactionData {
+    fn get_transport_layer(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+}
+
+impl HasCommandSender for ClientTransactionData {
+    fn get_self_command_sender(&self) -> mpsc::Sender<InternalTransactionCommand> {
+        self.cmd_tx.clone()
     }
 } 

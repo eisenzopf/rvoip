@@ -16,6 +16,7 @@ use crate::transaction::{
     InternalTransactionCommand, AtomicTransactionState
 };
 use crate::timer::TimerSettings;
+use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender};
 
 /// Command sender type for transaction
 pub type CommandSender = mpsc::Sender<InternalTransactionCommand>;
@@ -67,4 +68,34 @@ impl Drop for ServerTransactionData {
 pub trait CommonServerTransaction {
     /// Get the shared data for this transaction
     fn data(&self) -> &Arc<ServerTransactionData>;
+}
+
+impl AsRefState for ServerTransactionData {
+    fn as_ref_state(&self) -> &Arc<AtomicTransactionState> {
+        &self.state
+    }
+}
+
+impl AsRefKey for ServerTransactionData {
+    fn as_ref_key(&self) -> &TransactionKey {
+        &self.id
+    }
+}
+
+impl HasTransactionEvents for ServerTransactionData {
+    fn get_tu_event_sender(&self) -> mpsc::Sender<TransactionEvent> {
+        self.events_tx.clone()
+    }
+}
+
+impl HasTransport for ServerTransactionData {
+    fn get_transport_layer(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+}
+
+impl HasCommandSender for ServerTransactionData {
+    fn get_self_command_sender(&self) -> mpsc::Sender<InternalTransactionCommand> {
+        self.cmd_tx.clone()
+    }
 } 
