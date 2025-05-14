@@ -17,7 +17,7 @@ use rvoip_transaction_core::{
 /// Structure to track all state changes for a transaction
 #[derive(Default, Debug)]
 pub struct StateTracker {
-    states: Mutex<HashMap<String, Vec<TransactionState>>>,
+    states: Mutex<HashMap<TransactionKey, Vec<TransactionState>>>,
 }
 
 impl StateTracker {
@@ -27,21 +27,21 @@ impl StateTracker {
         })
     }
 
-    pub fn record_state(&self, tx_id: &str, state: TransactionState) {
+    pub fn record_state(&self, tx_id: &TransactionKey, state: TransactionState) {
         let mut states = self.states.lock().unwrap();
-        states.entry(tx_id.to_string())
+        states.entry(tx_id.clone())
             .or_insert_with(Vec::new)
             .push(state);
     }
     
-    pub fn get_states(&self, tx_id: &str) -> Vec<TransactionState> {
+    pub fn get_states(&self, tx_id: &TransactionKey) -> Vec<TransactionState> {
         let states = self.states.lock().unwrap();
         states.get(tx_id)
             .cloned()
             .unwrap_or_default()
     }
     
-    pub fn last_state(&self, tx_id: &str) -> Option<TransactionState> {
+    pub fn last_state(&self, tx_id: &TransactionKey) -> Option<TransactionState> {
         let states = self.states.lock().unwrap();
         states.get(tx_id)
             .and_then(|s| s.last().cloned())
@@ -57,18 +57,17 @@ pub async fn assert_state_sequence(
     timeout_ms: u64,
 ) -> bool {
     let start = std::time::Instant::now();
-    let tx_id_str = tx_id.to_string();
     
     // Keep checking until we've seen all expected states or timeout
     while start.elapsed() < Duration::from_millis(timeout_ms) {
         // Get current state from manager (this will trigger a state update in our tracker)
-        if let Ok(current) = manager.transaction_state(&tx_id_str).await {
+        if let Ok(current) = manager.transaction_state(tx_id).await {
             // Record the state
-            tracker.record_state(&tx_id_str, current);
+            tracker.record_state(tx_id, current);
         }
         
         // Get all recorded states
-        let states = tracker.get_states(&tx_id_str);
+        let states = tracker.get_states(tx_id);
         
         // Check if all expected states have been seen in sequence
         if states.len() >= expected_states.len() {
@@ -89,7 +88,7 @@ pub async fn assert_state_sequence(
     }
     
     // Report failure
-    let states = tracker.get_states(&tx_id_str);
+    let states = tracker.get_states(tx_id);
     println!("Expected state sequence: {:?}", expected_states);
     println!("Actual state sequence: {:?}", states);
     false
@@ -98,8 +97,8 @@ pub async fn assert_state_sequence(
 /// Process events from a transaction manager and monitor transaction states
 pub async fn process_events(
     event_rx: &mut mpsc::Receiver<TransactionEvent>,
-    tracker: Arc<StateTracker>,
     manager: &TransactionManager,
+    tracker: &Arc<StateTracker>,
     timeout_ms: u64,
 ) -> Option<TransactionEvent> {
     let start = std::time::Instant::now();
@@ -128,8 +127,8 @@ pub async fn process_events(
             
             // If we have a transaction ID, check and record its current state
             if let Some(id) = tx_id {
-                if let Ok(current_state) = manager.transaction_state(&id.to_string()).await {
-                    tracker.record_state(&id.to_string(), current_state);
+                if let Ok(current_state) = manager.transaction_state(id).await {
+                    tracker.record_state(id, current_state);
                     println!("Transaction {:?} state: {:?}", id, current_state);
                 }
             }
@@ -151,10 +150,9 @@ pub async fn wait_for_state(
     timeout_ms: u64,
 ) -> bool {
     let start = std::time::Instant::now();
-    let tx_id_str = tx_id.to_string();
     
     while start.elapsed() < Duration::from_millis(timeout_ms) {
-        if let Ok(state) = manager.transaction_state(&tx_id_str).await {
+        if let Ok(state) = manager.transaction_state(tx_id).await {
             if state == expected_state {
                 return true;
             }
@@ -179,7 +177,7 @@ pub async fn accelerate_transaction_timers(
 }
 
 /// Helper to print transaction state history for debugging
-pub fn print_transaction_history(tracker: &StateTracker, tx_id: &str) {
+pub fn print_transaction_history(tracker: &StateTracker, tx_id: &TransactionKey) {
     let states = tracker.get_states(tx_id);
     println!("Transaction {} state history:", tx_id);
     for (i, state) in states.iter().enumerate() {

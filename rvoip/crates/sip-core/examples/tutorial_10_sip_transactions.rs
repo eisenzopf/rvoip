@@ -48,61 +48,67 @@ use rvoip_transaction_core::{
         TransactionEvent // Add this for event processing
     }
 };
-use std::time::{Duration, Instant};
-use std::thread::sleep;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::sleep;
 use tokio::runtime::Runtime;
+use rvoip_sip_core::error::Result;
+use rvoip_sip_core::error::Error;
 
 // Mock Transport for examples that doesn't actually send messages over the network
 // Enhanced to track contacts for better routing
 #[derive(Debug)]
 struct MockTransport {
     local_addr: SocketAddr,
-    sent_messages: Vec<(Message, SocketAddr)>,
+    sent_messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
     // Add contact mapping for better ACK routing
-    contacts: Mutex<HashMap<String, (Option<Uri>, SocketAddr)>>,
+    contacts: Arc<Mutex<HashMap<String, (Option<Uri>, SocketAddr)>>>,
 }
 
 impl MockTransport {
     fn new(local_addr: SocketAddr) -> Self {
         Self {
             local_addr,
-            sent_messages: Vec::new(),
-            contacts: Mutex::new(HashMap::new()),
+            sent_messages: Arc::new(Mutex::new(Vec::new())),
+            contacts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     
-    // Store contact information from responses to use for ACK routing
-    fn store_contact_info(&self, message: &Message, source: SocketAddr) {
+    async fn store_contact_info(&self, message: &Message, source: SocketAddr) {
         if let Message::Response(response) = message {
             if let Some(call_id) = response.call_id() {
-                // Extract first contact URI from the response
-                let contact_uri = if let Some(contact) = response.headers.iter().find_map(|h| {
-                    if let TypedHeader::Contact(contact) = h {
-                        Some(contact)
-                    } else {
-                        None
+                let call_id_str = call_id.to_string();
+                
+                // Get contact URI from response
+                let contact_uri = if let Some(contact_str) = response.contact_uri() {
+                    // Try to parse it to Uri
+                    match Uri::from_str(&contact_str) {
+                        Ok(uri) => Some(uri),
+                        Err(e) => {
+                            println!("Failed to parse contact URI '{}': {}", contact_str, e);
+                            None
+                        }
                     }
-                }) {
-                    // Get the first address from the contact if it exists
-                    contact.address().map(|addr| addr.uri.clone())
                 } else {
                     None
                 };
                 
-                let mut contacts = self.contacts.lock().unwrap();
-                contacts.insert(call_id.to_string(), (contact_uri, source));
+                if let Some(uri) = &contact_uri {
+                    println!("Storing routing info for {}: {:?} -> {}", call_id_str, uri, source);
+                }
+                
+                let mut contacts = self.contacts.lock().await;
+                contacts.insert(call_id_str, (contact_uri, source));
             }
         }
     }
     
-    // Get routing information for a call ID
-    fn get_routing_info(&self, call_id: &str) -> Option<(Option<Uri>, SocketAddr)> {
-        let contacts = self.contacts.lock().unwrap();
+    async fn get_routing_info(&self, call_id: &str) -> Option<(Option<Uri>, SocketAddr)> {
+        let contacts = self.contacts.lock().await;
         contacts.get(call_id).cloned()
     }
 }
@@ -110,13 +116,9 @@ impl MockTransport {
 #[async_trait::async_trait]
 impl rvoip_sip_transport::Transport for MockTransport {
     async fn send_message(&self, message: Message, destination: SocketAddr) -> std::result::Result<(), rvoip_sip_transport::Error> {
-        println!("Sent message to {}: {}", destination, message);
-        
-        // Store contact information if this is a response
-        if let Message::Response(_) = &message {
-            // We wouldn't store here in real life, but this helps for simulation
-        }
-        
+        println!("MockTransport sending to {}: {:?}", destination, message);
+        let mut messages = self.sent_messages.lock().await;
+        messages.push((message, destination));
         Ok(())
     }
 
@@ -169,136 +171,138 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// Process transaction events during the specified duration
-// Returns the number of timer events processed and any other important events
-//
-// IMPORTANT: Transaction termination in SIP requires processing timer events.
-// If timer events are not processed, transactions will not properly terminate.
-// This function ensures timer events are consumed and processed correctly.
+// Process transaction events for a specified duration, returning count of timer events
+// and last important event received
 async fn process_events_for_duration(
     events_rx: &mut mpsc::Receiver<TransactionEvent>,
     manager: &TransactionManager,
     duration_ms: u64
 ) -> (usize, Option<TransactionEvent>) {
-    let start = Instant::now();
-    let mut timer_events_processed = 0;
-    let mut last_important_event: Option<TransactionEvent> = None;
+    let start = std::time::Instant::now();
+    let duration = Duration::from_millis(duration_ms);
+    let mut timer_events = 0;
+    let mut last_important_event = None;
     
-    println!("Processing events for {} ms...", duration_ms);
-    
-    while start.elapsed() < Duration::from_millis(duration_ms) {
-        // Use tokio's timeout to avoid blocking forever
+    while start.elapsed() < duration {
+        // Use tokio::time::timeout for async timeout
         match tokio::time::timeout(
-            Duration::from_millis(10),
+            Duration::from_millis(50),  // Small timeout to check elapsed time
             events_rx.recv()
         ).await {
             Ok(Some(event)) => {
                 match &event {
-                    TransactionEvent::TimerTriggered { transaction_id, timer } => {
-                        println!("Timer event received: {} fired for transaction {}", timer, transaction_id);
-                        
-                        // Explicitly trigger the timer in the manager to ensure state transition
-                        if let Ok(state) = manager.transaction_state(transaction_id).await {
-                            println!("Transaction {} state after timer {}: {:?}", 
-                                    transaction_id, timer, state);
-                            timer_events_processed += 1;
-                        } else {
-                            println!("Transaction {} no longer exists after timer {}", transaction_id, timer);
-                        }
-                    },
-                    TransactionEvent::NewRequest { transaction_id, .. } => {
-                        println!("NewRequest event received for transaction {}", transaction_id);
+                    TransactionEvent::TransactionTerminated { transaction_id } => {
+                        println!("Transaction terminated: {}", transaction_id);
                         last_important_event = Some(event.clone());
                     },
+                    TransactionEvent::TimerTriggered { .. } => {
+                        timer_events += 1;
+                    },
                     _ => {
-                        println!("Other event received: {:?}", event);
+                        println!("Event received: {:?}", event);
                         last_important_event = Some(event.clone());
                     }
                 }
             },
-            _ => {
-                // No events received within timeout, just sleep briefly
-                sleep(Duration::from_millis(5));
+            Ok(None) => {
+                println!("Event channel closed");
+                break;
+            },
+            Err(_) => {
+                // Timeout occurred, continue the loop
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
     }
     
-    println!("Processed {} timer events during wait period", timer_events_processed);
-    (timer_events_processed, last_important_event)
+    // Check remaining time if we should wait longer
+    let remaining = duration.checked_sub(start.elapsed()).unwrap_or(Duration::from_millis(0));
+    if !remaining.is_zero() {
+        tokio::time::sleep(remaining).await;
+    }
+    
+    (timer_events, last_important_event)
 }
 
-// Ensure a transaction is properly terminated by processing all events until timeout or termination
-// This is a helper for the tutorial to show how applications should handle transaction cleanup
+// Ensure transaction is terminated, either by receiving termination event or by checking manager
 async fn ensure_transaction_terminated(
     events_rx: &mut mpsc::Receiver<TransactionEvent>,
     manager: &TransactionManager,
     transaction_id: &String,
     max_wait_ms: u64
 ) -> bool {
-    let start = Instant::now();
-    println!("Ensuring transaction {} terminates (waiting up to {} ms)...", transaction_id, max_wait_ms);
+    let start = std::time::Instant::now();
+    let max_duration = Duration::from_millis(max_wait_ms);
     
-    // First check if transaction already terminated
-    match manager.transaction_state(transaction_id).await {
-        Ok(TransactionState::Terminated) => {
-            println!("Transaction is already terminated");
-            return true;
-        },
+    // First check transaction state directly
+    let pre_check = match manager.transaction_state(&transaction_id).await {
         Ok(state) => {
-            println!("Transaction is in state {:?}, waiting for termination", state);
+            if state == TransactionState::Terminated {
+                println!("Transaction {} already in terminated state", transaction_id);
+                return true;
+            }
+            false
         },
         Err(_) => {
-            println!("Transaction not found, already removed from manager");
+            // Error means transaction not found, which effectively means it's terminated
+            println!("Transaction {} not found - already terminated", transaction_id);
             return true;
         }
+    };
+    
+    if pre_check {
+        return true;
     }
     
-    // Process events until transaction terminates or timeout
-    while start.elapsed() < Duration::from_millis(max_wait_ms) {
+    // Wait for termination event or timeout
+    while start.elapsed() < max_duration {
         match tokio::time::timeout(
-            Duration::from_millis(20),
+            Duration::from_millis(50),
             events_rx.recv()
         ).await {
-            Ok(Some(TransactionEvent::TimerTriggered { transaction_id: id, timer })) => {
+            Ok(Some(TransactionEvent::TransactionTerminated { transaction_id: id })) => {
                 if id == *transaction_id {
-                    println!("Timer {} fired for transaction {}", timer, id);
-                    
-                    // Check if transaction has terminated
-                    match manager.transaction_state(transaction_id).await {
-                        Ok(TransactionState::Terminated) => {
-                            println!("Transaction {} terminated after timer {}", transaction_id, timer);
-                            return true;
-                        },
-                        Ok(state) => {
-                            println!("Transaction state after timer {}: {:?}", timer, state);
-                            // Continue processing
-                        },
-                        Err(_) => {
-                            println!("Transaction not found after timer {}, likely terminated", timer);
-                            return true;
-                        }
-                    }
+                    println!("Received termination event for transaction {}", transaction_id);
+                    return true;
                 }
             },
-            _ => {
-                // Sleep briefly to avoid tight loop
-                sleep(Duration::from_millis(10));
+            Ok(Some(_)) => {
+                // Other event received, ignore
+            },
+            Ok(None) => {
+                println!("Event channel closed while waiting for termination");
+                break;
+            },
+            Err(_) => {
+                // Timeout, check manager directly
+                match manager.transaction_state(&transaction_id).await {
+                    Ok(state) => {
+                        if state == TransactionState::Terminated {
+                            println!("Transaction {} now in terminated state", transaction_id);
+                            return true;
+                        }
+                    },
+                    Err(_) => {
+                        // Error means transaction not found, which is successful termination
+                        println!("Transaction {} removed from manager", transaction_id);
+                        return true;
+                    }
+                }
+                
+                // Continue waiting
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
     }
     
     // Final check
-    match manager.transaction_state(transaction_id).await {
-        Ok(TransactionState::Terminated) => {
-            println!("Transaction terminated successfully");
-            true
-        },
+    match manager.transaction_state(&transaction_id).await {
         Ok(state) => {
-            println!("Transaction failed to terminate, still in state {:?}", state);
-            false
+            println!("Transaction {} final state: {:?}", transaction_id, state);
+            state == TransactionState::Terminated
         },
         Err(_) => {
-            println!("Transaction not found, likely removed from manager");
+            println!("Transaction {} successfully removed from manager", transaction_id);
             true
         }
     }
@@ -387,7 +391,7 @@ async fn demonstrate_client_transaction() -> Result<()> {
         .build();
     
     // Store contact information in the mock transport
-    transport.store_contact_info(&Message::Response(final_response.clone()), remote_addr);
+    transport.store_contact_info(&Message::Response(final_response.clone()), remote_addr).await;
     
     // Manually inject the response
     println!("Simulating receipt of 200 OK");
@@ -701,7 +705,7 @@ async fn demonstrate_invite_client_transaction() -> Result<()> {
         .build();
     
     // Store contact information for ACK routing
-    transport.store_contact_info(&Message::Response(ok_response.clone()), remote_addr);
+    transport.store_contact_info(&Message::Response(ok_response.clone()), remote_addr).await;
     
     // Inject the response
     println!("Simulating receipt of 200 OK");
@@ -729,7 +733,7 @@ async fn demonstrate_invite_client_transaction() -> Result<()> {
                              .unwrap_or_else(|| "unknown".to_string());
     
     // Build and send a manual ACK with proper routing
-    if let Some((contact_uri, dest_addr)) = transport.get_routing_info(&call_id) {
+    if let Some((contact_uri, dest_addr)) = transport.get_routing_info(&call_id).await {
         println!("Found contact info for ACK routing: {:?} -> {}", contact_uri, dest_addr);
         
         // Create an ACK request directly
@@ -809,7 +813,7 @@ async fn demonstrate_transaction_manager() -> Result<()> {
         .build();
     
     // Store contact info for possible later use
-    transport.store_contact_info(&Message::Response(response.clone()), remote_addr);
+    transport.store_contact_info(&Message::Response(response.clone()), remote_addr).await;
     
     // Inject the response through transport
     println!("Simulating receipt of 200 OK response");
@@ -908,7 +912,7 @@ async fn run_complete_transaction_example() -> Result<()> {
         .build();
     
     // Store contact info
-    transport.store_contact_info(&Message::Response(response.clone()), remote_addr);
+    transport.store_contact_info(&Message::Response(response.clone()), remote_addr).await;
     
     // Inject the response
     println!("Simulating receipt of 200 OK response");

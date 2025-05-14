@@ -180,16 +180,15 @@ where
 // Helper to wait for a transaction to reach a specific state
 pub async fn wait_for_transaction_state(
     manager: &TransactionManager,
-    tx_id: &str,
+    tx_id: &TransactionKey,
     expected_state: rvoip_transaction_core::TransactionState,
     timeout_ms: u64,
 ) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
-    let tx_id_string = tx_id.to_string();  // Convert to owned String
     
     while start.elapsed() < timeout {
-        if let Ok(state) = manager.transaction_state(&tx_id_string).await {
+        if let Ok(state) = manager.transaction_state(tx_id).await {
             if state == expected_state {
                 return true;
             }

@@ -2,7 +2,7 @@
 name = "rvoip-transaction-core"
 version = "0.1.0"
 edition = "2021"
-description = "SIP transaction state machine for the rvoip stack"
+description = "Core transaction handling for SIP"
 license = "MIT OR Apache-2.0"
 
 # Silence all Rust warnings
@@ -19,20 +19,23 @@ rvoip-sip-core = { path = "../sip-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
 
 # Async runtime
-tokio = { workspace = true, features = ["time"] }
-async-trait = { version = "0.1" }
+tokio = { version = "1.28.2", features = ["full"] }
+async-trait = "0.1.60"
+futures = "0.3"
+pin-project = "1.0"
 
 # Error handling
-thiserror = { workspace = true }
-anyhow = { workspace = true }
+thiserror = "1.0.40"
 
 # Utilities
-bytes = { workspace = true }
-uuid = { workspace = true }
-rand = "0.8"
+uuid = { version = "1.0", features = ["v4"] }
 
 # Logging
-tracing = { workspace = true }
+tracing = "0.1.37"
+
+# Added from the code block
+rand = "0.8"
+lazy_static = "1.4.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

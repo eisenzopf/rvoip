@@ -1,231 +1,284 @@
-use async_trait::async_trait;
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
+use std::future::Future;
+use std::pin::Pin;
+
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
-use std::{any::Any, fmt, net::SocketAddr, sync::Arc, time::Duration};
 
-use crate::error::{Error, Result}; // Use crate's error type
-use crate::utils; // Import utils for key generation
+use crate::error::{Error, Result};
 
-pub mod client;
-pub mod server;
+pub mod state;
+pub mod key;
+pub mod event;
 
-/// Defines whether a transaction is Invite or Non-Invite, Client or Server.
+pub use state::*;
+pub use key::*;
+pub use event::*;
+
+/// Defines the core traits, types, and machinery for SIP transactions.
+///
+/// This module provides the fundamental building blocks for implementing and managing
+/// SIP transactions as specified in RFC 3261. It includes:
+///
+/// - [`TransactionKey`]: For uniquely identifying transactions.
+/// - [`TransactionState`]: For representing the various states a transaction can be in.
+/// - [`TransactionEvent`]: For communicating significant occurrences from the transaction layer
+///   to a Transaction User (TU).
+/// - [`TransactionKind`]: An enum to differentiate between client/server and INVITE/non-INVITE transactions.
+/// - [`Transaction`]: An object-safe trait defining common synchronous operations on transactions.
+/// - [`TransactionAsync`]: A trait for asynchronous operations, extending `Transaction`.
+/// - [`InternalTransactionCommand`]: Commands used for internal control flow within a transaction's lifecycle.
+/// - [`TimerConfig`]: Configuration for various transaction-related timers (T1, T2, T4, etc.).
+///
+/// The design separates synchronous state inspection (`Transaction`) from asynchronous state
+/// modification and event processing (`TransactionAsync`), facilitating easier management and
+/// interaction with transaction objects.
+/// Distinguishes between the four fundamental types of SIP transactions based on the
+/// request method (INVITE or other) and the role of the local SIP element (Client or Server).
+///
+/// This classification is crucial as each kind follows a distinct state machine as
+/// defined in RFC 3261, Section 17.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransactionKind {
+    /// A client transaction initiated by sending an INVITE request.
+    /// Follows the state machine in RFC 3261, Section 17.1.1.
     InviteClient,
+    /// A client transaction initiated by sending a non-INVITE request (e.g., REGISTER, OPTIONS, BYE).
+    /// Follows the state machine in RFC 3261, Section 17.1.2.
     NonInviteClient,
+    /// A server transaction initiated by receiving an INVITE request.
+    /// Follows the state machine in RFC 3261, Section 17.2.1.
     InviteServer,
+    /// A server transaction initiated by receiving a non-INVITE request.
+    /// Follows the state machine in RFC 3261, Section 17.2.2.
     NonInviteServer,
 }
 
-/// Uniquely identifies a transaction based on RFC 3261 rules.
-/// Typically derived from the top Via branch, CSeq method, and potentially To/From tags.
-pub type TransactionKey = String;
-
-/// Utility functions for working with TransactionKeys
-pub mod transaction_key {
-    use crate::utils;
-    use rvoip_sip_core::prelude::*;
-    use crate::error::Result;
-
-    /// Generate a transaction key from a SIP message based on RFC 3261 rules.
-    pub fn from_message(message: &Message) -> Option<super::TransactionKey> {
-        utils::transaction_key_from_message(message).ok()
-    }
+/// Represents commands that can be sent to a transaction's internal processing logic,
+/// typically by the `TransactionManager` or the transaction itself (e.g., for timer events).
+///
+/// These commands drive the transaction's state machine and interactions.
+#[derive(Debug, Clone)] // Clone is useful if commands need to be resent or duplicated.
+pub enum InternalTransactionCommand {
+    /// Instructs the transaction to transition to a specified `TransactionState`.
+    /// This should be used carefully, respecting the valid state transitions for the transaction kind.
+    TransitionTo(TransactionState),
+    /// Delivers an incoming SIP `Message` (Request or Response) to the transaction for processing.
+    /// The transaction will determine how this message affects its state based on its kind and current state.
+    ProcessMessage(Message),
+    /// Signals that a specific transaction timer has fired.
+    /// The `String` typically identifies the timer (e.g., "Timer_A", "Timer_F").
+    Timer(String),
+    /// Notifies the transaction of a transport-level error that occurred while trying to send a message
+    /// associated with this transaction. This usually leads to the transaction terminating.
+    TransportError,
+    /// Instructs the transaction to terminate immediately, cleaning up its resources.
+    /// This might be used for forceful shutdown or after a critical error.
+    Terminate,
 }
 
-// TODO: Define `TransactionId` if it's distinct from `TransactionKey`. Often they are the same.
-pub type TransactionId = TransactionKey;
-
-
-/// Represents events flowing *from* the transaction layer *to* the Transaction User (TU),
-/// such as the Session layer or application logic.
-#[derive(Debug, Clone)]
-pub enum TransactionEvent {
-    // --- Request Processing (Server Transactions) ---
-    /// A new request has arrived that initiated a server transaction.
-    /// The TU should process this request and eventually call `send_response` on the manager.
-    NewRequest {
-        transaction_id: TransactionKey,
-        request: Request,
-        source: SocketAddr,
-    },
-    /// An ACK was received for a non-2xx final response previously sent by an Invite Server Transaction.
-    AckReceived {
-        transaction_id: TransactionKey,
-        ack_request: Request,
-    },
-    /// A CANCEL request was received for an existing Invite Server Transaction.
-    /// The TU may need to stop processing the original INVITE.
-    CancelReceived {
-        transaction_id: TransactionKey,
-        cancel_request: Request,
-    },
-
-    // --- Response Processing (Client Transactions) ---
-    /// A provisional (1xx) response was received.
-    ProvisionalResponse {
-        transaction_id: TransactionKey,
-        response: Response,
-    },
-    /// A successful final (2xx) response was received.
-    /// For INVITE, the TU is responsible for sending the ACK via `manager.send_2xx_ack()`.
-    SuccessResponse {
-        transaction_id: TransactionKey,
-        response: Response,
-    },
-    /// A failure final (3xx-6xx) response was received.
-    FailureResponse {
-        transaction_id: TransactionKey,
-        response: Response,
-    },
-
-    // --- Response Sending (Server Transactions - Optional Info for TU) ---
-    /// A provisional response was sent by the server transaction.
-    ProvisionalResponseSent {
-        transaction_id: TransactionKey,
-        response: Response,
-    },
-    /// A final response was sent by the server transaction.
-    FinalResponseSent {
-        transaction_id: TransactionKey,
-        response: Response,
-    },
-
-    // --- State and Error Events ---
-    /// A transaction timed out (e.g., Timer B for INVITE client, Timer F for non-INVITE client).
-    TransactionTimeout {
-        transaction_id: TransactionKey,
-    },
-    /// An ACK was not received for a non-2xx final response in time (Timer H for INVITE server).
-    AckTimeout {
-        transaction_id: TransactionKey,
-    },
-    /// A transport error occurred related to this transaction. Transaction is likely terminated.
-    TransportError {
-        transaction_id: TransactionKey,
-    },
-    /// An internal error occurred within the transaction state machine.
-    Error {
-        transaction_id: Option<TransactionKey>,
-        error: String, // Consider using crate::Error directly if clonable/suitable
-    },
-    /// A message was received that didn't match any existing transaction.
-    StrayRequest {
-        request: Request,
-        source: SocketAddr,
-    },
-    StrayResponse {
-        response: Response,
-        source: SocketAddr,
-    },
-    /// Stray ACK (didn't match any server INVITE transaction). Usually ignored, but TU might want to know.
-    StrayAck {
-         request: Request,
-         source: SocketAddr,
-    },
-     /// Stray CANCEL (didn't match any server INVITE transaction). 481 sent automatically.
-    StrayCancel {
-         request: Request,
-         source: SocketAddr,
-    },
-
-    // --- Transaction Lifecycle Events ---
-    /// The transaction has reached the Terminated state and should be removed from the manager.
-    /// This is sent when a transaction transitions to Terminated state.
-    TransactionTerminated {
-        transaction_id: TransactionKey,
-    },
-    
-    /// A transaction has changed state.
-    /// This event allows applications to track the full state machine progression.
-    StateChanged {
-        transaction_id: TransactionKey,
-        previous_state: TransactionState,
-        new_state: TransactionState,
-    },
-
-    // --- Timer Events (Internal to Transaction Layer) ---
-    /// Internal event used to trigger timer logic within the transaction.
-    #[doc(hidden)] // Should not be exposed directly to TU
-    TimerTriggered {
-        transaction_id: TransactionKey,
-        timer: String, // e.g., "A", "B", "G", "H", "I", "J", "K"
-    },
-
-     // --- Optional events for finer-grained state tracking ---
-     // TransactionCreated { transaction_id: TransactionKey },
-}
-
-
-/// SIP transaction states (aligned with RFC 3261 state machines).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransactionState {
-    // Common initial/final states
-    Initial,    // Before any action
-    Completed,  // Final response sent/received, waiting for termination timer/ACK
-    Confirmed,  // ACK received (Server INVITE only)
-    Terminated, // Transaction finished
-
-    // Client States
-    Calling,    // INVITE specific: Request sent, waiting 1xx/final
-    Trying,     // Non-INVITE specific: Request sent, waiting 1xx/final
-    Proceeding, // 1xx received, waiting final
-
-    // Server States (Proceeding used for both INVITE/Non-INVITE after 1xx sent)
-    // Trying,     // Non-INVITE specific: Request received, before 1xx sent
-    // Proceeding, // Request received, 1xx sent (used instead of ServerProceeding)
-}
-
-
-/// Core SIP transaction trait. Defines common behavior for client and server transactions.
-#[async_trait]
-pub trait Transaction: fmt::Debug + Send + 'static {
-    /// Get the transaction's unique key.
+/// A common, object-safe trait providing synchronous access to core properties of a SIP transaction.
+///
+/// This trait allows different transaction types (e.g., `ClientInviteTransaction`, `ServerNonInviteTransaction`)
+/// to be handled uniformly when only their basic, synchronously accessible information is needed.
+/// It avoids `async` methods to maintain object safety (i.e., `dyn Transaction`).
+/// For asynchronous operations, see the [`TransactionAsync`] trait.
+pub trait Transaction: Send + Sync + fmt::Debug {
+    /// Returns the unique key identifying this transaction.
+    /// The key is typically derived from the branch parameter of the Via header, the method, and directionality.
     fn id(&self) -> &TransactionKey;
-
-    /// Get the kind of transaction (Invite/NonInvite, Client/Server).
+    
+    /// Returns the [`TransactionKind`] of this transaction (e.g., InviteClient, InviteServer).
     fn kind(&self) -> TransactionKind;
-
-    /// Get the current state of the transaction machine.
+    
+    /// Returns the current [`TransactionState`] of this transaction (e.g., Trying, Proceeding, Completed).
     fn state(&self) -> TransactionState;
-
-    /// Get the network transport used by this transaction.
-    fn transport(&self) -> Arc<dyn Transport>;
-
-     /// Get the remote address associated with this transaction.
-     /// (Destination for client tx, Source for server tx).
-     fn remote_addr(&self) -> SocketAddr;
-
-    /// Process an event relevant to this transaction (e.g., incoming message, timer).
-    /// This method is primarily for internal use by the TransactionManager.
-    /// `event_type` might be "request", "response", "timer", "transport_err".
-    async fn process_event(&mut self, event_type: &str, message: Option<Message>) -> Result<()>;
-
-    /// Explicitly handle a timer event dispatched by the manager.
-    async fn handle_timer(&mut self, timer_name: String) -> Result<()>;
-
-    /// Check if this transaction matches the given message based on RFC 3261 rules.
-    /// Primarily used by the TransactionManager for dispatching incoming messages.
+    
+    /// Returns the network [`SocketAddr`] of the remote party involved in this transaction.
+    /// For client transactions, this is the destination address. For server transactions, it's the source address.
+    fn remote_addr(&self) -> SocketAddr;
+    
+    /// Checks if the given SIP `Message` (request or response) matches this transaction
+    /// according to the rules in RFC 3261, Section 17.1.3 (client) and 17.2.3 (server).
+    /// This involves comparing Via branch, CSeq method and number, From/To tags, Call-ID, etc.
     fn matches(&self, message: &Message) -> bool;
+    
+    /// Provides a way to downcast this transaction object to its concrete type if needed.
+    /// This is a standard Rust pattern for trait objects.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
 
-    /// Check if the transaction is in a completed or terminated state.
-    fn is_finished(&self) -> bool {
-        matches!(
-            self.state(),
-            TransactionState::Completed | TransactionState::Confirmed | TransactionState::Terminated
-        )
+/// An extension trait for [`Transaction`] that adds asynchronous operations necessary for
+/// driving the transaction's lifecycle and interacting with its state machine.
+///
+/// Implementors of this trait handle the core logic of processing SIP messages, timer events,
+/// and internal commands, typically involving asynchronous operations like network I/O or
+/// interaction with shared resources.
+pub trait TransactionAsync: Transaction {
+    /// Asynchronously processes a significant event relevant to the transaction.
+    ///
+    /// This method is a general entry point for various event types, differentiated by `event_type`.
+    /// It might be called by the `TransactionManager` upon receiving a SIP message that matches
+    /// this transaction, or when a timer associated with this transaction fires.
+    ///
+    /// # Arguments
+    /// * `event_type`: A string slice identifying the type of event (e.g., "sip_message", "timer_A").
+    /// * `message`: An optional SIP `Message` associated with the event. This is `Some` for
+    ///              events like incoming requests/responses and `None` for timer events.
+    ///
+    /// # Returns
+    /// A pinned, boxed future that resolves to `Ok(())` on successful processing, or an `Error`
+    /// if processing fails. The future must be `Send` to allow it to be spawned on a runtime.
+    fn process_event<'a>(
+        &'a self, 
+        event_type: &'a str, // Consider an enum for event_type for better type safety
+        message: Option<Message> // Message is owned, implies it might be consumed or stored.
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    /// Sends an [`InternalTransactionCommand`] to this transaction for asynchronous processing.
+    ///
+    /// This allows the `TransactionManager` or other components to influence the transaction's
+    /// behavior or state (e.g., forcing a state change, initiating termination).
+    ///
+    /// # Arguments
+    /// * `cmd`: The command to be processed by the transaction.
+    ///
+    /// # Returns
+    /// A pinned, boxed future that resolves to `Ok(())` if the command was accepted for processing,
+    /// or an `Error` otherwise.
+    fn send_command<'a>(
+        &'a self,
+        cmd: InternalTransactionCommand // Command is owned.
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    /// Asynchronously retrieves the original SIP request that initiated this transaction.
+    ///
+    /// For client transactions, this is the request sent by the local UA.
+    /// For server transactions, this is the request received from the remote UA.
+    ///
+    /// # Returns
+    /// A pinned, boxed future that resolves to `Some(Request)` if the original request is available,
+    /// or `None` otherwise (e.g., if the transaction state is such that it's no longer stored).
+    fn original_request<'a>(
+        &'a self
+    ) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>>;
+
+    /// Asynchronously retrieves the last SIP response that was either sent (for server transactions)
+    /// or received (for client transactions) by this transaction.
+    ///
+    /// # Returns
+    /// A pinned, boxed future that resolves to `Some(Response)` if a last response is available,
+    /// or `None` otherwise.
+    fn last_response<'a>(
+        &'a self
+    ) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>>;
+}
+
+/// Configuration for standard SIP transaction timer durations, primarily based on RFC 3261.
+///
+/// These timers govern retransmission intervals, transaction timeouts, and other time-sensitive
+/// aspects of transaction behavior.
+#[derive(Debug, Clone, Copy)] // Added Copy as it's small and POD-like
+pub struct TimerConfig {
+    /// **T1: Round-Trip Time (RTT) Estimate (RFC 3261, Section 17.1.1.2)**
+    /// An estimate of the RTT between the client and server. It defaults to 500ms if not otherwise known.
+    /// This is the initial retransmission interval for INVITE requests and non-INVITE requests over UDP.
+    /// For INVITE client transactions, Timer A starts at T1 and doubles for each retransmission up to T2.
+    /// For non-INVITE client transactions, Timer F starts at T1 and doubles for retransmissions up to T2.
+    pub t1: Duration,
+
+    /// **T2: Maximum Retransmission Interval for Non-INVITE Requests and Responses (RFC 3261, Section 17.1.2.2)**
+    /// The maximum interval, in milliseconds, for retransmitting non-INVITE requests and INVITE responses.
+    /// It defaults to 4 seconds. Timer F (non-INVITE client) and Timer H (INVITE server, non-2xx response)
+    /// retransmit messages at intervals that cap at T2.
+    pub t2: Duration,
+
+    /// **T4: Network Maximum Segment Lifetime (MSL) (RFC 3261, Section 17.1.2.2)**
+    /// The maximum duration a message will stay in the network. It defaults to 5 seconds.
+    /// For non-INVITE transactions, Timer J (server) and Timer K (client) run for T4 after entering `Completed` state
+    /// for UDP to ensure old retransmissions are absorbed.
+    /// For INVITE server transactions using UDP, Timer G (for 2xx retransmissions by TU) runs for T4 to wait for ACK.
+    /// *Note*: This field is named `t4`, but its usage might also cover Timer D for INVITE client (default 32s for UDP).
+    /// A more comprehensive `TimerSettings` struct in the `timer` module might be preferred for all specific timers.
+    /// This `TimerConfig` seems to be a more general, basic set.
+    pub t4: Duration,
+    // Consider adding other timers like Timer_B (INVITE client timeout, 64*T1) explicitly if this struct is primary.
+    // Or renaming this struct to be more specific if it's only for T1, T2, T4.
+}
+
+impl Default for TimerConfig {
+    /// Provides default values for `TimerConfig` as recommended by RFC 3261:
+    /// - `t1`: 500 milliseconds
+    /// - `t2`: 4 seconds
+    /// - `t4`: 5 seconds
+    fn default() -> Self {
+        Self {
+            t1: Duration::from_millis(500), // RFC3261 default for T1
+            t2: Duration::from_secs(4),     // RFC3261 default for T2
+            t4: Duration::from_secs(5),     // RFC3261 default for T4
+        }
+    }
+}
+
+/// Creates a minimal, empty SIP INVITE request for placeholder or default usage.
+/// This is `pub(crate)` and intended for internal use within the `transaction-core` crate,
+/// for example, when a transaction needs a `Request` object before one is available,
+/// or for default initialization in tests or certain internal states.
+///
+/// The created request uses `Method::Register` and a dummy URI `sip:example.com`.
+/// This might need to be `Method::Invite` or more generic if its use implies an INVITE.
+/// Currently uses `Method::Register`. Let's assume it's generic enough or update if specific to INVITE.
+pub(crate) fn create_empty_request() -> Request {
+    let uri = Uri::sip("example.com"); // Creates sip:example.com
+    // Corrected: Request::new in sip-core only takes method and uri. 
+    // Version, headers, body are set via builder or other means if needed.
+    Request::new(Method::Register, uri)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_kind_creation() {
+        let _invite_client = TransactionKind::InviteClient;
+        let _non_invite_client = TransactionKind::NonInviteClient;
+        let _invite_server = TransactionKind::InviteServer;
+        let _non_invite_server = TransactionKind::NonInviteServer;
+        // Simply ensuring they can be constructed and used (e.g. in matches) is enough.
     }
 
-    /// Check if the transaction is specifically terminated.
-    fn is_terminated(&self) -> bool {
-        self.state() == TransactionState::Terminated
+    #[test]
+    fn internal_transaction_command_creation() {
+        let _cmd1 = InternalTransactionCommand::TransitionTo(TransactionState::Completed);
+        let _cmd2 = InternalTransactionCommand::ProcessMessage(Message::Request(create_empty_request()));
+        let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
+        let _cmd4 = InternalTransactionCommand::TransportError;
+        let _cmd5 = InternalTransactionCommand::Terminate;
     }
 
-    // --- Optional helper methods for accessing internal state ---
-    /// Get the original request that initiated this transaction.
-    fn original_request(&self) -> &Request;
+    #[test]
+    fn timer_config_default() {
+        let config = TimerConfig::default();
+        assert_eq!(config.t1, Duration::from_millis(500));
+        assert_eq!(config.t2, Duration::from_secs(4));
+        assert_eq!(config.t4, Duration::from_secs(5));
+    }
 
-    /// Get the last response sent or received by this transaction.
-    fn last_response(&self) -> Option<&Response>;
+    #[test]
+    fn timer_config_clonable_and_copyable() {
+        let config1 = TimerConfig::default();
+        let config2 = config1; // Test Copy
+        let config3 = config1.clone(); // Test Clone
+
+        assert_eq!(config1.t1, config2.t1);
+        assert_eq!(config1.t1, config3.t1);
+    }
+
+    #[test]
+    fn create_empty_request_works() {
+        let req = create_empty_request();
+        assert_eq!(req.method(), Method::Register); // As per current implementation
+        assert_eq!(req.uri().to_string(), "sip:example.com");
+    }
 } 

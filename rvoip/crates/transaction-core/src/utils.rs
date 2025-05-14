@@ -9,6 +9,7 @@ use crate::transaction::TransactionKey; // Import TransactionKey
 use crate::transaction::TransactionKind; // Import Kind
 
 use uuid::Uuid;
+use std::net::SocketAddr;
 
 /// Generate a random branch parameter for Via header (RFC 3261 magic cookie + random string)
 pub fn generate_branch() -> String {
@@ -133,20 +134,101 @@ pub fn extract_destination(_transaction_id: &str) -> Option<std::net::SocketAddr
     // Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5071)))
 }
 
-/// Creates a transaction key from a SIP message based on RFC 3261 rules.
-///
-/// This is a simplified placeholder and needs refinement for full RFC compliance.
-pub fn transaction_key_from_message(message: &Message) -> Result<TransactionKey> {
-    let branch = extract_branch(message)
-        .ok_or_else(|| Error::Other("Missing branch in Via for key generation".to_string()))?;
-    let method = match message {
-        Message::Request(req) => req.method().clone(),
-        Message::Response(_) => extract_cseq(message)
-                                    .ok_or(Error::Other("Missing or invalid CSeq in Response".to_string()))?
-                                    .1, // Get the Method part
-    };
-    // TODO: Refine key generation according to RFC 3261 Section 17.1.3 and 17.2.3 rigorously.
-    Ok(format!("{}-{}", branch, method))
+/// Extract a transaction key from a SIP message if possible.
+pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey> {
+    match message {
+        Message::Request(request) => {
+            // Get Via header using TypedHeader
+            if let Some(via) = request.typed_header::<Via>() {
+                if let Some(first_via) = via.0.first() {
+                    if let Some(branch) = first_via.branch() {
+                        let method = request.method();
+                        return Some(TransactionKey::new(branch.to_string(), method.clone(), true));
+                    }
+                }
+            }
+            None
+        }
+        Message::Response(response) => {
+            // Get Via header using TypedHeader
+            if let Some(via) = response.typed_header::<Via>() {
+                if let Some(first_via) = via.0.first() {
+                    if let Some(branch) = first_via.branch() {
+                        // Get method from CSeq header
+                        if let Some(cseq) = response.typed_header::<CSeq>() {
+                            return Some(TransactionKey::new(branch.to_string(), cseq.method.clone(), false));
+                        }
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Create an ACK request from an original INVITE and its response.
+pub fn create_ack_from_invite(original_request: &Request, response: &Response) -> Result<Request> {
+    // Get request URI from the original INVITE's Request-URI
+    let request_uri = original_request.uri().to_string();
+    let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri)?;
+    
+    // Copy Route headers from original INVITE (if present)
+    for header in original_request.headers.iter() {
+        if let TypedHeader::Route(route) = header {
+            ack_builder = ack_builder.header(TypedHeader::Route(route.clone()));
+        }
+    }
+    
+    // Copy From, To, Call-ID from the original request and response
+    if let Some(from) = original_request.typed_header::<From>() {
+        ack_builder = ack_builder.header(TypedHeader::From(from.clone()));
+    } else {
+        return Err(Error::Other("Missing From header in original request".to_string()));
+    }
+    
+    // Use To header from response to get the to-tag
+    if let Some(to) = response.typed_header::<To>() {
+        ack_builder = ack_builder.header(TypedHeader::To(to.clone()));
+    } else {
+        return Err(Error::Other("Missing To header in response".to_string()));
+    }
+    
+    if let Some(call_id) = original_request.typed_header::<CallId>() {
+        ack_builder = ack_builder.header(TypedHeader::CallId(call_id.clone()));
+    } else {
+        return Err(Error::Other("Missing Call-ID header in original request".to_string()));
+    }
+    
+    // Create CSeq header for ACK (same seq as INVITE, but method is ACK)
+    if let Some(cseq) = original_request.typed_header::<CSeq>() {
+        let ack_cseq = CSeq {
+            seq: cseq.seq,
+            method: Method::Ack,
+        };
+        ack_builder = ack_builder.header(TypedHeader::CSeq(ack_cseq));
+    } else {
+        return Err(Error::Other("Missing CSeq header in original request".to_string()));
+    }
+    
+    // Add Via header from original request (top Via only)
+    if let Some(via) = original_request.typed_header::<Via>() {
+        ack_builder = ack_builder.header(TypedHeader::Via(via.clone()));
+    } else {
+        return Err(Error::Other("Missing Via header in original request".to_string()));
+    }
+    
+    // Build the ACK request
+    Ok(ack_builder.build())
+}
+
+/// Determine which kind of transaction to create based on the request method.
+pub fn determine_transaction_kind(request: &Request, is_server: bool) -> TransactionKind {
+    match (request.method(), is_server) {
+        (Method::Invite, true) => TransactionKind::InviteServer,
+        (Method::Invite, false) => TransactionKind::InviteClient,
+        (_, true) => TransactionKind::NonInviteServer,
+        (_, false) => TransactionKind::NonInviteClient,
+    }
 }
 
 /// Create a test SIP request with the specified method

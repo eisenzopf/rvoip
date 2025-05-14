@@ -77,10 +77,49 @@ The Transaction User (TU) functionality should be properly distributed:
 
 ### Transaction Layer (`transaction-core`)
 
-- [ ] Verify all transaction timers match RFC specifications
-- [ ] Implement proper transaction matching
-- [ ] Ensure transaction termination events are properly propagated
-- [ ] Add detailed logging for transaction state transitions
+## Transaction Core Major Issues
+
+- [x] Fix trait object safety issue: async methods in Transaction trait (original_request, last_response, send_command) can't be used in trait objects
+- [ ] Transaction structs and TransactionData field mismatches (timer_manager, cmd_rx fields)
+- [ ] TransactionEvent enum variant mismatches (Response, Timeout, Terminated)
+- [x] Implement proper TypedHeader access for Request/Response methods (via, header, etc.)
+- [x] Fix TransactionKey::new implementation to match the expected parameters
+- [x] Address error propagation issues in client.rs handle_transport_message function
+- [ ] Fix the AtomicTransactionState usage in ClientNonInviteTransaction
+- [ ] Fix RequestBuilder.build() handling - it should return a Result<Request, Error>
+
+## Transaction Core Improvements
+
+- [x] Create comprehensive documentation in README.md explaining architecture and usage
+- [x] Implement RFC 3261 compliant timer management system
+- [x] Add proper support for both Send and Sync in Transaction trait
+- [x] Migrate from std::sync::Mutex to tokio::sync::Mutex for better async support
+- [x] Fix ClientNonInviteTransaction implementation
+- [x] Add utils.rs with create_ack_from_invite helper function
+- [x] Fix Error enum to use struct variants consistently
+- [x] Update Transaction trait interface with async original_request and last_response methods
+- [x] Fix transaction references to avoid borrowing issues with boxed trait objects
+- [x] Fix TransportEvent handling to match the current API
+- [ ] Redesign the trait hierarchy to avoid async methods in trait objects
+- [ ] Add proper client transaction test for full transaction lifecycle
+- [ ] Add proper server transaction test for full transaction lifecycle
+- [ ] Fix bug with ACK handling in InviteServerTransaction after 2xx response
+- [ ] Improve transaction reference handling in manager.rs (use Arc<RwLock> for transaction storage)
+- [ ] Add metrics and telemetry for monitoring transaction states
+- [ ] Add support for transaction termination and cleanup in the manager
+
+## Transaction Core Missing Features
+
+- [ ] Implement CANCEL method support with proper handling and matching
+- [ ] Add support for reliability extensions (RFC 3262/PRACK)
+- [ ] Implement forking support for handling multiple responses
+- [ ] Improve transport failure handling and recovery
+- [ ] Add dialog integration points for transaction layer
+- [ ] Implement UPDATE method support (RFC 3311)
+- [ ] Add error recovery and resilience mechanisms
+- [ ] Provide operational metrics for transaction states
+- [ ] Fix server transaction creation issues evident in integration tests
+- [ ] Add performance benchmarks and optimizations
 
 ### Session Layer (`session-core`)
 
@@ -109,6 +148,11 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Create architectural diagrams
 - [ ] Document key extension points for customization
 - [ ] Provide usage examples for each layer
+- [ ] Create visual state machine diagrams for all transaction types
+- [ ] Document transaction timer behavior and configuration options
+- [ ] Add examples of common transaction scenarios and patterns
+- [ ] Create troubleshooting guides for transaction-related issues
+- [ ] Document transaction manager's API contract
 
 ## Performance Considerations
 
@@ -116,6 +160,62 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Monitor and optimize memory usage, particularly in long-running transactions
 - [ ] Ensure proper connection pooling at transport layer
 - [ ] Consider scale-out strategies for high volume deployments
+- [ ] Analyze and optimize transaction timer overhead
+- [ ] Measure and reduce lock contention in transaction hot paths
+- [ ] Implement efficient transaction lookup with optimized data structures
+- [ ] Consider sharded transaction storage for better parallelism
+- [ ] Add performance testing framework with reproducible load tests
+- [ ] Implement load shedding mechanisms for overload protection
+
+## General Architecture
+
+- [ ] Define clear module boundaries and public interfaces (API separation)
+- [ ] Create diagrams for key data flow paths
+- [ ] Document communication patterns between components
+- [ ] Research WebRTC integration options
+- [ ] Design persistent storage for call history, registration status
+- [ ] Identify performance bottlenecks under high volume
+- [ ] Implement consistent logging strategy across crates
+- [ ] Add metrics collection and reporting
+- [ ] Implement graceful shutdown throughout the stack
+- [ ] Add thorough error handling with context
+- [ ] Standardize configuration approach
+- [ ] Add comprehensive integration tests
+
+## SIP Core 
+
+- [ ] Split parser into smaller, more focused components
+- [ ] Benchmark and optimize header parsing
+- [ ] Implement proper Via header handling
+- [ ] Add support for additional extensions (Replaces, etc.)
+- [ ] Create connection-oriented transport abstractions
+- [ ] Optimize memory usage for message parsing/serialization
+- [ ] Add validation for header values
+
+## Transport Layer
+
+- [ ] Implement connection pooling for TCP
+- [ ] Add TLS support with proper certificate handling
+- [ ] Create WebSocket transport for WebRTC signaling
+- [ ] Implement proper DNS SRV resolution
+- [ ] Create NAT traversal strategy (using STUN/ICE)
+- [ ] Add IPv6 support
+- [ ] Implement keep-alive mechanisms for persistent connections
+
+## Dialog Layer
+- [ ] Design core dialog state management
+- [ ] Implement dialog creation, modification, termination
+- [ ] Create dialog matching for in-dialog requests
+- [ ] Design proper Route/Record-Route handling
+- [ ] Implement target refresh handling
+
+## Control Layer / User Agent
+- [ ] Define API for application integration
+- [ ] Implement registration handling
+- [ ] Create call control interface
+- [ ] Add proxy authentication support
+- [ ] Implement re-INVITE support for media changes
+- [ ] Create subscription/notification framework
 
 ---
 
