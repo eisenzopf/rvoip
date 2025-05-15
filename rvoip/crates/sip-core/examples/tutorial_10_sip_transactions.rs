@@ -39,15 +39,16 @@ use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::builder::headers::SupportedBuilderExt; // For supported headers
 use rvoip_sip_core::json::ext::SipMessageJson; // Add this for header access methods
 use rvoip_sip_transport::Transport; // Add this for transport trait methods
-use rvoip_transaction_core::{
-    TransactionManager,
-    transaction::{
-        TransactionState,
-        client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction},
-        server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction},
-        TransactionEvent // Add this for event processing
-    }
+use rvoip_transaction_core::prelude::*;
+use rvoip_transaction_core::TransactionManager;
+use rvoip_transaction_core::transaction::{
+    TransactionState,
+    TransactionKey,
+    TransactionKind,
+    TransactionEvent
 };
+use rvoip_transaction_core::timer::TimerSettings;
+
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -228,14 +229,14 @@ async fn process_events_for_duration(
 async fn ensure_transaction_terminated(
     events_rx: &mut mpsc::Receiver<TransactionEvent>,
     manager: &TransactionManager,
-    transaction_id: &String,
+    transaction_id: &TransactionKey,
     max_wait_ms: u64
 ) -> bool {
     let start = std::time::Instant::now();
     let max_duration = Duration::from_millis(max_wait_ms);
     
     // First check transaction state directly
-    let pre_check = match manager.transaction_state(&transaction_id).await {
+    let pre_check = match manager.transaction_state(transaction_id).await {
         Ok(state) => {
             if state == TransactionState::Terminated {
                 println!("Transaction {} already in terminated state", transaction_id);
@@ -275,7 +276,7 @@ async fn ensure_transaction_terminated(
             },
             Err(_) => {
                 // Timeout, check manager directly
-                match manager.transaction_state(&transaction_id).await {
+                match manager.transaction_state(transaction_id).await {
                     Ok(state) => {
                         if state == TransactionState::Terminated {
                             println!("Transaction {} now in terminated state", transaction_id);
@@ -296,7 +297,7 @@ async fn ensure_transaction_terminated(
     }
     
     // Final check
-    match manager.transaction_state(&transaction_id).await {
+    match manager.transaction_state(transaction_id).await {
         Ok(state) => {
             println!("Transaction {} final state: {:?}", transaction_id, state);
             state == TransactionState::Terminated
@@ -326,10 +327,25 @@ async fn demonstrate_client_transaction() -> Result<()> {
     
     // Setup channels for transaction events and transport events
     let (transport_tx, transport_rx) = mpsc::channel(100);
-    let (manager, mut events_rx) = TransactionManager::new(
+    
+    // Create a transaction manager with faster timer settings for the example
+    let timer_settings = TimerSettings {
+        t1: Duration::from_millis(500),      // Base retransmission interval (default 500ms)
+        t2: Duration::from_millis(4000),     // Maximum retransmission interval (default 4s)
+        // Use shorter timer values for the example
+        transaction_timeout: Duration::from_millis(5000),  
+        wait_time_j: Duration::from_millis(500),  // Shorter Timer J
+        wait_time_k: Duration::from_millis(500),  // Shorter Timer K
+        wait_time_h: Duration::from_millis(500),  // Shorter Timer H
+        wait_time_i: Duration::from_millis(500),  // Shorter Timer I
+        wait_time_d: Duration::from_millis(500),  // Shorter Timer D
+    };
+    
+    let (manager, mut events_rx) = TransactionManager::new_with_config(
         transport.clone(),
         transport_rx,
-        Some(100)
+        Some(100),
+        Some(timer_settings),
     ).await.unwrap();
     
     // Create a client transaction for a non-INVITE request
@@ -344,7 +360,10 @@ async fn demonstrate_client_transaction() -> Result<()> {
     
     // Create and start the transaction through the manager
     println!("Creating transaction for REGISTER");
-    let transaction_id = manager.create_client_transaction(request, remote_addr).await.unwrap();
+    let transaction_id = manager.create_client_transaction(
+        request,
+        remote_addr
+    ).await.unwrap();
     
     // Send the request - in transaction-core, this initiates the transaction
     println!("Initiating transaction send");
@@ -415,11 +434,11 @@ async fn demonstrate_client_transaction() -> Result<()> {
     println!("Waiting for transaction termination (Timer K)...");
     
     // Keep processing events while waiting for termination
-    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 3000).await;
+    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 1000).await;
     println!("Processed {} timer events during Timer K period", timer_events);
     
     // Ensure transaction is fully terminated - this is important!
-    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id.to_string(), 2000).await;
+    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id, 500).await;
     
     // Check before/after state
     let (before_client_txs, before_server_txs) = manager.active_transactions().await;
@@ -458,10 +477,25 @@ async fn demonstrate_server_transaction() -> Result<()> {
     
     // Setup channels for transaction events and transport events
     let (transport_tx, transport_rx) = mpsc::channel(100);
-    let (manager, mut events_rx) = TransactionManager::new(
+    
+    // Create a transaction manager with faster timer settings for the example
+    let timer_settings = TimerSettings {
+        t1: Duration::from_millis(500),      // Base retransmission interval (default 500ms)
+        t2: Duration::from_millis(4000),     // Maximum retransmission interval (default 4s)
+        // Use shorter timer values for the example
+        transaction_timeout: Duration::from_millis(5000),  
+        wait_time_j: Duration::from_millis(500),  // Shorter Timer J
+        wait_time_k: Duration::from_millis(500),  // Shorter Timer K
+        wait_time_h: Duration::from_millis(500),  // Shorter Timer H
+        wait_time_i: Duration::from_millis(500),  // Shorter Timer I
+        wait_time_d: Duration::from_millis(500),  // Shorter Timer D
+    };
+    
+    let (manager, mut events_rx) = TransactionManager::new_with_config(
         transport.clone(),
         transport_rx,
-        Some(100)
+        Some(100),
+        Some(timer_settings),
     ).await.unwrap();
     
     // Prepare a request to be "received"
@@ -474,37 +508,18 @@ async fn demonstrate_server_transaction() -> Result<()> {
         .max_forwards(70)
         .build();
     
-    // Simulate receiving this request
-    println!("Simulating receipt of REGISTER request");
-    transport_tx.send(rvoip_sip_transport::TransportEvent::MessageReceived {
-        message: Message::Request(request.clone()),
-        source: remote_addr,
-        destination: local_addr
-    }).await.unwrap();
+    // Directly create a server transaction with the request
+    println!("Creating server transaction");
+    let server_tx = manager.create_server_transaction(
+        request.clone(), 
+        remote_addr
+    ).await.expect("Failed to create server transaction");
     
-    // Process events and capture the NewRequest event
-    let (_, request_event) = process_events_for_duration(&mut events_rx, &manager, 100).await;
+    // Get the transaction ID
+    let transaction_id = server_tx.id().clone();
+    println!("Server transaction created with ID: {}", transaction_id);
     
-    // Extract transaction ID from event
-    let transaction_id = match &request_event {
-        Some(TransactionEvent::NewRequest { transaction_id, .. }) => {
-            println!("Received NewRequest event with transaction ID: {}", transaction_id);
-            transaction_id.clone()
-        }
-        _ => {
-            println!("Did not receive expected NewRequest event");
-            // Fallback method: get transaction ID from manager's active transactions
-            let (_, server_txs) = manager.active_transactions().await;
-            if let Some(id) = server_txs.get(0) {
-                println!("Found transaction ID from active transactions: {}", id);
-                id.clone()
-            } else {
-                return Err(Error::ParseError("Failed to get transaction ID".into()));
-            }
-        }
-    };
-    
-    // Check current state
+    // Check initial state
     let state = manager.transaction_state(&transaction_id).await.unwrap();
     println!("Initial state: {:?}", state);
     
@@ -540,7 +555,7 @@ async fn demonstrate_server_transaction() -> Result<()> {
         .build();
     
     // Send through manager
-    manager.send_response(&transaction_id, final_response).await.unwrap();
+    manager.send_response(&transaction_id, final_response.clone()).await.unwrap();
     
     // Process events briefly
     process_events_for_duration(&mut events_rx, &manager, 100).await;
@@ -571,11 +586,11 @@ async fn demonstrate_server_transaction() -> Result<()> {
     println!("Waiting for transaction termination (Timer J)...");
     
     // Keep processing events while waiting for termination
-    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 3000).await;
+    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 1000).await;
     println!("Processed {} timer events during Timer J period", timer_events);
     
     // Ensure transaction is fully terminated - this is important!
-    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id.to_string(), 2000).await;
+    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id, 500).await;
     
     // Check if transaction has been terminated
     let (client_txs, server_txs) = manager.active_transactions().await;
@@ -583,10 +598,9 @@ async fn demonstrate_server_transaction() -> Result<()> {
              client_txs.len(), server_txs.len());
     
     // Check final state if transaction is still available
-    if let Ok(state) = manager.transaction_state(&transaction_id).await {
-        println!("Final transaction state: {:?}", state);
-    } else {
-        println!("Transaction has been terminated and removed from manager");
+    match manager.transaction_state(&transaction_id).await {
+        Ok(state) => println!("Final transaction state: {:?}", state),
+        Err(_) => println!("Transaction has been terminated and removed from manager")
     }
     
     println!("Transaction properly terminated: {}", terminated);
@@ -614,10 +628,25 @@ async fn demonstrate_invite_client_transaction() -> Result<()> {
     
     // Setup channels for transaction events and transport events
     let (transport_tx, transport_rx) = mpsc::channel(100);
-    let (manager, mut events_rx) = TransactionManager::new(
+    
+    // Create a transaction manager with faster timer settings for the example
+    let timer_settings = TimerSettings {
+        t1: Duration::from_millis(500),      // Base retransmission interval (default 500ms)
+        t2: Duration::from_millis(4000),     // Maximum retransmission interval (default 4s)
+        // Use shorter timer values for the example
+        transaction_timeout: Duration::from_millis(5000),  
+        wait_time_j: Duration::from_millis(500),  // Shorter Timer J
+        wait_time_k: Duration::from_millis(500),  // Shorter Timer K
+        wait_time_h: Duration::from_millis(500),  // Shorter Timer H
+        wait_time_i: Duration::from_millis(500),  // Shorter Timer I
+        wait_time_d: Duration::from_millis(500),  // Shorter Timer D
+    };
+    
+    let (manager, mut events_rx) = TransactionManager::new_with_config(
         transport.clone(),
         transport_rx,
-        Some(100)
+        Some(100),
+        Some(timer_settings),
     ).await.unwrap();
     
     // Create an INVITE request
@@ -633,7 +662,10 @@ async fn demonstrate_invite_client_transaction() -> Result<()> {
     
     // Create and start transaction
     println!("Creating transaction for INVITE");
-    let transaction_id = manager.create_client_transaction(request, remote_addr).await.unwrap();
+    let transaction_id = manager.create_invite_client_transaction(
+        request, 
+        remote_addr
+    ).await.unwrap();
     
     // Send the request
     println!("Initiating INVITE send");
@@ -727,33 +759,9 @@ async fn demonstrate_invite_client_transaction() -> Result<()> {
     // For INVITE, ACK to 2xx is sent by transaction user directly, outside the transaction
     println!("Sending ACK for 200 OK response (outside transaction)");
     
-    // Get call ID to look up routing info
-    let call_id = ok_response.call_id()
-                             .map(|cid| cid.to_string())
-                             .unwrap_or_else(|| "unknown".to_string());
-    
-    // Build and send a manual ACK with proper routing
-    if let Some((contact_uri, dest_addr)) = transport.get_routing_info(&call_id).await {
-        println!("Found contact info for ACK routing: {:?} -> {}", contact_uri, dest_addr);
-        
-        // Create an ACK request directly
-        let ack_request = RequestBuilder::new(Method::Ack, "sip:bob@biloxi.example.com")?
-            .from("Alice", "sip:alice@atlanta.example.com", Some("a73kszlfl"))
-            .to("Bob", "sip:bob@biloxi.example.com", Some("b73kszlfl"))
-            .call_id(&call_id)
-            .cseq(1)
-            .via("atlanta.example.com", "UDP", Some("z9hG4bKnewbranch"))
-            .max_forwards(70)
-            .build();
-            
-        // Send the ACK directly through transport
-        transport.send_message(Message::Request(ack_request), dest_addr).await.unwrap();
-        println!("ACK sent successfully");
-    } else {
-        // Try using the transaction manager's method
-        let ack_result = manager.send_2xx_ack(&ok_response).await;
-        println!("Transaction manager ACK Result: {:?}", ack_result);
-    }
+    // Send ACK using the transaction manager's utility method
+    let ack_result = manager.send_ack_for_2xx(&transaction_id, &ok_response).await;
+    println!("Transaction manager ACK Result: {:?}", ack_result);
     
     // Process timer events that might occur after ACK
     process_events_for_duration(&mut events_rx, &manager, 100).await;
@@ -777,10 +785,25 @@ async fn demonstrate_transaction_manager() -> Result<()> {
     
     // Setup channels for transaction events and transport events
     let (transport_tx, transport_rx) = mpsc::channel(100);
-    let (manager, mut events_rx) = TransactionManager::new(
+    
+    // Create a transaction manager with faster timer settings for the example
+    let timer_settings = TimerSettings {
+        t1: Duration::from_millis(500),      // Base retransmission interval (default 500ms)
+        t2: Duration::from_millis(4000),     // Maximum retransmission interval (default 4s)
+        // Use shorter timer values for the example
+        transaction_timeout: Duration::from_millis(5000),  
+        wait_time_j: Duration::from_millis(500),  // Shorter Timer J
+        wait_time_k: Duration::from_millis(500),  // Shorter Timer K
+        wait_time_h: Duration::from_millis(500),  // Shorter Timer H
+        wait_time_i: Duration::from_millis(500),  // Shorter Timer I
+        wait_time_d: Duration::from_millis(500),  // Shorter Timer D
+    };
+    
+    let (manager, mut events_rx) = TransactionManager::new_with_config(
         transport.clone(),
         transport_rx,
-        Some(100)
+        Some(100),
+        Some(timer_settings),
     ).await.unwrap();
     
     // Create a REGISTER request
@@ -795,12 +818,19 @@ async fn demonstrate_transaction_manager() -> Result<()> {
     
     // Create a client transaction
     println!("Creating transaction for REGISTER");
-    let transaction_id = manager.create_client_transaction(request, remote_addr).await.unwrap();
+    let transaction_id = manager.create_client_transaction(
+        request,
+        remote_addr
+    ).await.unwrap();
     
     // Check active transactions
     let (client_txs, server_txs) = manager.active_transactions().await;
     println!("Added client transaction for REGISTER. Active client transactions: {}", client_txs.len());
     println!("Active server transactions: {}", server_txs.len());
+    
+    // Initiate the transaction
+    println!("Sending request through transaction");
+    manager.send_request(&transaction_id).await.unwrap();
     
     // Simulate receiving a response and have the transaction handle it
     let response = ResponseBuilder::new(StatusCode::Ok, None)
@@ -826,9 +856,13 @@ async fn demonstrate_transaction_manager() -> Result<()> {
     // Process events briefly
     process_events_for_duration(&mut events_rx, &manager, 50).await;
     
+    // Check the transaction state
+    let state = manager.transaction_state(&transaction_id).await.unwrap();
+    println!("Transaction state after 200 OK: {:?}", state);
+    
     // Allow time for transaction termination with timer processing
     println!("Waiting for transaction timeout and processing timer events...");
-    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 2000).await;
+    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 1000).await;
     println!("Processed {} timer events during timeout period", timer_events);
     
     // Check active transactions again after timer processing
@@ -861,10 +895,25 @@ async fn run_complete_transaction_example() -> Result<()> {
     
     // Setup channels for transaction events and transport events
     let (transport_tx, transport_rx) = mpsc::channel(100);
-    let (manager, mut events_rx) = TransactionManager::new(
+    
+    // Create a transaction manager with faster timer settings for the example
+    let timer_settings = TimerSettings {
+        t1: Duration::from_millis(500),      // Base retransmission interval (default 500ms)
+        t2: Duration::from_millis(4000),     // Maximum retransmission interval (default 4s)
+        // Use shorter timer values for the example
+        transaction_timeout: Duration::from_millis(5000),  
+        wait_time_j: Duration::from_millis(500),  // Shorter Timer J
+        wait_time_k: Duration::from_millis(500),  // Shorter Timer K
+        wait_time_h: Duration::from_millis(500),  // Shorter Timer H
+        wait_time_i: Duration::from_millis(500),  // Shorter Timer I
+        wait_time_d: Duration::from_millis(500),  // Shorter Timer D
+    };
+    
+    let (manager, mut events_rx) = TransactionManager::new_with_config(
         transport.clone(),
         transport_rx,
-        Some(100)
+        Some(100), 
+        Some(timer_settings),
     ).await.unwrap();
     
     // Create an OPTIONS request
@@ -880,7 +929,10 @@ async fn run_complete_transaction_example() -> Result<()> {
     
     // In a real application, you would send this message over the network
     println!("Creating OPTIONS transaction");
-    let transaction_id = manager.create_client_transaction(request, remote_addr).await.unwrap();
+    let transaction_id = manager.create_client_transaction(
+        request, 
+        remote_addr
+    ).await.unwrap();
     
     // Send the request
     println!("Sending OPTIONS request");
@@ -925,13 +977,17 @@ async fn run_complete_transaction_example() -> Result<()> {
     // Process events briefly to handle the response
     process_events_for_duration(&mut events_rx, &manager, 100).await;
     
+    // Check transaction state after receiving 200 OK
+    let state = manager.transaction_state(&transaction_id).await.unwrap();
+    println!("Transaction state after 200 OK: {:?}", state);
+    
     // Simulate the passage of time for transaction cleanup
     println!("Waiting for transaction timeout with timer processing...");
-    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 3000).await;
+    let (timer_events, _) = process_events_for_duration(&mut events_rx, &manager, 1000).await;
     println!("Processed {} timer events during timeout period", timer_events);
     
     // Explicitly ensure the transaction terminates properly
-    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id.to_string(), 3000).await;
+    let terminated = ensure_transaction_terminated(&mut events_rx, &manager, &transaction_id, 500).await;
     println!("Transaction properly terminated: {}", terminated);
     
     // Check active transactions after waiting for timeout
@@ -949,16 +1005,6 @@ async fn run_complete_transaction_example() -> Result<()> {
         println!("      3. For this example, the transaction may still be in manager's internal storage");
     }
     
-    // Transactions still active in our example but may be terminated in the manager
-    println!("Note: In this example, our transaction state checks might still show transactions as active even");
-    println!("      when they've actually been properly terminated internally in the TransactionManager.");
-    println!("      This is because:");
-    println!("      1. The TransactionTerminated events are processed asynchronously");
-    println!("      2. Our tutorial has limited visibility into the internal TransactionManager state");
-    println!("      3. The termination events modify the manager's internal transaction collections");
-    println!("      4. In a real application, you would use the manager.active_transactions() method to");
-    println!("         verify transactions are properly terminated");
-
     println!("\nAll examples completed successfully!");
 
     println!("\nKEY LESSONS FROM THIS TUTORIAL:");
