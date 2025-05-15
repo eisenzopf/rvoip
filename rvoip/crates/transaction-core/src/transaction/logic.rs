@@ -1,3 +1,34 @@
+/// # Transaction Logic
+///
+/// This module defines the core trait that powers the different transaction state machines
+/// required by RFC 3261 Section 17. It provides a flexible, reusable architecture for 
+/// implementing the distinct behavior of INVITE and non-INVITE client and server transactions.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 defines four different transaction types, each with its own state machine:
+///
+/// 1. **INVITE Client Transaction** (Section 17.1.1)
+/// 2. **Non-INVITE Client Transaction** (Section 17.1.2)  
+/// 3. **INVITE Server Transaction** (Section 17.2.1)
+/// 4. **Non-INVITE Server Transaction** (Section 17.2.2)
+///
+/// While each follows different rules for state transitions, retransmissions, and timeouts,
+/// they share a common pattern: receiving messages, processing them based on the current state,
+/// potentially changing state, and initiating appropriate timers.
+///
+/// ## Implementation Architecture
+///
+/// This module implements a trait-based design pattern where:
+///
+/// 1. The `TransactionLogic` trait defines the interface that all transaction types must implement
+/// 2. Each concrete transaction type (e.g., `ClientInviteTransaction`) implements this trait
+/// 3. A generic transaction runner in `runner.rs` uses this trait to drive the state machine
+///
+/// This architecture separates the transaction-specific behavior (how each type processes messages
+/// and timers) from the common event loop machinery, reducing code duplication and making the
+/// code more maintainable.
+
 use std::sync::Arc;
 use std::time::Duration; // Required for timer configurations
 use tokio::task::JoinHandle;
@@ -9,43 +40,88 @@ use crate::error::Result;
 use crate::transaction::{TransactionState, TransactionKind, InternalTransactionCommand};
 use crate::timer::TimerSettings;
 
-/// Trait defining the specific logic for a type of SIP transaction.
+/// Core trait defining the state machine logic for a SIP transaction type.
 ///
-/// Implementors of this trait provide the state-specific handling for messages,
-/// timers, and state transitions, while a generic runner handles the common event loop.
+/// Implementors of this trait provide the transaction-specific behavior for handling
+/// messages, timers, and state transitions according to the rules in RFC 3261 Section 17.
+/// The generic transaction runner uses this trait to operate the transaction's state machine.
 ///
-/// - `D` is the transaction-specific data structure (e.g., `ClientTransactionData`, `ServerTransactionData`).
-/// - `TH` is a struct holding the `JoinHandle`s for the specific timers used by this transaction type.
+/// This trait follows the Strategy Pattern, allowing different transaction types to provide
+/// their own implementations of how to process messages, handle timers, and react to state changes,
+/// while reusing the common machinery of the event loop.
+///
+/// # Type Parameters
+///
+/// - `D`: The transaction-specific data structure (e.g., `ClientTransactionData`, `ServerTransactionData`)
+///   that contains the shared state and communication channels.
+/// - `TH`: A struct holding `JoinHandle`s for the specific timers used by this transaction type.
+///   For example, INVITE client transactions need handles for Timers A, B, and D, while
+///   non-INVITE clients need handles for Timers E, F, and K.
 #[async_trait::async_trait]
 pub trait TransactionLogic<D, TH>
 where
     D: Send + Sync + 'static, // Shared transaction data
     TH: Default + Send + Sync + 'static, // Holds timer JoinHandles
 {
-    /// Returns the kind of this transaction (e.g., InviteClient, NonInviteServer).
-    /// Used for validating state transitions.
-    fn kind(&self) -> TransactionKind;
-
-    /// Returns the initial state for this transaction type when it's first created.
-    fn initial_state(&self) -> TransactionState;
-
-    /// Provides access to the timer configuration (T1, T2, etc.) for this transaction.
-    /// Typically sourced from the shared transaction `data` structure.
-    fn timer_settings<'a>(data: &'a Arc<D>) -> &'a TimerSettings;
-
-    /// Processes an incoming SIP message based on the transaction's current state.
+    /// Returns the kind of this transaction implementation.
     ///
-    /// This method encapsulates the core logic of how a transaction reacts to different
-    /// SIP messages (e.g., a provisional response, a final response, a retransmitted request).
-    ///
-    /// # Arguments
-    /// * `data`: The shared data associated with this transaction.
-    /// * `message`: The SIP message received from the transport layer.
-    /// * `current_state`: The current `TransactionState` of this transaction.
+    /// This method identifies which of the four transaction types from RFC 3261 this
+    /// implementation represents: INVITE client, non-INVITE client, INVITE server,
+    /// or non-INVITE server. The transaction runner uses this to validate state transitions.
     ///
     /// # Returns
-    /// * `Ok(Some(new_state))`: If processing the message leads to a state transition.
-    /// * `Ok(None)`: If the message is processed but no state change occurs.
+    ///
+    /// The transaction kind (e.g., `TransactionKind::InviteClient`).
+    fn kind(&self) -> TransactionKind;
+
+    /// Returns the initial state for this transaction type.
+    ///
+    /// Per RFC 3261, different transaction types start in different states:
+    /// - INVITE client: Calling (after sending INVITE)
+    /// - Non-INVITE client: Trying (after sending request)
+    /// - INVITE server: Proceeding (after receiving INVITE and sending 100 Trying)
+    /// - Non-INVITE server: Trying or Proceeding (depends on immediate response)
+    ///
+    /// # Returns
+    ///
+    /// The appropriate `TransactionState` for the initial state of this transaction type.
+    fn initial_state(&self) -> TransactionState;
+
+    /// Provides access to the timer configuration for this transaction.
+    ///
+    /// RFC 3261 defines several timers with specific durations that control retransmission
+    /// intervals, transaction timeouts, and other time-sensitive behavior. This method
+    /// retrieves the configuration containing these values.
+    ///
+    /// # Arguments
+    ///
+    /// * `data`: A reference to the transaction's shared data.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the `TimerSettings` for this transaction.
+    fn timer_settings<'a>(data: &'a Arc<D>) -> &'a TimerSettings;
+
+    /// Processes an incoming SIP message according to the transaction's current state.
+    ///
+    /// This is a core method that implements the state machine logic described in
+    /// RFC 3261 Section 17 for each transaction type. It:
+    ///
+    /// 1. Examines the message type (request/response)
+    /// 2. Considers the current transaction state
+    /// 3. Performs appropriate actions based on the RFC 3261 state diagram
+    /// 4. Determines if a state transition is needed
+    ///
+    /// # Arguments
+    ///
+    /// * `data`: The shared data associated with this transaction.
+    /// * `message`: The SIP message (request or response) to process.
+    /// * `current_state`: The current `TransactionState`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(new_state))`: If processing the message requires a state transition.
+    /// * `Ok(None)`: If the message is processed but no state change is needed.
     /// * `Err(_)`: If an error occurs during message processing.
     async fn process_message(
         &self,
@@ -54,23 +130,30 @@ where
         current_state: TransactionState,
     ) -> Result<Option<TransactionState>>;
 
-    /// Handles a timer event that has fired for this transaction.
+    /// Handles a timer expiration event based on the transaction's current state.
     ///
-    /// This method defines what actions to take when a specific timer expires,
-    /// such as retransmitting a message or timing out the transaction.
+    /// RFC 3261 defines various timers for different transaction types:
+    /// - INVITE client: Timers A, B, D
+    /// - Non-INVITE client: Timers E, F, K
+    /// - INVITE server: Timers G, H, I
+    /// - Non-INVITE server: Timer J
+    ///
+    /// This method implements the appropriate behavior when these timers expire,
+    /// such as retransmitting messages, terminating the transaction, or moving to a new state.
     ///
     /// # Arguments
+    ///
     /// * `data`: The shared data associated with this transaction.
-    /// * `timer_name`: A string identifying the timer that fired (e.g., "A", "F", "Timeout_K").
-    /// * `current_state`: The current `TransactionState` of this transaction.
-    /// * `timer_handles`: Mutable access to the struct holding specific timer `JoinHandle`s.
-    ///                  The implementor should clear the handle for the timer that just fired.
+    /// * `timer_name`: A string identifying the specific timer (e.g., "A", "F").
+    /// * `current_state`: The current `TransactionState`.
+    /// * `timer_handles`: Mutable access to the struct holding timer `JoinHandle`s.
+    ///                  The implementation should clear the handle for the timer that fired.
     ///
     /// # Returns
-    /// * `Ok(Some(new_state))`: If handling the timer event leads to a state transition.
-    /// * `Ok(None)`: If the timer event is handled (e.g., retransmission and timer restart)
-    ///               without an immediate state change.
-    /// * `Err(_)`: If an error occurs.
+    ///
+    /// * `Ok(Some(new_state))`: If the timer event requires a state transition.
+    /// * `Ok(None)`: If the timer is handled without needing a state change.
+    /// * `Err(_)`: If an error occurs handling the timer.
     async fn handle_timer(
         &self,
         data: &Arc<D>,
@@ -79,24 +162,40 @@ where
         timer_handles: &mut TH,
     ) -> Result<Option<TransactionState>>;
 
-    /// Called by the generic event loop when the transaction enters a new state.
+    /// Performs actions needed when the transaction enters a new state.
     ///
-    /// This method is responsible for starting any timers that are required for the `new_state`.
-    /// It will use the provided `command_tx` to spawn timer tasks that, upon completion,
-    /// send an `InternalTransactionCommand::Timer` back to the generic event loop.
+    /// This method is called by the transaction runner whenever a state transition occurs.
+    /// It's responsible for starting state-specific timers as defined in RFC 3261:
+    ///
+    /// - INVITE client:
+    ///   - Calling state: Start Timers A and B
+    ///   - Completed state: Start Timer D
+    ///
+    /// - Non-INVITE client:
+    ///   - Trying state: Start Timers E and F
+    ///   - Completed state: Start Timer K
+    ///
+    /// - INVITE server:
+    ///   - Completed state: Start Timers G and H
+    ///   - Confirmed state: Start Timer I
+    ///
+    /// - Non-INVITE server:
+    ///   - Completed state: Start Timer J
     ///
     /// # Arguments
-    /// * `data`: The shared data associated with this transaction.
-    /// * `new_state`: The `TransactionState` being entered.
-    /// * `previous_state`: The `TransactionState` being exited.
-    /// * `timer_handles`: Mutable access to the struct holding specific timer `JoinHandle`s.
-    ///                  The implementor should store new `JoinHandle`s here.
-    /// * `command_tx`: An `mpsc::Sender` for `InternalTransactionCommand`. Timer tasks spawned
-    ///                 by this method should use this sender to notify the event loop when they fire.
+    ///
+    /// * `data`: The shared transaction data.
+    /// * `new_state`: The state being entered.
+    /// * `previous_state`: The state being exited.
+    /// * `timer_handles`: Mutable access to the timer handles collection where new timer
+    ///                  task handles should be stored.
+    /// * `command_tx`: Channel for sending commands back to the transaction's event loop,
+    ///                used by timer tasks when they complete.
     ///
     /// # Returns
-    /// * `Ok(())`: If timers are successfully started or if no timers are needed for this state.
-    /// * `Err(_)`: If an error occurs during timer setup.
+    ///
+    /// * `Ok(())`: If the state entry actions were performed successfully.
+    /// * `Err(_)`: If an error occurred.
     async fn on_enter_state(
         &self,
         data: &Arc<D>,
@@ -108,11 +207,16 @@ where
 
     /// Cancels all active timers specific to this transaction type.
     ///
-    /// This method should iterate through the `timer_handles` and abort any active tasks.
-    /// It's called by the generic event loop before transitioning to a new state that
-    /// might start a different set of timers, or when the transaction is terminating.
+    /// This method is called before a state transition to clean up any timers that
+    /// should not continue into the new state. It's also called during transaction
+    /// termination to ensure all timer tasks are properly aborted.
+    ///
+    /// For example, when an INVITE client transaction moves from Calling to Proceeding,
+    /// Timer A should be canceled as it's no longer needed after receiving a provisional response.
     ///
     /// # Arguments
+    ///
     /// * `timer_handles`: Mutable reference to the transaction's timer handles.
+    ///                  The implementation should abort and remove all active timers.
     fn cancel_all_specific_timers(&self, timer_handles: &mut TH);
 } 

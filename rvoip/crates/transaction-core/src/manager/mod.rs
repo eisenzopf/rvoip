@@ -1,13 +1,172 @@
+/// # Transaction Manager for SIP Protocol
+///
+/// This module implements the TransactionManager, which is the central component
+/// of the RFC 3261 SIP transaction layer. It manages all four transaction types
+/// defined in the specification:
+///
+/// - INVITE client transactions (ICT)
+/// - Non-INVITE client transactions (NICT)
+/// - INVITE server transactions (IST)
+/// - Non-INVITE server transactions (NIST)
+///
+/// ## Transaction Layer Architecture
+///
+/// In the SIP protocol stack, the transaction layer sits between the transport layer
+/// and the Transaction User (TU) layer, fulfilling RFC 3261 Section 17:
+///
+/// ```text
+/// +---------------------------+
+/// |  Transaction User (TU)    |  <- Dialogs, call control, etc.
+/// |  (UAC, UAS, Proxy)        |
+/// +---------------------------+
+///              ↑ ↓
+///              | |  Transaction events, requests, responses
+///              ↓ ↑
+/// +---------------------------+
+/// |  Transaction Layer        |  <- This module
+/// |  (Manager + Transactions) |
+/// +---------------------------+
+///              ↑ ↓
+///              | |  Messages, transport events
+///              ↓ ↑
+/// +---------------------------+
+/// |  Transport Layer          |  <- UDP, TCP, etc.
+/// +---------------------------+
+/// ```
+///
+/// ## Transaction Manager Responsibilities
+/// 
+/// The TransactionManager's primary responsibilities include:
+///
+/// 1. **Transaction Creation**: Creating the appropriate transaction type for client or server operations
+/// 2. **Message Matching**: Matching incoming messages to existing transactions 
+/// 3. **State Machine Management**: Managing transaction state transitions
+/// 4. **Timer Coordination**: Managing transaction timers (A, B, C, D, E, F, G, H, I, J, K)
+/// 5. **Message Retransmission**: Handling reliable delivery over unreliable transports
+/// 6. **Event Distribution**: Notifying the TU of transaction events
+/// 7. **Special Method Handling**: Processing special methods like ACK and CANCEL
+///
+/// ## Transaction Matching Rules (RFC 3261 Section 17.1.3 and 17.2.3)
+///
+/// The manager implements these matching rules to route incoming messages:
+///
+/// - For client transactions (responses):
+///   - Match the branch parameter in the top Via header
+///   - Match the sent-by value in the top Via header
+///   - Match the method in the CSeq header
+///
+/// - For server transactions (requests):
+///   - Match the branch parameter in the top Via header
+///   - Match the sent-by value in the top Via header
+///   - Match the request method (except for ACK)
+///
+/// ## Transaction State Machines
+///
+/// The TransactionManager orchestrates four distinct state machines defined in RFC 3261:
+///
+/// ```text
+///       INVITE Client Transaction          Non-INVITE Client Transaction
+///             (Section 17.1.1)                  (Section 17.1.2)
+///
+///               |INVITE                           |Request
+///               V                                 V
+///    +-------+                         +-------+
+///    |Calling|-------------+           |Trying |------------+
+///    +-------+             |           +-------+            |
+///        |                 |               |                |
+///        |1xx              |               |1xx             |
+///        |                 |               |                |
+///        V                 |               V                |
+///    +----------+          |           +----------+         |
+///    |Proceeding|          |           |Proceeding|         |
+///    +----------+          |           +----------+         |
+///        |                 |               |                |
+///        |200-699          |               |200-699         |
+///        |                 |               |                |
+///        V                 |               V                |
+///    +---------+           |           +---------+          |
+///    |Completed|<----------+           |Completed|<---------+
+///    +---------+                       +---------+
+///        |                                 |
+///        |                                 |
+///        V                                 V
+///    +-----------+                    +-----------+
+///    |Terminated |                    |Terminated |
+///    +-----------+                    +-----------+
+///
+///
+///       INVITE Server Transaction          Non-INVITE Server Transaction
+///             (Section 17.2.1)                  (Section 17.2.2)
+///
+///               |INVITE                           |Request
+///               V                                 V
+///    +----------+                        +----------+
+///    |Proceeding|--+                     |  Trying  |
+///    +----------+  |                     +----------+
+///        |         |                         |
+///        |1xx      |1xx                      |
+///        |         |                         |
+///        |         v                         v
+///        |      +----------+              +----------+
+///        |      |Proceeding|---+          |Proceeding|---+
+///        |      +----------+   |          +----------+   |
+///        |         |           |              |          |
+///        |         |2xx        |              |2xx       |
+///        |         |           |              |          |
+///        v         v           |              v          |
+///    +----------+  |           |          +----------+   |
+///    |Completed |<-+-----------+          |Completed |<--+
+///    +----------+                         +----------+
+///        |                                    |
+///        |                                    |
+///        V                                    V
+///    +-----------+                       +-----------+
+///    |Terminated |                       |Terminated |
+///    +-----------+                       +-----------+
+/// ```
+///
+/// ## Special Method Handling
+///
+/// The TransactionManager implements special handling for:
+///
+/// - **ACK for non-2xx responses**: Automatically generated by the transaction layer (RFC 3261 17.1.1.3)
+/// - **ACK for 2xx responses**: Generated by the TU, not by the transaction layer
+/// - **CANCEL**: Requires matching to an existing INVITE transaction (RFC 3261 Section 9.1)
+/// - **UPDATE**: Follows RFC 3311 rules for in-dialog requests
+///
+/// ## Event Flow Between Layers
+///
+/// The TransactionManager facilitates communication between the Transport layer and the TU:
+///
+/// ```text
+///   TU (Transaction User)
+///      ↑        ↓
+///      |        | - Requests to send
+///      |        | - Responses to send
+///      |        | - Commands (e.g., CANCEL)
+/// Events|        |
+///      |        |
+///      ↓        ↑
+///   Transaction Manager
+///      ↑        ↓
+///      |        | - Outgoing messages
+///      |        |
+/// Events|        |
+///      |        |
+///      ↓        ↑
+///   Transport Layer
+/// ```
+
 mod handlers;
 mod types;
-mod utils;
+pub mod utils;
 mod functions;
 #[cfg(test)]
 mod tests;
 
 pub use types::*;
-use handlers::*;
-use utils::*;
+pub use handlers::*;
+pub use utils::*;
 use functions::*;
 
 use std::collections::HashMap;
@@ -41,8 +200,8 @@ use crate::client::{
 };
 use crate::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction};
 use crate::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
-use crate::utils::{transaction_key_from_message, generate_branch, extract_cseq, create_ack_from_invite};
 use crate::method::{cancel, update, ack};
+use crate::utils::{transaction_key_from_message, generate_branch, extract_cseq, create_ack_from_invite};
 
 // Type aliases without Sync requirement
 type BoxedTransaction = Box<dyn Transaction + Send>;
@@ -94,7 +253,53 @@ pub struct TransactionManager {
 pub const RFC3261_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
 impl TransactionManager {
-    /// Create a new transaction manager 
+    /// Creates a new transaction manager with default settings.
+    ///
+    /// This async constructor sets up the transaction manager with default timer settings
+    /// and starts the message processing loop. It is the preferred way to create a
+    /// transaction manager in an async context.
+    ///
+    /// ## Transaction Manager Initialization
+    ///
+    /// The initialization process:
+    /// 1. Sets up internal data structures for tracking transactions
+    /// 2. Initializes the timer management system
+    /// 3. Starts the message processing loop to handle transport events
+    /// 4. Returns the manager and an event receiver for transaction events
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17: The transaction layer requires proper initialization
+    /// - RFC 3261 Section 17.1.1.2 and 17.1.2.2: Timer initialization for retransmissions
+    ///
+    /// # Arguments
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `transport_rx` - Channel for receiving transport events
+    /// * `capacity` - Optional event queue capacity (defaults to 100)
+    ///
+    /// # Returns
+    /// * `Result<(Self, mpsc::Receiver<TransactionEvent>)>` - The manager and event receiver
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use tokio::sync::mpsc;
+    /// # use rvoip_sip_transport::{Transport, TransportEvent};
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # async fn example(transport: Arc<dyn Transport>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create a transport event channel
+    /// let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
+    ///
+    /// // Create transaction manager
+    /// let (manager, event_rx) = TransactionManager::new(
+    ///     transport,
+    ///     transport_rx,
+    ///     Some(200), // Buffer up to 200 events
+    /// ).await?;
+    ///
+    /// // Now use the manager and listen for events
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn new(
         transport: Arc<dyn Transport>,
         transport_rx: mpsc::Receiver<TransportEvent>,
@@ -138,7 +343,62 @@ impl TransactionManager {
         Ok((manager, events_rx))
     }
 
-    /// Create a new transaction manager with custom timer configuration 
+    /// Creates a new transaction manager with custom timer configuration.
+    ///
+    /// This async constructor allows customizing the timer settings, which affect
+    /// retransmission intervals and timeouts. This is useful for fine-tuning SIP
+    /// transaction behavior in different network environments.
+    ///
+    /// ## Timer Configuration Importance
+    ///
+    /// SIP transactions rely heavily on timers for reliability:
+    /// - Timer A, B: Control INVITE retransmissions and timeouts
+    /// - Timer E, F: Control non-INVITE retransmissions and timeouts  
+    /// - Timer G, H: Control INVITE response retransmissions
+    /// - Timer I, J, K: Control various cleanup behaviors
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: INVITE client transaction timers
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction timers
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction timers
+    /// - RFC 3261 Section 17.2.2: Non-INVITE server transaction timers
+    ///
+    /// # Arguments
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `transport_rx` - Channel for receiving transport events
+    /// * `capacity` - Optional event queue capacity (defaults to 100)
+    /// * `timer_settings` - Optional custom timer settings
+    ///
+    /// # Returns
+    /// * `Result<(Self, mpsc::Receiver<TransactionEvent>)>` - The manager and event receiver
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # use tokio::sync::mpsc;
+    /// # use rvoip_sip_transport::{Transport, TransportEvent};
+    /// # use rvoip_transaction_core::{TransactionManager, timer::TimerSettings};
+    /// # async fn example(transport: Arc<dyn Transport>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create custom timer settings for high-latency networks
+    /// let mut timer_settings = TimerSettings::default();
+    /// timer_settings.t1 = Duration::from_millis(1000); // Increase base timer
+    ///
+    /// // Create a transport event channel
+    /// let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
+    ///
+    /// // Create transaction manager with custom settings
+    /// let (manager, event_rx) = TransactionManager::new_with_config(
+    ///     transport,
+    ///     transport_rx,
+    ///     Some(200),
+    ///     Some(timer_settings),
+    /// ).await?;
+    ///
+    /// // Now use the manager with custom timer behavior
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn new_with_config(
         transport: Arc<dyn Transport>,
         transport_rx: mpsc::Receiver<TransportEvent>,
@@ -182,12 +442,74 @@ impl TransactionManager {
         Ok((manager, events_rx))
     }
 
-    /// Create a new transaction manager with classic signature (non-async)
+    /// Creates a transaction manager synchronously (without async).
+    ///
+    /// This constructor is provided for contexts where async initialization
+    /// isn't possible. It creates a minimal transaction manager with dummy
+    /// channels that will need to be properly connected later.
+    ///
+    /// Note: Using the async `new()` method is preferred in async contexts.
+    ///
+    /// # Arguments
+    /// * `transport` - The transport layer to use for sending messages
+    ///
+    /// # Returns
+    /// * `Self` - A transaction manager instance
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use rvoip_sip_transport::Transport;
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # fn example(transport: Arc<dyn Transport>) {
+    /// // Create a transaction manager without async
+    /// let manager = TransactionManager::new_sync(transport);
+    /// 
+    /// // Manager can now be used or passed to an async context
+    /// # }
+    /// ```
     pub fn new_sync(transport: Arc<dyn Transport>) -> Self {
         Self::with_config(transport, None)
     }
     
-    /// Create a new transaction manager with custom timer configuration
+    /// Creates a transaction manager with custom timer configuration (sync version).
+    ///
+    /// This synchronous constructor allows customizing the timer settings
+    /// in contexts where async initialization isn't possible.
+    ///
+    /// ## Timer Configuration
+    ///
+    /// The custom timer settings allow tuning:
+    /// - T1: Base retransmission interval (default 500ms)
+    /// - T2: Maximum retransmission interval (default 4s)
+    /// - T4: Maximum duration a message remains in the network (default 5s)
+    /// - TD: Wait time for response retransmissions (default 32s)
+    ///
+    /// # Arguments
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `timer_settings_opt` - Optional custom timer settings
+    ///
+    /// # Returns
+    /// * `Self` - A transaction manager instance
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # use rvoip_sip_transport::Transport;
+    /// # use rvoip_transaction_core::{TransactionManager, timer::TimerSettings};
+    /// # fn example(transport: Arc<dyn Transport>) {
+    /// // Create custom timer settings
+    /// let mut timer_settings = TimerSettings::default();
+    /// timer_settings.t1 = Duration::from_millis(1000);
+    /// 
+    /// // Create transaction manager with custom settings
+    /// let manager = TransactionManager::with_config(
+    ///     transport,
+    ///     Some(timer_settings)
+    /// );
+    /// # }
+    /// ```
     pub fn with_config(transport: Arc<dyn Transport>, timer_settings_opt: Option<TimerSettings>) -> Self {
         let (events_tx, _) = mpsc::channel(100);
         let (_, transport_rx) = mpsc::channel(100);
@@ -221,7 +543,18 @@ impl TransactionManager {
         }
     }
 
-    /// Construct a dummy manager for testing
+    /// Creates a minimal transaction manager for testing purposes.
+    ///
+    /// This constructor creates a transaction manager with the minimal
+    /// required components for testing. It doesn't start message loops
+    /// or perform other initialization that might complicate testing.
+    ///
+    /// # Arguments
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `transport_rx` - Channel for receiving transport events
+    ///
+    /// # Returns
+    /// * `Self` - A transaction manager instance configured for testing
     pub fn dummy(
         transport: Arc<dyn Transport>,
         transport_rx: mpsc::Receiver<TransportEvent>,
@@ -260,7 +593,48 @@ impl TransactionManager {
         }
     }
 
-    /// Send a request through a client transaction
+    /// Sends a request through a client transaction.
+    ///
+    /// This method initiates a client transaction by sending its request
+    /// according to the transaction state machine rules in RFC 3261.
+    /// It triggers the transition from Initial to Calling (for INVITE)
+    /// or Trying (for non-INVITE) state.
+    ///
+    /// ## Transaction State Transition
+    ///
+    /// This method triggers the following state transitions:
+    /// - INVITE client: Initial → Calling
+    /// - Non-INVITE client: Initial → Trying
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: INVITE client transaction initiation
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction initiation 
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The ID of the client transaction to send
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if the transaction cannot be sent
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use std::net::SocketAddr;
+    /// # use std::str::FromStr;
+    /// # use rvoip_sip_core::Request;
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::TransactionKey;
+    /// # async fn example(manager: &TransactionManager, request: Request) -> Result<(), Box<dyn std::error::Error>> {
+    /// let destination = SocketAddr::from_str("192.168.1.100:5060")?;
+    ///
+    /// // First, create a client transaction
+    /// let tx_id = manager.create_client_transaction(request, destination).await?;
+    ///
+    /// // Then, send the request through the transaction
+    /// manager.send_request(&tx_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_request(&self, transaction_id: &TransactionKey) -> Result<()> {
         debug!(%transaction_id, "TransactionManager::send_request - sending request");
         
@@ -291,7 +665,54 @@ impl TransactionManager {
         }
     }
 
-    /// Send a response through a server transaction
+    /// Sends a response through a server transaction.
+    ///
+    /// This method sends a SIP response through an existing server transaction,
+    /// which will handle retransmissions and state transitions according to
+    /// RFC 3261 rules.
+    ///
+    /// ## Transaction State Transitions
+    ///
+    /// This method can trigger the following state transitions:
+    /// - INVITE server with provisional response: Proceeding → Proceeding
+    /// - INVITE server with final response: Proceeding → Completed  
+    /// - Non-INVITE server with provisional response: Trying/Proceeding → Proceeding
+    /// - Non-INVITE server with final response: Trying/Proceeding → Completed
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction response handling
+    /// - RFC 3261 Section 17.2.2: Non-INVITE server transaction response handling
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The ID of the server transaction
+    /// * `response` - The SIP response to send
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if the response cannot be sent
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_sip_core::{Response, StatusCode};
+    /// # use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::TransactionKey;
+    /// # async fn example(
+    /// #    manager: &TransactionManager,
+    /// #    tx_id: &TransactionKey,
+    /// #    request: &rvoip_sip_core::Request
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create a 200 OK response
+    /// let response = SimpleResponseBuilder::response_from_request(
+    ///     request,
+    ///     StatusCode::Ok,
+    ///     Some("OK")
+    /// ).build();
+    ///
+    /// // Send the response through the transaction
+    /// manager.send_response(tx_id, response).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> Result<()> {
         // We need to get the transaction and clone only when needed
         let mut locked_txs = self.server_transactions.lock().await;
@@ -314,7 +735,30 @@ impl TransactionManager {
         }
     }
 
-    /// Check if a transaction exists
+    /// Checks if a transaction with the given ID exists.
+    ///
+    /// This method looks for the transaction in both client and server
+    /// transaction collections. It's useful for verifying that a transaction
+    /// exists before attempting operations on it.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction ID to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the transaction exists, false otherwise
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::TransactionKey;
+    /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) {
+    /// if manager.transaction_exists(tx_id).await {
+    ///     println!("Transaction {} exists", tx_id);
+    /// } else {
+    ///     println!("Transaction {} not found", tx_id);
+    /// }
+    /// # }
+    /// ```
     pub async fn transaction_exists(&self, transaction_id: &TransactionKey) -> bool {
         let client_exists = {
             let client_txs = self.client_transactions.lock().await;
@@ -333,7 +777,50 @@ impl TransactionManager {
         server_exists
     }
 
-    /// Get the state of a transaction
+    /// Gets the current state of a transaction.
+    ///
+    /// This method retrieves the current state of a transaction according to
+    /// the state machines defined in RFC 3261. The state determines what
+    /// operations are valid and how the transaction will respond to messages.
+    ///
+    /// ## Transaction States
+    ///
+    /// The possible states are:
+    /// - **Initial**: Transaction created but not started
+    /// - **Calling**: INVITE client waiting for response
+    /// - **Trying**: Non-INVITE client waiting for response
+    /// - **Proceeding**: Received provisional response, waiting for final
+    /// - **Completed**: Received final response, waiting for reliability
+    /// - **Terminated**: Transaction is done
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1: INVITE client transaction states
+    /// - RFC 3261 Section 17.1.2: Non-INVITE client transaction states
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction states
+    /// - RFC 3261 Section 17.2.2: Non-INVITE server transaction states
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The ID of the transaction
+    ///
+    /// # Returns
+    /// * `Result<TransactionState>` - The transaction state or error if not found
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::{TransactionKey, TransactionState};
+    /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
+    /// let state = manager.transaction_state(tx_id).await?;
+    /// 
+    /// match state {
+    ///     TransactionState::Proceeding => println!("Transaction is in Proceeding state"),
+    ///     TransactionState::Completed => println!("Transaction is in Completed state"),
+    ///     TransactionState::Terminated => println!("Transaction is terminated"),
+    ///     _ => println!("Transaction is in state: {:?}", state),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn transaction_state(&self, transaction_id: &TransactionKey) -> Result<TransactionState> {
         // Try client transactions first
         {
@@ -355,22 +842,81 @@ impl TransactionManager {
         Err(Error::transaction_not_found(transaction_id.clone(), "transaction_state - transaction not found"))
     }
 
-    /// Get the transaction type (kind)
+    /// Gets the transaction type (kind) for the specified transaction.
+    ///
+    /// This method returns the type of transaction as defined in RFC 3261:
+    /// - INVITE client transaction (ICT)
+    /// - Non-INVITE client transaction (NICT)
+    /// - INVITE server transaction (IST) 
+    /// - Non-INVITE server transaction (NIST)
+    ///
+    /// Knowing the transaction kind is important because each type follows
+    /// different state machines and behavior rules.
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17: Four transaction types with different state machines
+    /// - RFC 3261 Section 17.1: Client transaction types
+    /// - RFC 3261 Section 17.2: Server transaction types
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The ID of the transaction
+    ///
+    /// # Returns
+    /// * `Result<TransactionKind>` - The transaction kind or error if not found
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::{TransactionKey, TransactionKind};
+    /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
+    /// let kind = manager.transaction_kind(tx_id).await?;
+    /// 
+    /// match kind {
+    ///     TransactionKind::InviteClient => println!("This is an INVITE client transaction"),
+    ///     TransactionKind::NonInviteClient => println!("This is a non-INVITE client transaction"),
+    ///     TransactionKind::InviteServer => println!("This is an INVITE server transaction"),
+    ///     TransactionKind::NonInviteServer => println!("This is a non-INVITE server transaction"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn transaction_kind(&self, transaction_id: &TransactionKey) -> Result<TransactionKind> {
-         let client_txs = self.client_transactions.lock().await;
-         if let Some(tx) = client_txs.get(transaction_id) {
-             return Ok(tx.kind());
-         }
+        let client_txs = self.client_transactions.lock().await;
+        if let Some(tx) = client_txs.get(transaction_id) {
+            return Ok(tx.kind());
+        }
 
-         let server_txs = self.server_transactions.lock().await;
-         if let Some(tx) = server_txs.get(transaction_id) {
-             return Ok(tx.kind());
-         }
+        let server_txs = self.server_transactions.lock().await;
+        if let Some(tx) = server_txs.get(transaction_id) {
+            return Ok(tx.kind());
+        }
 
         Err(Error::transaction_not_found(transaction_id.clone(), "transaction kind lookup failed"))
     }
 
-    /// Get all active transaction IDs (keys)
+    /// Gets a list of all active transaction IDs.
+    ///
+    /// This method returns separate lists of client and server transaction IDs,
+    /// which can be useful for monitoring, debugging, or cleanup operations.
+    ///
+    /// # Returns
+    /// * `(Vec<TransactionKey>, Vec<TransactionKey>)` - Client and server transaction IDs
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # async fn example(manager: &TransactionManager) {
+    /// let (client_txs, server_txs) = manager.active_transactions().await;
+    /// 
+    /// println!("Active client transactions: {}", client_txs.len());
+    /// println!("Active server transactions: {}", server_txs.len());
+    /// 
+    /// // Process each transaction ID
+    /// for tx_id in client_txs {
+    ///     println!("Client transaction: {}", tx_id);
+    /// }
+    /// # }
+    /// ```
     pub async fn active_transactions(&self) -> (Vec<TransactionKey>, Vec<TransactionKey>) {
         let client_txs = self.client_transactions.lock().await;
         let server_txs = self.server_transactions.lock().await;
@@ -381,12 +927,63 @@ impl TransactionManager {
         )
     }
 
-    /// Get the transport
+    /// Gets a reference to the transport layer used by this transaction manager.
+    ///
+    /// This method provides access to the underlying transport layer,
+    /// which can be useful for operations outside the transaction layer.
+    ///
+    /// # Returns
+    /// * `Arc<dyn Transport>` - The transport layer
     pub fn transport(&self) -> Arc<dyn Transport> {
         self.transport.clone()
     }
 
-    /// Subscribe to transaction events
+    /// Subscribes to transaction events.
+    ///
+    /// This method returns a receiver that will receive all transaction events
+    /// emitted by this manager. This is the primary way for the application
+    /// to be notified of transaction state changes, incoming messages, and
+    /// other important events.
+    ///
+    /// ## Transaction Events
+    ///
+    /// The subscriber will receive events including:
+    /// - Transaction state changes
+    /// - Incoming requests
+    /// - Response events (provisional and final)
+    /// - Transaction timeouts
+    /// - Special events for ACK and CANCEL
+    ///
+    /// # Returns
+    /// * `mpsc::Receiver<TransactionEvent>` - Channel for receiving events
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_transaction_core::TransactionManager;
+    /// # use rvoip_transaction_core::transaction::TransactionEvent;
+    /// # use tokio::sync::mpsc;
+    /// # async fn example(manager: &TransactionManager) {
+    /// // Subscribe to transaction events
+    /// let mut event_rx = manager.subscribe();
+    ///
+    /// // Process events in a loop
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = event_rx.recv().await {
+    ///         match event {
+    ///             TransactionEvent::StateChanged { transaction_id, previous_state, new_state } => {
+    ///                 println!("Transaction {} changed state: {:?} -> {:?}",
+    ///                     transaction_id, previous_state, new_state);
+    ///             },
+    ///             TransactionEvent::SuccessResponse { transaction_id, response, .. } => {
+    ///                 println!("Transaction {} received success response: {}",
+    ///                     transaction_id, response.status());
+    ///             },
+    ///             _ => println!("Received event: {:?}", event),
+    ///         }
+    ///     }
+    /// });
+    /// # }
+    /// ```
     pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
         // Use a larger buffer to prevent backpressure
         let (tx, rx) = mpsc::channel(100);

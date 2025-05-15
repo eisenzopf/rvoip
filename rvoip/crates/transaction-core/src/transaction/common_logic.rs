@@ -1,3 +1,26 @@
+/// # Transaction Common Logic
+///
+/// This module provides reusable utility functions for transaction event handling 
+/// and common operations used by both client and server transactions.
+///
+/// ## RFC 3261 Context
+///
+/// SIP transactions generate various events throughout their lifecycle as described in RFC 3261.
+/// These events need to be communicated to the Transaction User (TU) as defined in
+/// RFC 3261 Section 17. This module simplifies that communication with helper functions
+/// that properly format and send standardized events.
+///
+/// ## Usage In Transaction Layer
+///
+/// These utility functions are used by different transaction types to:
+/// 
+/// 1. Send standardized events to the TU about state changes, responses, timeouts, etc.
+/// 2. Process incoming responses based on their status codes
+/// 3. Implement common behavior shared between different transaction types
+///
+/// By centralizing these common functions, the library ensures consistent behavior
+/// across all transaction types while reducing code duplication.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -12,7 +35,16 @@ use crate::transaction::{
     InternalTransactionCommand, TransactionKind
 };
 
-/// Send a transaction state changed event
+/// Send a transaction state changed event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a transaction transitions from one state
+/// to another, allowing it to track the transaction's lifecycle.
+/// 
+/// # RFC 3261 Context
+/// 
+/// While RFC 3261 doesn't explicitly define this event type, it's essential for
+/// the TU to understand the transaction's current state to properly handle its
+/// responsibilities, such as when to generate ACKs for 2xx responses (Section 17.1.1.3).
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -33,7 +65,16 @@ pub async fn send_state_changed_event(
     }).await;
 }
 
-/// Send a transaction terminated event
+/// Send a transaction terminated event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a transaction has completed its lifecycle
+/// and is about to be destroyed. This allows the TU to perform cleanup operations
+/// and potentially initiate new transactions if needed.
+/// 
+/// # RFC 3261 Context
+/// 
+/// According to RFC 3261 Sections 17.1.1.2, 17.1.2.2, 17.2.1, and 17.2.2, all
+/// transaction types eventually terminate, either normally or due to timeouts or errors.
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -48,7 +89,16 @@ pub async fn send_transaction_terminated_event(
     }).await;
 }
 
-/// Send a timer triggered event
+/// Send a timer triggered event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a transaction-specific timer has fired,
+/// which may be useful for diagnosing network conditions or transaction behavior.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 defines various timers like A, B, C, D, E, F, G, H, I, J, and K
+/// that control retransmissions, timeouts, and cleanup in Sections 17.1.1.2,
+/// 17.1.2.2, 17.2.1, and 17.2.2.
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -66,7 +116,17 @@ pub async fn send_timer_triggered_event(
     }).await;
 }
 
-/// Send a transaction timeout event
+/// Send a transaction timeout event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a transaction has timed out, usually
+/// because it didn't receive an expected response within the allotted time.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 defines several timeout scenarios:
+/// - Section 17.1.1.2: Timer B for INVITE client transactions
+/// - Section 17.1.2.2: Timer F for non-INVITE client transactions
+/// - Section 17.2.1: Timer H for INVITE server transactions
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -81,7 +141,16 @@ pub async fn send_transaction_timeout_event(
     }).await;
 }
 
-/// Send a provisional response event
+/// Send a provisional response event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a provisional response (1xx) has been
+/// received or sent for a transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 Section 17.1.1.2 describes how the receipt of a provisional response
+/// moves an INVITE client transaction to the Proceeding state. Section 17.2.1 describes
+/// how a server sends provisional responses for INVITE transactions.
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -99,7 +168,16 @@ pub async fn send_provisional_response_event(
     }).await;
 }
 
-/// Send a success response event
+/// Send a success response event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a success response (2xx) has been
+/// received or sent for a transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 Section 17.1.1.2 describes how an INVITE client transaction handles 
+/// 2xx responses and Section 17.1.2.2 does the same for non-INVITE client transactions.
+/// For INVITE transactions, the TU must generate an ACK for 2xx responses.
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -121,7 +199,17 @@ pub async fn send_success_response_event(
     }).await;
 }
 
-/// Send a failure response event
+/// Send a failure response event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a failure response (3xx-6xx) has been
+/// received or sent for a transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 describes how transactions handle failure responses:
+/// - Section 17.1.1.2: INVITE client transactions automatically generate ACKs for
+///   3xx-6xx responses and move to the Completed state
+/// - Section 17.1.2.2: Non-INVITE client transactions move to the Completed state
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -139,7 +227,16 @@ pub async fn send_failure_response_event(
     }).await;
 }
 
-/// Send a transport error event
+/// Send a transport error event to the Transaction User (TU).
+/// 
+/// This function notifies the TU when a transport error has occurred while
+/// sending or receiving messages for a transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// While RFC 3261 doesn't explicitly define transport error handling, it's 
+/// important for the TU to know when the underlying transport has failed
+/// so it can attempt recovery or notify the user.
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -156,6 +253,15 @@ pub async fn send_transport_error_event(
 
 /// Handle response based on its status code and the current transaction state.
 /// Returns the new state to transition to if needed.
+/// 
+/// This generic function implements the core logic for handling different types
+/// of responses in client transactions as specified in RFC 3261.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 defines how transactions handle responses:
+/// - Section 17.1.1.2: INVITE client transactions
+/// - Section 17.1.2.2: Non-INVITE client transactions
 /// 
 /// # Arguments
 /// * `tx_id` - The transaction ID
@@ -247,6 +353,19 @@ pub async fn handle_response_by_status(
     }
 }
 
+/// Handle a success response for a non-INVITE client transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// Per RFC 3261 Section 17.1.2.2, when a non-INVITE client transaction
+/// receives a 2xx response, it transitions to the Completed state and
+/// starts Timer K.
+/// 
+/// # Arguments
+/// * `tx_id` - The transaction ID
+/// * `response` - The success response
+/// * `events_tx` - The events channel to send on
+/// * `remote_addr` - The remote socket address
 async fn handle_success_response_for_client_non_invite_transaction(
     tx_id: &TransactionKey,
     response: Response,
@@ -259,6 +378,20 @@ async fn handle_success_response_for_client_non_invite_transaction(
     send_success_response_event(tx_id, response, events_tx, remote_addr).await;
 }
 
+/// Handle a success response for an INVITE client transaction.
+/// 
+/// # RFC 3261 Context
+/// 
+/// Per RFC 3261 Section 17.1.1.2, when an INVITE client transaction
+/// receives a 2xx response, it transitions to the Terminated state
+/// and does not generate an ACK (the TU does).
+/// 
+/// # Arguments
+/// * `tx_id` - The transaction ID
+/// * `state` - The current transaction state
+/// * `response` - The success response
+/// * `events_tx` - The events channel to send on
+/// * `remote_addr` - The remote socket address
 async fn handle_success_response_for_client_invite_transaction(
     tx_id: &TransactionKey,
     state: TransactionState,
@@ -271,6 +404,28 @@ async fn handle_success_response_for_client_invite_transaction(
     send_success_response_event(tx_id, response, events_tx, remote_addr).await;
 }
 
+/// Handle responses for a client transaction based on its kind and state.
+/// 
+/// This function contains the core logic for how client transactions handle
+/// different response types according to RFC 3261.
+/// 
+/// # RFC 3261 Context
+/// 
+/// RFC 3261 defines distinct behavior for INVITE and non-INVITE client transactions:
+/// - Section 17.1.1.2: INVITE client transactions
+/// - Section 17.1.2.2: Non-INVITE client transactions
+/// 
+/// # Arguments
+/// * `tx_id` - The transaction ID
+/// * `state` - The current transaction state
+/// * `kind` - The transaction kind (INVITE or non-INVITE client)
+/// * `response` - The SIP response
+/// * `events_tx` - The events channel to send on
+/// * `transport` - The SIP transport layer
+/// * `remote_addr` - The remote socket address
+/// 
+/// # Returns
+/// A Result containing the new transaction state
 pub async fn handle_response_for_client_transaction(
     tx_id: &TransactionKey,
     state: TransactionState,

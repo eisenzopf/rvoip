@@ -1,3 +1,67 @@
+/// # INVITE Client Transaction Implementation
+///
+/// This module implements the INVITE client transaction state machine as defined in
+/// [RFC 3261 Section 17.1.1](https://datatracker.ietf.org/doc/html/rfc3261#section-17.1.1).
+///
+/// ## State Machine
+///
+/// The INVITE client transaction follows this state machine:
+///
+/// ```text
+///                                         |INVITE from TU
+///                Timer A fires            |INVITE sent
+///                Reset A,                 V
+///                INVITE sent +-----------+
+///                  +---------|           |-------------------+
+///                  |         |  Calling  |  Timer B fires    |
+///                  +-------->|           |  or Transport Err.|
+///                            +-----------+  inform TU        |
+///                               |  |                         |
+///                               |  |1xx                      |
+///                               |  |from                     |
+///                               |  |TU                       V
+///                            1xx|  |                   +-----------+
+///                            from|  |                   |           |
+///                            TL  |  |                   | Terminated|
+///                               |  |                    |           |
+///                               |  |                    +-----------+
+///                               |  |
+///                               |  |
+///                               |  |                      300-699 from TL
+///                               |  |                      ACK sent, resp. to TU
+///                               |  |                         +----+
+///                               |  |                         |    |
+///                               |  |                         V    |
+///                 +-----------+ |  |      Timer D fires  +-----------+
+///                 |           |<|--|-------------------+|           |
+///                 |Proceeding |--+  |                   | Completed |
+///                 |           |<----+                   |           |
+///                 +-----------+                         +-----------+
+///                   |      |                            ^      |
+///                   |      |                            |      |
+///                   |      +-------------+              |      |
+///                   |                    |              |      |
+///                   |                    |              |      |
+///                   |                    |              |      |
+///    300-699 from TL|                    |2xx from TL   |      |2xx from TL
+///     resp. to TU   |                    |resp. to TU   |      |resp. to TU
+///                   |                    |              |      |
+///                   V                    V              |      |
+///             +-----------+        +-----------+        |      |
+///             |           |        |           |<-------+      |
+///             | Completed |        | Terminated|<--------------+
+///             |           |        |           |
+///             +-----------+        +-----------+
+/// ```
+///
+/// ## Timers
+///
+/// INVITE client transactions use the following timers:
+///
+/// - **Timer A**: Initial value T1, doubles on each retransmission. Controls request retransmissions in Calling state.
+/// - **Timer B**: Typically 64*T1. Controls transaction timeout. When it fires, the transaction terminates with an error.
+/// - **Timer D**: Typically 32s, but can be shorter. Controls how long to wait for retransmissions of the final response.
+
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -28,7 +92,20 @@ use crate::transaction::timer_utils;
 use crate::transaction::validators;
 use crate::transaction::common_logic;
 
-/// Client INVITE transaction (RFC 3261 Section 17.1.1)
+/// Client INVITE transaction implementation as defined in RFC 3261 Section 17.1.1.
+///
+/// This struct implements the state machine for client INVITE transactions, which are used
+/// for initiating SIP sessions. INVITE transactions have unique behavior, including:
+///
+/// - Automatic ACK generation for non-2xx responses
+/// - Special handling for 2xx responses (transaction terminates without sending ACK)
+/// - Unique timer requirements (Timers A, B, D)
+///
+/// Key behaviors:
+/// - In Calling state: Retransmits INVITE periodically until response or timeout
+/// - In Proceeding state: Waits for a final response
+/// - In Completed state: Has received a final non-2xx response, sent ACK, waiting for retransmissions
+/// - In Terminated state: Transaction is finished
 #[derive(Debug, Clone)]
 pub struct ClientInviteTransaction {
     data: Arc<ClientTransactionData>,
@@ -36,15 +113,28 @@ pub struct ClientInviteTransaction {
 }
 
 /// Holds JoinHandles and dynamic state for timers specific to Client INVITE transactions.
+///
+/// Used by the transaction runner to manage the various timers required by the
+/// INVITE client transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ClientInviteTimerHandles {
+    /// Handle for Timer A, which controls INVITE retransmissions
     timer_a: Option<JoinHandle<()>>,
+    
+    /// Current interval for Timer A, which doubles after each firing
     current_timer_a_interval: Option<Duration>, // For backoff
+    
+    /// Handle for Timer B, which controls transaction timeout
     timer_b: Option<JoinHandle<()>>,
+    
+    /// Handle for Timer D, which controls how long to wait in Completed state
     timer_d: Option<JoinHandle<()>>,
 }
 
 /// Implements the TransactionLogic for Client INVITE transactions.
+///
+/// This struct contains the core logic for the INVITE client transaction state machine,
+/// implementing the behavior defined in RFC 3261 Section 17.1.1.
 #[derive(Debug, Clone, Default)]
 struct ClientInviteLogic {
     _data_marker: std::marker::PhantomData<ClientTransactionData>,
@@ -153,7 +243,10 @@ impl ClientInviteLogic {
         }
     }
     
-    // Helper method to handle initial request sending in Calling state
+    /// Handle initial request sending in Calling state
+    ///
+    /// This method is called when the transaction enters the Calling state.
+    /// It sends the initial INVITE request and starts Timers A and B according to RFC 3261 Section 17.1.1.2.
     async fn handle_calling_state(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -185,7 +278,11 @@ impl ClientInviteLogic {
         Ok(())
     }
 
-    // Handle Timer A (retransmission) trigger
+    /// Handle Timer A (retransmission) trigger
+    ///
+    /// This method is called when Timer A fires. According to RFC 3261 Section 17.1.1.2,
+    /// when Timer A fires in the Calling state, the client should retransmit the INVITE
+    /// request and restart Timer A with a doubled interval (capped by T2).
     async fn handle_timer_a_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -227,7 +324,11 @@ impl ClientInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer B (transaction timeout) trigger
+    /// Handle Timer B (transaction timeout) trigger
+    ///
+    /// This method is called when Timer B fires. According to RFC 3261 Section 17.1.1.2,
+    /// when Timer B fires in the Calling state, the client should inform the TU that the
+    /// transaction has timed out and transition to the Terminated state.
     async fn handle_timer_b_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -254,7 +355,12 @@ impl ClientInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer D (wait for retransmissions) trigger
+    /// Handle Timer D (wait for retransmissions) trigger
+    ///
+    /// This method is called when Timer D fires. According to RFC 3261 Section 17.1.1.2,
+    /// when Timer D fires in the Completed state, the client should transition to the
+    /// Terminated state. Timer D ensures that any retransmissions of the final response
+    /// are properly ACKed before the transaction terminates.
     async fn handle_timer_d_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -276,7 +382,11 @@ impl ClientInviteLogic {
         }
     }
     
-    // Helper to create an ACK for a non-2xx response
+    /// Create and send an ACK for a non-2xx response
+    ///
+    /// According to RFC 3261 Section 17.1.1.3, the client transaction must generate an
+    /// ACK request when it receives a final response (3xx-6xx) to an INVITE request.
+    /// This method creates that ACK and sends it to the same address as the original INVITE.
     async fn create_and_send_ack_for_response(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -306,7 +416,12 @@ impl ClientInviteLogic {
         }
     }
     
-    // Process a SIP response using common logic
+    /// Process a SIP response
+    ///
+    /// This method implements the core logic for handling incoming responses
+    /// according to RFC 3261 Section 17.1.1.2. It validates the response,
+    /// determines the appropriate action based on the current state and the
+    /// response status, and returns any state transition that should occur.
     async fn process_response(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -534,6 +649,23 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
 
 impl ClientInviteTransaction {
     /// Create a new client INVITE transaction.
+    ///
+    /// This method creates a new INVITE client transaction with the specified parameters.
+    /// It validates that the request is an INVITE, initializes the transaction data, and
+    /// spawns the transaction runner task.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier for this transaction
+    /// * `request` - The INVITE request that initiates this transaction
+    /// * `remote_addr` - The address to which the request should be sent
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `events_tx` - The channel for sending events to the Transaction User
+    /// * `timer_config_override` - Optional custom timer settings
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new ClientInviteTransaction or an error
     pub fn new(
         id: TransactionKey,
         request: Request,

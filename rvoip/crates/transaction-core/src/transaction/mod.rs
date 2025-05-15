@@ -1,3 +1,84 @@
+/// # SIP Transaction Layer
+///
+/// This module implements the SIP transaction layer as defined in RFC 3261 Section 17.
+/// The transaction layer sits between the transport layer and the Transaction User (TU),
+/// handling the mechanics of reliable message delivery and state management.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 defines the transaction layer as follows:
+///
+/// > The transaction layer handles application-layer retransmissions, matching of
+/// > responses to requests, and application-layer timeouts. Any task that a User
+/// > Agent Client (UAC) accomplishes takes place using a series of transactions.
+///
+/// The transaction layer's primary responsibilities include:
+///
+/// 1. **Message Retransmission**: Ensuring reliable delivery over unreliable transports (e.g., UDP)
+/// 2. **Response Matching**: Associating responses with their corresponding requests
+/// 3. **State Management**: Implementing the state machines for different transaction types
+/// 4. **Timer Management**: Handling various timers for retransmissions, timeouts, and cleanup
+/// 5. **Transaction Identification**: Uniquely identifying transactions using branch parameters
+///
+/// ## Transaction Types
+///
+/// RFC 3261 defines four distinct transaction types, each with its own state machine:
+///
+/// 1. **INVITE Client Transaction** (Section 17.1.1)
+/// 2. **Non-INVITE Client Transaction** (Section 17.1.2)
+/// 3. **INVITE Server Transaction** (Section 17.2.1)
+/// 4. **Non-INVITE Server Transaction** (Section 17.2.2)
+///
+/// ## Architecture Overview
+///
+/// ```text
+///                           ┌────────────────────┐
+///                           │  Transaction User  │
+///                           │    (TU/Dialog)     │
+///                           └─────────┬──────────┘
+///                                     │ TransactionEvents
+///                                     ▼
+///  ┌─────────────────────────────────────────────────────────────┐
+///  │                     Transaction Layer                       │
+///  │                                                             │
+///  │  ┌─────────────┐   ┌────────────────┐   ┌────────────────┐  │
+///  │  │ Transaction │   │ TransactionKey │   │TransactionState│  │
+///  │  │   Manager   │   │   Matching     │   │   Machines     │  │
+///  │  └─────────────┘   └────────────────┘   └────────────────┘  │
+///  │          │                  │                  │            │
+///  │          └──────────────────┼──────────────────┘            │
+///  │                             │                               │
+///  │                      ┌──────┴───────┐                       │
+///  │                      │ Timer System │                       │
+///  │                      └──────────────┘                       │
+///  └─────────────────────────────────────────────────────────────┘
+///                                     │ SIP Messages
+///                                     ▼
+///                           ┌────────────────────┐
+///                           │   Transport Layer  │
+///                           └────────────────────┘
+/// ```
+///
+/// ## Implementation Details
+///
+/// This module provides:
+///
+/// 1. **Transaction Identification**: The `TransactionKey` struct for uniquely identifying transactions
+/// 2. **State Management**: The `TransactionState` enum and `AtomicTransactionState` for thread-safe state tracking
+/// 3. **Event Communication**: The `TransactionEvent` enum for communicating with the TU
+/// 4. **Transaction Types**: The `TransactionKind` enum for distinguishing between transaction types
+/// 5. **Transaction Interface**: The `Transaction` and `TransactionAsync` traits for uniform interaction
+/// 6. **Timer Configuration**: The `TimerConfig` struct for configuring transaction timers
+///
+/// The implementation follows a trait-based design pattern where:
+///
+/// 1. Each transaction type implements the `TransactionLogic` trait
+/// 2. A generic transaction runner uses this trait to drive the state machine
+/// 3. The `TransactionManager` coordinates all active transactions
+///
+/// This architecture separates the transaction-specific behavior from the common
+/// event loop machinery, making the code more maintainable and extensible.
+
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 use std::future::Future;
 use std::pin::Pin;

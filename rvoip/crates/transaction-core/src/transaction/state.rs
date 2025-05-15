@@ -1,3 +1,180 @@
+/// # Transaction State Machine
+///
+/// This module implements the SIP transaction state machines as defined in RFC 3261 Section 17.
+/// It provides a thread-safe mechanism for tracking and transitioning between transaction states
+/// while ensuring compliance with the RFC-defined state transition rules.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 defines four distinct transaction state machines:
+///
+/// 1. **INVITE Client Transaction** (Section 17.1.1)
+/// 2. **Non-INVITE Client Transaction** (Section 17.1.2)
+/// 3. **INVITE Server Transaction** (Section 17.2.1)
+/// 4. **Non-INVITE Server Transaction** (Section 17.2.2)
+///
+/// Each state machine specifies the valid states and transitions for that transaction type,
+/// as well as the events that trigger transitions (receiving messages, sending messages,
+/// timer expirations).
+///
+/// ## State Machine Diagrams
+///
+/// ### INVITE Client Transaction
+///
+/// ```text
+///                   |INVITE sent
+///                   |Timer A fires
+///                   |INVITE sent
+///                   V
+///                 +---------+
+///                 | Calling |-------------------+
+///                 +---------+                   |
+///                    |  |                       |
+///        300-699     |  |1xx                    |2xx
+///        ACK sent    |  |                       |
+///        +-----+     |  +----------+            |
+///        |     |     |             |            |
+///        |     V     V             |            |
+///        |  +-----------+          |            |
+///        |  | Proceeding|          |            |
+///        |  +-----------+          |            |
+///        |        |                |            |
+///        |        |                |            |
+///        |        |300-699         |            |
+///        |        |ACK sent        |            |
+///        |        +-----+          |            |
+///        |              |          |            |
+///        |              V          |            |
+///        |        +-----------+    |            |
+///        +------->| Completed |<---+            |
+///                 +-----------+                 |
+///                      |                        |
+///                      |Timer D fires           |
+///                      |                        |
+///                      V                        |
+///                 +-----------+                 |
+///                 | Terminated|<----------------+
+///                 +-----------+
+/// ```
+///
+/// ### Non-INVITE Client Transaction
+///
+/// ```text
+///               |Request sent
+///               |Timer E fires
+///               |Request sent
+///               V
+///             +---------+
+///             | Trying  |-------------+
+///             +---------+             |
+///                 |  |               |
+///     1xx         |  |               |
+///     +-----+     |  |               |
+///     |     |     |  |2xx-6xx        |
+///     |     V     V  |               |
+///     |  +-----------+               |
+///     |  | Proceeding|---------------+
+///     |  +-----------+               |
+///     |      |                       |
+///     |      |                       |
+///     |      |2xx-6xx                |
+///     |      |                       |
+///     |      V                       |
+///     |  +-----------+               |
+///     +->| Completed |               |
+///        +-----------+               |
+///             |                      |
+///             |Timer K fires         |
+///             |                      |
+///             V                      |
+///        +-----------+               |
+///        | Terminated|<--------------+
+///        +-----------+
+/// ```
+///
+/// ### INVITE Server Transaction
+///
+/// ```text
+///               |INVITE received
+///               |100 sent
+///               V
+///             +---------+
+///             |         |--------+
+///             |Proceeding|       |
+///             |         |<-------+
+///             +---------+        |
+///                  |  |          |
+///                  |  |          |
+///     300-699      |  |2xx       |1xx
+///     +-----+      |  |          |sent
+///     |     |      |  |          |
+///     |     V      V  |          |
+///     |  +----------+ |          |
+///     |  | Completed | |          |
+///     |  +----------+ |          |
+///     |       |       |          |
+///     |       |       |          |
+///     |       |       |          |
+///     |       V       |          |
+///     |  +-----------+|          |
+///     +->| Confirmed  |<---------+
+///        +-----------+
+///              |
+///              |Timer I fires
+///              |
+///              V
+///        +-----------+
+///        | Terminated|
+///        +-----------+
+/// ```
+///
+/// ### Non-INVITE Server Transaction
+///
+/// ```text
+///                 |Request received
+///                 V
+///             +---------+
+///             |         |
+///             | Trying  |
+///             |         |
+///             +---------+
+///                  |
+///                  |1xx sent
+///                  |
+///                  V
+///             +---------+
+///             |         |
+///             |Proceeding|
+///             |         |
+///             +---------+
+///                  |
+///                  |2xx-6xx sent
+///                  |
+///                  V
+///             +---------+
+///             |         |
+///             | Completed |
+///             |         |
+///             +---------+
+///                  |
+///                  |Timer J fires
+///                  |
+///                  V
+///             +---------+
+///             |         |
+///             | Terminated |
+///             |         |
+///             +---------+
+/// ```
+///
+/// ## Implementation Details
+///
+/// This module provides:
+///
+/// 1. The `TransactionState` enum representing the possible states
+/// 2. The `AtomicTransactionState` struct for thread-safe state management
+/// 3. Functions to validate state transitions according to RFC 3261 rules
+
 use std::sync::atomic::{AtomicU8, Ordering};
 use crate::error::{Error, Result};
 use crate::transaction::TransactionKind;
@@ -12,63 +189,103 @@ use crate::transaction::TransactionKind;
 pub enum TransactionState {
     /// The initial state of a transaction before any significant event (like sending a request
     /// for client transactions, or receiving one for server transactions) has occurred.
-    /// Not explicitly named in RFC 3261 state diagrams but represents the state before
-    /// the transaction officially starts its lifecycle (e.g., before moving to `Calling` or `Trying`).
-    Initial,    // Before any action
-
-    /// **Client INVITE & Non-INVITE Transactions / Server Non-INVITE Transactions:**
-    /// The transaction has sent a request (Client) or received a request and sent a provisional response (Server Non-INVITE)
-    /// and is waiting for a final response or further provisional responses.
-    /// Specifically:
-    /// - Client INVITE: After sending INVITE, before 1xx/final. (RFC uses "Calling")
-    /// - Client Non-INVITE: After sending request, before 1xx/final. (RFC uses "Trying")
-    /// - Server Non-INVITE: After receiving request, before sending final response. (RFC uses "Trying" before sending provisional, "Proceeding" after)
-    /// This state consolidates these initial active phases.
     /// 
-    /// Server INVITE transactions typically start in `Proceeding` after receiving an INVITE if they choose to respond.
-    Trying,     // Non-INVITE specific: Request sent, waiting 1xx/final
+    /// This state is not explicitly named in RFC 3261 state diagrams but represents the state
+    /// before the transaction officially starts its lifecycle (e.g., before moving to `Calling`
+    /// or `Trying`).
+    Initial,
 
-    /// **Client INVITE & Non-INVITE Transactions / Server INVITE & Non-INVITE Transactions:**
-    /// A provisional response (1xx) has been sent (Server) or received (Client).
-    /// The transaction is awaiting a final response (Client) or further actions that lead to a final response (Server).
-    /// - Client (INVITE/Non-INVITE): After receiving a 1xx, awaiting final response.
-    /// - Server (INVITE/Non-INVITE): After sending a 1xx, before sending final response.
-    Proceeding, // 1xx received, waiting final
+    /// **Client INVITE Transactions Only**
+    /// 
+    /// The initial INVITE request has been sent, and the transaction is awaiting any response 
+    /// (provisional or final).
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// RFC 3261 Section 17.1.1.2 defines this state:
+    /// > When in the "Calling" state, any response received that is a 1xx response causes
+    /// > the client transaction to transition to the "Proceeding" state. Any response
+    /// > received that is a 2xx response causes the client transaction to transition to
+    /// > the "Terminated" state, and the response MUST be passed up to the TU. Any
+    /// > response received that is a 300-699 response causes the client transaction to
+    /// > transition to the "Completed" state.
+    Calling,
 
-    /// **Client INVITE Transactions Only:**
-    /// The initial INVITE request has been sent, and the transaction is awaiting any response (provisional or final).
-    /// This is specific to client INVITE transactions as per RFC 3261, Section 17.1.1.
-    /// If a provisional response is received, it transitions to `Proceeding`.
-    /// If a final response is received, it transitions to `Completed`.
-    Calling,    // INVITE specific: Request sent, waiting 1xx/final
+    /// **Client Non-INVITE Transactions / Server Non-INVITE Transactions**
+    /// 
+    /// For client non-INVITE transactions: The request has been sent and the client is waiting
+    /// for a response.
+    /// 
+    /// For server non-INVITE transactions: The request has been received but no response
+    /// has been sent yet.
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// RFC 3261 Section 17.1.2.2 (Client Non-INVITE):
+    /// > When in the "Trying" state, any response received that is a 1xx response causes
+    /// > the client transaction to transition to the "Proceeding" state. Any response
+    /// > received that is a 2xx-699 response causes the client transaction to transition
+    /// > to the "Completed" state.
+    /// 
+    /// RFC 3261 Section 17.2.2 (Server Non-INVITE):
+    /// > The state machine is initialized in the "Trying" state and immediately transitions
+    /// > to the "Proceeding" state when a provisional response is sent.
+    Trying,
 
-    /// **All Transaction Types:**
-    /// The transaction has received a final response (Client) or sent a final response (Server).
-    /// - Client INVITE/Non-INVITE: Received a final response (2xx-6xx).
-    ///   - If 2xx to INVITE, TU must send ACK. Transaction handles ACK retransmissions if it were to send one (it doesn't for 2xx).
-    ///   - If non-2xx to INVITE, transaction absorbs ACKs.
-    ///   - For Non-INVITE, no ACK processing here.
-    /// - Server INVITE: Sent a non-2xx final response. Awaits ACK from client. (Timer H starts)
-    /// - Server INVITE: Sent a 2xx final response. Waits for TU to signal ACK, or for Timer G to handle 2xx retransmissions.
-    ///   (RFC 3261 indicates the server INVITE transaction itself does not retransmit 2xx, but higher layers might rely on its state/timers)
-    ///   *Correction*: Server INVITE sends 2xx and transitions to Terminated after Timer G, unless an ACK is received, then it transitions to Confirmed (then Terminated).
-    ///   *RFC17.2.1*: If a 2xx response is sent, state is Terminated. This seems to be a simplification in the RFC diagram for the core transaction logic.
-    ///   This `Completed` state for Server INVITE (especially for 2xx) might be more about TU interaction point.
-    ///   Let's align with simplified view: for server INVITE 2xx, it moves to Terminated. For non-2xx, it's `Completed` awaiting ACK.
-    /// - Server Non-INVITE: Sent a final response. (Timer J starts for UDP to absorb retransmitted requests).
-    /// The transaction remains in this state for a period to absorb retransmissions or ACKs.
-    Completed,  // Final response sent/received, waiting for termination timer/ACK
+    /// **All Transaction Types**
+    /// 
+    /// For client transactions: A provisional (1xx) response has been received.
+    /// 
+    /// For server transactions: A provisional (1xx) response has been sent.
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// RFC 3261 defines this state for all transaction types:
+    /// 
+    /// - Section 17.1.1.2 (Client INVITE): After receiving a 1xx response
+    /// - Section 17.1.2.2 (Client Non-INVITE): After receiving a 1xx response
+    /// - Section 17.2.1 (Server INVITE): After receiving INVITE and sending 1xx
+    /// - Section 17.2.2 (Server Non-INVITE): After sending 1xx response
+    Proceeding,
 
-    /// **Server INVITE Transactions Only:**
-    /// A 2xx final response was sent, and an ACK has been received from the client.
-    /// The transaction will shortly transition to `Terminated`.
-    /// (RFC 3261, Section 17.2.1)
-    Confirmed,  // ACK received (Server INVITE only)
+    /// **All Transaction Types**
+    /// 
+    /// For client transactions: A final (2xx-6xx) response has been received.
+    /// 
+    /// For server transactions: A final (2xx-6xx) response has been sent.
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// - Section 17.1.1.2 (Client INVITE): After receiving 3xx-6xx response, ACK sent
+    /// - Section 17.1.2.2 (Client Non-INVITE): After receiving final response
+    /// - Section 17.2.1 (Server INVITE): After sending non-2xx final response, waiting for ACK
+    /// - Section 17.2.2 (Server Non-INVITE): After sending final response
+    Completed,
 
-    /// **All Transaction Types:**
-    /// The transaction has finished all its processing, timers have expired, and it should be destroyed.
-    /// No further messages will be processed by this transaction instance.
-    Terminated, // Transaction finished
+    /// **Server INVITE Transactions Only**
+    /// 
+    /// An ACK has been received for a non-2xx final response.
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// RFC 3261 Section 17.2.1 defines this state:
+    /// > If an ACK is received while in the "Completed" state, the server transaction
+    /// > MUST transition to the "Confirmed" state. As Timer G is ignored in this state,
+    /// > any retransmissions of the response will cease.
+    Confirmed,
+
+    /// **All Transaction Types**
+    /// 
+    /// The transaction has completed its function and will be removed from the transaction layer.
+    /// 
+    /// # RFC 3261 Context
+    /// 
+    /// All transaction types eventually reach this state when:
+    /// - Client INVITE: After Timer D expires (Section 17.1.1.2)
+    /// - Client Non-INVITE: After Timer K expires (Section 17.1.2.2)
+    /// - Server INVITE: After Timer I expires (Section 17.2.1)
+    /// - Server Non-INVITE: After Timer J expires (Section 17.2.2)
+    Terminated,
 }
 
 impl TransactionState {
@@ -145,6 +362,18 @@ impl From<u8> for StateValue {
 /// in an `AtomicU8`, allowing for atomic reads and writes, which is crucial
 /// when a transaction's state might be accessed or modified by multiple tasks
 /// concurrently (e.g., a task processing an incoming message and a timer task).
+///
+/// # RFC 3261 Context
+///
+/// While RFC 3261 doesn't specify implementation details for managing transaction state,
+/// it does require that transactions properly handle concurrent events like:
+/// 
+/// - Receiving a response while a retransmission timer is active
+/// - Receiving an ACK while a response retransmission is in progress
+/// - Handling timer expirations during message processing
+///
+/// This atomic implementation ensures that state transitions are properly synchronized
+/// even when multiple tasks are operating on the same transaction.
 #[derive(Debug)]
 pub struct AtomicTransactionState {
     value: AtomicU8,
@@ -179,6 +408,13 @@ impl AtomicTransactionState {
     /// current state matches `current_state`.
     ///
     /// This is a compare-and-swap (CAS) operation.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// RFC 3261 defines specific state transitions for each transaction type.
+    /// This method ensures that transitions only occur when the current state
+    /// matches the expected state, preventing race conditions that could lead
+    /// to invalid state transitions.
     ///
     /// # Behavior
     /// - If the actual current state is equal to the `current_state` parameter, it's updated to `new_state`,
@@ -229,7 +465,16 @@ impl AtomicTransactionState {
     /// Validates if a transition from `current_state` to `new_state` is valid
     /// for the given transaction kind according to the RFC 3261 state machine rules.
     ///
-    /// Returns `Ok(())` if the transition is valid, or `Err(String)` with an error message if invalid.
+    /// # RFC 3261 Context
+    ///
+    /// This method implements the state transition rules defined in RFC 3261 Sections:
+    /// - 17.1.1 (INVITE client transaction)
+    /// - 17.1.2 (non-INVITE client transaction)
+    /// - 17.2.1 (INVITE server transaction)
+    /// - 17.2.2 (non-INVITE server transaction)
+    ///
+    /// # Returns
+    /// `Ok(())` if the transition is valid, or `Err(String)` with an error message if invalid.
     pub fn validate_transition(
         tx_kind: TransactionKind,
         current_state: TransactionState,

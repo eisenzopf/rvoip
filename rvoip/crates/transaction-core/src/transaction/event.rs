@@ -1,3 +1,60 @@
+/// # Transaction Events
+///
+/// This module defines the events that flow from the transaction layer to the Transaction User (TU)
+/// as defined in RFC 3261. These events represent the key communication mechanism between
+/// the transaction layer and higher layers of a SIP stack.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 Section 17 defines the transaction layer as an intermediary between the transport
+/// layer and the Transaction User (TU). The transaction layer is responsible for:
+///
+/// 1. Matching responses to client transactions
+/// 2. Matching requests to server transactions
+/// 3. Absorbing retransmissions at the transaction level
+/// 4. Implementing transaction state machines and timers
+///
+/// When significant events occur within a transaction (receiving messages, state changes,
+/// timeouts, etc.), the transaction layer must inform the TU through a well-defined set
+/// of events, which this module implements.
+///
+/// ## Event Flow in the SIP Stack
+///
+/// ```text
+///                  +----------------+
+///                  | Transaction    |
+///                  | User (TU)      |
+///                  +----------------+
+///                          ^
+///                          | TransactionEvents
+///                          |
+///                  +----------------+
+///                  | Transaction    |
+///                  | Layer          |
+///                  +----------------+
+///                          ^
+///                          | SIP Messages
+///                          |
+///                  +----------------+
+///                  | Transport      |
+///                  | Layer          |
+///                  +----------------+
+/// ```
+///
+/// ## Event Categories
+///
+/// The events in this module fall into several categories:
+///
+/// 1. **Request Events**: Notify the TU about incoming requests (NewRequest, AckReceived, etc.)
+/// 2. **Response Events**: Notify the TU about responses to its requests (ProvisionalResponse, SuccessResponse, etc.)
+/// 3. **State Events**: Inform the TU about transaction state changes (StateChanged, TransactionTerminated)
+/// 4. **Error Events**: Report transport or processing errors (TransportError, Error)
+/// 5. **Timeout Events**: Indicate when transaction timers expire (TransactionTimeout)
+///
+/// These events provide the TU with all the information it needs to implement proper SIP
+/// dialog and session behavior without having to understand the complexities of the
+/// transaction state machines.
+
 use std::net::SocketAddr;
 use std::fmt;
 use rvoip_sip_core::prelude::{Request, Response, Message, Method, StatusCode, Uri, Version};

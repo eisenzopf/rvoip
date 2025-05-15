@@ -5,6 +5,19 @@
 //!   as defined in RFC 3261, as well as generic timer categories.
 //! - [`Timer`]: A struct representing an active timer instance, containing its properties,
 //!   scheduling information, and associated transaction.
+//! - [`TimerSettings`]: Configuration for timer durations as specified in RFC 3261.
+//!
+//! # SIP Timer Protocol Requirements
+//!
+//! RFC 3261 specifies various timers that govern different aspects of SIP transactions:
+//!
+//! - **Retransmission Timers**: Control when messages are retransmitted over unreliable transports (A, E, G)
+//! - **Transaction Timeout Timers**: Limit overall transaction lifetime (B, F, H)
+//! - **Wait Timers**: Control how long to remain in certain states to absorb retransmissions (D, I, J, K)
+//!
+//! The base retransmission interval (T1) is typically 500ms, doubling with each retransmission
+//! up to a maximum (T2) of 4 seconds. For reliable transports like TCP, many of these timers
+//! can be set to zero as retransmissions are handled by the transport layer.
 
 use std::fmt;
 use std::time::Duration;
@@ -351,6 +364,37 @@ impl fmt::Display for Timer {
 ///
 /// These settings control the behavior of timers managed by the [`TimerFactory`]
 /// and [`TimerManager`].
+///
+/// # Example: Custom Timer Settings
+///
+/// ```rust
+/// use std::time::Duration;
+/// use rvoip_transaction_core::timer::TimerSettings;
+///
+/// // Default settings (RFC 3261 recommended values)
+/// let default_settings = TimerSettings::default();
+/// assert_eq!(default_settings.t1, Duration::from_millis(500));
+/// assert_eq!(default_settings.t2, Duration::from_secs(4));
+///
+/// // Custom settings for high-latency networks
+/// let slow_network_settings = TimerSettings {
+///     t1: Duration::from_millis(1000),    // Double the retransmission interval
+///     t2: Duration::from_secs(8),         // Double the maximum retransmission interval
+///     transaction_timeout: Duration::from_secs(64),  // 64*T1 with new T1 value
+///     ..Default::default()
+/// };
+///
+/// // Custom settings for local testing (faster timeouts)
+/// let fast_test_settings = TimerSettings {
+///     t1: Duration::from_millis(100),     // Fast initial retransmissions
+///     t2: Duration::from_millis(400),     // Fast maximum retransmission interval
+///     transaction_timeout: Duration::from_secs(8),  // Quicker timeouts for tests
+///     wait_time_d: Duration::from_secs(4),  // Short wait times
+///     wait_time_i: Duration::from_millis(500),
+///     wait_time_k: Duration::from_millis(500),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // Added PartialEq, Eq for testing
 pub struct TimerSettings {
     /// **T1: Round-Trip Time (RTT) Estimate (Default: 500 ms)**

@@ -1,3 +1,13 @@
+/// # Common Client Transaction Functionality
+///
+/// This module provides common utility functions and traits used by both INVITE and non-INVITE
+/// client transactions as defined in RFC 3261 Section 17.1.
+///
+/// The common functionality includes:
+/// - Processing responses
+/// - Sending commands to the transaction's event loop
+/// - Accessing transaction state and data
+
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -20,12 +30,32 @@ use crate::transaction::{
 use crate::timer::{TimerType, TimerSettings};
 use crate::utils;
 
-/// Common functionality for all client transaction types
+/// Common functionality for all client transaction types.
+///
+/// This trait defines utility methods shared by both INVITE and non-INVITE client
+/// transactions to reduce code duplication and provide consistent behavior.
 pub trait CommonClientTransaction {
-    /// Get the transaction data
+    /// Returns the transaction data structure containing state and communication channels.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the shared ClientTransactionData for this transaction.
     fn data(&self) -> &Arc<ClientTransactionData>;
     
-    /// Process a response based on transaction kind and current state
+    /// Processes a SIP response based on transaction kind and current state.
+    ///
+    /// This method handles the common logic for processing incoming responses to a client
+    /// transaction. It stores the response in the transaction data and forwards it to the
+    /// transaction's event loop for state-specific processing according to RFC 3261 Section 17.1.
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The SIP response to process
+    ///
+    /// # Returns
+    ///
+    /// A Future that resolves to Ok(()) if the response was processed successfully,
+    /// or an Error if there was a problem.
     fn process_response_common(&self, response: Response) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data().clone();
         
@@ -42,7 +72,20 @@ pub trait CommonClientTransaction {
         })
     }
     
-    /// Helper to send a command to this transaction
+    /// Sends a command to this transaction's event loop.
+    ///
+    /// This helper method is used to send commands to the transaction's event loop
+    /// for asynchronous processing. It's used by transaction-specific methods that
+    /// need to interact with the transaction's internal state machine.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command to send to the transaction
+    ///
+    /// # Returns
+    ///
+    /// A Future that resolves to Ok(()) if the command was sent successfully,
+    /// or an Error if there was a problem.
     fn send_command_common(&self, cmd: InternalTransactionCommand) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data().clone();
         
@@ -52,7 +95,15 @@ pub trait CommonClientTransaction {
         })
     }
     
-    /// Helper to get original request
+    /// Returns the original request that initiated this transaction.
+    ///
+    /// This helper method is used to access the original request stored in the transaction data.
+    /// It's used by transaction-specific methods that need to reference the original request,
+    /// such as when generating ACK requests for INVITE transactions.
+    ///
+    /// # Returns
+    ///
+    /// A Future that resolves to the original SIP request.
     fn original_request_common(&self) -> Pin<Box<dyn Future<Output = Request> + Send + '_>> {
         let data = self.data().clone();
         
@@ -62,7 +113,15 @@ pub trait CommonClientTransaction {
         })
     }
     
-    /// Helper to get last response
+    /// Returns the last response received by this transaction.
+    ///
+    /// This helper method is used to access the last response stored in the transaction data.
+    /// It's used by transaction-specific methods that need to reference the last response.
+    ///
+    /// # Returns
+    ///
+    /// A Future that resolves to the last received SIP response, or None if no response
+    /// has been received yet.
     fn last_response_common(&self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + '_>> {
         let data = self.data().clone();
         

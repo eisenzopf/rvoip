@@ -1,3 +1,38 @@
+/// # Transaction Runner
+///
+/// This module provides the core event loop implementation that drives SIP transaction
+/// state machines according to RFC 3261 Section 17. It's the "engine" that powers all
+/// transaction types by translating events into state transitions.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 defines four distinct transaction state machines:
+/// - INVITE client transactions (Section 17.1.1)
+/// - Non-INVITE client transactions (Section 17.1.2)
+/// - INVITE server transactions (Section 17.2.1)
+/// - Non-INVITE server transactions (Section 17.2.2)
+///
+/// While each transaction type has its own specific states and transitions, they all
+/// share a common execution pattern:
+/// 1. Receive messages or timer events
+/// 2. Process these events based on the current state
+/// 3. Potentially transition to a new state
+/// 4. Start/stop timers as needed for the new state
+///
+/// ## Implementation Architecture
+///
+/// This module implements a generic "runner" that can power any of the four transaction
+/// types by delegating the transaction-specific logic to implementations of the
+/// `TransactionLogic` trait. This separation allows:
+///
+/// 1. **Code Reuse**: The common event loop logic is implemented once
+/// 2. **Type Safety**: Each transaction type can have its own specific data structures
+/// 3. **Maintainability**: The state machine implementations are separate from the event loop
+///
+/// The architecture follows a dependency inversion principle - the runner depends on
+/// abstract traits rather than concrete implementations, allowing new transaction types
+/// to be added without modifying the runner itself.
+
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -11,7 +46,44 @@ use crate::transaction::{
 };
 use crate::transaction::logic::TransactionLogic; // The new trait
 
-// This function will be the core of the generic event loop.
+/// Run the main event loop for a SIP transaction.
+///
+/// This function implements the core event processing and state machine logic for
+/// all SIP transaction types. It receives commands through a channel, processes them
+/// according to the transaction's current state, and triggers appropriate state transitions
+/// and timer operations.
+///
+/// ## RFC 3261 Context
+///
+/// This function implements the runtime machinery required by the transaction layer
+/// as defined in RFC 3261 Section 17. It handles:
+///
+/// - Processing incoming SIP messages (Section 17.1.1.2, 17.1.2.2, 17.2.1, 17.2.2)
+/// - Managing transaction state transitions
+/// - Handling timer events for retransmissions and timeouts
+/// - Reporting events to the Transaction User (TU)
+///
+/// ## Implementation Details
+///
+/// The event loop receives commands through `cmd_rx` and uses the provided `logic`
+/// implementation to determine how to process them based on the transaction's current state.
+/// It manages timer activation/cancellation during state transitions and reports significant
+/// events to the TU via the event sender in `data`.
+///
+/// This generic implementation can run any transaction type, with the type-specific
+/// behavior delegated to the `logic` parameter that implements `TransactionLogic`.
+///
+/// ## Type Parameters
+///
+/// - `D`: The transaction data type, which must implement various traits for accessing state and channels
+/// - `TH`: The timer handles type, which stores JoinHandles for active timers
+/// - `L`: The logic implementation type, which must implement TransactionLogic
+///
+/// ## Arguments
+///
+/// * `data`: Shared data for the transaction, including state and communication channels
+/// * `logic`: Implementation of transaction-specific logic (INVITE client, Non-INVITE server, etc.)
+/// * `cmd_rx`: Channel for receiving commands to process
 #[allow(clippy::too_many_arguments)] // May have many args initially
 pub async fn run_transaction_loop<D, TH, L>(
     data: Arc<D>,
@@ -164,22 +236,52 @@ where
     }
 }
 
+/// Trait for accessing a transaction's state.
+///
+/// This trait allows the runner to access the transaction's state without knowing
+/// the concrete data type. The state is wrapped in an `Arc<AtomicTransactionState>`
+/// for thread-safe access from multiple tasks.
 pub trait AsRefState {
+    /// Returns a reference to the transaction's state storage.
     fn as_ref_state(&self) -> &Arc<AtomicTransactionState>;
 }
 
+/// Trait for accessing a transaction's key.
+///
+/// This trait allows the runner to access the transaction's key without knowing
+/// the concrete data type. The key uniquely identifies the transaction within
+/// the transaction layer.
 pub trait AsRefKey {
+    /// Returns a reference to the transaction's key.
     fn as_ref_key(&self) -> &TransactionKey;
 }
 
+/// Trait for accessing a transaction's event sender.
+///
+/// This trait allows the runner to send events to the Transaction User (TU)
+/// without knowing the concrete data type. These events inform the TU about
+/// significant transaction events like state changes, responses, and errors.
 pub trait HasTransactionEvents {
+    /// Returns the channel sender for communicating with the TU.
     fn get_tu_event_sender(&self) -> mpsc::Sender<TransactionEvent>;
 }
 
+/// Trait for accessing the transport layer.
+///
+/// This trait allows the runner to access the SIP transport layer for sending
+/// messages without knowing the concrete data type. The transport layer is
+/// responsible for actually sending SIP messages over the network.
 pub trait HasTransport {
+    /// Returns a reference to the transport layer implementation.
     fn get_transport_layer(&self) -> Arc<dyn rvoip_sip_transport::Transport>;
 }
 
+/// Trait for accessing a transaction's command sender.
+///
+/// This trait allows the runner to send commands to itself (typically as a result
+/// of timer expirations or message processing) without knowing the concrete data type.
+/// This is used for things like scheduling state transitions.
 pub trait HasCommandSender {
-     fn get_self_command_sender(&self) -> mpsc::Sender<InternalTransactionCommand>;
+    /// Returns the channel sender for sending commands to this transaction.
+    fn get_self_command_sender(&self) -> mpsc::Sender<InternalTransactionCommand>;
 } 

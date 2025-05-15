@@ -3,6 +3,61 @@
 //! The [`TimerFactory`] simplifies the process of starting common RFC 3261 timers
 //! (A, B, D, E, F, G, H, I, J, K) by using pre-configured [`TimerSettings`] and
 //! interacting with a [`TimerManager`].
+//!
+//! # RFC 3261 Timer Requirements
+//!
+//! SIP transaction timers are crucial for ensuring reliable message delivery over unreliable 
+//! transports like UDP. RFC 3261 Section 17 defines different transaction types (INVITE client,
+//! non-INVITE client, INVITE server, non-INVITE server) with different timer requirements.
+//!
+//! The `TimerFactory` abstracts these requirements, providing convenience methods for
+//! starting the appropriate timers for each transaction type and state:
+//!
+//! - **INVITE Client Transactions**: Use Timers A, B, and D for retransmission, 
+//!   timeout, and wait time respectively
+//! - **Non-INVITE Client Transactions**: Use Timers E, F, and K for similar purposes
+//! - **INVITE Server Transactions**: Use Timers G, H, and I for response retransmission,
+//!   ACK waiting, and cleanup
+//! - **Non-INVITE Server Transactions**: Use Timer J for absorbing request retransmissions
+//!
+//! # Usage Example
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//! use rvoip_transaction_core::timer::{TimerFactory, TimerManager, TimerSettings};
+//! use rvoip_transaction_core::transaction::TransactionKey;
+//! use rvoip_sip_core::Method;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create transaction keys for different transaction types
+//! let invite_client_key = TransactionKey::new("z9hG4bK.123".to_string(), Method::Invite, false);
+//! let register_client_key = TransactionKey::new("z9hG4bK.456".to_string(), Method::Register, false);
+//! let invite_server_key = TransactionKey::new("z9hG4bK.789".to_string(), Method::Invite, true);
+//!
+//! // Create timer manager and factory with custom settings
+//! let settings = TimerSettings {
+//!     t1: Duration::from_millis(200), // Faster retransmissions for testing
+//!     ..Default::default()
+//! };
+//! let timer_manager = Arc::new(TimerManager::new(Some(settings.clone())));
+//! let factory = TimerFactory::new(Some(settings), timer_manager.clone());
+//!
+//! // Schedule INVITE client transaction initial timers (A and B)
+//! factory.schedule_invite_client_initial_timers(invite_client_key.clone()).await?;
+//!
+//! // Schedule non-INVITE client transaction initial timers (E and F)
+//! factory.schedule_non_invite_client_initial_timers(register_client_key.clone()).await?;
+//!
+//! // Schedule individual timers as needed
+//! factory.schedule_timer_g(invite_server_key.clone()).await?;
+//! factory.schedule_timer_h(invite_server_key.clone()).await?;
+//!
+//! // Later, cancel all timers for a terminated transaction
+//! factory.cancel_all_timers(&invite_client_key).await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +76,16 @@ use super::manager::TimerManager;
 /// common combinations of timers for different transaction states.
 /// It relies on a [`TimerSettings`] instance for duration configurations and a
 /// [`TimerManager`] instance to handle the actual timer operations (start, stop).
+///
+/// # RFC 3261 Compliance
+///
+/// This factory makes it easy to create timers that comply with RFC 3261 Section 17,
+/// which specifies timer behavior for different transaction types:
+///
+/// - Section 17.1.1: INVITE Client Transaction
+/// - Section 17.1.2: Non-INVITE Client Transaction  
+/// - Section 17.2.1: INVITE Server Transaction
+/// - Section 17.2.2: Non-INVITE Server Transaction
 #[derive(Debug, Clone)]
 pub struct TimerFactory {
     /// Configuration settings for timer durations (T1, T2, specific wait times).
@@ -58,60 +123,154 @@ impl TimerFactory {
 
     /// Schedules Timer A for an INVITE client transaction (initial retransmission timer).
     /// Uses `settings.t1` for duration and `TimerType::A`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer A controls the retransmission interval for INVITE requests over unreliable 
+    /// transports. It starts at T1 seconds and doubles after each retransmission. 
+    /// See RFC 3261 Section 17.1.1.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_a(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::A, self.settings.t1).await.map(|_| ()) 
     }
 
     /// Schedules Timer B for an INVITE client transaction (transaction timeout).
     /// Uses `settings.transaction_timeout` for duration and `TimerType::B`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer B determines how long an INVITE client transaction will continue 
+    /// to retry (retransmit) before timing out. The recommended value is 64*T1.
+    /// See RFC 3261 Section 17.1.1.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_b(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::B, self.settings.transaction_timeout).await.map(|_| ()) 
     }
 
     /// Schedules Timer D for an INVITE client transaction (wait for response retransmissions).
     /// Uses `settings.wait_time_d` for duration and `TimerType::D`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer D defines how long an INVITE client transaction in the Completed state
+    /// should wait to receive retransmitted responses (min. 32 seconds for UDP).
+    /// See RFC 3261 Section 17.1.1.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_d(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::D, self.settings.wait_time_d).await.map(|_| ()) 
     }
 
     /// Schedules Timer E for a non-INVITE client transaction (initial retransmission timer).
     /// Uses `settings.t1` for duration and `TimerType::E`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer E controls the retransmission interval for non-INVITE requests.
+    /// Like Timer A, it starts at T1 and doubles after each retransmission up to T2.
+    /// See RFC 3261 Section 17.1.2.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_e(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::E, self.settings.t1).await.map(|_| ()) 
     }
 
     /// Schedules Timer F for a non-INVITE client transaction (transaction timeout).
     /// Uses `settings.transaction_timeout` for duration and `TimerType::F`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer F determines how long a non-INVITE client transaction will continue 
+    /// to retry before timing out. The recommended value is 64*T1.
+    /// See RFC 3261 Section 17.1.2.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_f(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::F, self.settings.transaction_timeout).await.map(|_| ()) 
     }
 
     /// Schedules Timer G for an INVITE server transaction (2xx response retransmission).
     /// Uses `settings.t1` for duration and `TimerType::G`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer G controls the retransmission interval for INVITE responses.
+    /// It starts at T1 and doubles with each retransmission up to T2.
+    /// See RFC 3261 Section 17.2.1 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_g(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::G, self.settings.t1).await.map(|_| ()) 
     }
 
     /// Schedules Timer H for an INVITE server transaction (wait for ACK after 2xx).
     /// Uses `settings.wait_time_h` for duration and `TimerType::H`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer H limits how long an INVITE server transaction will retransmit 
+    /// the final response. If no ACK is received when Timer H fires, the 
+    /// transaction terminates anyway. Typically 64*T1.
+    /// See RFC 3261 Section 17.2.1 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_h(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::H, self.settings.wait_time_h).await.map(|_| ()) 
     }
 
     /// Schedules Timer I for an INVITE server transaction (wait in Confirmed state after ACK).
     /// Uses `settings.wait_time_i` for duration and `TimerType::I`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer I determines how long an INVITE server transaction stays in the 
+    /// Confirmed state after receiving an ACK, to absorb any retransmitted ACKs. 
+    /// For reliable transports, this can be 0. For UDP, it's typically T4 (5 seconds).
+    /// See RFC 3261 Section 17.2.1 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_i(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::I, self.settings.wait_time_i).await.map(|_| ()) 
     }
 
     /// Schedules Timer J for a non-INVITE server transaction (wait for request retransmissions).
     /// Uses `settings.wait_time_j` for duration and `TimerType::J`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer J determines how long a non-INVITE server transaction stays in the 
+    /// Completed state, waiting for request retransmissions. For UDP, this is 
+    /// typically 64*T1 (32 seconds). For reliable transports, it can be 0.
+    /// See RFC 3261 Section 17.2.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the non-INVITE server transaction
     pub async fn schedule_timer_j(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::J, self.settings.wait_time_j).await.map(|_| ()) 
     }
 
     /// Schedules Timer K for a non-INVITE client transaction (wait for response retransmissions).
     /// Uses `settings.wait_time_k` for duration and `TimerType::K`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// Timer K determines how long a non-INVITE client transaction stays in the 
+    /// Completed state, waiting for response retransmissions. For UDP, this is 
+    /// typically T4 (5 seconds). For reliable transports, it can be 0.
+    /// See RFC 3261 Section 17.1.2.2 for details.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_k(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager.start_timer(transaction_id, TimerType::K, self.settings.wait_time_k).await.map(|_| ()) 
     }
@@ -119,12 +278,36 @@ impl TimerFactory {
     // --- Transaction State Timer Combinations ---
 
     /// Schedules the initial set of timers (A and B) for an INVITE client transaction.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// When an INVITE client transaction is initiated, it needs both:
+    /// - Timer A for controlling retransmissions (starting at T1)
+    /// - Timer B for overall transaction timeout (64*T1)
+    ///
+    /// This method is typically called when the transaction enters the Calling state
+    /// after sending the initial INVITE request.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_invite_client_initial_timers(&self, transaction_id: TransactionKey) -> Result<()> {
         self.schedule_timer_a(transaction_id.clone()).await?;
         self.schedule_timer_b(transaction_id).await
     }
 
     /// Schedules the initial set of timers (E and F) for a non-INVITE client transaction.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// When a non-INVITE client transaction is initiated, it needs both:
+    /// - Timer E for controlling retransmissions (starting at T1)
+    /// - Timer F for overall transaction timeout (64*T1)
+    ///
+    /// This method is typically called when the transaction enters the Trying state
+    /// after sending the initial non-INVITE request.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_non_invite_client_initial_timers(&self, transaction_id: TransactionKey) -> Result<()> {
         self.schedule_timer_e(transaction_id.clone()).await?;
         self.schedule_timer_f(transaction_id).await
@@ -132,18 +315,43 @@ impl TimerFactory {
 
     /// Schedules timers (G and H) for an INVITE server transaction that has sent a 2xx final response
     /// and is awaiting an ACK.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// When an INVITE server transaction sends a final response in the Completed state, it needs:
+    /// - Timer G for controlling response retransmissions
+    /// - Timer H as a failsafe in case no ACK is received
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_invite_server_completed_timers_for_2xx(&self, transaction_id: TransactionKey) -> Result<()> {
         self.schedule_timer_g(transaction_id.clone()).await?; // For retransmitting 2xx
         self.schedule_timer_h(transaction_id).await // For ACK timeout
     }
     
     /// Schedules Timer I for an INVITE server transaction that has received an ACK for its 2xx response.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// When an INVITE server transaction receives an ACK in the Completed state, it transitions
+    /// to the Confirmed state and starts Timer I. When Timer I expires, the transaction terminates.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_invite_server_confirmed_timer(&self, transaction_id: TransactionKey) -> Result<()> {
         self.schedule_timer_i(transaction_id).await
     }
 
     /// Cancels all active timers associated with the given `transaction_id`.
     /// Delegates to `TimerManager::unregister_transaction`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// When a transaction is terminated (either normally or abnormally), all of its
+    /// timers should be cancelled to prevent resource leaks and unnecessary timer events.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The transaction key for which to cancel all timers
     pub async fn cancel_all_timers(&self, transaction_id: &TransactionKey) -> Result<()> {
         self.timer_manager.unregister_transaction(transaction_id).await;
         Ok(())

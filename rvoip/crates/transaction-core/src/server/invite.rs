@@ -1,3 +1,69 @@
+/// # INVITE Server Transaction Implementation
+///
+/// This module implements the INVITE server transaction state machine as defined in
+/// [RFC 3261 Section 17.2.1](https://datatracker.ietf.org/doc/html/rfc3261#section-17.2.1).
+///
+/// ## State Machine
+///
+/// The INVITE server transaction follows this state machine:
+///
+/// ```text
+///                                  |INVITE
+///                                  |pass to TU
+///                      INVITE      V send 100 if TU won't in 200ms
+///                      send 100    +-----------+
+///                         +--------|           |--------+101-199 from TU
+///                         |        | Proceeding|        |send
+///                         +------->|           |<-------+
+///                                  +-----------+
+///                                      |    |
+///                                      |    | 2xx from TU
+///                                      |    | send
+///                                      |    V
+///                                      |  +------+
+///                                      |  |      |
+///                                      |  |Terminated
+///                                      |  |      |
+///                                      |  +------+
+///                                      |
+///                                      |    | 3xx-6xx from TU
+///                                      |    | send, create timer G
+///                                      |    V
+///                                  +-----------+
+///                                  |           |----+
+///                                  | Completed |    |Timer G fires
+///                                  |           |    |send response, reset G
+///                                  +-----------+    +--+
+///                                     |  ^             |
+///                                     |  +-------------+
+///                                     | ACK
+///                                     | -
+///                                     |
+///                                     V
+///                                  +-----------+
+///                                  |           |
+///                                  | Confirmed |
+///                                  |           |
+///                                  +-----------+
+///                                     |
+///                                     | Timer I fires
+///                                     |
+///                                     V
+///                                  +-----------+
+///                                  |           |
+///                                  | Terminated|
+///                                  |           |
+///                                  +-----------+
+/// ```
+///
+/// ## Timers
+///
+/// INVITE server transactions use the following timers:
+///
+/// - **Timer G**: Initial value T1, doubles on each retransmission (up to T2). Controls response retransmissions in Completed state.
+/// - **Timer H**: Typically 64*T1. Controls timeout waiting for ACK. When it fires, the transaction terminates with an error.
+/// - **Timer I**: Typically 5s (UDP) or 0s (TCP/SCTP). Controls how long to wait in Confirmed state.
+
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -27,7 +93,21 @@ use crate::transaction::validators;
 use crate::transaction::common_logic;
 use crate::utils;
 
-/// Server INVITE transaction (RFC 3261 Section 17.2.1)
+/// Server INVITE transaction implementation as defined in RFC 3261 Section 17.2.1.
+///
+/// This struct implements the state machine for server INVITE transactions, which are used
+/// for handling session establishment requests. INVITE server transactions have unique behavior, including:
+///
+/// - A four-state machine (Proceeding, Completed, Confirmed, Terminated)
+/// - Special handling for ACK requests in the Completed state
+/// - Response retransmission in the Completed state
+/// - Unique timer requirements (Timers G, H, I)
+///
+/// Key behaviors:
+/// - In Proceeding state: Sends provisional (1xx) responses
+/// - In Completed state: Retransmits final non-2xx response until ACK is received
+/// - In Confirmed state: Waits for Timer I before terminating
+/// - In Terminated state: Transaction is finished
 #[derive(Debug, Clone)]
 pub struct ServerInviteTransaction {
     data: Arc<ServerTransactionData>,
@@ -35,15 +115,28 @@ pub struct ServerInviteTransaction {
 }
 
 /// Holds JoinHandles and dynamic state for timers specific to Server INVITE transactions.
+///
+/// Used by the transaction runner to manage the various timers required by the
+/// INVITE server transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ServerInviteTimerHandles {
+    /// Handle for Timer G, which controls response retransmissions
     timer_g: Option<JoinHandle<()>>,
+    
+    /// Current interval for Timer G, which doubles after each firing (up to T2)
     current_timer_g_interval: Option<Duration>, // For backoff
+    
+    /// Handle for Timer H, which controls transaction timeout waiting for ACK
     timer_h: Option<JoinHandle<()>>,
+    
+    /// Handle for Timer I, which controls how long to wait in Confirmed state
     timer_i: Option<JoinHandle<()>>,
 }
 
 /// Implements the TransactionLogic for Server INVITE transactions.
+///
+/// This struct contains the core logic for the INVITE server transaction state machine,
+/// implementing the behavior defined in RFC 3261 Section 17.2.1.
 #[derive(Debug, Clone, Default)]
 struct ServerInviteLogic {
     _data_marker: std::marker::PhantomData<ServerTransactionData>,
@@ -51,7 +144,11 @@ struct ServerInviteLogic {
 }
 
 impl ServerInviteLogic {
-    // Helper method to start Timer G (retransmission timer) using timer utils
+    /// Starts Timer G (response retransmission timer)
+    ///
+    /// According to RFC 3261 Section 17.2.1, Timer G controls retransmission of the final
+    /// response in the Completed state. The initial interval is T1, and it
+    /// doubles on each retransmission up to T2.
     async fn start_timer_g(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -84,7 +181,11 @@ impl ServerInviteLogic {
         }
     }
     
-    // Helper method to start Timer H (transaction timeout for ACK) using timer utils
+    /// Starts Timer H (transaction timeout for ACK) 
+    ///
+    /// According to RFC 3261 Section 17.2.1, Timer H determines how long the server
+    /// transaction will wait for an ACK before terminating. This protects against
+    /// lost ACK messages or client failures.
     async fn start_timer_h(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -117,7 +218,11 @@ impl ServerInviteLogic {
         }
     }
     
-    // Helper method to start Timer I (wait for retransmissions in Confirmed state) using timer utils with transition
+    /// Starts Timer I (wait time in Confirmed state) 
+    ///
+    /// According to RFC 3261 Section 17.2.1, Timer I determines how long the server
+    /// transaction will remain in the Confirmed state before terminating. This timer
+    /// allows for catching any additional ACK retransmissions before the transaction terminates.
     async fn start_timer_i(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -151,7 +256,10 @@ impl ServerInviteLogic {
         }
     }
 
-    // Handle Timer G (retransmission in Completed state) trigger
+    /// Handles Timer G (response retransmission) trigger
+    ///
+    /// When Timer G fires, the transaction should retransmit the final response
+    /// and restart Timer G with a doubled interval (capped by T2).
     async fn handle_timer_g_trigger(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -196,7 +304,10 @@ impl ServerInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer H (wait for ACK in Completed state) trigger
+    /// Handles Timer H (wait for ACK in Completed state) trigger
+    ///
+    /// When Timer H fires, the server has waited too long for an ACK and 
+    /// should terminate the transaction to prevent resource leakage.
     async fn handle_timer_h_trigger(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -223,7 +334,10 @@ impl ServerInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer I (wait for retransmissions in Confirmed state) trigger
+    /// Handles Timer I (wait for retransmissions in Confirmed state) trigger
+    ///
+    /// When Timer I fires, the transaction can safely terminate as any 
+    /// retransmitted ACKs would have been received by now.
     async fn handle_timer_i_trigger(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -245,7 +359,11 @@ impl ServerInviteLogic {
         }
     }
     
-    // Process a retransmitted INVITE request
+    /// Processes a retransmitted INVITE request
+    ///
+    /// According to RFC 3261 Section 17.2.1, if a retransmission of the original
+    /// INVITE is received while in the Proceeding state, the server should
+    /// retransmit the last provisional response.
     async fn process_invite_retransmission(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -281,7 +399,11 @@ impl ServerInviteLogic {
         }
     }
     
-    // Process an ACK request
+    /// Processes an ACK request
+    ///
+    /// According to RFC 3261 Section 17.2.1, when a server receives an ACK in the 
+    /// Completed state, it should transition to the Confirmed state and start Timer I.
+    /// This indicates the client has received the final response.
     async fn process_ack(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -315,7 +437,12 @@ impl ServerInviteLogic {
         }
     }
     
-    // Process a CANCEL request
+    /// Processes a CANCEL request
+    ///
+    /// According to RFC 3261 Section 9.2, when a server receives a CANCEL request,
+    /// it should attempt to match it to an existing INVITE transaction. If the transaction
+    /// is in the Proceeding state, the server should send a 200 OK for the CANCEL and
+    /// then a 487 (Request Terminated) for the INVITE.
     async fn process_cancel(
         &self,
         data: &Arc<ServerTransactionData>,
@@ -479,7 +606,26 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
 }
 
 impl ServerInviteTransaction {
-    /// Create a new server INVITE transaction.
+    /// Creates a new server INVITE transaction.
+    ///
+    /// This method creates a new INVITE server transaction with the specified parameters.
+    /// It validates that the request is an INVITE, initializes the transaction data, and
+    /// spawns the transaction runner task.
+    ///
+    /// According to RFC 3261 Section 17.2.1, INVITE server transactions start in the Proceeding state.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier for this transaction
+    /// * `request` - The INVITE request that initiated this transaction
+    /// * `remote_addr` - The address to which responses should be sent
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `events_tx` - The channel for sending events to the Transaction User
+    /// * `timer_config_override` - Optional custom timer settings
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new ServerInviteTransaction or an error
     pub fn new(
         id: TransactionKey,
         request: Request,

@@ -1,3 +1,34 @@
+/// # Transaction Identification
+///
+/// This module implements the transaction identification mechanism defined in RFC 3261,
+/// which is crucial for properly matching SIP messages to their respective transactions.
+///
+/// ## RFC 3261 Context
+///
+/// RFC 3261 Section 17.1.3 and 17.2.3 define how SIP transactions are identified:
+///
+/// > For a server transaction, the branch parameter in the request's top Via header field
+/// > uniquely identifies the transaction. For a client transaction, the combination of the
+/// > branch parameter in the top Via header field of the request, the sent-by value in the
+/// > top Via of the request, and the CSeq sequence number and method uniquely identify
+/// > the transaction.
+///
+/// The branch parameter must be globally unique and should begin with the magic cookie
+/// "z9hG4bK" to indicate compliance with RFC 3261 (previous versions of SIP had different
+/// transaction matching rules).
+///
+/// ## Implementation Details
+///
+/// This module provides the `TransactionKey` struct, which encapsulates the essential
+/// components needed to uniquely identify a transaction:
+///
+/// 1. The branch parameter from the top Via header
+/// 2. The request method
+/// 3. A flag indicating whether it's a client or server transaction
+///
+/// The module also provides methods to create transaction keys from SIP requests and
+/// responses, implementing the matching rules specified in RFC 3261.
+
 use std::fmt;
 // use std::net::SocketAddr; // This import seems unused in this file. Commenting out.
 use std::hash::{Hash, Hasher};
@@ -30,15 +61,29 @@ use rvoip_sip_core::{
 /// 2. The `Method` of the request (e.g., INVITE, REGISTER).
 /// 3. Whether the transaction is a client or server transaction.
 ///
-/// For client transactions (Section 17.1.3), the ID is `branch` + `sent-by` + `method`.
-/// The `sent-by` component (host and port from Via) helps disambiguate if multiple clients
-/// share the same branch generation logic. However, a globally unique `branch` (starting with `z9hG4bK`)
-/// is the primary mechanism for uniqueness.
+/// ## RFC 3261 Transaction Matching Rules
 ///
-/// For server transactions (Section 17.2.3), the ID is also effectively `branch` + `sent-by` + `method`.
-/// The `branch` parameter from the top Via header of the request is used.
+/// RFC 3261 Section 17.1.3 states that a response matches a client transaction if:
 ///
-/// This `TransactionKey` struct simplifies this by using the `branch` string, the `method`,
+/// 1. The response has the same value of the branch parameter in the top Via header field
+///    as the branch parameter in the top Via header field of the request that created the
+///    transaction.
+///
+/// 2. The method parameter in the CSeq header field matches the method of the request that
+///    created the transaction. This is necessary because a CANCEL request constitutes a
+///    different transaction but shares the same value of the branch parameter.
+///
+/// RFC 3261 Section 17.2.3 states that a request matches a server transaction if:
+///
+/// 1. The request has the same branch parameter in the top Via header field as the branch
+///    parameter in the top Via header field of the request that created the transaction.
+///
+/// 2. The request method matches the method of the request that created the transaction,
+///    except for ACK, where the method of the request that created the transaction is INVITE.
+///
+/// ## Implementation Notes
+///
+/// This `TransactionKey` struct simplifies these rules by using the `branch` string, the `method`,
 /// and an `is_server` boolean flag to ensure uniqueness within a single transaction manager instance.
 /// It assumes the `branch` parameter is generated according to RFC 3261 to be sufficiently unique.
 #[derive(Clone)]
@@ -82,6 +127,12 @@ impl TransactionKey {
     /// Extracts the branch parameter from the top-most `Via` header and the request's method.
     /// Sets `is_server` to `true`.
     ///
+    /// # RFC 3261 Context
+    ///
+    /// RFC 3261 Section 17.2.3 specifies that a server transaction is identified by the
+    /// branch parameter in the top Via header field of the request. This method implements
+    /// that rule by extracting the branch parameter and creating a server transaction key.
+    ///
     /// # Returns
     /// `Some(TransactionKey)` if the top Via header and its branch parameter are present.
     /// `None` otherwise (e.g., malformed request, no Via, or Via without a branch).
@@ -106,6 +157,14 @@ impl TransactionKey {
     /// Extracts the branch parameter from the top-most `Via` header (which was added by this client)
     /// and the method from the `CSeq` header of the response (which corresponds to the original request method).
     /// Sets `is_server` to `false`.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// RFC 3261 Section 17.1.3 specifies that a response matches a client transaction if:
+    /// 1. The branch parameter in the top Via header matches the transaction's branch
+    /// 2. The method in the CSeq header matches the transaction's original request method
+    ///
+    /// This method implements these rules by extracting both values from the response.
     ///
     /// # Returns
     /// `Some(TransactionKey)` if the top Via (with branch) and CSeq (with method) headers are present.
@@ -142,7 +201,14 @@ impl TransactionKey {
         self.is_server
     }
 
-    /// Returns a new TransactionKey with a different method but the same branch and is_server values
+    /// Returns a new TransactionKey with a different method but the same branch and is_server values.
+    ///
+    /// # RFC 3261 Context
+    ///
+    /// This is useful for creating related transaction keys, such as when handling
+    /// a CANCEL request for an INVITE transaction. According to RFC 3261 Section 9.1,
+    /// a CANCEL request has the same branch parameter as the request it cancels,
+    /// but constitutes a separate transaction.
     pub fn with_method(&self, method: Method) -> Self {
         Self {
             branch: self.branch.clone(),

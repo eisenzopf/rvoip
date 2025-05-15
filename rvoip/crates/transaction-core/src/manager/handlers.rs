@@ -1,3 +1,26 @@
+/// # SIP Transaction Message Handlers
+///
+/// This module implements handlers for processing incoming and outgoing SIP messages through
+/// the transaction layer as defined in RFC 3261 Section 17. These handlers are responsible for:
+///
+/// 1. **Matching** - Matching incoming messages to existing transactions
+/// 2. **Routing** - Routing messages to appropriate transactions
+/// 3. **State Transitions** - Triggering state transitions in transaction state machines
+/// 4. **Special Method Handling** - Processing special cases like ACK, CANCEL, and stray messages
+/// 5. **Response Generation** - Automatically generating specific responses (e.g., 200 OK for CANCEL)
+///
+/// The handlers implement the core logic required for the transaction layer to fulfill its role
+/// as the reliability layer between the Transport layer and the Transaction User (TU).
+///
+/// ## RFC 3261 Specification Coverage
+///
+/// These handlers implement the behavior required by:
+/// - Section 17.1.3: Matching responses to client transactions
+/// - Section 17.2.3: Matching requests to server transactions
+/// - Section 8.2.6: Generating automatic responses
+/// - Section 9.2: CANCEL handling
+/// - Section 17.1.1.3: ACK handling
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -21,7 +44,29 @@ use crate::utils::{self, transaction_key_from_message, create_ack_from_invite};
 use super::TransactionManager;
 use super::types::*;
 
-/// Handle transport message events and route them to appropriate transactions
+/// Handle transport message events and route them to appropriate transactions.
+///
+/// This is the main entry point for all incoming SIP messages from the transport
+/// layer. It implements the message matching rules specified in RFC 3261 sections
+/// 17.1.3 (client transactions) and 17.2.3 (server transactions).
+///
+/// The function:
+/// 1. Identifies the transaction that should handle the message
+/// 2. Routes requests/responses to appropriate transactions
+/// 3. Handles special cases (ACK, CANCEL)
+/// 4. Reports "stray" messages that don't match any transaction
+///
+/// # Arguments
+/// * `event` - The transport event containing the message and addressing information
+/// * `transport` - The transport layer for sending responses
+/// * `client_transactions` - Map of active client transactions
+/// * `server_transactions` - Map of active server transactions
+/// * `events_tx` - Channel for broadcasting transaction events
+/// * `event_subscribers` - Additional event subscribers
+/// * `manager` - Reference to the TransactionManager
+///
+/// # Returns
+/// * `Result<()>` - Success or error depending on message processing outcome
 pub async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
@@ -346,7 +391,18 @@ pub async fn handle_transport_message(
     Ok(())
 }
 
-/// Determine ACK destination for 2xx responses
+/// Determine ACK destination for 2xx responses according to RFC 3261 Section 13.2.2.4.
+///
+/// For 2xx responses to INVITE, ACK requests are sent directly from the TU to the peer.
+/// This function implements the algorithm to determine where to send the ACK based on:
+/// 1. The Contact header if present
+/// 2. Fallback to Via header received/rport parameters or sent-by value
+///
+/// # Arguments
+/// * `response` - The 2xx response to ACK
+///
+/// # Returns
+/// * `Option<SocketAddr>` - The destination socket address if it can be determined
 pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
     if let Some(contact_header) = response.header(&HeaderName::Contact) {
         if let TypedHeader::Contact(contact) = contact_header {
@@ -383,13 +439,32 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
     None
 }
 
-/// Helper to resolve URI host to SocketAddr
+/// Helper to resolve URI host to SocketAddr for ACK destinations.
+///
+/// This implements the address resolution for SIP URIs according to
+/// RFC 3263 procedures.
+///
+/// # Arguments
+/// * `uri` - SIP URI to resolve
+///
+/// # Returns
+/// * `Option<SocketAddr>` - Resolved socket address if successful
 async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
     let port = uri.port.unwrap_or(5060);
     resolve_host_to_socketaddr(&uri.host, port).await
 }
 
-/// Helper to resolve Host enum to SocketAddr
+/// Helper to resolve Host enum to SocketAddr for network addressing.
+///
+/// SIP specification allows both IP addresses and domain names as hosts.
+/// This function resolves them to socket addresses for actual transmission.
+///
+/// # Arguments
+/// * `host` - SIP host to resolve (IP or domain)
+/// * `port` - Port number to use
+///
+/// # Returns
+/// * `Option<SocketAddr>` - Resolved socket address if successful
 async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> Option<SocketAddr> {
     match host {
         rvoip_sip_core::Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
@@ -409,7 +484,17 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
 }
 
 impl TransactionManager {
-    /// Handle an incoming SIP message from the transport layer
+    /// Handle an incoming SIP message from the transport layer.
+    ///
+    /// This is the entry point for incoming messages from the transport layer to
+    /// the TransactionManager. It delegates to more specific handlers based on
+    /// message type.
+    ///
+    /// # Arguments
+    /// * `event` - Transport event containing the message and addressing information
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error depending on message processing outcome
     pub(crate) async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
         match event {
             TransportEvent::MessageReceived { message, source, destination } => {
@@ -423,7 +508,18 @@ impl TransactionManager {
         }
     }
     
-    /// Handle a SIP message
+    /// Handle a SIP message, routing it to appropriate transaction or creating a new one.
+    ///
+    /// This method dispatches incoming messages to either request or response
+    /// handlers, which implement the core transaction layer logic.
+    ///
+    /// # Arguments
+    /// * `message` - The SIP message (request or response)
+    /// * `source` - The source address of the message
+    /// * `destination` - The local address that received the message
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error depending on message processing outcome
     async fn handle_message(
         &self,
         message: Message,
@@ -446,7 +542,19 @@ impl TransactionManager {
         }
     }
     
-    /// Handle an incoming SIP request
+    /// Handle an incoming SIP request according to RFC 3261 transaction rules.
+    ///
+    /// This method:
+    /// 1. Attempts to match the request to an existing server transaction
+    /// 2. Creates a new server transaction if no match is found
+    /// 3. Notifies the TU about the request based on its method
+    ///
+    /// # Arguments
+    /// * `request` - The incoming SIP request
+    /// * `source` - The source address of the request
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error depending on request processing outcome
     async fn handle_request(&self, request: Request, source: SocketAddr) -> Result<()> {
         // Try to find a matching transaction
         if let Some(key) = crate::utils::transaction_key_from_message(&Message::Request(request.clone())) {
@@ -499,7 +607,19 @@ impl TransactionManager {
         Ok(())
     }
     
-    /// Handle an incoming SIP response
+    /// Handle an incoming SIP response according to RFC 3261 transaction rules.
+    ///
+    /// This method:
+    /// 1. Attempts to match the response to an existing client transaction
+    /// 2. Delivers the response to the matched transaction
+    /// 3. Generates a "stray response" event if no match is found
+    ///
+    /// # Arguments
+    /// * `response` - The incoming SIP response
+    /// * `source` - The source address of the response
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error depending on response processing
     async fn handle_response(&self, response: Response, source: SocketAddr) -> Result<()> {
         // Try to find a matching client transaction
         if let Some(key) = crate::utils::transaction_key_from_message(&Message::Response(response.clone())) {
@@ -579,7 +699,20 @@ impl TransactionManager {
         Ok(())
     }
     
-    /// Handle an ACK request
+    /// Handle an ACK request with special processing required by RFC 3261.
+    ///
+    /// ACK is a special method in SIP:
+    /// - ACK for non-2xx responses is part of the INVITE transaction
+    /// - ACK for 2xx responses is a separate end-to-end transaction
+    ///
+    /// This method handles both cases according to RFC 3261 Section 17.1.1.3.
+    ///
+    /// # Arguments
+    /// * `request` - The ACK request
+    /// * `source` - The source address of the request
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error depending on ACK processing
     async fn handle_ack_request(&self, request: Request, source: SocketAddr) -> Result<()> {
         // Check if this ACK matches an INVITE server transaction
         if let Some(key) = crate::utils::transaction_key_from_message(&Message::Request(request.clone())) {

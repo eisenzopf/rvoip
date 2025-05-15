@@ -6,11 +6,69 @@
 //!   event to the associated transaction.
 //! - Holding timer settings applicable to its operations.
 //!
-//! Note: This `TimerManager` provides a mechanism for scheduling a single notification after a
+//! # Timer Management in SIP
+//!
+//! RFC 3261 requires precise timer management for ensuring reliability in SIP transactions.
+//! Both client and server transactions rely on various timers (A-K) to handle:
+//!
+//! - Message retransmissions over unreliable transports (e.g., UDP)
+//! - Transaction timeouts
+//! - Waiting periods for absorbing message retransmissions
+//!
+//! # Implementation Details
+//!
+//! This `TimerManager` provides a mechanism for scheduling a single notification after a
 //! specified duration. For timers that require periodic firing or complex backoff strategies
 //! (like RFC 3261 Timer A or E), the transaction itself, upon receiving a timer event,
 //! is responsible for performing its action (e.g., retransmission) and then requesting the
 //! `TimerManager` to start a new timer with the next appropriate duration.
+//!
+//! # Usage Example
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//! use tokio::sync::mpsc;
+//! use rvoip_transaction_core::timer::TimerManager;
+//! use rvoip_transaction_core::timer::TimerType;
+//! use rvoip_transaction_core::transaction::{TransactionKey, InternalTransactionCommand};
+//! use rvoip_sip_core::Method;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create a timer manager
+//! let timer_manager = Arc::new(TimerManager::new(None));
+//!
+//! // Create a transaction key and command channel
+//! let tx_key = TransactionKey::new("z9hG4bK.456".to_string(), Method::Invite, false);
+//! let (cmd_tx, mut cmd_rx) = mpsc::channel(10);
+//!
+//! // Register the transaction with the timer manager
+//! timer_manager.register_transaction(tx_key.clone(), cmd_tx).await;
+//!
+//! // Start Timer A for this transaction (initial INVITE retransmission timer)
+//! let timer_handle = timer_manager.start_timer(
+//!     tx_key.clone(), 
+//!     TimerType::A, 
+//!     Duration::from_millis(500)
+//! ).await?;
+//!
+//! // In your transaction event loop, handle timer events
+//! tokio::spawn(async move {
+//!     while let Some(cmd) = cmd_rx.recv().await {
+//!         match cmd {
+//!             InternalTransactionCommand::Timer(timer_name) => {
+//!                 println!("Timer fired: {}", timer_name);
+//!                 // Handle timer event (e.g., retransmit request, timeout transaction)
+//!             },
+//!             // Handle other commands...
+//!             _ => {}
+//!         }
+//!     }
+//! });
+//!
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,9 +87,25 @@ use super::types::{TimerSettings, TimerType};
 
 /// Manages active timers for SIP transactions.
 ///
+/// The `TimerManager` is a central component of the SIP transaction layer that handles:
+///
+/// 1. **Timer Registration**: Associates transactions with their command channels
+/// 2. **Timer Scheduling**: Creates and manages one-shot timers 
+/// 3. **Event Delivery**: Notifies transactions when their timers expire
+///
 /// When a timer fires, the `TimerManager` sends an `InternalTransactionCommand::Timer` message
 /// to the `mpsc::Sender<InternalTransactionCommand>` that was registered for that transaction.
 /// It does not directly manage `Timer` struct instances but rather the spawned tasks for each active timer.
+///
+/// # RFC 3261 Compliance
+///
+/// This implementation satisfies the timing requirements of RFC 3261 Section 17, which
+/// defines the behavior of client and server transaction state machines. The `TimerManager`
+/// provides the underlying mechanism for:
+///
+/// - Retransmission timers (A, E, G)
+/// - Transaction timeout timers (B, F, H)
+/// - Wait timers for absorbing retransmissions (D, I, J, K)
 #[derive(Debug)]
 pub struct TimerManager {
     /// Stores sender channels for `InternalTransactionCommand`s, keyed by `TransactionKey`.
@@ -48,6 +122,7 @@ impl TimerManager {
     ///
     /// # Arguments
     /// * `settings` - Optional [`TimerSettings`]. If `None`, default settings are used.
+    ///   The default settings follow RFC 3261 recommendations (T1=500ms, etc.).
     pub fn new(settings: Option<TimerSettings>) -> Self {
         Self {
             transaction_channels: Arc::new(Mutex::new(HashMap::new())),
@@ -63,6 +138,12 @@ impl TimerManager {
     /// # Arguments
     /// * `transaction_id` - The [`TransactionKey`] of the transaction to register.
     /// * `command_tx` - The `mpsc::Sender` channel for sending [`InternalTransactionCommand`]s to the transaction.
+    ///
+    /// # SIP Transaction Lifecycle
+    ///
+    /// In the SIP transaction model, registration occurs when a transaction is created,
+    /// either by a client initiating a request or a server receiving one. The registration
+    /// enables timer management for the transaction's entire lifecycle.
     pub async fn register_transaction(
         &self,
         transaction_id: TransactionKey,
@@ -83,6 +164,16 @@ impl TimerManager {
     ///
     /// # Arguments
     /// * `transaction_id` - The [`TransactionKey`] of the transaction to unregister.
+    ///
+    /// # SIP Transaction Termination
+    ///
+    /// In SIP, transactions eventually reach a terminated state when:
+    /// - A final response is received (client transactions)
+    /// - An ACK is received or timeout occurs (server INVITE transactions)
+    /// - Cleanup timers expire (all transaction types)
+    ///
+    /// This method should be called when a transaction reaches its terminated state
+    /// to prevent memory leaks and ensure proper cleanup.
     pub async fn unregister_transaction(&self, transaction_id: &TransactionKey) {
         let mut channels = self.transaction_channels.lock().await;
         if channels.remove(transaction_id).is_some() {
@@ -114,6 +205,15 @@ impl TimerManager {
     /// (though the current implementation spawns and checks later).
     /// The primary error source would be if `transaction_channels.lock()` fails, which is unlikely.
     /// The current implementation always returns Ok, as the check happens in spawned task.
+    ///
+    /// # RFC 3261 Timer Types
+    ///
+    /// RFC 3261 defines several timer types that will commonly be used with this method:
+    ///
+    /// - For INVITE client transactions: Timers A, B, and D
+    /// - For non-INVITE client transactions: Timers E, F, and K
+    /// - For INVITE server transactions: Timers G, H, and I
+    /// - For non-INVITE server transactions: Timer J
     pub async fn start_timer(
         &self,
         transaction_id: TransactionKey,

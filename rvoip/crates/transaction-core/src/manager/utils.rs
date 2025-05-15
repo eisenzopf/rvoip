@@ -1,3 +1,18 @@
+/// # Transaction Manager Utilities
+///
+/// This module provides utility functions for the TransactionManager implementation.
+/// These utilities help with common tasks required for SIP message processing and
+/// transaction handling according to RFC 3261.
+///
+/// The utilities include:
+/// - Extracting specific headers and values from SIP messages
+/// - Resolving network addresses from SIP URIs
+/// - Building standard SIP responses from requests
+/// - Determining message routing based on SIP headers
+///
+/// These functions encapsulate low-level details, allowing the TransactionManager
+/// to focus on higher-level transaction state management.
+
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::collections::HashMap;
@@ -16,8 +31,39 @@ use crate::client::ClientTransaction;
 use crate::client::TransactionExt as ClientTransactionExt;
 use crate::server::TransactionExt as ServerTransactionExt;
 
-/// ResponseBuilderExt trait - Use specific accessors and wrap headers
+/// Extensions for response building to ensure RFC 3261 compliance.
+///
+/// RFC 3261 Section 8.2.6.2 specifies that responses need to copy specific 
+/// headers from the request, including Via, From, To, Call-ID, and CSeq.
+/// This trait simplifies that process.
 pub trait ResponseBuilderExt {
+    /// Copies essential headers from a request as required by RFC 3261.
+    ///
+    /// RFC 3261 Section 8.2.6.2 requires that certain headers be copied from
+    /// the request to the response:
+    /// - All Via headers (in same order)
+    /// - From header
+    /// - To header (optionally adding a tag)
+    /// - Call-ID header
+    /// - CSeq header
+    ///
+    /// # Arguments
+    /// * `request` - The request to copy headers from
+    ///
+    /// # Returns
+    /// * `Result<Self>` - The builder with headers added
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_transaction_core::manager::utils::ResponseBuilderExt;
+    /// # fn example(request: &Request) -> rvoip_transaction_core::error::Result<Response> {
+    /// let builder = ResponseBuilder::new(StatusCode::Ok, Some("OK"));
+    /// let builder = builder.copy_essential_headers(request)?;
+    /// let response = builder.build();
+    /// # Ok(response)
+    /// # }
+    /// ```
     fn copy_essential_headers(self, request: &Request) -> Result<Self> where Self: Sized;
 }
 
@@ -51,8 +97,30 @@ impl ResponseBuilderExt for ResponseBuilder {
     }
 }
 
-/// Extract the socket address from a SIP URI if possible
-/// Returns None if the host part is not an IP address or if port is missing and no default provided
+/// Extract the socket address from a SIP URI if possible.
+/// 
+/// RFC 3261 Section 19.1.1 describes SIP URI syntax, which can include a host
+/// and port. This function attempts to parse the host and port as a socket address,
+/// which is needed for network transmission.
+///
+/// # Arguments
+/// * `uri` - The SIP URI to extract address from
+///
+/// # Returns
+/// * `Option<SocketAddr>` - Socket address if successful, None otherwise
+///
+/// # Example
+/// ```
+/// # use std::str::FromStr;
+/// # use rvoip_sip_core::Uri;
+/// # use rvoip_transaction_core::manager::utils::socket_addr_from_uri;
+/// # fn example() {
+/// let uri = Uri::from_str("sip:user@192.168.1.10:5060").unwrap();
+/// if let Some(addr) = socket_addr_from_uri(&uri) {
+///     println!("Socket address: {}", addr);  // 192.168.1.10:5060
+/// }
+/// # }
+/// ```
 pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
     let host = uri.host.to_string();
     let port = uri.port.unwrap_or(5060); // Default to 5060 if no port specified
@@ -65,8 +133,27 @@ pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
     }
 }
 
-/// Extract CSeq header from a SIP message
-/// Returns a tuple of (sequence number, method)
+/// Extract CSeq header from a SIP message.
+///
+/// The CSeq header is crucial for transaction matching and reliable request 
+/// processing as defined in RFC 3261 Section 8.1.1.5.
+///
+/// # Arguments
+/// * `message` - The SIP message to extract CSeq from
+///
+/// # Returns
+/// * `Option<(u32, Method)>` - Tuple of sequence number and method if found
+///
+/// # Example
+/// ```no_run
+/// # use rvoip_sip_core::Message;
+/// # use rvoip_transaction_core::manager::utils::extract_cseq;
+/// # fn example(message: &Message) {
+/// if let Some((seq_num, method)) = extract_cseq(message) {
+///     println!("CSeq: {} {}", seq_num, method);
+/// }
+/// # }
+/// ```
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     match message {
         Message::Request(request) => {
@@ -78,8 +165,30 @@ pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     }
 }
 
-/// Utility to determine the destination for an ACK to a 2xx response
-/// Follows the RFC 3261 Section 13.2.2.4 rules
+/// Determine the destination address for an ACK to a 2xx response.
+///
+/// According to RFC 3261 Section 13.2.2.4, ACK for 2xx responses should be sent to:
+/// 1. The URI in the Contact header of the response, if present
+/// 2. Otherwise, constructed by the procedures in Section 8.1.2
+///
+/// This function implements this logic to find the appropriate destination.
+///
+/// # Arguments
+/// * `response` - The 2xx response to ACK
+///
+/// # Returns
+/// * `Option<SocketAddr>` - Destination address for the ACK if it can be determined
+///
+/// # Example
+/// ```no_run
+/// # use rvoip_sip_core::Response;
+/// # use rvoip_transaction_core::manager::utils::determine_ack_destination;
+/// # async fn example(response: &Response) {
+/// if let Some(dest) = determine_ack_destination(response).await {
+///     println!("ACK destination: {}", dest);
+/// }
+/// # }
+/// ```
 pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
     // Try to get destination from Contact header first
     if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
@@ -146,7 +255,22 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
     None
 }
 
-/// Get the original request from a transaction
+/// Get the original request from a transaction.
+///
+/// Retrieves the original request that initiated a client transaction.
+/// This is needed for many operations, including generating CANCEL and ACK requests.
+///
+/// ## Uses in SIP Transaction Layer
+/// - Creating CANCEL requests based on an INVITE
+/// - Creating ACK requests for final responses
+/// - Validating incoming requests against stored requests
+///
+/// # Arguments
+/// * `transactions` - Mutex-wrapped map of transactions
+/// * `tx_id` - Transaction ID to look up
+///
+/// # Returns
+/// * `Result<Request>` - The original request or an error
 pub async fn get_transaction_request(
     transactions: &Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>,
     tx_id: &TransactionKey
@@ -162,4 +286,4 @@ pub async fn get_transaction_request(
     }
     
     Err(Error::transaction_not_found(tx_id.clone(), "get_transaction_request - transaction not found"))
-} 
+}

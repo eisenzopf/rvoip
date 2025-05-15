@@ -1,3 +1,67 @@
+/// # Non-INVITE Client Transaction Implementation
+///
+/// This module implements the non-INVITE client transaction state machine as defined in
+/// [RFC 3261 Section 17.1.2](https://datatracker.ietf.org/doc/html/rfc3261#section-17.1.2).
+///
+/// ## State Machine
+///
+/// The non-INVITE client transaction follows this state machine:
+///
+/// ```text
+///                                  |Request from TU
+///                                  |send request
+///               Timer E            V
+///               send request  +-----------+
+///                   +---------|           |-------------------+
+///                   |         |  Trying   |  Timer F fires    |
+///                   +-------->|           |  or Transport Err.|
+///                             +-----------+  inform TU        |
+///                               |  |                          |
+///                               |  |1xx                       |
+///                               |  |from                      |
+///                               |  |TL                        |
+///           Timer E             |  |                          |
+///           send request        |  |                          |
+///               +---------------|--|---+                      |
+///               |               |  |   |                      |
+///               |               |  |   |                      |
+///               |               |  |   |                      |
+///               |               |  |   |                      |
+///       +-------V------+        |  |   |                      |
+///       |              |<-------+  |   |                      |
+///       |  Proceeding  |          |   |                      |
+///       |              |----------+   |    2xx from TL       |
+///       +-------+------+              |    inform TU         |
+///               |                     |                       |
+///               |                     |                       |
+///               | 300-699 from TL     |                       |
+///               | inform TU           |                       |
+///               |                     |                       |
+///               |                     |                       |
+///       +-------V------+          +---+---+                   |
+///       |              |          |       |                   |
+///       |  Completed   |          | Term. |<------------------+
+///       |              |          |       |
+///       +-------+------+          +-------+
+///               |
+///        Timer K|
+///               |
+///               V
+///         +-----------+
+///         |           |
+///         | Terminated|
+///         |           |
+///         +-----------+
+/// ```
+///
+/// ## Timers
+///
+/// Non-INVITE client transactions use the following timers:
+///
+/// - **Timer E**: Initial value T1, doubles on each retransmission (up to T2). Controls request retransmissions.
+/// - **Timer F**: Typically 64*T1. Controls transaction timeout. When it fires, the transaction terminates with an error.
+/// - **Timer K**: Typically 5s. Controls how long to wait in Completed state for response retransmissions.
+
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -26,7 +90,21 @@ use crate::transaction::timer_utils;
 use crate::transaction::validators;
 use crate::transaction::common_logic;
 
-/// Client non-INVITE transaction (RFC 3261 Section 17.1.2)
+/// Client non-INVITE transaction implementation as defined in RFC 3261 Section 17.1.2.
+///
+/// This struct implements the state machine for client non-INVITE transactions, which are used
+/// for all request methods except INVITE. Non-INVITE transactions have simpler behavior than
+/// INVITE transactions, including:
+///
+/// - No ACK generation required (unlike INVITE transactions)
+/// - Different timer requirements (Timers E, F, K instead of A, B, D)
+/// - Different state transitions (e.g., non-INVITE transactions can go from Trying directly to Completed)
+///
+/// Key behaviors:
+/// - In Trying state: Retransmits request periodically until response or timeout
+/// - In Proceeding state: Continues retransmissions until final response
+/// - In Completed state: Has received a final response, waiting for retransmissions
+/// - In Terminated state: Transaction is finished
 #[derive(Debug, Clone)]
 pub struct ClientNonInviteTransaction {
     data: Arc<ClientTransactionData>,
@@ -34,15 +112,28 @@ pub struct ClientNonInviteTransaction {
 }
 
 /// Holds JoinHandles and dynamic state for timers specific to Client Non-INVITE transactions.
+///
+/// Used by the transaction runner to manage the various timers required by the
+/// non-INVITE client transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ClientNonInviteTimerHandles {
+    /// Handle for Timer E, which controls request retransmissions
     timer_e: Option<JoinHandle<()>>,
+    
+    /// Current interval for Timer E, which doubles after each firing (up to T2)
     current_timer_e_interval: Option<Duration>, // For backoff
+    
+    /// Handle for Timer F, which controls transaction timeout
     timer_f: Option<JoinHandle<()>>,
+    
+    /// Handle for Timer K, which controls how long to wait in Completed state
     timer_k: Option<JoinHandle<()>>,
 }
 
 /// Implements the TransactionLogic for Client Non-INVITE transactions.
+///
+/// This struct contains the core logic for the non-INVITE client transaction state machine,
+/// implementing the behavior defined in RFC 3261 Section 17.1.2.
 #[derive(Debug, Clone, Default)]
 struct ClientNonInviteLogic {
     _data_marker: std::marker::PhantomData<ClientTransactionData>,
@@ -50,7 +141,11 @@ struct ClientNonInviteLogic {
 }
 
 impl ClientNonInviteLogic {
-    // Helper method to start Timer E (retransmission timer) using timer utils
+    /// Start Timer E (retransmission timer) using timer utils
+    ///
+    /// This method starts Timer E, which controls retransmissions of the request
+    /// in the Trying and Proceeding states. The initial interval is T1, and it
+    /// doubles on each retransmission up to T2.
     async fn start_timer_e(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -84,7 +179,11 @@ impl ClientNonInviteLogic {
         }
     }
     
-    // Helper method to start Timer F (transaction timeout) using timer utils
+    /// Start Timer F (transaction timeout) using timer utils
+    ///
+    /// This method starts Timer F, which controls the overall transaction timeout.
+    /// If Timer F fires before a final response is received, the transaction fails
+    /// with a timeout error.
     async fn start_timer_f(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -117,7 +216,11 @@ impl ClientNonInviteLogic {
         }
     }
     
-    // Helper method to start Timer K (wait for response retransmissions) using timer utils with transition
+    /// Start Timer K (wait for response retransmissions) using timer utils
+    ///
+    /// This method starts Timer K, which controls how long to wait in the Completed
+    /// state for retransmissions of the final response. When Timer K fires, the
+    /// transaction transitions to the Terminated state.
     async fn start_timer_k(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -151,7 +254,10 @@ impl ClientNonInviteLogic {
         }
     }
     
-    // Helper method to handle initial request sending in Trying state
+    /// Handle initial request sending in Trying state
+    ///
+    /// This method is called when the transaction enters the Trying state.
+    /// It sends the initial request and starts Timers E and F according to RFC 3261 Section 17.1.2.2.
     async fn handle_trying_state(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -182,7 +288,11 @@ impl ClientNonInviteLogic {
         Ok(())
     }
 
-    // Handle Timer E (retransmission) trigger
+    /// Handle Timer E (retransmission) trigger
+    ///
+    /// This method is called when Timer E fires. According to RFC 3261 Section 17.1.2.2,
+    /// when Timer E fires in the Trying or Proceeding state, the client should retransmit
+    /// the request and restart Timer E with a doubled interval (capped by T2).
     async fn handle_timer_e_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -240,7 +350,11 @@ impl ClientNonInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer F (transaction timeout) trigger
+    /// Handle Timer F (transaction timeout) trigger
+    ///
+    /// This method is called when Timer F fires. According to RFC 3261 Section 17.1.2.2,
+    /// when Timer F fires in the Trying or Proceeding state, the client should inform
+    /// the TU that the transaction has timed out and transition to the Terminated state.
     async fn handle_timer_f_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -267,7 +381,12 @@ impl ClientNonInviteLogic {
         Ok(None)
     }
     
-    // Handle Timer K (wait for retransmissions) trigger
+    /// Handle Timer K (wait for retransmissions) trigger
+    ///
+    /// This method is called when Timer K fires. According to RFC 3261 Section 17.1.2.2,
+    /// when Timer K fires in the Completed state, the client should transition to the
+    /// Terminated state. Timer K ensures that any retransmissions of the final response
+    /// are properly received before the transaction terminates.
     async fn handle_timer_k_trigger(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -289,7 +408,12 @@ impl ClientNonInviteLogic {
         }
     }
 
-    // Process a SIP response using common logic
+    /// Process a SIP response
+    ///
+    /// This method implements the core logic for handling incoming responses
+    /// according to RFC 3261 Section 17.1.2.2. It validates the response,
+    /// determines the appropriate action based on the current state and the
+    /// response status, and returns any state transition that should occur.
     async fn process_response(
         &self,
         data: &Arc<ClientTransactionData>,
@@ -450,6 +574,29 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
 
 impl ClientNonInviteTransaction {
     /// Create a new client non-INVITE transaction.
+    ///
+    /// This method creates a new non-INVITE client transaction with the specified parameters.
+    /// It initializes the transaction data and spawns the transaction runner task.
+    ///
+    /// Non-INVITE transactions are used for all request methods except INVITE, including:
+    /// - REGISTER: For user registration with a SIP registrar
+    /// - OPTIONS: For querying capabilities of a SIP UA or server
+    /// - BYE: For terminating a session
+    /// - CANCEL: For canceling a pending INVITE
+    /// - And others (SUBSCRIBE, NOTIFY, INFO, etc.)
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier for this transaction
+    /// * `request` - The non-INVITE request that initiates this transaction
+    /// * `remote_addr` - The address to which the request should be sent
+    /// * `transport` - The transport layer to use for sending messages
+    /// * `events_tx` - The channel for sending events to the Transaction User
+    /// * `timer_config_override` - Optional custom timer settings
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new ClientNonInviteTransaction or an error
     pub fn new(
         id: TransactionKey,
         request: Request,
@@ -496,8 +643,6 @@ impl ClientNonInviteTransaction {
         
         Ok(Self { data, logic })
     }
-    
-    // OLD start_event_loop IS REMOVED
 }
 
 impl ClientTransaction for ClientNonInviteTransaction {

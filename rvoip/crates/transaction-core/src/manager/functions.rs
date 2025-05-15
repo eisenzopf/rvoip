@@ -25,9 +25,20 @@ use super::TransactionManager;
 impl TransactionManager {
     /// Retrieves the original request from a transaction.
     /// 
-    /// This retrieves the SIP request that initiated this transaction.
-    /// For client transactions, this is the request sent by the local UA.
-    /// For server transactions, this is the request received from the remote UA.
+    /// In SIP protocol, each transaction begins with a request. According to RFC 3261, the transaction
+    /// layer must store this request for potential retransmission and matching purposes. This method
+    /// retrieves that original request from either a client or server transaction.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - For client transactions: Retrieve the request for retransmission (Timer A)
+    /// - For server transactions: Access the request to create appropriate responses
+    /// - For INVITE transactions: Create ACK requests for non-2xx responses
+    /// - For CANCEL creation: Base the CANCEL request on the original INVITE
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1: Client Transaction state machines store original request
+    /// - RFC 3261 Section 17.2.1: Server Transaction receives request
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -61,8 +72,18 @@ impl TransactionManager {
 
     /// Retrieves the last response from a transaction.
     ///
-    /// For client transactions, this is the last response received from the remote server.
-    /// For server transactions, this is the last response sent to the client.
+    /// In SIP, transactions track the last response they've sent or received. This is important
+    /// for state machine operation, retransmission handling, and ACK generation.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - For client transactions: Access received responses for user notification
+    /// - For server transactions: Retransmit last response if request retransmitted (RFC 3261 Section 17.2.1)
+    /// - For INVITE transactions: Generate ACK requests based on final responses
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: Client Transaction response handling
+    /// - RFC 3261 Section 17.2.1: Server Transaction response retransmission
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -97,8 +118,19 @@ impl TransactionManager {
 
     /// Retrieves the remote address of a transaction.
     ///
-    /// For client transactions, this is the destination address.
-    /// For server transactions, this is the source address.
+    /// The transaction layer must maintain the destination address for client transactions
+    /// and the source address for server transactions, as dictated by RFC 3261.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - For client transactions: Destination for sending requests and receiving responses
+    /// - For server transactions: Source for receiving requests and sending responses
+    /// - For CANCEL: Determine the destination for CANCEL requests
+    /// - For ACK: Determine the destination for ACK requests
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 18.1.1: SIP entities must route responses to client requests
+    /// - RFC 3261 Section 18.2.2: Responses must be sent to address in top Via header
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -128,8 +160,21 @@ impl TransactionManager {
 
     /// Wait for a transaction to reach a specific state.
     ///
-    /// This function polls the transaction's state until it matches the target state,
-    /// or until the timeout expires.
+    /// SIP transactions progress through well-defined state machines as described in RFC 3261.
+    /// This function allows waiting for a transaction to reach a target state, which is useful
+    /// for synchronizing application logic with transaction progress.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Wait for client transactions to reach Completed state (response received)
+    /// - Wait for server transactions to reach Terminated state before cleanup
+    /// - Coordinate application logic with transaction state
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1: INVITE client transaction state machine
+    /// - RFC 3261 Section 17.1.2: Non-INVITE client transaction state machine
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction state machine
+    /// - RFC 3261 Section 17.2.2: Non-INVITE server transaction state machine
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -138,6 +183,27 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<bool>` - True if the state was reached, false if timed out
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use rvoip_transaction_core::{TransactionManager, TransactionState, TransactionKey};
+    /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Wait for the transaction to reach the Completed state
+    /// let success = manager.wait_for_transaction_state(
+    ///     tx_id,
+    ///     TransactionState::Completed,
+    ///     Duration::from_secs(5),
+    /// ).await?;
+    /// 
+    /// if success {
+    ///     println!("Transaction reached Completed state");
+    /// } else {
+    ///     println!("Timed out waiting for Completed state");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_transaction_state(
         &self,
         tx_id: &TransactionKey,
@@ -228,8 +294,19 @@ impl TransactionManager {
 
     /// Wait for a transaction to receive a final response.
     ///
-    /// A final response is any response with a status code >= 200.
-    /// This function waits until a final response is received or the timeout expires.
+    /// In SIP, final responses have status codes ≥ 200. This method waits until a transaction
+    /// receives a final response or times out, simplifying application flow control.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - UAC waiting for call setup completion
+    /// - Error handling for failed requests
+    /// - Dialog creation after 2xx responses
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 8.1.3.3: Response codes
+    /// - RFC 3261 Section 17.1.1.2: INVITE client transaction receiving responses
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction receiving responses
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -237,6 +314,25 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<Option<Response>>` - The final response if received, None if timed out
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use rvoip_transaction_core::{TransactionManager, TransactionKey};
+    /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Wait for a final response (2xx-6xx)
+    /// let response = manager.wait_for_final_response(
+    ///     tx_id,
+    ///     Duration::from_secs(5),
+    /// ).await?;
+    /// 
+    /// match response {
+    ///     Some(resp) => println!("Received final response: {}", resp.status()),
+    ///     None => println!("Timed out waiting for final response"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_final_response(
         &self,
         tx_id: &TransactionKey,
@@ -344,7 +440,14 @@ impl TransactionManager {
 
     /// Get the total number of active transactions.
     ///
-    /// This counts both client and server transactions.
+    /// Monitors the count of active transactions. This is useful for diagnostics, 
+    /// load monitoring, and ensuring proper cleanup.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    ///
+    /// - Monitoring transaction count for resource utilization
+    /// - Detecting transaction leaks
+    /// - Load balancing in high-volume systems
     ///
     /// # Returns
     /// * `usize` - The number of active transactions
@@ -356,8 +459,21 @@ impl TransactionManager {
 
     /// Terminates a transaction.
     ///
-    /// This forcefully terminates a transaction regardless of its current state.
-    /// The transaction will be removed from the manager's internal maps.
+    /// Forces a transaction to terminate regardless of its current state.
+    /// RFC 3261 defines normal termination conditions for each transaction type,
+    /// but sometimes external factors require immediate termination.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Force termination of stalled transactions
+    /// - Clean up during application shutdown
+    /// - Release resources for canceled operations
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: Normal INVITE client transaction termination
+    /// - RFC 3261 Section 17.1.2.2: Normal non-INVITE client transaction termination
+    /// - RFC 3261 Section 17.2.1: Normal INVITE server transaction termination
+    /// - RFC 3261 Section 17.2.2: Normal non-INVITE server transaction termination
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -411,7 +527,21 @@ impl TransactionManager {
 
     /// Cleanup terminated transactions.
     ///
-    /// This removes all transactions that are in the Terminated state.
+    /// Removes terminated transactions to free up resources. According to RFC 3261,
+    /// transactions should transition to the Terminated state before being removed
+    /// from the transaction set.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Regular housekeeping of transaction tables
+    /// - Resource management in high-volume systems
+    /// - Final cleanup as required by RFC 3261 Section 17
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: INVITE client transaction terminated state
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction terminated state
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction terminated state 
+    /// - RFC 3261 Section 17.2.2: Non-INVITE server transaction terminated state
     ///
     /// # Returns
     /// * `Result<usize>` - The number of transactions cleaned up
@@ -507,8 +637,19 @@ impl TransactionManager {
 
     /// Find transactions related to the given transaction.
     ///
-    /// Related transactions are those that share key properties like Call-ID, 
-    /// From/To tags, or have a parent-child relationship (e.g., INVITE-CANCEL).
+    /// Some SIP methods (like CANCEL and ACK) are related to other transactions.
+    /// This function finds these related transactions to support operations 
+    /// that span multiple transactions.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Finding INVITE for a CANCEL transaction
+    /// - Finding INVITE for an incoming ACK
+    /// - Managing transaction relationships for dialog creation
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 9.1: CANCEL relationship to INVITE
+    /// - RFC 3261 Section 17.1.1.3: ACK for non-2xx responses
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
@@ -556,7 +697,19 @@ impl TransactionManager {
 
     /// Retry sending a request.
     ///
-    /// This resends the request in a client transaction, useful in case of network issues.
+    /// Provides an application-initiated retransmission mechanism beyond the automatic
+    /// retransmissions governed by transaction timers. This is useful for recovering
+    /// from known network issues.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Recovery from known network issues
+    /// - Attempting to send a request through an alternate path
+    /// - Application-controlled reliability enhancement
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.1.1.2: INVITE client transaction retransmissions
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction retransmissions
     ///
     /// # Arguments
     /// * `tx_id` - The transaction ID
