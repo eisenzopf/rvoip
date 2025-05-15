@@ -1997,6 +1997,7 @@ dependencies = [
  "rvoip-media-core",
  "rvoip-rtp-core",
  "rvoip-sip-core",
+ "rvoip-sip-transport",
  "rvoip-transaction-core",
  "serde",
  "serde_json",
