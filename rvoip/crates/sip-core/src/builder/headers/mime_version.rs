@@ -5,17 +5,57 @@ use crate::types::{
 };
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use bytes::Bytes;
 
-/// Extension trait for adding MIME-Version headers to SIP message builders.
+/// # MIME-Version Header Builder Extension
 ///
-/// This trait provides a standard way to add MIME-Version headers to both request and response builders
-/// as specified in [RFC 3261 Section 20.24](https://datatracker.ietf.org/doc/html/rfc3261#section-20.24).
-/// The MIME-Version header is typically included in messages that contain MIME content, especially those
-/// with multipart message bodies.
+/// This module provides builder methods for the MIME-Version header in SIP messages.
 ///
-/// # Examples
+/// ## SIP MIME-Version Header Overview
 ///
-/// ## Basic MIME-Version Header
+/// The MIME-Version header is defined in [RFC 3261 Section 20.24](https://datatracker.ietf.org/doc/html/rfc3261#section-20.24)
+/// as part of the core SIP protocol. It indicates which version of the MIME protocol is being used,
+/// and is typically required when using MIME-formatted message bodies, particularly multipart bodies.
+///
+/// ## Format
+///
+/// ```text
+/// MIME-Version: 1.0
+/// ```
+///
+/// ## Purpose of MIME-Version Header
+///
+/// The MIME-Version header serves several specific purposes in SIP:
+///
+/// 1. It indicates compliance with the MIME specification for message body handling
+/// 2. It is required when using MIME multipart bodies to properly delimit different content parts
+/// 3. It enables SIP clients to correctly interpret complex body structures
+/// 4. It allows for proper handling of media attachments and alternative content formats
+///
+/// ## When to Use MIME-Version
+///
+/// - **Multipart Bodies**: Always include when using multipart/mixed, multipart/alternative, etc.
+/// - **Rich Content**: When including non-SDP bodies like XML or JSON
+/// - **Multiple Body Types**: When a message contains multiple body parts with different content types
+/// - **MIME Extensions**: When using any MIME-specific features like Content-ID references
+///
+/// ## Relationship with other headers
+///
+/// - **MIME-Version vs Content-Type**: MIME-Version indicates the MIME protocol version, while Content-Type 
+///   specifies the media type of the message body. Both are typically required for proper MIME handling.
+/// - **MIME-Version vs Content-Disposition**: Content-Disposition provides additional information about
+///   how to present the body, while MIME-Version indicates the overall MIME compliance.
+/// - **MIME-Version with multipart/mixed**: When using multipart bodies, the MIME-Version header is 
+///   required along with Content-Type boundaries to correctly parse the body parts.
+///
+/// ## Common Values
+///
+/// In practice, `1.0` is almost always used as the MIME-Version value. Other versions are rarely
+/// seen in SIP deployments. The header syntax supports major.minor version numbers.
+///
+/// ## Examples
+///
+/// ### Basic MIME-Version Header
 ///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -35,7 +75,7 @@ use crate::builder::headers::HeaderSetter;
 ///     .build();
 /// ```
 ///
-/// ## With Multipart Content
+/// ### With Multipart Content
 ///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -57,7 +97,40 @@ use crate::builder::headers::HeaderSetter;
 ///     .build();
 /// ```
 ///
-/// ## SIP INVITE with SDP and XML (Advanced Example)
+/// ### SIP MESSAGE with Text and XML Alternative Formats
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::{MimeVersionBuilderExt, ContentTypeBuilderExt};
+/// use rvoip_sip_core::builder::multipart::MultipartBodyBuilder;
+/// use rvoip_sip_core::types::Method;
+///
+/// // Scenario: Sending a MESSAGE with both plain text and XML formats
+///
+/// // Create a multipart body with text and XML parts
+/// let multipart = MultipartBodyBuilder::new()
+///     .add_text_part("Meeting scheduled for 3pm")
+///     .add_xml_part(r#"<?xml version="1.0"?>
+///       <meeting xmlns="urn:example:meeting">
+///         <subject>Project Review</subject>
+///         <time>15:00</time>
+///         <location>Conference Room B</location>
+///       </meeting>"#)
+///     .build();
+///
+/// // Create a SIP MESSAGE with the multipart body
+/// let message = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com").unwrap()
+///     .from("Alice", "sip:alice@example.com", Some("msg-1"))
+///     .to("Bob", "sip:bob@example.com", None)
+///     .mime_version_1_0()  // Required for multipart bodies
+///     .content_type(format!("multipart/alternative; boundary={}", multipart.boundary).as_str())
+///     .body(multipart.to_string())
+///     .build();
+///     
+/// // The recipient can choose to display either the plain text or XML version
+/// ```
+///
+/// ### SIP INVITE with SDP and XML (Advanced Example)
 ///
 /// ```rust
 /// use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -96,6 +169,36 @@ use crate::builder::headers::HeaderSetter;
 /// // Create a SIP INVITE with the multipart body and MIME-Version header
 /// let invite = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .mime_version_1_0()
+///     .content_type(format!("multipart/mixed; boundary={}", multipart.boundary).as_str())
+///     .body(multipart.to_string())
+///     .build();
+/// ```
+///
+/// ### Notification with Image Attachment
+///
+/// ```rust
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
+/// use rvoip_sip_core::builder::headers::{MimeVersionBuilderExt, ContentTypeBuilderExt};
+/// use rvoip_sip_core::builder::multipart::MultipartBodyBuilder;
+/// use rvoip_sip_core::types::Method;
+/// use bytes::Bytes;
+///
+/// // Scenario: Sending a notification with text and an image attachment
+///
+/// // Sample image data (normally this would be actual binary data)
+/// let image_data = Bytes::from_static(b"THIS_WOULD_BE_BINARY_IMAGE_DATA");
+///
+/// // Create a multipart body with text and image
+/// let multipart = MultipartBodyBuilder::new()
+///     .add_text_part("Please see the attached image for the office layout")
+///     .add_image_part("image/png", image_data, Some("image1@example.com"))
+///     .build();
+///
+/// // Create a SIP MESSAGE with the multipart body
+/// let message = SimpleRequestBuilder::new(Method::Message, "sip:team@example.com").unwrap()
+///     .from("Admin", "sip:admin@example.com", Some("not-1"))
+///     .to("Team", "sip:team@example.com", None)
+///     .mime_version_1_0()  // Required for multipart/mixed bodies
 ///     .content_type(format!("multipart/mixed; boundary={}", multipart.boundary).as_str())
 ///     .body(multipart.to_string())
 ///     .build();

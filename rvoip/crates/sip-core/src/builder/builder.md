@@ -25,36 +25,76 @@ when possible, with runtime validation for more complex scenarios.
 
 ## Supported Headers
 
-The builder supports the following SIP headers:
+The builder supports the following SIP headers, organized by their defining RFC:
 
-- **Core Headers**
-  - [`From`][headers::from::FromBuilderExt], [`To`][headers::to::ToBuilderExt], [`Contact`][headers::contact::ContactBuilderExt], [`Call-ID`][headers::call_id::CallIdBuilderExt], [`CSeq`][headers::cseq::CSeqBuilderExt], [`Via`][headers::via::ViaBuilderExt], [`Max-Forwards`][headers::max_forwards::MaxForwardsBuilderExt]
+- **RFC 3261 (SIP: Session Initiation Protocol)**
+  - [`From`][headers::from::FromBuilderExt] - Indicates the initiator of the request
+  - [`To`][headers::to::ToBuilderExt] - Specifies the logical recipient of the request
+  - [`Contact`][headers::contact::ContactBuilderExt] - Provides a URI for direct communication to a specific instance
+  - [`Call-ID`][headers::call_id::CallIdBuilderExt] - Uniquely identifies a call or registration
+  - [`CSeq`][headers::cseq::CSeqBuilderExt] - Contains a sequence number and request method for ordering requests
+  - [`Via`][headers::via::ViaBuilderExt] - Indicates the path taken by the request and where responses should be sent
+  - [`Max-Forwards`][headers::max_forwards::MaxForwardsBuilderExt] - Limits the number of hops a request can make
+  - [`Content-Type`][headers::content_type::ContentTypeBuilderExt] - Indicates the media type of the message body
+  - [`Content-Length`][headers::content_length::ContentLengthBuilderExt] - Indicates the size of the message body in bytes
+  - [`Content-Encoding`][headers::content_encoding::ContentEncodingExt] - Indicates any encodings applied to the message body
+  - [`Content-Language`][headers::content_language::ContentLanguageExt] - Indicates the language of the message body
+  - [`Content-Disposition`][headers::content_disposition::ContentDispositionExt] - Describes how the message body should be handled
+  - [`Accept`][headers::accept::AcceptExt] - Specifies acceptable media types for the response
+  - [`Accept-Encoding`][headers::accept_encoding::AcceptEncodingExt] - Specifies acceptable encodings for the response
+  - [`Accept-Language`][headers::accept_language::AcceptLanguageExt] - Specifies acceptable languages for the response
+  - [`Alert-Info`][headers::alert_info::AlertInfoBuilderExt] - Specifies alternative ring or ringback tones for calls
+  - [`Allow`][headers::allow::AllowBuilderExt] - Lists the methods supported by the UA
+  - [`Supported`][headers::supported::SupportedBuilderExt] - Lists extensions supported by the UA
+  - [`Unsupported`][headers::unsupported::UnsupportedBuilderExt] - Lists extensions not supported by the UA
+  - [`Require`][headers::require::RequireBuilderExt] - Lists extensions that must be supported for the request to succeed
+  - [`Proxy-Require`][headers::proxy_require::ProxyRequireBuilderExt] - Lists extensions that must be supported by proxies
+  - [`Route`][headers::route::RouteBuilderExt] - Specifies a list of proxies that must be traversed by the request
+  - [`Record-Route`][headers::record_route::RecordRouteBuilderExt] - Added by proxies to stay in the signaling path
+  - [`User-Agent`][headers::user_agent::UserAgentBuilderExt] - Identifies the client software originating the request
+  - [`Server`][headers::server::ServerBuilderExt] - Identifies the server software generating the response
+  - [`Warning`][headers::warning::WarningBuilderExt] - Carries additional information about response status
+  - [`Retry-After`][headers::retry_after::RetryAfterBuilderExt] - Indicates when to retry after certain error responses
+  - [`MIME-Version`][headers::mime_version::MimeVersionBuilderExt] - Indicates the version of MIME protocol being used
+  - [`Organization`][headers::organization::OrganizationBuilderExt] - Indicates the organization to which the entity belongs
+  - [`Priority`][headers::priority::PriorityBuilderExt] - Indicates the urgency or importance of a request
+  - [`Call-Info`][headers::call_info::CallInfoBuilderExt] - Provides additional information about the call
+  - [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt] - Identifies the Call-IDs that this call references
+  - [`Reply-To`][headers::reply_to::ReplyToBuilderExt] - Specifies the address to use for replies outside SIP
+  - [`Error-Info`][headers::error_info::ErrorInfoBuilderExt] - Provides pointers to additional error information
+  - [`Expires`][headers::expires::ExpiresBuilderExt] - Specifies expiration time for registrations or subscriptions
 
-- **Content-Related Headers**
-  - [`Content-Type`][headers::content_type::ContentTypeBuilderExt], [`Content-Length`][headers::content_length::ContentLengthBuilderExt], [`Content-Encoding`][headers::content_encoding::ContentEncodingExt], [`Content-Language`][headers::content_language::ContentLanguageExt], [`Content-Disposition`][headers::content_disposition::ContentDispositionExt]
-  - [`MIME-Version`][headers::mime_version::MimeVersionBuilderExt] - Important for multipart MIME content
-  - [`Accept`][headers::accept::AcceptExt], [`Accept-Encoding`][headers::accept_encoding::AcceptEncodingExt], [`Accept-Language`][headers::accept_language::AcceptLanguageExt]
+- **RFC 3262 (Reliability of Provisional Responses in SIP)**
+  - [`RSeq`][headers::rseq::RSeqBuilderExt] - Response sequence number for reliable provisional responses
+
+- **RFC 3265 (SIP-Specific Event Notification)**
+  - [`Event`][headers::event::EventBuilderExt] - Specifies the event type for subscription or notification
+
+- **RFC 3515 (The SIP Refer Method)**
+  - [`Refer-To`][headers::refer_to::ReferToExt] - Specifies the target resource for a referral
+
+- **RFC 3892 (The SIP Referred-By Mechanism)**
+  - [`Referred-By`][headers::referred_by::ReferredByExt] - Identifies the entity that initiated a referral
+
+- **RFC 4028 (Session Timers in SIP)**
+  - [`Session-Expires`][headers::session_expires::SessionExpiresExt] - Specifies session interval for periodic refreshes
+  - [`Min-SE`][headers::min_se::MinSEBuilderExt] - Specifies minimum acceptable session timer interval
+
+- **Content Features**
   - [`Content`][headers::content::ContentBuilderExt] - For message body handling with appropriate Content-Type headers
   - [`Multipart`][multipart::MultipartBuilder] - For creating multipart MIME bodies with multiple content types
 
-- **Authentication Headers**
-  - [`Authorization`][headers::authorization::AuthorizationExt], [`WWW-Authenticate`][headers::www_authenticate::WwwAuthenticateExt], [`Proxy-Authenticate`][headers::proxy_authenticate::ProxyAuthenticateExt], [`Proxy-Authorization`][headers::proxy_authorization::ProxyAuthorizationExt], [`Authentication-Info`][headers::authentication_info::AuthenticationInfoExt]
+- **RFC 3329 (Security Mechanism Agreement for SIP)**
+  - [`Authorization`][headers::authorization::AuthorizationExt] - Contains authentication credentials for a user agent
+  - [`WWW-Authenticate`][headers::www_authenticate::WwwAuthenticateExt] - Contains authentication challenge issued by a server
+  - [`Proxy-Authenticate`][headers::proxy_authenticate::ProxyAuthenticateExt] - Contains authentication challenge issued by a proxy
+  - [`Proxy-Authorization`][headers::proxy_authorization::ProxyAuthorizationExt] - Contains authentication credentials for a proxy
+  - [`Authentication-Info`][headers::authentication_info::AuthenticationInfoExt] - Contains authentication information
 
-- **Routing Headers**
-  - [`Route`][headers::route::RouteBuilderExt], [`Record-Route`][headers::record_route::RecordRouteBuilderExt], [`Path`][headers::path::PathBuilderExt]
+- **RFC 3327 (Path Extension Header Field for SIP)**
+  - [`Path`][headers::path::PathBuilderExt] - Specifies path to be used for registrations
 
-- **Feature Headers**
-  - [`Allow`][headers::allow::AllowBuilderExt], [`Supported`][headers::supported::SupportedBuilderExt], [`Unsupported`][headers::unsupported::UnsupportedBuilderExt], [`Require`][headers::require::RequireBuilderExt], [`Proxy-Require`][headers::proxy_require::ProxyRequireBuilderExt]
-
-- **Miscellaneous Headers**
-  - [`User-Agent`][headers::user_agent::UserAgentBuilderExt], [`Server`][headers::server::ServerBuilderExt], [`Call-Info`][headers::call_info::CallInfoBuilderExt], [`In-Reply-To`][headers::in_reply_to::InReplyToBuilderExt], [`Reply-To`][headers::reply_to::ReplyToBuilderExt], [`Refer-To`][headers::refer_to::ReferToExt]
-  - [`Organization`][headers::organization::OrganizationBuilderExt] - Identifies the organization to which the entity belongs
-  - [`Priority`][headers::priority::PriorityBuilderExt] - Indicates the urgency or importance of a request
-  - [`Expires`][headers::expires::ExpiresBuilderExt] - Specifies expiration time for registrations or subscriptions
-
-- **Error and Diagnostic Headers**
-  - [`Warning`][headers::warning::WarningBuilderExt] - Carries additional information about response status
-  - [`Error-Info`][headers::error_info::ErrorInfoBuilderExt] - Provides pointers to additional error information
+- **RFC 3841 (Caller Preferences for SIP)**
   - [`Reason`][headers::reason::ReasonBuilderExt] - Provides information about why a request was generated
 
 ## Recommendations
@@ -723,4 +763,11 @@ let ok_bye = SimpleResponseBuilder::ok()
 [headers::expires::ExpiresBuilderExt]: crate::builder::headers::expires::ExpiresBuilderExt
 [headers::organization::OrganizationBuilderExt]: crate::builder::headers::organization::OrganizationBuilderExt
 [headers::priority::PriorityBuilderExt]: crate::builder::headers::priority::PriorityBuilderExt
-[headers::refer_to::ReferToExt]: crate::builder::headers::refer_to::ReferToExt 
+[headers::refer_to::ReferToExt]: crate::builder::headers::refer_to::ReferToExt
+[headers::retry_after::RetryAfterBuilderExt]: crate::builder::headers::retry_after::RetryAfterBuilderExt
+[headers::rseq::RSeqBuilderExt]: crate::builder::headers::rseq::RSeqBuilderExt
+[headers::event::EventBuilderExt]: crate::builder::headers::event::EventBuilderExt
+[headers::session_expires::SessionExpiresExt]: crate::builder::headers::session_expires::SessionExpiresExt
+[headers::min_se::MinSEBuilderExt]: crate::builder::headers::min_se::MinSEBuilderExt
+[headers::referred_by::ReferredByExt]: crate::builder::headers::referred_by::ReferredByExt
+[headers::alert_info::AlertInfoBuilderExt]: crate::builder::headers::alert_info::AlertInfoBuilderExt 
