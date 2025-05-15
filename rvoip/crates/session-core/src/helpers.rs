@@ -5,9 +5,11 @@ use crate::dialog::{DialogId, DialogManager, Dialog, DialogState};
 use crate::session::{SessionManager, SessionConfig, SessionDirection, SessionState, Session, SessionId};
 use crate::sdp::SessionDescription;
 use rvoip_sip_core::{Request, Response, Method, Header, Uri};
+use rvoip_sip_core::types::content_type::ContentType;
 use rvoip_transaction_core::TransactionKey;
 use std::sync::Arc;
-use bytes;
+use bytes::Bytes;
+use std::str::FromStr;
 
 /// Create a dialog not found error with proper context
 pub fn dialog_not_found_error(dialog_id: &DialogId) -> Error {
@@ -239,11 +241,16 @@ pub async fn update_dialog_media(
     }
     
     // Create a new INVITE request (re-INVITE)
-    // The dialog_manager already handles creating proper requests
+    let mut request = dialog_manager.create_request(dialog_id, Method::Invite).await?;
     
-    // For now, we'll just send the re-INVITE without an SDP body
-    // In a real implementation, we'd need to set the SDP correctly
-    // based on the specific SIP core library's API
+    // Set the SDP as the message body with proper Content-Type
+    let sdp_string = new_sdp.to_string();
+    request.body = Bytes::from(sdp_string.into_bytes());
+    request.headers.push(rvoip_sip_core::TypedHeader::ContentType(
+        ContentType::from_str("application/sdp").unwrap()
+    ));
+    
+    // Send the re-INVITE request
     dialog_manager.send_dialog_request(dialog_id, Method::Invite).await
 }
 

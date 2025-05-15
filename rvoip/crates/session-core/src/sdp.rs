@@ -1,665 +1,491 @@
+// Session Core SDP Integration
+//
+// This module provides integration between the session-core layer and sip-core's SDP implementation.
+// It focuses on SDP operations needed specifically for the session layer, building on top of
+// the more generic SDP implementation in the sip-core crate.
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-
+use tracing::{debug, warn, trace, error};
 use thiserror::Error;
-use tracing;
 
-/// Errors related to SDP operations
+// Import types from sip-core's SDP implementation
+use rvoip_sip_core::sdp::{
+    SdpBuilder, 
+    attributes::MediaDirection
+};
+use rvoip_sip_core::types::sdp::{
+    SdpSession,
+    MediaDescription,
+    ParsedAttribute,
+    RtpMapAttribute
+};
+use rvoip_sip_core::error::Result as SipResult;
+
+use crate::media::{MediaConfig, MediaType, AudioCodecType};
+
+/// Errors that can occur during SDP operations at the session layer
 #[derive(Error, Debug)]
 pub enum SdpError {
-    #[error("Failed to parse SDP: {0}")]
-    ParseError(String),
-    
-    #[error("Invalid SDP format: {0}")]
-    FormatError(String),
+    #[error("Failed to parse or build SDP: {0}")]
+    SdpProcessingError(String),
     
     #[error("Missing required SDP field: {0}")]
     MissingField(String),
+    
+    #[error("Media negotiation failed: {0}")]
+    MediaNegotiationFailed(String),
     
     #[error("Unsupported codec or media type: {0}")]
     UnsupportedMedia(String),
 }
 
-/// Media direction in an SDP
+/// Result type for SDP operations at the session layer
+pub type Result<T> = std::result::Result<T, SdpError>;
+
+/// Session Description - A convenient re-export of SdpSession from sip-core
+/// This allows existing code to continue using SessionDescription without changes
+pub type SessionDescription = SdpSession;
+
+/// SDP negotiation state for tracking offer/answer model
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NegotiationState {
+    /// No offer has been sent or received
+    Initial,
+    
+    /// An offer has been sent, waiting for an answer
+    OfferSent,
+    
+    /// An offer has been received, waiting to send an answer
+    OfferReceived,
+    
+    /// A complete offer/answer exchange has happened
+    Complete,
+}
+
+/// Direction of SDP exchange
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaDirection {
-    SendRecv,
-    SendOnly,
-    RecvOnly,
-    Inactive,
+pub enum SdpDirection {
+    /// Local to remote
+    Outgoing,
+    
+    /// Remote to local
+    Incoming,
 }
 
-impl Default for MediaDirection {
-    fn default() -> Self {
-        Self::SendRecv
-    }
+/// SDP context for a dialog or session
+#[derive(Debug, Clone)]
+pub struct SdpContext {
+    /// Current local SDP
+    pub local_sdp: Option<SessionDescription>,
+    
+    /// Current remote SDP
+    pub remote_sdp: Option<SessionDescription>,
+    
+    /// Current negotiation state
+    pub state: NegotiationState,
+    
+    /// Direction of the last exchange
+    pub direction: SdpDirection,
 }
 
-impl FromStr for MediaDirection {
-    type Err = SdpError;
-    
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "sendrecv" => Ok(Self::SendRecv),
-            "sendonly" => Ok(Self::SendOnly),
-            "recvonly" => Ok(Self::RecvOnly),
-            "inactive" => Ok(Self::Inactive),
-            _ => Err(SdpError::ParseError(format!("Invalid media direction: {}", s))),
-        }
-    }
-}
-
-impl ToString for MediaDirection {
-    fn to_string(&self) -> String {
-        match self {
-            Self::SendRecv => "sendrecv".to_string(),
-            Self::SendOnly => "sendonly".to_string(),
-            Self::RecvOnly => "recvonly".to_string(),
-            Self::Inactive => "inactive".to_string(),
-        }
-    }
-}
-
-/// A media format defined in an SDP
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaFormat {
-    /// Payload type (e.g., 0 for PCMU, 8 for PCMA)
-    pub payload_type: u8,
-    
-    /// Encoding name (e.g., "PCMU", "PCMA", "opus")
-    pub encoding: String,
-    
-    /// Clock rate in Hz (e.g., 8000, 48000)
-    pub clock_rate: u32,
-    
-    /// Number of channels (typically 1 for mono, 2 for stereo)
-    pub channels: u8,
-    
-    /// Format-specific parameters
-    pub parameters: HashMap<String, String>,
-}
-
-impl MediaFormat {
-    /// Create a new G.711 μ-law format (PCMU)
-    pub fn pcmu() -> Self {
-        Self {
-            payload_type: 0,
-            encoding: "PCMU".to_string(),
-            clock_rate: 8000,
-            channels: 1,
-            parameters: HashMap::new(),
-        }
-    }
-    
-    /// Create a new G.711 A-law format (PCMA)
-    pub fn pcma() -> Self {
-        Self {
-            payload_type: 8,
-            encoding: "PCMA".to_string(),
-            clock_rate: 8000,
-            channels: 1,
-            parameters: HashMap::new(),
-        }
-    }
-    
-    /// Format the rtpmap attribute
-    pub fn format_rtpmap(&self) -> String {
-        if self.channels > 1 {
-            format!("a=rtpmap:{} {}/{}/{}\r\n", 
-                    self.payload_type, self.encoding, self.clock_rate, self.channels)
-        } else {
-            format!("a=rtpmap:{} {}/{}\r\n", 
-                    self.payload_type, self.encoding, self.clock_rate)
-        }
-    }
-    
-    /// Format the fmtp attribute if there are parameters
-    pub fn format_fmtp(&self) -> Option<String> {
-        if self.parameters.is_empty() {
-            return None;
-        }
-        
-        let params = self.parameters.iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(";");
-            
-        Some(format!("a=fmtp:{} {}\r\n", self.payload_type, params))
-    }
-}
-
-/// A media description in an SDP
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaDescription {
-    /// Media type (e.g., "audio", "video")
-    pub media_type: String,
-    
-    /// Port number
-    pub port: u16,
-    
-    /// Protocol (e.g., "RTP/AVP", "RTP/SAVP")
-    pub protocol: String,
-    
-    /// Available formats
-    pub formats: Vec<MediaFormat>,
-    
-    /// Media direction
-    pub direction: MediaDirection,
-    
-    /// Additional attributes
-    pub attributes: HashMap<String, String>,
-}
-
-impl Default for MediaDescription {
-    fn default() -> Self {
-        Self {
-            media_type: "audio".to_string(),
-            port: 0,
-            protocol: "RTP/AVP".to_string(),
-            formats: Vec::new(),
-            direction: MediaDirection::default(),
-            attributes: HashMap::new(),
-        }
-    }
-}
-
-impl MediaDescription {
-    /// Create a new audio media description
-    pub fn new_audio(port: u16) -> Self {
-        Self {
-            media_type: "audio".to_string(),
-            port,
-            protocol: "RTP/AVP".to_string(),
-            formats: Vec::new(),
-            direction: MediaDirection::default(),
-            attributes: HashMap::new(),
-        }
-    }
-    
-    /// Add a media format
-    pub fn add_format(&mut self, format: MediaFormat) {
-        self.formats.push(format);
-    }
-    
-    /// Add a standard G.711 μ-law format
-    pub fn add_pcmu(&mut self) {
-        self.formats.push(MediaFormat::pcmu());
-    }
-    
-    /// Add a standard G.711 A-law format
-    pub fn add_pcma(&mut self) {
-        self.formats.push(MediaFormat::pcma());
-    }
-    
-    /// Get payload types as a space-separated string
-    fn format_payload_types(&self) -> String {
-        self.formats.iter()
-            .map(|f| f.payload_type.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-/// Session Description Protocol representation
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionDescription {
-    /// Protocol version
-    pub version: u8,
-    
-    /// Origin information
-    pub origin: SessionOrigin,
-    
-    /// Session name
-    pub session_name: String,
-    
-    /// Connection information
-    pub connection: Option<ConnectionInfo>,
-    
-    /// Time description
-    pub timing: Vec<(u64, u64)>,
-    
-    /// Media descriptions
-    pub media: Vec<MediaDescription>,
-    
-    /// Session-level attributes
-    pub attributes: HashMap<String, String>,
-}
-
-/// Session origin information
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionOrigin {
-    /// Username
-    pub username: String,
-    
-    /// Session ID
-    pub session_id: u64,
-    
-    /// Session version
-    pub session_version: u64,
-    
-    /// Network type (typically "IN")
-    pub network_type: String,
-    
-    /// Address type (typically "IP4" or "IP6")
-    pub address_type: String,
-    
-    /// Unicast address
-    pub unicast_address: IpAddr,
-}
-
-impl Default for SessionOrigin {
-    fn default() -> Self {
-        Self {
-            username: "-".to_string(),
-            session_id: rand::random::<u32>() as u64,
-            session_version: rand::random::<u32>() as u64,
-            network_type: "IN".to_string(),
-            address_type: "IP4".to_string(),
-            unicast_address: IpAddr::from([127, 0, 0, 1]),
-        }
-    }
-}
-
-/// Connection information
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionInfo {
-    /// Network type (typically "IN")
-    pub network_type: String,
-    
-    /// Address type (typically "IP4" or "IP6")
-    pub address_type: String,
-    
-    /// Connection address
-    pub connection_address: IpAddr,
-}
-
-impl Default for ConnectionInfo {
-    fn default() -> Self {
-        Self {
-            network_type: "IN".to_string(),
-            address_type: "IP4".to_string(),
-            connection_address: IpAddr::from([127, 0, 0, 1]),
-        }
-    }
-}
-
-impl Default for SessionDescription {
-    fn default() -> Self {
-        Self {
-            version: 0,
-            origin: SessionOrigin::default(),
-            session_name: "Session".to_string(),
-            connection: Some(ConnectionInfo::default()),
-            timing: vec![(0, 0)],
-            media: Vec::new(),
-            attributes: HashMap::new(),
-        }
-    }
-}
-
-impl SessionDescription {
-    /// Create a new SessionDescription with default values
+impl SdpContext {
+    /// Create a new SDP context
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            local_sdp: None,
+            remote_sdp: None,
+            state: NegotiationState::Initial,
+            direction: SdpDirection::Outgoing,
+        }
     }
     
-    /// Create a new SessionDescription for a basic audio call
-    pub fn new_audio_call(username: &str, local_ip: IpAddr, rtp_port: u16) -> Self {
-        let mut sdp = Self::default();
-        
-        // Set origin
-        sdp.origin.username = username.to_string();
-        sdp.origin.unicast_address = local_ip;
-        
-        // Set session name
-        sdp.session_name = "Audio Call".to_string();
-        
-        // Set connection info
-        sdp.connection = Some(ConnectionInfo {
-            network_type: "IN".to_string(),
-            address_type: if local_ip.is_ipv4() { "IP4" } else { "IP6" }.to_string(),
-            connection_address: local_ip,
-        });
-        
-        // Create an audio media description
-        let mut media = MediaDescription::new_audio(rtp_port);
-        media.add_pcmu();
-        media.add_pcma();
-        media.direction = MediaDirection::SendRecv;
-        
-        // Add the media description
-        sdp.media.push(media);
-        
-        sdp
+    /// Create a new SDP context with existing SDPs
+    pub fn with_sdps(
+        local_sdp: Option<SessionDescription>,
+        remote_sdp: Option<SessionDescription>,
+        state: NegotiationState,
+        direction: SdpDirection,
+    ) -> Self {
+        Self {
+            local_sdp,
+            remote_sdp,
+            state,
+            direction,
+        }
     }
     
-    /// Parse an SDP string
-    pub fn parse(sdp_str: &str) -> Result<Self, SdpError> {
-        let mut sdp = Self::default();
-        let mut current_media: Option<MediaDescription> = None;
-        
-        for line in sdp_str.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            
-            // SDP lines are in the format type=value
-            if line.len() < 2 || !line.contains('=') {
-                return Err(SdpError::ParseError(format!("Invalid SDP line: {}", line)));
-            }
-            
-            let type_char = line.chars().next().unwrap();
-            let value = &line[2..];
-            
-            match type_char {
-                'v' => {
-                    // Version
-                    sdp.version = value.parse()
-                        .map_err(|_| SdpError::ParseError(format!("Invalid version: {}", value)))?;
-                },
-                'o' => {
-                    // Origin
-                    let parts: Vec<&str> = value.split_whitespace().collect();
-                    if parts.len() != 6 {
-                        return Err(SdpError::ParseError(format!("Invalid origin: {}", value)));
-                    }
-                    
-                    sdp.origin = SessionOrigin {
-                        username: parts[0].to_string(),
-                        session_id: parts[1].parse()
-                            .map_err(|_| SdpError::ParseError(format!("Invalid session ID: {}", parts[1])))?,
-                        session_version: parts[2].parse()
-                            .map_err(|_| SdpError::ParseError(format!("Invalid session version: {}", parts[2])))?,
-                        network_type: parts[3].to_string(),
-                        address_type: parts[4].to_string(),
-                        unicast_address: parts[5].parse()
-                            .map_err(|_| SdpError::ParseError(format!("Invalid address: {}", parts[5])))?,
-                    };
-                },
-                's' => {
-                    // Session name
-                    sdp.session_name = value.to_string();
-                },
-                'c' => {
-                    // Connection information
-                    let parts: Vec<&str> = value.split_whitespace().collect();
-                    if parts.len() != 3 {
-                        return Err(SdpError::ParseError(format!("Invalid connection info: {}", value)));
-                    }
-                    
-                    let connection = ConnectionInfo {
-                        network_type: parts[0].to_string(),
-                        address_type: parts[1].to_string(),
-                        connection_address: parts[2].parse()
-                            .map_err(|_| SdpError::ParseError(format!("Invalid connection address: {}", parts[2])))?,
-                    };
-                    
-                    // If we're parsing a media section, add to the current media
-                    if let Some(ref mut _media) = current_media {
-                        // Media-level connection information would go here if needed
-                    } else {
-                        // Session-level connection
-                        sdp.connection = Some(connection);
-                    }
-                },
-                't' => {
-                    // Timing
-                    let parts: Vec<&str> = value.split_whitespace().collect();
-                    if parts.len() != 2 {
-                        return Err(SdpError::ParseError(format!("Invalid timing: {}", value)));
-                    }
-                    
-                    let start_time = parts[0].parse()
-                        .map_err(|_| SdpError::ParseError(format!("Invalid start time: {}", parts[0])))?;
-                    let end_time = parts[1].parse()
-                        .map_err(|_| SdpError::ParseError(format!("Invalid end time: {}", parts[1])))?;
-                    
-                    sdp.timing.push((start_time, end_time));
-                },
-                'm' => {
-                    // Media description
-                    // If we already have a current media, add it to the SDP
-                    if let Some(media) = current_media.take() {
-                        sdp.media.push(media);
-                    }
-                    
-                    // Parse the new media line
-                    let parts: Vec<&str> = value.split_whitespace().collect();
-                    if parts.len() < 4 {
-                        return Err(SdpError::ParseError(format!("Invalid media description: {}", value)));
-                    }
-                    
-                    let media_type = parts[0].to_string();
-                    let port = parts[1].parse()
-                        .map_err(|_| SdpError::ParseError(format!("Invalid port: {}", parts[1])))?;
-                    let protocol = parts[2].to_string();
-                    
-                    // Create new media description
-                    let mut media = MediaDescription {
-                        media_type,
-                        port,
-                        protocol,
-                        formats: Vec::new(),
-                        direction: MediaDirection::default(),
-                        attributes: HashMap::new(),
-                    };
-                    
-                    // Parse formats (payload types)
-                    for pt in &parts[3..] {
-                        let payload_type = pt.parse()
-                            .map_err(|_| SdpError::ParseError(format!("Invalid payload type: {}", pt)))?;
-                        
-                        // We'll fill in more details when we see rtpmap attributes
-                        media.formats.push(MediaFormat {
-                            payload_type,
-                            encoding: String::new(),
-                            clock_rate: 0,
-                            channels: 1,
-                            parameters: HashMap::new(),
-                        });
-                    }
-                    
-                    current_media = Some(media);
-                },
-                'a' => {
-                    // Attribute
-                    let attr_parts: Vec<&str> = value.splitn(2, ':').collect();
-                    let attr_name = attr_parts[0];
-                    let attr_value = attr_parts.get(1).map(|&v| v).unwrap_or("");
-                    
-                    if let Some(ref mut _media) = current_media {
-                        // Media-level attribute
-                        match attr_name {
-                            "rtpmap" => {
-                                // Parse rtpmap
-                                let rtpmap_parts: Vec<&str> = attr_value.splitn(2, ' ').collect();
-                                if rtpmap_parts.len() != 2 {
-                                    return Err(SdpError::ParseError(format!("Invalid rtpmap: {}", attr_value)));
-                                }
-                                
-                                let payload_type: u8 = rtpmap_parts[0].parse()
-                                    .map_err(|_| SdpError::ParseError(format!("Invalid payload type: {}", rtpmap_parts[0])))?;
-                                
-                                let codec_parts: Vec<&str> = rtpmap_parts[1].split('/').collect();
-                                if codec_parts.len() < 2 {
-                                    return Err(SdpError::ParseError(format!("Invalid codec format: {}", rtpmap_parts[1])));
-                                }
-                                
-                                let encoding = codec_parts[0].to_string();
-                                let clock_rate: u32 = codec_parts[1].parse()
-                                    .map_err(|_| SdpError::ParseError(format!("Invalid clock rate: {}", codec_parts[1])))?;
-                                
-                                let channels = if codec_parts.len() > 2 {
-                                    codec_parts[2].parse()
-                                        .map_err(|_| SdpError::ParseError(format!("Invalid channels: {}", codec_parts[2])))?
-                                } else {
-                                    1
-                                };
-                                
-                                // Find the format with this payload type and update it
-                                for format in &mut _media.formats {
-                                    if format.payload_type == payload_type {
-                                        format.encoding = encoding;
-                                        format.clock_rate = clock_rate;
-                                        format.channels = channels;
-                                        break;
-                                    }
-                                }
-                            },
-                            "fmtp" => {
-                                // Parse fmtp
-                                let fmtp_parts: Vec<&str> = attr_value.splitn(2, ' ').collect();
-                                if fmtp_parts.len() != 2 {
-                                    return Err(SdpError::ParseError(format!("Invalid fmtp: {}", attr_value)));
-                                }
-                                
-                                let payload_type: u8 = fmtp_parts[0].parse()
-                                    .map_err(|_| SdpError::ParseError(format!("Invalid payload type: {}", fmtp_parts[0])))?;
-                                
-                                // Parse parameters
-                                let mut parameters = HashMap::new();
-                                for param in fmtp_parts[1].split(';') {
-                                    let param_parts: Vec<&str> = param.splitn(2, '=').collect();
-                                    if param_parts.len() == 2 {
-                                        parameters.insert(param_parts[0].to_string(), param_parts[1].to_string());
-                                    }
-                                }
-                                
-                                // Find the format with this payload type and update it
-                                for format in &mut _media.formats {
-                                    if format.payload_type == payload_type {
-                                        format.parameters = parameters;
-                                        break;
-                                    }
-                                }
-                            },
-                            "sendrecv" | "sendonly" | "recvonly" | "inactive" => {
-                                // Parse direction
-                                _media.direction = MediaDirection::from_str(attr_name)?;
-                            },
-                            _ => {
-                                // Other attributes
-                                _media.attributes.insert(attr_name.to_string(), attr_value.to_string());
-                            }
-                        }
-                    } else {
-                        // Session-level attribute
-                        sdp.attributes.insert(attr_name.to_string(), attr_value.to_string());
-                    }
-                },
-                _ => {
-                    // Ignore other lines for now
-                }
-            }
-        }
-        
-        // Add the last media section if there is one
-        if let Some(media) = current_media {
-            sdp.media.push(media);
-        }
-        
-        Ok(sdp)
+    /// Update with a new local SDP offer
+    pub fn update_with_local_offer(&mut self, offer: SessionDescription) {
+        self.local_sdp = Some(offer);
+        self.state = NegotiationState::OfferSent;
+        self.direction = SdpDirection::Outgoing;
     }
     
-    /// Format SDP to string
-    pub fn to_string(&self) -> String {
-        let mut sdp = String::new();
-        
-        // Version
-        sdp.push_str(&format!("v={}\r\n", self.version));
-        
-        // Origin
-        sdp.push_str(&format!("o={} {} {} {} {} {}\r\n",
-            self.origin.username,
-            self.origin.session_id,
-            self.origin.session_version,
-            self.origin.network_type,
-            self.origin.address_type,
-            self.origin.unicast_address
-        ));
-        
-        // Session name
-        sdp.push_str(&format!("s={}\r\n", self.session_name));
-        
-        // Connection information
-        if let Some(conn) = &self.connection {
-            sdp.push_str(&format!("c={} {} {}\r\n",
-                conn.network_type,
-                conn.address_type,
-                conn.connection_address
-            ));
-        }
-        
-        // Timing
-        for (start, end) in &self.timing {
-            sdp.push_str(&format!("t={} {}\r\n", start, end));
-        }
-        
-        // Session-level attributes
-        for (name, value) in &self.attributes {
-            if value.is_empty() {
-                sdp.push_str(&format!("a={}\r\n", name));
-            } else {
-                sdp.push_str(&format!("a={}:{}\r\n", name, value));
-            }
-        }
-        
-        // Media descriptions
-        for media in &self.media {
-            // Media line
-            sdp.push_str(&format!("m={} {} {} {}\r\n",
-                media.media_type,
-                media.port,
-                media.protocol,
-                media.format_payload_types()
-            ));
-            
-            // Media attributes
-            // Add rtpmap attributes
-            for format in &media.formats {
-                sdp.push_str(&format.format_rtpmap());
-                
-                // Add fmtp if present
-                if let Some(fmtp) = format.format_fmtp() {
-                    sdp.push_str(&fmtp);
-                }
-            }
-            
-            // Add direction attribute
-            sdp.push_str(&format!("a={}\r\n", media.direction.to_string()));
-            
-            // Add other media attributes
-            for (name, value) in &media.attributes {
-                if value.is_empty() {
-                    sdp.push_str(&format!("a={}\r\n", name));
-                } else {
-                    sdp.push_str(&format!("a={}:{}\r\n", name, value));
-                }
-            }
-        }
-        
-        sdp
+    /// Update with a remote SDP offer
+    pub fn update_with_remote_offer(&mut self, offer: SessionDescription) {
+        self.remote_sdp = Some(offer);
+        self.state = NegotiationState::OfferReceived;
+        self.direction = SdpDirection::Incoming;
     }
     
-    /// Extract the RTP port for a specific media type
-    pub fn get_rtp_port(&self, media_type: &str) -> Option<u16> {
-        self.media.iter()
-            .find(|m| m.media_type == media_type)
-            .map(|m| m.port)
+    /// Update with a local answer to a remote offer
+    pub fn update_with_local_answer(&mut self, answer: SessionDescription) {
+        if self.state == NegotiationState::OfferReceived {
+            self.local_sdp = Some(answer);
+            self.state = NegotiationState::Complete;
+        } else {
+            warn!("Attempted to update with local answer when no remote offer was received");
+        }
     }
     
-    /// Extract audio RTP port
-    pub fn get_audio_port(&self) -> Option<u16> {
-        self.get_rtp_port("audio")
+    /// Update with a remote answer to a local offer
+    pub fn update_with_remote_answer(&mut self, answer: SessionDescription) {
+        if self.state == NegotiationState::OfferSent {
+            self.remote_sdp = Some(answer);
+            self.state = NegotiationState::Complete;
+        } else {
+            warn!("Attempted to update with remote answer when no local offer was sent");
+        }
+    }
+    
+    /// Check if the negotiation is complete
+    pub fn is_complete(&self) -> bool {
+        self.state == NegotiationState::Complete
+    }
+    
+    /// Reset the negotiation state (e.g., for a re-INVITE)
+    pub fn reset_for_renegotiation(&mut self) {
+        self.state = NegotiationState::Initial;
     }
 }
 
-/// Helper function to extract RTP port from SDP bytes
-pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
-    use tracing::{debug, warn, trace};
+// Session Layer SDP Operations
+
+/// Create a default audio SDP offer for an outgoing call
+pub fn create_audio_offer(
+    local_address: IpAddr,
+    local_port: u16,
+    supported_codecs: &[AudioCodecType]
+) -> Result<SessionDescription> {
+    // Create a random session ID
+    let session_id = format!("{}", rand::random::<u64>());
     
+    // Start building the SDP
+    let mut builder = SdpBuilder::new("RVOIP Call")
+        .origin("-", &session_id, "1", "IN", 
+                if local_address.is_ipv4() { "IP4" } else { "IP6" },
+                &local_address.to_string())
+        .connection("IN", 
+                if local_address.is_ipv4() { "IP4" } else { "IP6" },
+                &local_address.to_string())
+        .time("0", "0"); // Always active session
+    
+    // Add an audio media section
+    let mut media_builder = builder.media_audio(local_port, "RTP/AVP");
+    
+    // Add formats based on supported codecs
+    let format_strings = convert_codecs_to_formats(supported_codecs);
+    media_builder = media_builder.formats(&format_strings);
+    
+    // Add rtpmap attributes for each codec
+    for codec in supported_codecs {
+        match codec {
+            AudioCodecType::PCMU => {
+                media_builder = media_builder.rtpmap("0", "PCMU/8000");
+            },
+            AudioCodecType::PCMA => {
+                media_builder = media_builder.rtpmap("8", "PCMA/8000");
+            },
+            // Add more codec types as needed
+        }
+    }
+    
+    // Set direction to sendrecv and complete the media section
+    media_builder = media_builder.direction(MediaDirection::SendRecv);
+    
+    // Build the final SDP
+    let sdp = media_builder.done().build()
+        .map_err(|e| SdpError::SdpProcessingError(e.to_string()))?;
+    
+    Ok(sdp)
+}
+
+/// Create an SDP answer based on a received offer
+pub fn create_audio_answer(
+    offer: &SessionDescription,
+    local_address: IpAddr,
+    local_port: u16,
+    supported_codecs: &[AudioCodecType]
+) -> Result<SessionDescription> {
+    // Extract session information from offer for the answer
+    let session_id = format!("{}", rand::random::<u64>());
+    
+    // Start building the SDP
+    let mut builder = SdpBuilder::new("RVOIP Answer")
+        .origin("-", &session_id, "1", "IN", 
+                if local_address.is_ipv4() { "IP4" } else { "IP6" },
+                &local_address.to_string())
+        .connection("IN", 
+                if local_address.is_ipv4() { "IP4" } else { "IP6" },
+                &local_address.to_string())
+        .time("0", "0"); // Always active session
+    
+    // Find audio media description in the offer
+    let audio_media = offer.media_descriptions.iter()
+        .find(|m| m.media == "audio")
+        .ok_or_else(|| SdpError::MissingField("No audio media section in offer".to_string()))?;
+    
+    // Determine supported codecs that match the offer
+    let mut matching_codecs = Vec::new();
+    let mut matching_formats = Vec::new();
+    
+    // Extract payload types and their associated codecs from the offer
+    for format in &audio_media.formats {
+        // Look for rtpmap attributes to identify codecs
+        for attr in &audio_media.generic_attributes {
+            if let ParsedAttribute::RtpMap(RtpMapAttribute {
+                payload_type, 
+                encoding_name, 
+                ..
+            }) = attr {
+                if format == &payload_type.to_string() {
+                    // Check if we support this codec
+                    if encoding_name == "PCMU" && supported_codecs.contains(&AudioCodecType::PCMU) {
+                        matching_codecs.push(AudioCodecType::PCMU);
+                        matching_formats.push(format.clone());
+                    } else if encoding_name == "PCMA" && supported_codecs.contains(&AudioCodecType::PCMA) {
+                        matching_codecs.push(AudioCodecType::PCMA);
+                        matching_formats.push(format.clone());
+                    }
+                    // Add more codec checks as needed
+                }
+            }
+        }
+    }
+    
+    if matching_formats.is_empty() {
+        return Err(SdpError::MediaNegotiationFailed(
+            "No matching codecs found between offer and supported codecs".to_string()));
+    }
+    
+    // Add an audio media section with negotiated codecs
+    let mut media_builder = builder.media_audio(local_port, "RTP/AVP");
+    
+    // Add formats based on matched codecs
+    media_builder = media_builder.formats(&matching_formats);
+    
+    // Add rtpmap attributes for each matched codec
+    for (i, codec) in matching_codecs.iter().enumerate() {
+        match codec {
+            AudioCodecType::PCMU => {
+                media_builder = media_builder.rtpmap(&matching_formats[i], "PCMU/8000");
+            },
+            AudioCodecType::PCMA => {
+                media_builder = media_builder.rtpmap(&matching_formats[i], "PCMA/8000");
+            },
+            // Add more codec types as needed
+        }
+    }
+    
+    // Match the direction from offer or set default
+    let direction = match audio_media.direction {
+        Some(MediaDirection::SendOnly) => MediaDirection::RecvOnly,
+        Some(MediaDirection::RecvOnly) => MediaDirection::SendOnly,
+        _ => MediaDirection::SendRecv,
+    };
+    
+    media_builder = media_builder.direction(direction);
+    
+    // Build the final SDP
+    let sdp = media_builder.done().build()
+        .map_err(|e| SdpError::SdpProcessingError(e.to_string()))?;
+    
+    Ok(sdp)
+}
+
+/// Extract a MediaConfig from a negotiated SDP
+pub fn extract_media_config(
+    local_sdp: &SessionDescription,
+    remote_sdp: &SessionDescription
+) -> Result<MediaConfig> {
+    // Find audio media in both SDPs
+    let local_audio = local_sdp.media_descriptions.iter()
+        .find(|m| m.media == "audio")
+        .ok_or_else(|| SdpError::MissingField("No audio media section in local SDP".to_string()))?;
+    
+    let remote_audio = remote_sdp.media_descriptions.iter()
+        .find(|m| m.media == "audio")
+        .ok_or_else(|| SdpError::MissingField("No audio media section in remote SDP".to_string()))?;
+    
+    // Get local port
+    let local_port = local_audio.port;
+    
+    // Determine the remote connection information and port
+    let remote_conn = remote_sdp.connection_info.as_ref()
+        .or_else(|| remote_audio.connection_info.as_ref())
+        .ok_or_else(|| SdpError::MissingField("No connection info in remote SDP".to_string()))?;
+    
+    let remote_addr = remote_conn.connection_address.parse::<IpAddr>()
+        .map_err(|_| SdpError::SdpProcessingError("Invalid remote IP address".to_string()))?;
+    
+    let remote_port = remote_audio.port;
+    let remote_socket = SocketAddr::new(remote_addr, remote_port);
+    
+    // Determine the negotiated codec
+    // We'll use the first format in the answer as the negotiated codec
+    if remote_audio.formats.is_empty() {
+        return Err(SdpError::MissingField("No formats in remote SDP".to_string()));
+    }
+    
+    let negotiated_format = &remote_audio.formats[0];
+    
+    // Find the rtpmap for this format to determine codec
+    let mut payload_type = 0;
+    let mut codec_type = AudioCodecType::PCMU; // Default
+    let mut clock_rate = 8000;
+    
+    for attr in &remote_audio.generic_attributes {
+        if let ParsedAttribute::RtpMap(RtpMapAttribute {
+            payload_type: pt, 
+            encoding_name,
+            clock_rate: cr,
+            ..
+        }) = attr {
+            if pt.to_string() == *negotiated_format {
+                payload_type = *pt;
+                clock_rate = *cr;
+                
+                // Determine codec type
+                match encoding_name.as_str() {
+                    "PCMU" => codec_type = AudioCodecType::PCMU,
+                    "PCMA" => codec_type = AudioCodecType::PCMA,
+                    _ => return Err(SdpError::UnsupportedMedia(format!(
+                        "Unsupported codec: {}", encoding_name))),
+                }
+                
+                break;
+            }
+        }
+    }
+    
+    // Create the media config
+    // Parse the IP address from the connection address string
+    let local_addr = if let Some(conn) = local_sdp.connection_info.as_ref() {
+        conn.connection_address.parse::<IpAddr>()
+            .unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1]))
+    } else {
+        IpAddr::from([127, 0, 0, 1])
+    };
+    
+    let local_socket = SocketAddr::new(local_addr, local_port);
+    
+    let config = MediaConfig {
+        local_addr: local_socket,
+        remote_addr: Some(remote_socket),
+        media_type: MediaType::Audio,
+        payload_type,
+        clock_rate,
+        audio_codec: codec_type,
+    };
+    
+    Ok(config)
+}
+
+/// Update an existing SDP for a re-INVITE (for media updates)
+pub fn update_sdp_for_reinvite(
+    original_sdp: &SessionDescription,
+    new_local_port: Option<u16>,
+    direction: Option<MediaDirection>
+) -> Result<SessionDescription> {
+    // Find the position of the audio media
+    let audio_index = original_sdp.media_descriptions.iter()
+        .position(|m| m.media == "audio")
+        .ok_or_else(|| SdpError::MissingField("No audio media section in original SDP".to_string()))?;
+    
+    // Get the original media description
+    let original_audio = &original_sdp.media_descriptions[audio_index];
+    let port = new_local_port.unwrap_or(original_audio.port);
+    
+    // Build a new SDP with updated fields
+    let mut builder = SdpBuilder::new(&original_sdp.session_name);
+    
+    // Update origin with incremented version
+    let current_version = original_sdp.origin.sess_version.parse::<u64>().unwrap_or(0);
+    let new_version = (current_version + 1).to_string();
+    
+    builder = builder.origin(
+        &original_sdp.origin.username,
+        &original_sdp.origin.sess_id,
+        &new_version,
+        &original_sdp.origin.net_type,
+        &original_sdp.origin.addr_type,
+        &original_sdp.origin.unicast_address
+    );
+    
+    // Copy connection info
+    if let Some(conn) = &original_sdp.connection_info {
+        builder = builder.connection(
+            &conn.net_type,
+            &conn.addr_type,
+            &conn.connection_address
+        );
+    }
+    
+    // Copy timing info
+    if !original_sdp.time_descriptions.is_empty() {
+        let time = &original_sdp.time_descriptions[0];
+        builder = builder.time(&time.start_time, &time.stop_time);
+    }
+    
+    // Add updated audio media
+    let mut media_builder = builder.media_audio(
+        port, 
+        &original_audio.protocol
+    );
+    
+    // Copy formats
+    media_builder = media_builder.formats(&original_audio.formats);
+    
+    // Copy rtpmap attributes and other attributes
+    for attr in &original_audio.generic_attributes {
+        match attr {
+            ParsedAttribute::RtpMap(rtpmap) => {
+                media_builder = media_builder.rtpmap(
+                    &rtpmap.payload_type.to_string(),
+                    &format!("{}/{}", rtpmap.encoding_name, rtpmap.clock_rate)
+                );
+            },
+            ParsedAttribute::Fmtp(fmtp) => {
+                media_builder = media_builder.fmtp(
+                    &fmtp.format,
+                    &fmtp.parameters
+                );
+            },
+            // Skip direction as it will be set below
+            ParsedAttribute::Direction(_) => {},
+            // Add handlers for other attribute types as needed
+            _ => {}
+        }
+    }
+    
+    // Set the direction
+    let media_direction = direction.unwrap_or_else(|| {
+        original_audio.direction.unwrap_or(MediaDirection::SendRecv)
+    });
+    
+    media_builder = media_builder.direction(media_direction);
+    
+    // Build the updated SDP
+    let updated_sdp = media_builder.done().build()
+        .map_err(|e| SdpError::SdpProcessingError(e.to_string()))?;
+    
+    Ok(updated_sdp)
+}
+
+/// Extract the RTP port from an SDP (version that preserves functionality from original)
+pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
     trace!("Extracting RTP port from SDP bytes, length: {}", sdp.len());
     
     // First, convert the SDP bytes to string
@@ -673,19 +499,21 @@ pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
     
     debug!("Parsing SDP:\n{}", sdp_str);
     
-    // Try the structured approach first
-    match SessionDescription::parse(sdp_str) {
+    // Try to parse the SDP using sip-core's parser
+    match SdpSession::from_str(sdp_str) {
         Ok(session) => {
-            let port = session.get_audio_port();
-            if let Some(p) = port {
-                debug!("Successfully extracted audio RTP port {} using structured parsing", p);
-                return Some(p);
-            } else {
-                warn!("No audio media found in SDP using structured parsing");
+            // Find the audio media description
+            for media in &session.media_descriptions {
+                if media.media == "audio" {
+                    debug!("Found audio media with port {}", media.port);
+                    return Some(media.port);
+                }
             }
+            
+            warn!("No audio media found in SDP");
         },
         Err(e) => {
-            warn!("Failed to parse SDP using structured approach: {}", e);
+            warn!("Failed to parse SDP: {}", e);
         }
     }
     
@@ -718,39 +546,21 @@ pub fn extract_rtp_port_from_sdp(sdp: &[u8]) -> Option<u16> {
     None
 }
 
-/// Create a default audio SDP for simple call scenarios
-pub fn default_audio(host_str: String, port: u16) -> SessionDescription {
-    // Parse host string into IpAddr, defaulting to 127.0.0.1 if it fails
-    let host = host_str.parse().unwrap_or_else(|_| IpAddr::from([127, 0, 0, 1]));
+// Utility Functions
+
+/// Convert AudioCodecType array to format strings for SDP
+fn convert_codecs_to_formats(codecs: &[AudioCodecType]) -> Vec<String> {
+    let mut formats = Vec::new();
     
-    // Create default session description
-    let mut sdp = SessionDescription::default();
-    
-    // Update session name
-    sdp.session_name = "RVOIP SIP Call".to_string();
-    
-    // Update origin
-    sdp.origin.username = "rvoip".to_string();
-    sdp.origin.unicast_address = host;
-    
-    // Update connection
-    if let Some(connection) = &mut sdp.connection {
-        connection.connection_address = host;
+    for codec in codecs {
+        match codec {
+            AudioCodecType::PCMU => formats.push("0".to_string()),
+            AudioCodecType::PCMA => formats.push("8".to_string()),
+            // Add more codecs as needed
+        }
     }
     
-    // Create audio media description
-    let mut audio = MediaDescription::new_audio(port);
-    audio.add_pcmu();
-    audio.add_pcma();
-    audio.direction = MediaDirection::SendRecv;
-    
-    // Add the media description
-    sdp.media.push(audio);
-    
-    // Add session attributes
-    sdp.attributes.insert("tool".to_string(), "rvoip".to_string());
-    
-    sdp
+    formats
 }
 
 #[cfg(test)]
@@ -758,72 +568,116 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_parse_sdp() {
-        let sdp_str = "v=0\r\n\
-                      o=alice 123456 789012 IN IP4 192.168.1.2\r\n\
-                      s=Call\r\n\
-                      c=IN IP4 192.168.1.2\r\n\
-                      t=0 0\r\n\
-                      m=audio 10000 RTP/AVP 0 8\r\n\
-                      a=rtpmap:0 PCMU/8000\r\n\
-                      a=rtpmap:8 PCMA/8000\r\n\
-                      a=sendrecv\r\n";
+    fn test_create_audio_offer() {
+        let local_addr = "192.168.1.2".parse::<IpAddr>().unwrap();
+        let supported_codecs = vec![AudioCodecType::PCMU, AudioCodecType::PCMA];
         
-        let sdp = SessionDescription::parse(sdp_str).unwrap();
+        let offer = create_audio_offer(local_addr, 10000, &supported_codecs).unwrap();
         
-        assert_eq!(sdp.version, 0);
-        assert_eq!(sdp.origin.username, "alice");
-        assert_eq!(sdp.session_name, "Call");
-        assert_eq!(sdp.media.len(), 1);
-        assert_eq!(sdp.media[0].media_type, "audio");
-        assert_eq!(sdp.media[0].port, 10000);
-        assert_eq!(sdp.media[0].formats.len(), 2);
-        assert_eq!(sdp.media[0].formats[0].payload_type, 0);
-        assert_eq!(sdp.media[0].formats[0].encoding, "PCMU");
-        assert_eq!(sdp.media[0].direction, MediaDirection::SendRecv);
+        // Verify offer properties
+        assert!(offer.session_name.contains("Call"));
+        
+        // Check that offer has audio media section
+        let audio_media = offer.media_descriptions.iter()
+            .find(|m| m.media == "audio")
+            .expect("No audio media section found");
+            
+        assert_eq!(audio_media.port, 10000);
+        assert!(audio_media.formats.contains(&"0".to_string())); // PCMU
+        assert!(audio_media.formats.contains(&"8".to_string())); // PCMA
     }
     
     #[test]
-    fn test_format_sdp() {
-        let mut sdp = SessionDescription::new_audio_call(
-            "alice", 
-            "192.168.1.2".parse().unwrap(), 
-            10000
-        );
+    fn test_create_audio_answer() {
+        // Create an offer first
+        let local_addr = "192.168.1.2".parse::<IpAddr>().unwrap();
+        let supported_codecs = vec![AudioCodecType::PCMU, AudioCodecType::PCMA];
+        let offer = create_audio_offer(local_addr, 10000, &supported_codecs).unwrap();
         
-        // Add another format (PCMA)
-        if let Some(media) = sdp.media.first_mut() {
-            media.add_pcma();
-        }
+        // Create an answer from a different address/port
+        let answer_addr = "192.168.1.3".parse::<IpAddr>().unwrap();
+        let answer_supported_codecs = vec![AudioCodecType::PCMU]; // Only support PCMU
         
-        let sdp_str = sdp.to_string();
+        let answer = create_audio_answer(&offer, answer_addr, 20000, &answer_supported_codecs).unwrap();
         
-        // Check that essential elements are present
-        assert!(sdp_str.contains("v=0"));
-        assert!(sdp_str.contains("o=alice"));
-        assert!(sdp_str.contains("c=IN IP4 192.168.1.2"));
-        assert!(sdp_str.contains("m=audio 10000 RTP/AVP"));
-        assert!(sdp_str.contains("a=rtpmap:0 PCMU/8000"));
-        assert!(sdp_str.contains("a=rtpmap:8 PCMA/8000"));
-        assert!(sdp_str.contains("a=sendrecv"));
+        // Verify answer properties
+        let audio_media = answer.media_descriptions.iter()
+            .find(|m| m.media == "audio")
+            .expect("No audio media section found");
+            
+        assert_eq!(audio_media.port, 20000);
+        assert!(audio_media.formats.contains(&"0".to_string())); // PCMU
+        assert!(!audio_media.formats.contains(&"8".to_string())); // No PCMA
+    }
+    
+    #[test]
+    fn test_extract_media_config() {
+        // Create an offer and answer
+        let local_addr = "192.168.1.2".parse::<IpAddr>().unwrap();
+        let remote_addr = "192.168.1.3".parse::<IpAddr>().unwrap();
+        let supported_codecs = vec![AudioCodecType::PCMU, AudioCodecType::PCMA];
         
-        // Parse it back and verify
-        let parsed_sdp = SessionDescription::parse(&sdp_str).unwrap();
-        assert_eq!(parsed_sdp.get_audio_port(), Some(10000));
+        let offer = create_audio_offer(local_addr, 10000, &supported_codecs).unwrap();
+        let answer = create_audio_answer(&offer, remote_addr, 20000, &supported_codecs).unwrap();
+        
+        // Extract media config
+        let config = extract_media_config(&offer, &answer).unwrap();
+        
+        // Verify config properties
+        assert_eq!(config.local_addr.port(), 10000);
+        assert_eq!(config.remote_addr.unwrap().port(), 20000);
+        assert_eq!(config.remote_addr.unwrap().ip(), remote_addr);
+        assert_eq!(config.media_type, MediaType::Audio);
+        // First codec in answer should be selected
+        assert_eq!(config.payload_type, 0); // PCMU
+        assert_eq!(config.audio_codec, AudioCodecType::PCMU);
     }
     
     #[test]
     fn test_extract_rtp_port() {
-        let sdp_str = "v=0\r\n\
-                      o=alice 123456 789012 IN IP4 192.168.1.2\r\n\
-                      s=Call\r\n\
-                      c=IN IP4 192.168.1.2\r\n\
-                      t=0 0\r\n\
-                      m=audio 12345 RTP/AVP 0\r\n\
-                      a=rtpmap:0 PCMU/8000\r\n\
-                      a=sendrecv\r\n";
+        // Create an SDP with a known port
+        let local_addr = "192.168.1.2".parse::<IpAddr>().unwrap();
+        let supported_codecs = vec![AudioCodecType::PCMU];
+        let test_port = 12345;
         
-        let port = extract_rtp_port_from_sdp(sdp_str.as_bytes());
-        assert_eq!(port, Some(12345));
+        let sdp = create_audio_offer(local_addr, test_port, &supported_codecs).unwrap();
+        
+        // Convert to string and then to bytes
+        let sdp_str = sdp.to_string();
+        let sdp_bytes = sdp_str.as_bytes();
+        
+        // Extract port using our function
+        let extracted_port = extract_rtp_port_from_sdp(sdp_bytes);
+        
+        assert_eq!(extracted_port, Some(test_port));
+    }
+    
+    #[test]
+    fn test_update_sdp_for_reinvite() {
+        // Create an original SDP
+        let local_addr = "192.168.1.2".parse::<IpAddr>().unwrap();
+        let supported_codecs = vec![AudioCodecType::PCMU, AudioCodecType::PCMA];
+        let original_sdp = create_audio_offer(local_addr, 10000, &supported_codecs).unwrap();
+        
+        // Update for re-INVITE with new port and direction
+        let new_port = 11000;
+        let updated_sdp = update_sdp_for_reinvite(
+            &original_sdp, 
+            Some(new_port), 
+            Some(MediaDirection::SendOnly)
+        ).unwrap();
+        
+        // Verify updates
+        let audio_media = updated_sdp.media_descriptions.iter()
+            .find(|m| m.media == "audio")
+            .expect("No audio media section found");
+            
+        assert_eq!(audio_media.port, new_port);
+        
+        // Check direction
+        let has_sendonly = audio_media.generic_attributes.iter()
+            .any(|attr| matches!(attr, ParsedAttribute::Direction(MediaDirection::SendOnly)));
+            
+        assert!(has_sendonly, "Media direction should be sendonly");
     }
 } 
