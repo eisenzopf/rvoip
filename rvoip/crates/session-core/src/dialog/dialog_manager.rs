@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use rvoip_sip_core::{
-    Request, Response, Method, StatusCode, Uri, TypedHeader
+    Request, Response, Method, StatusCode, Uri, TypedHeader, HeaderName
 };
 
 use rvoip_sip_core::types::address::Address;
@@ -98,119 +98,126 @@ impl DialogManager {
     
     /// Process a transaction event and update dialogs accordingly
     async fn process_transaction_event(&self, event: TransactionEvent) {
+        debug!("Processing transaction event: {:?}", event);
+        
         match event {
-            // Handle new INVITE request
-            TransactionEvent::NewRequest { 
-                transaction_id, 
-                request, 
-                source 
-            } if request.method() == Method::Invite => {
-                debug!("New INVITE request received for transaction: {}", transaction_id);
-                // Dialog will be created when a response with to-tag is sent
+            TransactionEvent::Response { transaction_id: tx_key, response, source: _ } => {
+                debug!("Received response through transaction {}:\n{}", tx_key, response);
                 
-                // Track this transaction as a potential dialog creator
-                self.transaction_to_dialog.insert(transaction_id.clone(), DialogId::new());
-            },
-            
-            // Handle provisional responses - may create early dialogs
-            TransactionEvent::ProvisionalResponse { 
-                transaction_id, 
-                response 
-            } => {
-                self.handle_provisional_response(&transaction_id, response).await;
-            },
-            
-            // Handle success responses - create or confirm dialogs
-            TransactionEvent::SuccessResponse { 
-                transaction_id, 
-                response,
-                ..
-            } => {
-                self.handle_success_response(&transaction_id, response).await;
-            },
-            
-            // Handle failure responses - potentially terminate dialogs
-            TransactionEvent::FailureResponse { 
-                transaction_id, 
-                response 
-            } => {
-                debug!("Failure response for transaction: {}", transaction_id);
+                // Find dialog associated with this transaction
+                let dialog_id = match self.transaction_to_dialog.get(&tx_key) {
+                    Some(dialog_id) => dialog_id.clone(),
+                    None => {
+                        debug!("No dialog found for transaction {}", tx_key);
+                        return;
+                    }
+                };
                 
-                // If we have an associated dialog, we may want to terminate it
-                if let Some(dialog_id) = self.transaction_to_dialog.get(&transaction_id) {
-                    let dialog_id = dialog_id.clone();
-                    if let Some(mut dialog) = self.dialogs.get_mut(&dialog_id) {
-                        // Terminate early dialogs immediately
-                        if dialog.state == DialogState::Early {
-                            debug!("Terminating early dialog {} due to failure response", dialog_id);
-                            dialog.terminate();
-                            
-                            // Emit dialog terminated event
-                            let session_id = self.dialog_to_session.get(&dialog_id).map(|id| id.clone());
+                // Get the dialog
+                let mut dialog_opt = self.dialogs.get_mut(&dialog_id);
+                if dialog_opt.is_none() {
+                    debug!("Dialog {} not found for transaction {}", dialog_id, tx_key);
+                    return;
+                }
+                let mut dialog = dialog_opt.unwrap();
+                
+                // Check if this is a response to an INVITE
+                let is_invite = match self.transaction_manager.transaction_kind(&tx_key).await {
+                    Ok(TransactionKind::InviteClient) => true,
+                    _ => false
+                };
+                
+                // If this is a 2xx response to an INVITE, update dialog
+                if is_invite && (response.status == StatusCode::Ok || response.status == StatusCode::Accepted) {
+                    if dialog.state == DialogState::Early {
+                        // Update the dialog from early to confirmed
+                        let old_state = dialog.state.clone();
+                        let updated = dialog.update_from_2xx(&response);
+                        
+                        // Check if negotiation is complete for SDP
+                        let session_id = self.find_session_for_transaction(&tx_key);
+                        
+                        // If SDP is present, handle SDP answer
+                        if let Some(TypedHeader::ContentType(content_type)) = response.header(&HeaderName::ContentType) {
+                            if content_type.to_string() == "application/sdp" {
+                                if let Ok(sdp_str) = std::str::from_utf8(&response.body) {
+                                    if let Ok(sdp) = crate::sdp::SessionDescription::from_str(sdp_str) {
+                                        // Update the dialog with the remote SDP answer
+                                        if dialog.sdp_context.state == crate::sdp::NegotiationState::OfferSent {
+                                            dialog.sdp_context.update_with_remote_answer(sdp.clone());
+                                            
+                                            // Fire SDP answer received event
+                                            if let Some(session_id) = session_id.clone() {
+                                                self.event_bus.publish(crate::events::SessionEvent::SdpAnswerReceived {
+                                                    session_id: session_id.clone(),
+                                                    dialog_id: dialog_id.clone(),
+                                                });
+                                                
+                                                // Emit negotiation complete event
+                                                if dialog.sdp_context.is_complete() {
+                                                    self.event_bus.publish(crate::events::SessionEvent::SdpNegotiationComplete {
+                                                        session_id: session_id,
+                                                        dialog_id: dialog_id.clone(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if updated {
+                            // Emit dialog state changed event
                             if let Some(session_id) = session_id {
-                                self.event_bus.publish(SessionEvent::Terminated {
+                                self.event_bus.publish(crate::events::SessionEvent::DialogStateChanged {
                                     session_id,
-                                    reason: format!("Failure response: {}", response.status()),
+                                    dialog_id: dialog_id.clone(),
+                                    previous: old_state,
+                                    current: dialog.state.clone(),
                                 });
                             }
                         }
                     }
                 }
-            },
-            
-            // Handle BYE request to terminate a dialog
-            TransactionEvent::NewRequest { 
-                transaction_id, 
-                request, 
-                source 
-            } if request.method() == Method::Bye => {
-                self.handle_bye_request(&transaction_id, request).await;
-            },
-            
-            // Handle transaction termination (clean up resources)
-            TransactionEvent::TransactionTerminated {
-                transaction_id
-            } => {
-                debug!("Transaction terminated: {}", transaction_id);
-                
-                // Clean up transaction-to-dialog mapping but keep the dialog itself
-                if let Some((_, dialog_id)) = self.transaction_to_dialog.remove(&transaction_id) {
-                    debug!("Removed association between transaction {} and dialog {}", 
-                           transaction_id, dialog_id);
-                }
-                
-                // Run background cleanup to remove terminated sessions
-                self.cleanup_terminated();
-            },
-            
-            // Handle transport errors that should terminate dialogs
-            TransactionEvent::TransportError {
-                transaction_id
-            } => {
-                debug!("Transport error for transaction: {}", transaction_id);
-                
-                if let Some(dialog_id) = self.transaction_to_dialog.get(&transaction_id) {
-                    let dialog_id = dialog_id.clone();
-                    if let Some(mut dialog) = self.dialogs.get_mut(&dialog_id) {
-                        // Terminate the dialog on transport error
-                        if dialog.state != DialogState::Terminated {
-                            debug!("Terminating dialog {} due to transport error", dialog_id);
-                            dialog.terminate();
-                            
-                            // Emit dialog terminated event
-                            if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                                self.event_bus.publish(SessionEvent::Terminated {
-                                    session_id: session_id.clone(),
-                                    reason: "Transport error".to_string(),
-                                });
+                // For non-2xx INVITE responses with SDP, handle early media
+                else if is_invite && response.status == StatusCode::SessionProgress {
+                    // Check for SDP in early media
+                    if let Some(TypedHeader::ContentType(content_type)) = response.header(&HeaderName::ContentType) {
+                        if content_type.to_string() == "application/sdp" {
+                            if let Ok(sdp_str) = std::str::from_utf8(&response.body) {
+                                if let Ok(sdp) = crate::sdp::SessionDescription::from_str(sdp_str) {
+                                    // Update the dialog with the remote SDP answer (early media)
+                                    if dialog.sdp_context.state == crate::sdp::NegotiationState::OfferSent {
+                                        dialog.sdp_context.update_with_remote_answer(sdp.clone());
+                                        
+                                        // Fire SDP answer received event
+                                        if let Some(session_id) = self.find_session_for_transaction(&tx_key) {
+                                            self.event_bus.publish(crate::events::SessionEvent::SdpAnswerReceived {
+                                                session_id: session_id.clone(),
+                                                dialog_id: dialog_id.clone(),
+                                            });
+                                            
+                                            // Emit negotiation complete event for early media
+                                            if dialog.sdp_context.is_complete() {
+                                                self.event_bus.publish(crate::events::SessionEvent::SdpNegotiationComplete {
+                                                    session_id,
+                                                    dialog_id: dialog_id.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             },
-            
-            // Ignore other events
-            _ => {}
+            // Using a pattern match to handle any request event
+            _ => {
+                // Log the event type for debugging
+                debug!("Received unhandled transaction event: {:?}", event);
+            }
         }
     }
     
@@ -615,6 +622,109 @@ impl DialogManager {
             ))?;
             
         dialog.terminate();
+        Ok(())
+    }
+    
+    /// Update dialog SDP state with a local SDP offer
+    /// 
+    /// This is used when sending an SDP offer in a request, to track
+    /// the SDP negotiation state.
+    pub async fn update_dialog_with_local_sdp_offer(
+        &self,
+        dialog_id: &DialogId,
+        offer: crate::sdp::SessionDescription
+    ) -> Result<(), Error> {
+        let mut dialog = self.dialogs.get_mut(dialog_id)
+            .ok_or_else(|| Error::DialogNotFoundWithId(
+                dialog_id.to_string(),
+                ErrorContext {
+                    category: ErrorCategory::Dialog,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    dialog_id: Some(dialog_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("Cannot update SDP - dialog {} not found", dialog_id)),
+                    ..Default::default()
+                }
+            ))?;
+            
+        dialog.update_with_local_sdp_offer(offer);
+        
+        // Publish SDP offer event
+        if let Some(session_id) = self.dialog_to_session.get(dialog_id) {
+            let sdp_event = crate::events::SdpEvent::OfferSent {
+                session_id: session_id.to_string(),
+                dialog_id: dialog_id.to_string(),
+            };
+            self.event_bus.publish(sdp_event.into());
+        }
+        
+        Ok(())
+    }
+    
+    /// Update dialog SDP state with a local SDP answer
+    /// 
+    /// This is used when sending an SDP answer in a response, to track
+    /// the SDP negotiation state.
+    pub async fn update_dialog_with_local_sdp_answer(
+        &self,
+        dialog_id: &DialogId,
+        answer: crate::sdp::SessionDescription
+    ) -> Result<(), Error> {
+        let mut dialog = self.dialogs.get_mut(dialog_id)
+            .ok_or_else(|| Error::DialogNotFoundWithId(
+                dialog_id.to_string(),
+                ErrorContext {
+                    category: ErrorCategory::Dialog,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    dialog_id: Some(dialog_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("Cannot update SDP - dialog {} not found", dialog_id)),
+                    ..Default::default()
+                }
+            ))?;
+            
+        dialog.update_with_local_sdp_answer(answer);
+        
+        // Publish SDP answer event
+        if let Some(session_id) = self.dialog_to_session.get(dialog_id) {
+            let sdp_event = crate::events::SdpEvent::AnswerSent {
+                session_id: session_id.to_string(),
+                dialog_id: dialog_id.to_string(),
+            };
+            self.event_bus.publish(sdp_event.into());
+        }
+        
+        Ok(())
+    }
+    
+    /// Update dialog for re-negotiation (re-INVITE)
+    /// 
+    /// This resets the SDP negotiation state to prepare for a new
+    /// offer/answer exchange.
+    pub async fn prepare_dialog_sdp_renegotiation(
+        &self,
+        dialog_id: &DialogId
+    ) -> Result<(), Error> {
+        let mut dialog = self.dialogs.get_mut(dialog_id)
+            .ok_or_else(|| Error::DialogNotFoundWithId(
+                dialog_id.to_string(),
+                ErrorContext {
+                    category: ErrorCategory::Dialog,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    dialog_id: Some(dialog_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("Cannot prepare for renegotiation - dialog {} not found", dialog_id)),
+                    ..Default::default()
+                }
+            ))?;
+            
+        dialog.prepare_sdp_renegotiation();
         Ok(())
     }
     

@@ -254,6 +254,85 @@ pub async fn update_dialog_media(
     dialog_manager.send_dialog_request(dialog_id, Method::Invite).await
 }
 
+/// Get the media configuration from a dialog
+///
+/// This is a convenience wrapper that extracts media configuration from 
+/// negotiated SDP in a dialog.
+pub fn get_dialog_media_config(
+    dialog_manager: &Arc<DialogManager>,
+    dialog_id: &DialogId
+) -> Result<crate::media::MediaConfig, Error> {
+    // Get the dialog
+    let dialog = dialog_manager.get_dialog(dialog_id)?;
+    
+    // Check if SDP negotiation is complete
+    if dialog.sdp_context.state != crate::sdp::NegotiationState::Complete {
+        return Err(Error::InvalidDialogState {
+            current: dialog.sdp_context.state.to_string(),
+            expected: crate::sdp::NegotiationState::Complete.to_string(),
+            context: ErrorContext {
+                category: ErrorCategory::Dialog,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::None,
+                retryable: false,
+                dialog_id: Some(dialog_id.to_string()),
+                timestamp: SystemTime::now(),
+                details: Some("Cannot extract media config: SDP negotiation not complete".to_string()),
+                ..Default::default()
+            }
+        });
+    }
+    
+    // Get local and remote SDP
+    let local_sdp = dialog.sdp_context.local_sdp
+        .as_ref()
+        .ok_or_else(|| Error::InternalError(
+            "Local SDP missing in complete negotiation".to_string(),
+            ErrorContext {
+                category: ErrorCategory::Internal,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::None,
+                retryable: false,
+                dialog_id: Some(dialog_id.to_string()),
+                timestamp: SystemTime::now(),
+                details: Some("SDP negotiation state is Complete but local SDP is missing".to_string()),
+                ..Default::default()
+            }
+        ))?;
+        
+    let remote_sdp = dialog.sdp_context.remote_sdp
+        .as_ref()
+        .ok_or_else(|| Error::InternalError(
+            "Remote SDP missing in complete negotiation".to_string(),
+            ErrorContext {
+                category: ErrorCategory::Internal,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::None,
+                retryable: false,
+                dialog_id: Some(dialog_id.to_string()),
+                timestamp: SystemTime::now(),
+                details: Some("SDP negotiation state is Complete but remote SDP is missing".to_string()),
+                ..Default::default()
+            }
+        ))?;
+    
+    // Extract media config using the SDP utility function
+    crate::sdp::extract_media_config(local_sdp, remote_sdp)
+        .map_err(|e| Error::InternalError(
+            format!("Failed to extract media config: {}", e),
+            ErrorContext {
+                category: ErrorCategory::Media,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::None,
+                retryable: false,
+                dialog_id: Some(dialog_id.to_string()),
+                timestamp: SystemTime::now(),
+                details: Some(format!("Error extracting media config: {}", e)),
+                ..Default::default()
+            }
+        ))
+}
+
 /// Create a new dialog directly (for testing or advanced scenarios)
 ///
 /// This is useful for creating dialogs outside the normal INVITE flow,
@@ -287,6 +366,7 @@ pub fn create_dialog(
         remote_target, // Use remote URI as target initially
         route_set: Vec::new(),
         is_initiator: true, // Assume we're the initiator by default
+        sdp_context: crate::sdp::SdpContext::new(),
     };
     
     // In a real implementation we'd add the dialog to the dialog manager directly

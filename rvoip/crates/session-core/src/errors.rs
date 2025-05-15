@@ -458,6 +458,10 @@ pub enum Error {
     /// Unexpected error
     #[error("Unexpected error: {0}")]
     UnexpectedError(String, Option<Box<dyn std::error::Error + Send + Sync>>, ErrorContext),
+    
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String, ErrorContext),
 }
 
 impl Error {
@@ -512,6 +516,7 @@ impl Error {
             Error::ConfigurationError(_, ctx) => ctx,
             Error::InternalError(_, ctx) => ctx,
             Error::UnexpectedError(_, _, ctx) => ctx,
+            Error::SerializationError(_, ctx) => ctx,
         }
     }
 

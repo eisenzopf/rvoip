@@ -2,15 +2,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
+use std::fmt;
 
 use rvoip_sip_core::{Request, Response};
 use rvoip_transaction_core::TransactionKey;
 
 use crate::session::{SessionId, SessionState};
-use crate::dialog::DialogId;
+use crate::dialog::{DialogId, DialogState};
+use crate::sdp::NegotiationState;
 
 /// Event types that can be emitted during session lifecycle
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// A new session was created
     Created {
@@ -90,6 +92,82 @@ pub enum SessionEvent {
         session_id: SessionId,
         event_type: String,
         data: serde_json::Value,
+    },
+    
+    /// Session created
+    SessionCreated {
+        /// Session ID
+        session_id: SessionId,
+    },
+    
+    /// Session state changed
+    SessionStateChanged {
+        /// Session ID
+        session_id: SessionId,
+        /// Previous state
+        previous: SessionState,
+        /// New state
+        current: SessionState,
+    },
+    
+    /// Dialog created
+    DialogCreated {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+    },
+    
+    /// Dialog state changed
+    DialogStateChanged {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+        /// Previous state
+        previous: DialogState,
+        /// New state
+        current: DialogState,
+    },
+    
+    /// SDP offer sent in a request
+    SdpOfferSent {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+    },
+    
+    /// SDP offer received in a request
+    SdpOfferReceived {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+    },
+    
+    /// SDP answer sent in a response
+    SdpAnswerSent {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+    },
+    
+    /// SDP answer received in a response
+    SdpAnswerReceived {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+    },
+    
+    /// SDP negotiation completed
+    SdpNegotiationComplete {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
     },
 }
 
@@ -344,5 +422,129 @@ mod tests {
         ).await;
         
         assert!(received.is_ok(), "Failed to receive event within timeout");
+    }
+}
+
+// Add Display implementation for the NegotiationState enum
+impl fmt::Display for NegotiationState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NegotiationState::Initial => write!(f, "Initial"),
+            NegotiationState::OfferSent => write!(f, "OfferSent"),
+            NegotiationState::OfferReceived => write!(f, "OfferReceived"),
+            NegotiationState::Complete => write!(f, "Complete"),
+        }
+    }
+}
+
+/// Add SDP-related events to the session context
+#[derive(Debug, Clone)]
+pub enum SdpEvent {
+    /// SDP offer was sent
+    OfferSent {
+        /// Session ID
+        session_id: String,
+        /// Dialog ID
+        dialog_id: String,
+    },
+
+    /// SDP offer was received
+    OfferReceived {
+        /// Session ID
+        session_id: String,
+        /// Dialog ID
+        dialog_id: String,
+    },
+
+    /// SDP answer was sent
+    AnswerSent {
+        /// Session ID
+        session_id: String,
+        /// Dialog ID
+        dialog_id: String,
+    },
+
+    /// SDP answer was received
+    AnswerReceived {
+        /// Session ID
+        session_id: String,
+        /// Dialog ID
+        dialog_id: String,
+    },
+
+    /// SDP negotiation is complete
+    NegotiationComplete {
+        /// Session ID
+        session_id: String,
+        /// Dialog ID
+        dialog_id: String,
+    },
+}
+
+// Add conversion from SdpEvent to SessionEvent
+impl From<SdpEvent> for SessionEvent {
+    fn from(event: SdpEvent) -> Self {
+        match event {
+            SdpEvent::OfferSent { session_id, dialog_id } => {
+                let session_id_val = match Uuid::parse_str(&session_id) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => SessionId::new(),
+                };
+                
+                SessionEvent::Custom { 
+                    session_id: session_id_val,
+                    event_type: "sdp:offer_sent".to_string(),
+                    data: serde_json::json!({ "dialog_id": dialog_id }),
+                }
+            },
+            SdpEvent::OfferReceived { session_id, dialog_id } => {
+                let session_id_val = match Uuid::parse_str(&session_id) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => SessionId::new(),
+                };
+                
+                SessionEvent::Custom { 
+                    session_id: session_id_val,
+                    event_type: "sdp:offer_received".to_string(),
+                    data: serde_json::json!({ "dialog_id": dialog_id }),
+                }
+            },
+            SdpEvent::AnswerSent { session_id, dialog_id } => {
+                let session_id_val = match Uuid::parse_str(&session_id) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => SessionId::new(),
+                };
+                
+                SessionEvent::Custom { 
+                    session_id: session_id_val,
+                    event_type: "sdp:answer_sent".to_string(),
+                    data: serde_json::json!({ "dialog_id": dialog_id }),
+                }
+            },
+            SdpEvent::AnswerReceived { session_id, dialog_id } => {
+                let session_id_val = match Uuid::parse_str(&session_id) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => SessionId::new(),
+                };
+                
+                SessionEvent::Custom { 
+                    session_id: session_id_val,
+                    event_type: "sdp:answer_received".to_string(),
+                    data: serde_json::json!({ "dialog_id": dialog_id }),
+                }
+            },
+            SdpEvent::NegotiationComplete { session_id, dialog_id } => {
+                let session_id_val = match Uuid::parse_str(&session_id) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => SessionId::new(),
+                };
+                
+                SessionEvent::Custom { 
+                    session_id: session_id_val,
+                    event_type: "sdp:negotiation_complete".to_string(),
+                    data: serde_json::json!({ "dialog_id": dialog_id }),
+                }
+            },
+        }
     }
 } 
