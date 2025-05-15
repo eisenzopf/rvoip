@@ -26,21 +26,178 @@ This library follows a message-passing architecture using Tokio's async/await mo
 └─────────────────────┘ └─────────────────────┘
 ```
 
+### Transaction vs. Dialog Layer
+
+One of the key architectural principles in SIP is the separation between transaction and dialog layers:
+
+- **Transaction Layer** (this library): Handles individual request-response exchanges with defined lifecycles. Responsible for message reliability, retransmissions, and state tracking for a single exchange.
+
+- **Dialog Layer** (implemented separately): Maintains long-lived application state across multiple transactions. Manages the relationship between endpoints using Call-ID, tags, and sequence numbers.
+
+This separation allows the transaction layer to focus on protocol-level reliability while letting the dialog layer handle the application logic and session state.
+
+### Integration with Session Core
+
+In the RVOIP stack, the `transaction-core` library provides the foundation for the `session-core` library, which implements dialog and session management:
+
+```
+┌─────────────────────────┐
+│ Application Layer       │
+│ (SIP Client/Server)     │
+└───────────┬─────────────┘
+            │
+┌───────────▼─────────────┐
+│ Session Core            │
+│ (Dialog & Call Sessions)│
+└───────────┬─────────────┘
+            │
+┌───────────▼─────────────┐
+│ Transaction Core        │
+│ (Message Reliability)   │
+└───────────┬─────────────┘
+            │
+┌───────────▼─────────────┐
+│ SIP Transport Layer     │
+│ (UDP, TCP, TLS, etc.)   │
+└─────────────────────────┘
+```
+
+The relationship between these libraries follows these principles:
+
+1. **Ownership**: Session Core holds a reference to the Transaction Manager
+2. **Event Flow**: Transaction events are propagated to Session Core, which maps them to dialogs
+3. **Request Initiation**: Session Core uses Transaction Core to initiate requests
+4. **Response Handling**: Transaction Core delivers responses back to Session Core
+5. **Message Reliability**: Transaction Core handles all retransmissions transparently for Session Core
+
+This layered approach allows each library to focus on its specific responsibilities while providing a clean API for higher-level application logic.
+
 ### Key Components
 
-1. **TransactionManager**: Central coordinator for all transactions
+1. **TransactionManager**: Central coordinator for all transactions, providing the primary API for the application
 2. **Transaction Types**:
    - **ClientInviteTransaction**: For INVITE client transactions
    - **ClientNonInviteTransaction**: For non-INVITE client transactions
    - **ServerInviteTransaction**: For INVITE server transactions
    - **ServerNonInviteTransaction**: For non-INVITE server transactions
-3. **Transaction States**:
+3. **Method-specific Modules**:
+   - **method/cancel.rs**: Specialized logic for CANCEL requests
+   - **method/ack.rs**: Special handling for ACK requests
+   - **method/update.rs**: Support for UPDATE method
+4. **Transaction States**:
    - Initial
    - Calling/Trying (client-side)
    - Proceeding
    - Completed
    - Confirmed (INVITE server only)
    - Terminated
+
+## Code Organization
+
+The library code is organized into several modules:
+
+- **manager/**: Contains the `TransactionManager` implementation, the main entry point for applications
+- **client/**: Implements client transaction state machines
+- **server/**: Implements server transaction state machines
+- **transaction/**: Defines common transaction traits, states, and events
+- **method/**: Contains method-specific logic for special SIP methods
+- **timer/**: Implements timer management for retransmissions and timeouts
+- **utils/**: Utility functions for transaction processing
+- **error/**: Error types and results
+
+## State Management and Event Flow
+
+The transaction system manages state through a combination of state machines, command channels, and event broadcasting:
+
+### Transaction Identification and Storage
+
+Transactions are identified by a `TransactionKey` containing:
+- Branch ID (from the Via header)
+- SIP method type (INVITE, REGISTER, etc.)
+- Flag indicating if it's a server-side transaction
+
+The `TransactionManager` stores transactions in two separate HashMaps:
+- `client_transactions`: For client-side transactions
+- `server_transactions`: For server-side transactions
+
+### Transaction Matching
+
+According to RFC 3261 sections 17.1.3 and 17.2.3, transactions are matched as follows:
+
+- **For Responses**: Matched using the branch parameter in the top Via header, the sent-by value, and the CSeq method
+- **For Requests**: Server transactions are matched using the branch parameter, the request method, and sent-by value
+- **For ACK to non-2xx**: Matched to the original INVITE transaction (same branch parameter)
+- **For ACK to 2xx**: Not matched to any transaction - handled by the TU (dialog layer)
+- **For CANCEL**: Creates a new transaction but targets an existing INVITE transaction with the same identifiers
+
+The `TransactionManager` implements these rules to properly route incoming messages.
+
+### State Machine Implementation
+
+Each transaction implements a state machine according to RFC 3261:
+
+1. **State Storage**: States are stored in `AtomicTransactionState` objects for thread-safe access
+2. **State Transitions**: Transitions are validated according to RFC 3261 rules
+3. **State-specific Logic**: Each state has specific behavior for message processing and timer management
+
+### Command and Event Architecture
+
+The system uses an actor-like pattern where each transaction runs in its own task:
+
+1. **Command Flow**:
+   - Application code calls methods on `TransactionManager`
+   - `TransactionManager` sends commands to transactions via command channels
+   - Each transaction's runner task processes commands and executes appropriate actions
+
+2. **Event Broadcasting**:
+   - State changes and other significant events generate `TransactionEvent` objects
+   - Events are broadcast to the primary channel and any subscribers
+   - Applications receive events via a channel obtained from `subscribe()`
+
+3. **Transaction Runner**:
+   - Each transaction runs in a dedicated async task
+   - The runner receives commands from its command channel
+   - It processes incoming SIP messages and timer events
+   - It manages state transitions and executes state-specific logic
+
+### Timers and Retransmissions
+
+The library handles RFC 3261 timers automatically:
+
+1. **Timer Factory**: Creates timers with appropriate intervals based on configuration
+2. **Timer Registration**: Each transaction registers its timers with the timer manager
+3. **Timer Events**: When timers expire, events are sent to the transaction's command channel
+4. **Automatic Retransmissions**: Transactions automatically retransmit requests according to RFC 3261
+
+### Handling Special Cases
+
+The system provides specialized handling for certain SIP methods:
+
+1. **CANCEL Handling**: 
+   - Helper functions in `method/cancel.rs` validate and create CANCEL requests
+   - CANCEL can only target INVITE transactions that haven't received a final response
+   - CANCEL requests maintain the same Call-ID, From, To, and Request-URI as the original INVITE
+
+2. **ACK Handling**:
+   - For non-2xx responses: ACK is automatically generated by the transaction layer
+   - For 2xx responses: ACK is treated as a separate transaction created by the dialog layer (TU)
+   - The `create_ack_for_2xx` method helps TUs generate correct ACK requests
+
+3. **UPDATE Support**:
+   - Implements RFC 3311 UPDATE method for session modification without impact on dialog state
+   - Uses non-INVITE transaction type for processing
+
+## Test Suite
+
+The library includes an extensive test suite covering various aspects of RFC 3261 compliance:
+
+- **Real-world scenarios**: Tests for authentication flows, network failure recovery, concurrent transactions, etc.
+- **INVITE transaction tests**: Tests for success and failure flows of INVITE transactions
+- **Non-INVITE transaction tests**: Tests for different non-INVITE methods
+- **CANCEL transaction tests**: Tests for cancellation of pending INVITE transactions
+- **Integration tests**: End-to-end tests of client and server interaction
+
+All tests run serially with comprehensive logging to aid in debugging and understanding the protocol flow.
 
 ## State Machines
 
@@ -167,20 +324,21 @@ manager.send_request(&tx_id).await?;
 // Process events from the events_rx channel
 while let Some(event) = events_rx.recv().await {
     match event {
-        TransactionEvent::ProvisionalResponse { transaction_id, response } => {
-            println!("Received 1xx response: {}", response.status());
+        TransactionEvent::ProvisionalResponse { transaction_id, response, .. } => {
+            println!("Received 1xx response: {}", response.status_code());
         },
-        TransactionEvent::SuccessResponse { transaction_id, response } => {
-            println!("Received 2xx response: {}", response.status());
-            // For INVITE, send ACK for 2xx responses
+        TransactionEvent::SuccessResponse { transaction_id, response, .. } => {
+            println!("Received 2xx response: {}", response.status_code());
+            // For INVITE, handle ACK for 2xx responses at the TU level
             if is_invite {
-                manager.send_2xx_ack(&response).await?;
+                let ack_request = manager.create_ack_for_2xx(&transaction_id, &response).await?;
+                // Send the ACK (typically via a new transport method or direct send)
             }
         },
-        TransactionEvent::FailureResponse { transaction_id, response } => {
-            println!("Received 3xx-6xx response: {}", response.status());
+        TransactionEvent::FailureResponse { transaction_id, response, .. } => {
+            println!("Received 3xx-6xx response: {}", response.status_code());
         },
-        TransactionEvent::TransactionTerminated { transaction_id } => {
+        TransactionEvent::TransactionTerminated { transaction_id, .. } => {
             println!("Transaction terminated: {}", transaction_id);
         },
         // Handle other events
@@ -200,21 +358,40 @@ transport_tx.send(TransportEvent::MessageReceived {
 }).await?;
 
 // Process events to get the transaction ID of the new server transaction
-let event = events_rx.recv().await.unwrap();
-let tx_id = match event {
-    TransactionEvent::NewRequest { transaction_id, request, source } => {
+let tx_id = match events_rx.recv().await.unwrap() {
+    TransactionEvent::NewRequest { transaction_id, request, source, .. } => {
         println!("New request: {}", request.method());
-        transaction_id
+        
+        // Create a server transaction
+        let server_tx = manager.create_server_transaction(
+            request.clone(), 
+            source
+        ).await.expect("Failed to create server transaction");
+        
+        server_tx.id().clone()
     },
     _ => panic!("Expected NewRequest event"),
 };
 
 // Send a response through the transaction
-let response = ResponseBuilder::new(StatusCode::Ok, None)?
+let response = ResponseBuilder::new(StatusCode::Ok, Some("OK"))?
     // Add headers...
     .build();
 
 manager.send_response(&tx_id, response).await?;
+```
+
+### CANCEL Example
+
+```rust
+// To cancel an ongoing INVITE transaction:
+let cancel_tx_id = manager.cancel_invite_transaction(&invite_tx_id).await?;
+
+// The cancel_invite_transaction method handles:
+// 1. Creating the correct CANCEL request
+// 2. Creating a new transaction for the CANCEL
+// 3. Sending the CANCEL request
+// 4. Managing the relationship between the INVITE and CANCEL transactions
 ```
 
 ## Error Handling
@@ -228,20 +405,25 @@ The library provides specific error types for different failure scenarios:
 
 ## Timer Configuration
 
-Transaction timers can be configured through the `TimerConfig` struct:
+Transaction timers can be configured through the `TimerSettings` struct:
 
 ```rust
-let custom_timers = TimerConfig {
+let custom_timers = TimerSettings {
     t1: Duration::from_millis(500),   // Base timer value
     t2: Duration::from_secs(4),       // Max retransmit interval
     transaction_timeout: Duration::from_secs(32),  // Client transaction timeout
-    // Other timer configuration...
+    wait_time_d: Duration::from_secs(32),  // Timer D duration
+    wait_time_h: Duration::from_secs(32),  // Timer H duration
+    wait_time_i: Duration::from_secs(5),   // Timer I duration
+    wait_time_j: Duration::from_secs(32),  // Timer J duration
+    wait_time_k: Duration::from_secs(5),   // Timer K duration
 };
 
 let (manager, events_rx) = TransactionManager::new_with_config(
     transport,
     transport_rx,
-    Some(custom_timers),
+    Some(100),             // Event channel capacity
+    Some(custom_timers),   // Custom timer settings
 ).await?;
 ```
 
@@ -249,6 +431,9 @@ let (manager, events_rx) = TransactionManager::new_with_config(
 
 1. Always process all events from the `events_rx` channel
 2. Properly handle `TransactionTerminated` events to avoid resource leaks
-3. For INVITE transactions, send ACK for 2xx responses outside the transaction
+3. For INVITE transactions, handle ACK for 2xx responses at the dialog layer
 4. Configure appropriate timer values based on network conditions
-5. Implement proper error handling and retries at the application level 
+5. Implement proper error handling and retries at the application level
+6. Use `cleanup_terminated_transactions` periodically for long-running applications
+7. Subscribe to events using the `subscribe()` method when implementing multiple consumers
+8. Verify transaction state with `transaction_state()` before critical operations 

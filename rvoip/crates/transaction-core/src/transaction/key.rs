@@ -141,6 +141,15 @@ impl TransactionKey {
     pub fn is_server(&self) -> bool {
         self.is_server
     }
+
+    /// Returns a new TransactionKey with a different method but the same branch and is_server values
+    pub fn with_method(&self, method: Method) -> Self {
+        Self {
+            branch: self.branch.clone(),
+            method,
+            is_server: self.is_server,
+        }
+    }
 }
 
 /// Provides a human-readable debug representation of the `TransactionKey`.

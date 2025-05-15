@@ -226,152 +226,176 @@ impl AtomicTransactionState {
         }
     }
 
-    /// Validates if a transition from `current_state` to `new_state` is permissible
-    /// for a given `TransactionKind`, according to RFC 3261 state machine rules.
+    /// Validates if a transition from `current_state` to `new_state` is valid
+    /// for the given transaction kind according to the RFC 3261 state machine rules.
     ///
-    /// This function does not change the state; it only checks for validity.
-    /// Note: This always allows transitions to `Terminated` from any state.
-    ///
-    /// # Arguments
-    /// * `current_state`: The state to transition from.
-    /// * `new_state`: The state to transition to.
-    /// * `kind`: The type of transaction (e.g., `InviteClient`, `NonInviteServer`).
-    ///
-    /// # Returns
-    /// - `Ok(())` if the transition is valid.
-    /// - `Err(Error::InvalidStateTransition)` if the transition is not allowed by RFC 3261
-    ///   for the given transaction kind (unless `new_state` is `Terminated`).
+    /// Returns `Ok(())` if the transition is valid, or `Err(String)` with an error message if invalid.
     pub fn validate_transition(
+        tx_kind: TransactionKind,
         current_state: TransactionState,
         new_state: TransactionState,
-        kind: TransactionKind,
-    ) -> Result<()> {
-        // Return early if the transition is to the same state.
+    ) -> std::result::Result<(), String> {
         if current_state == new_state {
+            // Always allow transitioning to the same state (no-op)
             return Ok(());
         }
 
-        // Always allow transition to Terminated from any state
+        // Always allow transitions to Terminated from any state for all transaction kinds
         if new_state == TransactionState::Terminated {
             return Ok(());
         }
-
-        match kind {
+        
+        match tx_kind {
             TransactionKind::InviteClient => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Calling) => Ok(()),
-                    (TransactionState::Calling, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Calling, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
+                match current_state {
+                    TransactionState::Initial => {
+                        // Initial state can transition to Calling or Terminated
+                        if new_state == TransactionState::Calling {
+                            return Ok(());
+                        }
+                    },
+                    TransactionState::Calling => {
+                        // Calling can transition to Proceeding, Completed, or Terminated
+                        match new_state {
+                            TransactionState::Proceeding | 
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Proceeding => {
+                        // Proceeding can transition to Completed or Terminated
+                        match new_state {
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Completed => {
+                        // Completed can only transition to Terminated
+                        // Handled above
+                    },
+                    TransactionState::Terminated => {
+                        // Terminated is a final state, cannot transition further
+                        return Err("Cannot transition from Terminated state".to_string());
+                    },
+                    // States that don't apply to this transaction kind
+                    _ => {},
                 }
             },
             TransactionKind::NonInviteClient => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
-                }
-            },
-            TransactionKind::CancelClient => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
-                }
-            },
-            TransactionKind::UpdateClient => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
+                match current_state {
+                    TransactionState::Initial => {
+                        // Initial state can transition to Trying or Terminated
+                        if new_state == TransactionState::Trying {
+                            return Ok(());
+                        }
+                    },
+                    TransactionState::Trying => {
+                        // Trying can transition to Proceeding, Completed, or Terminated
+                        match new_state {
+                            TransactionState::Proceeding | 
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Proceeding => {
+                        // Proceeding can transition to Completed or Terminated
+                        match new_state {
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Completed => {
+                        // Completed can only transition to Terminated
+                        // Handled above
+                    },
+                    TransactionState::Terminated => {
+                        // Terminated is a final state, cannot transition further
+                        return Err("Cannot transition from Terminated state".to_string());
+                    },
+                    // States that don't apply to this transaction kind
+                    _ => {},
                 }
             },
             TransactionKind::InviteServer => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Proceeding) => Ok(()), 
-                    (TransactionState::Initial, TransactionState::Completed) => Ok(()), 
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Completed, TransactionState::Confirmed) => Ok(()), 
-                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
+                match current_state {
+                    TransactionState::Initial => {
+                        // Initial state can transition to Proceeding, Completed, or Terminated
+                        match new_state {
+                            TransactionState::Proceeding |
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Proceeding => {
+                        // Proceeding can transition to Completed, Confirmed, or Terminated
+                        match new_state {
+                            TransactionState::Completed | 
+                            TransactionState::Confirmed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Completed => {
+                        // Completed can transition to Confirmed or Terminated
+                        match new_state {
+                            TransactionState::Confirmed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Confirmed => {
+                        // Confirmed can only transition to Terminated
+                        // Handled above
+                    },
+                    TransactionState::Terminated => {
+                        // Terminated is a final state, cannot transition further
+                        return Err("Cannot transition from Terminated state".to_string());
+                    },
+                    // States that don't apply to this transaction kind
+                    _ => {},
                 }
             },
             TransactionKind::NonInviteServer => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
-                }
-            },
-            TransactionKind::CancelServer => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
-                }
-            },
-            TransactionKind::UpdateServer => {
-                match (current_state, new_state) {
-                    (TransactionState::Initial, TransactionState::Trying) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Proceeding) => Ok(()),
-                    (TransactionState::Trying, TransactionState::Completed) => Ok(()),
-                    (TransactionState::Proceeding, TransactionState::Completed) => Ok(()),
-                    (_, TransactionState::Terminated) => Ok(()),  // Any state can transition to Terminated
-                    _ => Err(Error::invalid_state_transition(
-                        kind,
-                        current_state,
-                        new_state,
-                        None,
-                    )),
+                match current_state {
+                    TransactionState::Initial => {
+                        // Initial state can transition to Trying, Proceeding, or Terminated
+                        match new_state {
+                            TransactionState::Trying | 
+                            TransactionState::Proceeding => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Trying => {
+                        // Trying can transition to Proceeding, Completed, or Terminated
+                        match new_state {
+                            TransactionState::Proceeding | 
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Proceeding => {
+                        // Proceeding can transition to Completed or Terminated
+                        match new_state {
+                            TransactionState::Completed => return Ok(()),
+                            _ => {},
+                        }
+                    },
+                    TransactionState::Completed => {
+                        // Completed can only transition to Terminated
+                        // Handled above
+                    },
+                    TransactionState::Terminated => {
+                        // Terminated is a final state, cannot transition further
+                        return Err("Cannot transition from Terminated state".to_string());
+                    },
+                    // States that don't apply to this transaction kind
+                    _ => {},
                 }
             },
         }
+        
+        Err(format!(
+            "Invalid transition for {:?}: {:?} -> {:?}", 
+            tx_kind, current_state, new_state
+        ))
     }
 }
 
@@ -487,14 +511,14 @@ mod tests {
     // Helper macro for terser validation tests
     macro_rules! assert_valid_transition {
         ($kind:expr, $from:expr, $to:expr) => {
-            assert!(AtomicTransactionState::validate_transition($from, $to, $kind).is_ok(),
+            assert!(AtomicTransactionState::validate_transition($kind, $from, $to).is_ok(),
                     "Expected valid transition for {:?} from {:?} to {:?}", $kind, $from, $to);
         };
     }
 
     macro_rules! assert_invalid_transition {
         ($kind:expr, $from:expr, $to:expr) => {
-            assert!(AtomicTransactionState::validate_transition($from, $to, $kind).is_err(),
+            assert!(AtomicTransactionState::validate_transition($kind, $from, $to).is_err(),
                     "Expected invalid transition for {:?} from {:?} to {:?}", $kind, $from, $to);
         };
     }

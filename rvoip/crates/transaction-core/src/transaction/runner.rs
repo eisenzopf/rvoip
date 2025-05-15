@@ -25,21 +25,32 @@ where
     L: TransactionLogic<D, TH> + Send + Sync + 'static,
 {
     let mut timer_handles = TH::default();
+    let tx_id = data.as_ref_key().clone();
 
-    debug!(id = %data.as_ref_key().branch, "Generic transaction loop starting. Initial state: {:?}", data.as_ref_state().get());
+    println!("Transaction loop starting for {}", tx_id);
+    println!("Initial state: {:?}", data.as_ref_state().get());
+    debug!(id = %tx_id, "Generic transaction loop starting. Initial state: {:?}", data.as_ref_state().get());
 
     while let Some(command) = cmd_rx.recv().await {
         let current_state = data.as_ref_state().get();
         let tx_id_clone = data.as_ref_key().clone();
 
+        println!("Received command: {:?} for transaction {}", command, tx_id_clone);
+        debug!(id=%tx_id_clone, ?command, "Transaction received command");
+        
         match command {
             InternalTransactionCommand::TransitionTo(requested_new_state) => {
+                println!("Processing TransitionTo({:?}) current state: {:?}", requested_new_state, current_state);
+                debug!(id=%tx_id_clone, current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
+                
                 if current_state == requested_new_state {
+                    println!("Already in requested state, no transition needed: {:?}", current_state);
                     trace!(id=%tx_id_clone, state=?current_state, "Already in requested state, no transition needed.");
                     continue;
                 }
 
-                if let Err(e) = AtomicTransactionState::validate_transition(current_state, requested_new_state, logic.kind()) {
+                if let Err(e) = AtomicTransactionState::validate_transition(logic.kind(), current_state, requested_new_state) {
+                    println!("Invalid state transition: {:?} -> {:?}, error: {}", current_state, requested_new_state, e);
                     error!(id=%tx_id_clone, error=%e, "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
                     let _ = data.get_tu_event_sender().send(TransactionEvent::Error {
                         transaction_id: Some(tx_id_clone.clone()),
@@ -48,15 +59,22 @@ where
                     continue;
                 }
 
+                println!("Valid state transition: {:?} -> {:?}", current_state, requested_new_state);
                 debug!(id=%tx_id_clone, "State transition: {:?} -> {:?}", current_state, requested_new_state);
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 let previous_state = data.as_ref_state().set(requested_new_state);
+                println!("State successfully changed to: {:?}", requested_new_state);
+                debug!(id=%tx_id_clone, "State changed from {:?} to {:?}", previous_state, requested_new_state);
 
-                let _ = data.get_tu_event_sender().send(TransactionEvent::StateChanged {
+                let result = data.get_tu_event_sender().send(TransactionEvent::StateChanged {
                     transaction_id: tx_id_clone.clone(),
                     previous_state,
                     new_state: requested_new_state,
                 }).await;
+                println!("Sent StateChanged event result: {}", if result.is_ok() { "Success" } else { "Failed" });
+                if result.is_err() {
+                    error!(id=%tx_id_clone, "Failed to send StateChanged event");
+                }
 
                 if let Err(e) = logic.on_enter_state(
                     &data,
@@ -134,10 +152,12 @@ where
         }
     }
 
+    let final_state = data.as_ref_state().get();
+    println!("Transaction loop ending for {}. Final state: {:?}", data.as_ref_key(), final_state);
     logic.cancel_all_specific_timers(&mut timer_handles);
-    debug!(id = %data.as_ref_key().branch, "Generic transaction loop ended.");
+    debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
 
-    if data.as_ref_state().get() == TransactionState::Terminated {
+    if final_state == TransactionState::Terminated {
          let _ = data.get_tu_event_sender().send(TransactionEvent::TransactionTerminated {
             transaction_id: data.as_ref_key().clone(),
         }).await;

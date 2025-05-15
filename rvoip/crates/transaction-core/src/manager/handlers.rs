@@ -406,4 +406,221 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
             }
         }
     }
+}
+
+impl TransactionManager {
+    /// Handle an incoming SIP message from the transport layer
+    pub(crate) async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
+        match event {
+            TransportEvent::MessageReceived { message, source, destination } => {
+                debug!("Received message from {}", source);
+                self.handle_message(message, source, destination).await
+            },
+            _ => {
+                // We don't care about other transport events for now
+                Ok(())
+            }
+        }
+    }
+    
+    /// Handle a SIP message
+    async fn handle_message(
+        &self,
+        message: Message,
+        source: SocketAddr,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        match message {
+            Message::Request(request) => {
+                // Special handling for ACK to 2xx responses
+                if request.method() == Method::Ack {
+                    // ACK requests matching a 2xx response are end-to-end and don't have a transaction
+                    return self.handle_ack_request(request, source).await;
+                }
+                
+                self.handle_request(request, source).await
+            },
+            Message::Response(response) => {
+                self.handle_response(response, source).await
+            }
+        }
+    }
+    
+    /// Handle an incoming SIP request
+    async fn handle_request(&self, request: Request, source: SocketAddr) -> Result<()> {
+        // Try to find a matching transaction
+        if let Some(key) = crate::utils::transaction_key_from_message(&Message::Request(request.clone())) {
+            // Check for existing server transaction
+            let server_txs = self.server_transactions.lock().await;
+            if let Some(transaction) = server_txs.get(&key) {
+                let tx = transaction.clone();
+                drop(server_txs);
+                
+                // Process the request in the existing transaction
+                return tx.process_request(request).await;
+            }
+            drop(server_txs);
+        }
+        
+        // No existing transaction found, create a new one
+        let transaction = self.create_server_transaction(request.clone(), source).await?;
+        
+        // Notify the transaction user about the new transaction
+        match transaction.kind() {
+            TransactionKind::InviteServer => {
+                self.events_tx.send(crate::TransactionEvent::InviteRequest {
+                    transaction_id: transaction.id().clone(),
+                    request,
+                    source,
+                }).await.ok();
+            },
+            TransactionKind::NonInviteServer => {
+                // For non-INVITE requests, notify based on the method
+                match request.method() {
+                    Method::Cancel => {
+                        // CANCEL events are handled in create_server_transaction
+                        // to link them with the target INVITE transaction
+                    },
+                    _ => {
+                        self.events_tx.send(crate::TransactionEvent::NonInviteRequest {
+                            transaction_id: transaction.id().clone(),
+                            request,
+                            source,
+                        }).await.ok();
+                    }
+                }
+            },
+            // Client transaction kinds shouldn't occur here, but handle them for completeness
+            TransactionKind::InviteClient | TransactionKind::NonInviteClient => {
+                warn!("Unexpected client transaction kind in handle_request");
+            },
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle an incoming SIP response
+    async fn handle_response(&self, response: Response, source: SocketAddr) -> Result<()> {
+        // Try to find a matching client transaction
+        if let Some(key) = crate::utils::transaction_key_from_message(&Message::Response(response.clone())) {
+            debug!(id=%key, "Found matching transaction for response");
+            
+            // Check that the key is for a client transaction (not is_server)
+            if key.is_server() {
+                // This is a response but the transaction key is for a server - this is a mismatch
+                return Err(Error::Other(format!(
+                    "Received response but matching transaction key {} is for a server transaction", key
+                )));
+            }
+
+            // First try to send directly to the transaction via events_tx
+            let mut client_txs_guard = self.client_transactions.lock().await;
+            let mut processed = false;
+            
+            if client_txs_guard.contains_key(&key) {
+                let transaction = client_txs_guard.remove(&key).unwrap();
+                
+                // Drop the lock so we can do async operations
+                drop(client_txs_guard);
+                
+                // Process the response
+                if let Err(e) = transaction.process_response(response.clone()).await {
+                    warn!(id=%key, error=%e, "Error processing response");
+                } else {
+                    processed = true;
+                }
+                
+                // Put the transaction back
+                let mut client_txs_guard = self.client_transactions.lock().await;
+                client_txs_guard.insert(key.clone(), transaction);
+                drop(client_txs_guard);
+            } else {
+                drop(client_txs_guard);
+            }
+            
+            // If not processed via transaction, still send the event
+            if !processed {
+                debug!(id=%key, "Response matches key but no active transaction found");
+                
+                // Deliver to the transaction user anyway
+                let status = response.status();
+                if key.method() == &Method::Invite && status.is_success() {
+                    // Special handling for 2xx responses to INVITE
+                    self.events_tx.send(crate::TransactionEvent::SuccessResponse {
+                        transaction_id: key,
+                        response,
+                        need_ack: true,
+                        source,
+                    }).await.ok();
+                } else {
+                    // All other responses
+                    self.events_tx.send(crate::TransactionEvent::Response {
+                        transaction_id: key,
+                        response,
+                        source,
+                    }).await.ok();
+                }
+            }
+            
+            return Ok(());
+        }
+        
+        // No transaction match
+        debug!("No matching transaction found for response");
+        
+        // This could be a response for a transaction that has already terminated
+        // or a response forwarded by another SIP entity (for proxy scenarios)
+        // In any case, deliver it to the transaction user
+        self.events_tx.send(crate::TransactionEvent::StrayResponse {
+            response,
+            source,
+        }).await.ok();
+        
+        Ok(())
+    }
+    
+    /// Handle an ACK request
+    async fn handle_ack_request(&self, request: Request, source: SocketAddr) -> Result<()> {
+        // Check if this ACK matches an INVITE server transaction
+        if let Some(key) = crate::utils::transaction_key_from_message(&Message::Request(request.clone())) {
+            // Create a key for the INVITE transaction this ACK might belong to
+            // ACK has its own branch parameter but the To and From tags should match
+            // the INVITE transaction
+            let invite_key = key.with_method(Method::Invite);
+            
+            // Check for an INVITE server transaction
+            let server_txs = self.server_transactions.lock().await;
+            if let Some(transaction) = server_txs.get(&invite_key) {
+                if transaction.state() == TransactionState::Confirmed {
+                    // This is an ACK for a 2xx response, which is end-to-end
+                    // and doesn't have its own transaction
+                    self.events_tx.send(crate::TransactionEvent::AckRequest {
+                        transaction_id: invite_key,
+                        request,
+                        source,
+                    }).await.ok();
+                    
+                    return Ok(());
+                } else {
+                    // This is an ACK for a non-2xx response, process it in the transaction
+                    let tx = transaction.clone();
+                    drop(server_txs);
+                    
+                    return tx.process_request(request).await;
+                }
+            }
+            drop(server_txs);
+        }
+        
+        // No matching INVITE transaction found, this is a stray ACK
+        debug!("No matching INVITE transaction found for ACK request");
+        
+        // Notify the transaction user about the stray ACK
+        self.events_tx.send(crate::TransactionEvent::StrayAckRequest {
+            request,
+            source,
+        }).await.ok();
+        
+        Ok(())
+    }
 } 

@@ -1,10 +1,11 @@
-mod error;
-pub mod transaction;
 pub mod client;
+pub mod error;
 pub mod server;
 pub mod manager;
+pub mod transaction;
 pub mod timer;
 pub mod utils;
+pub mod method;
 
 // Re-export core types
 pub use error::{Error, Result};
@@ -33,7 +34,7 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///    of SIP transactions (INVITE client/server, non-INVITE client/server).
 /// 
 /// 3. **Transaction Matching**: Correctly matching requests and responses to their corresponding transactions
-///    based on SIP headers (Via, CSeq, etc.).
+///    based on SIP headers (Via, CSeq, etc.) according to the rules defined in RFC 3261 Section 17.1.3 and 17.2.3.
 /// 
 /// 4. **Timer Management**: Managing various timers required by the SIP protocol for retransmissions,
 ///    transaction timeouts, and cleanup operations.
@@ -72,6 +73,20 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 /// +--------------------------------------+
 /// ```
 ///
+/// ### Transaction vs. Dialog Layer
+/// 
+/// It's important to understand the separation between the transaction layer and dialog layer in SIP:
+/// 
+/// - **Transaction Layer** (this library): Handles individual request-response exchanges and ensures
+///   reliable message delivery. Transactions are short-lived with well-defined lifecycles.
+/// 
+/// - **Dialog Layer** (implemented in session-core): Maintains long-lived application state across
+///   multiple transactions. Dialogs track the relationship between endpoints using Call-ID, tags,
+///   and sequence numbers.
+/// 
+/// This separation allows the transaction layer to focus solely on message reliability and state management,
+/// while the dialog layer handles higher-level application logic.
+///
 /// ### Relationship to Other Libraries
 /// 
 /// In the RVOIP project, transaction-core interacts with:
@@ -82,6 +97,43 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 /// 
 /// The transaction layer isolates the transport details from higher layers while providing 
 /// transaction state management that higher layers don't need to implement.
+///
+/// #### Transaction Core and Session Core Relationship
+/// 
+/// The `transaction-core` and `session-core` libraries are designed to work together while maintaining
+/// clear separation of concerns:
+/// 
+/// - **transaction-core** handles individual message exchanges with reliability and retransmission
+///   according to RFC 3261 Section 17, ensuring messages are delivered and properly tracked.
+/// 
+/// - **session-core** builds on top of transaction-core to implement dialog management (RFC 3261 Section 12)
+///   and higher-level session concepts like calls and registrations.
+/// 
+/// Typically, an application would:
+/// 
+/// 1. Create a `TransactionManager` from transaction-core
+/// 2. Pass it to a `SessionManager` from session-core 
+/// 3. Work primarily with the SessionManager's higher-level API
+/// 4. Receive events from both layers (transaction events and session events)
+/// 
+/// This layered architecture allows each component to focus on its specific responsibilities
+/// while providing clean integration points between layers.
+///
+/// ## Library Organization
+/// 
+/// The codebase is organized into several modules:
+/// 
+/// - **manager**: Contains the `TransactionManager`, the main entry point for the library
+/// - **client**: Implements client transaction types (INVITE and non-INVITE)
+/// - **server**: Implements server transaction types (INVITE and non-INVITE)
+/// - **transaction**: Defines common transaction traits, states, and events
+/// - **timer**: Implements timer management for retransmissions and timeouts
+/// - **method**: Handles special method-specific behavior (CANCEL, ACK, etc.)
+/// - **utils**: Utility functions for transaction processing
+/// - **error**: Error types and results for the library
+/// 
+/// Most users will primarily interact with the `TransactionManager` class, which provides
+/// the public API for creating and managing transactions.
 ///
 /// ## Key Components
 ///
@@ -101,6 +153,24 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///   * [`TimerManager`]: Manages transaction timers as per RFC 3261
 ///   * [`TimerFactory`]: Creates appropriate timers for different transaction types
 ///   * [`TimerSettings`]: Configures timer durations (T1, T2, etc.)
+///
+/// ## Transaction Matching
+/// 
+/// The transaction layer needs to match incoming messages to the right transaction. According to RFC 3261:
+/// 
+/// - **For Responses**: Matched using the branch parameter, sent-by value in the top Via header, 
+///   and CSeq method.
+/// 
+/// - **For ACK to non-2xx**: Matched to the original INVITE transaction. The branch parameter and other
+///   identifiers remain the same as the INVITE.
+/// 
+/// - **For ACK to 2xx**: Not matched to any transaction - handled by the TU (dialog layer).
+/// 
+/// - **For CANCEL**: Creates a new transaction but matches to an existing INVITE transaction
+///   with the same identifiers (except method).
+/// 
+/// The `TransactionManager` implements these matching rules to route messages to the appropriate
+/// transaction instance.
 ///
 /// ## Usage Examples
 ///
@@ -225,8 +295,29 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///     let tx_id = manager.create_client_transaction(invite_req.clone(), destination_server_addr)
 ///         .await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///     println!("Client transaction created with ID: {}", tx_id);
+///     
+///     // Send the request after creating the transaction
+///     manager.send_request(&tx_id).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///
-///     tokio::time::sleep(Duration::from_millis(50)).await; // Allow manager to send the message
+///     // Allow more time for the transaction manager to send the message
+///     tokio::time::sleep(Duration::from_millis(100)).await;
+///
+///     // Process any state change events before checking messages
+///     tokio::select! {
+///         Some(event) = client_events_rx.recv() => {
+///             match event {
+///                 TransactionEvent::StateChanged { transaction_id, previous_state, new_state } 
+///                     if transaction_id == tx_id => {
+///                     println!("Transaction state changed from {:?} to {:?}", previous_state, new_state);
+///                     // This is the expected StateChanged event, continue with the test
+///                 },
+///                 _ => {} // Ignore other events
+///             }
+///         },
+///         _ = tokio::time::sleep(Duration::from_millis(50)) => {
+///             // Timeout waiting for event, continue anyway
+///         }
+///     }
 ///
 ///     let sent_messages = mock_transport.sent_messages.lock().await;
 ///     assert_eq!(sent_messages.len(), 1, "INVITE should have been sent");
@@ -397,14 +488,22 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///                     println!("Received new INVITE with ID: {} from {}", transaction_id, source);
 ///                     assert_eq!(request.method(), Method::Invite);
 ///                     assert_eq!(source, client_socket_addr);
-///                     received_tx_id = transaction_id;
+///                     
+///                     // Create a server transaction (don't use the transaction_id from NewRequest)
+///                     let server_tx = manager.create_server_transaction(
+///                         request.clone(), 
+///                         source
+///                     ).await.expect("Failed to create server transaction");
+///                     received_tx_id = server_tx.id().clone();
 ///                     original_request_for_response = request;
+///
+///                     // Wait a short time for the transaction to be fully registered
+///                     tokio::time::sleep(Duration::from_millis(50)).await;
 ///
 ///                     let ringing_response = SimpleResponseBuilder::response_from_request(&original_request_for_response, StatusCode::Ringing, Some("Ringing"))
 ///                         .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
 ///                         .build();
 ///
-///                     tokio::time::sleep(Duration::from_millis(10)).await; // Small delay before sending response
 ///                     manager.send_response(&received_tx_id, ringing_response).await
 ///                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///                     println!("Sent 180 Ringing");
@@ -523,7 +622,7 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 /// #               &invite_to_header.address().uri.to_string(),
 /// #               Some(to_tag)
 /// #           )
-/// #           .contact(server_contact_str, None)?
+/// #           .contact(server_contact_str, None)
 /// #           .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
 /// #           .build();
 /// #       Ok(response)
@@ -565,7 +664,8 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 /// #       let ack_request_uri_parsed = Uri::from_str(&ack_request_uri_string)?;
 /// #       let host = ack_request_uri_parsed.host.as_str();
 /// #       let port = ack_request_uri_parsed.port.unwrap_or(5060);
-/// #       let ack_destination: SocketAddr = format!("{}:{}", host, port).parse()?;
+/// #       // Use numeric IP address instead of hostname to avoid parsing issues
+/// #       let ack_destination: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
 /// #
 /// #       Ok((ack_request, ack_destination))
 /// #   }
@@ -599,12 +699,7 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///     ).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///
 ///     let server_uri_str = "sip:ackserver@server.com:5098";
-///     let server_socket_addr: SocketAddr = { 
-///         let uri = Uri::from_str(server_uri_str)?;
-///         let host = uri.host.as_str(); 
-///         let port = uri.port.unwrap_or(5060); 
-///         format!("{}:{}", host, port).parse()?
-///     };
+///     let server_socket_addr: SocketAddr = "127.0.0.1:5098".parse()?;  // Use direct IP address instead of parsing from URI
 ///
 ///     let invite_request = build_invite_for_ack_test(client_addr_str, server_uri_str)?;
 ///
@@ -612,6 +707,27 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///         .await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 ///     println!("Client INVITE for ACK test created: {}", tx_id);
 /// 
+///     // Explicitly send the request (don't just wait)
+///     manager.send_request(&tx_id).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+///     
+///     // Wait for state change events first, to avoid the "Unexpected event" error
+///     let mut state_changed_received = false;
+///     while !state_changed_received {
+///         tokio::select! {
+///             Some(event) = client_events_rx.recv() => {
+///                 match event {
+///                     TransactionEvent::StateChanged { .. } => {
+///                         state_changed_received = true;
+///                     },
+///                     _ => {}
+///                 }
+///             },
+///             _ = tokio::time::sleep(Duration::from_millis(100)) => {
+///                 break;
+///             }
+///         }
+///     }
+///     
 ///     tokio::time::sleep(Duration::from_millis(50)).await; // Allow manager to send INVITE
 ///
 ///     let server_contact_str = format!("sip:contact@{}", server_socket_addr);
@@ -623,28 +739,41 @@ pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 ///         destination: mock_transport.local_addr()?,
 ///     }).await?;
 ///
-///     tokio::select! {
-///         Some(event) = client_events_rx.recv() => {
-///             match event {
-///                 TransactionEvent::SuccessResponse { transaction_id, response, .. } if transaction_id == tx_id => {
-///                     println!("Received Success Response: {} {}", response.status_code(), response.reason_phrase());
-///                     assert!(StatusCode::from_u16(response.status_code())?.is_success());
-///
-///                     let (ack_request, ack_destination) = create_ack_for_2xx_invite(
-///                         &response,
-///                         &invite_request,
-///                         client_addr_str
-///                     ).await?;
-///
-///                     println!("TU sending ACK to {} for 2xx INVITE response", ack_destination);
-///                     mock_transport.send_message(SipMessage::Request(ack_request), ack_destination).await?;
-///
-///                 },
-///                 other_event => return Err(format!("Unexpected event: {:?}, expected SuccessResponse", other_event).into()),
+///     // Wait for the SuccessResponse event with a timeout
+///     let success_response = tokio::time::timeout(
+///         Duration::from_secs(1),
+///         async {
+///             loop {
+///                 if let Some(event) = client_events_rx.recv().await {
+///                     match event {
+///                         TransactionEvent::SuccessResponse { transaction_id, response, .. } 
+///                             if transaction_id == tx_id => {
+///                             return Ok::<_, Box<dyn std::error::Error>>(response);
+///                         },
+///                         other => {
+///                             println!("Ignoring event while waiting for SuccessResponse: {:?}", other);
+///                         }
+///                     }
+///                 } else {
+///                     return Err::<_, Box<dyn std::error::Error>>("Event channel closed".into());
+///                 }
 ///             }
-///         },
-///         _ = tokio::time::sleep(Duration::from_secs(2)) => return Err("Timeout waiting for SuccessResponse".into()),
-///     }
+///         }
+///     ).await.map_err(|_| "Timeout waiting for SuccessResponse")??;
+///
+///     println!("Received Success Response: {} {}", 
+///              success_response.status_code(), 
+///              success_response.reason_phrase());
+///     assert!(StatusCode::from_u16(success_response.status_code())?.is_success());
+///
+///     let (ack_request, ack_destination) = create_ack_for_2xx_invite(
+///         &success_response,
+///         &invite_request,
+///         client_addr_str
+///     ).await?;
+///
+///     println!("TU sending ACK to {} for 2xx INVITE response", ack_destination);
+///     mock_transport.send_message(SipMessage::Request(ack_request), ack_destination).await?;
 ///
 ///     tokio::time::sleep(Duration::from_millis(100)).await;
 ///     let sent_messages = mock_transport.sent_messages.lock().await;
@@ -805,10 +934,10 @@ mod tests {
         assert_ne!(completed, terminated);
         
         // Verify some valid transitions for InviteClient
-        assert!(AtomicTransactionState::validate_transition(initial, calling, TransactionKind::InviteClient).is_ok());
-        assert!(AtomicTransactionState::validate_transition(calling, proceeding, TransactionKind::InviteClient).is_ok());
-        assert!(AtomicTransactionState::validate_transition(proceeding, completed, TransactionKind::InviteClient).is_ok());
-        assert!(AtomicTransactionState::validate_transition(completed, terminated, TransactionKind::InviteClient).is_ok());
+        assert!(AtomicTransactionState::validate_transition(TransactionKind::InviteClient, initial, calling).is_ok());
+        assert!(AtomicTransactionState::validate_transition(TransactionKind::InviteClient, calling, proceeding).is_ok());
+        assert!(AtomicTransactionState::validate_transition(TransactionKind::InviteClient, proceeding, completed).is_ok());
+        assert!(AtomicTransactionState::validate_transition(TransactionKind::InviteClient, completed, terminated).is_ok());
     }
 
     #[tokio::test]

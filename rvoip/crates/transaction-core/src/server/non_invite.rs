@@ -449,6 +449,14 @@ impl ServerTransaction for ServerNonInviteTransaction {
             Ok(())
         })
     }
+
+    // Add the required last_response implementation for ServerTransaction
+    fn last_response(&self) -> Option<Response> {
+        // Return the last response from the last_response field
+        // We use try_lock() instead of lock() to avoid blocking
+        // If the lock is already held, we return None
+        self.data.last_response.try_lock().ok()?.clone()
+    }
 }
 
 #[cfg(test)]

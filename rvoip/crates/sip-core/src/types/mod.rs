@@ -401,6 +401,7 @@ pub use auth::*;
 pub use call_id::CallId;
 pub use call_info::{CallInfo, CallInfoValue, InfoPurpose};
 pub use contact::Contact;
+pub use contact::ContactParamInfo;
 pub use content_disposition::*;
 pub use content_length::ContentLength;
 pub use content_type::ContentType;

@@ -67,6 +67,10 @@ pub enum TransactionEvent {
         transaction_id: TransactionKey,
         /// The successful final response message (e.g., "200 OK").
         response: Response,
+        /// Flag indicating whether an ACK is needed for this response (true for 2xx to INVITE)
+        need_ack: bool,
+        /// The network address from which the response was received.
+        source: SocketAddr,
     },
     /// A failure final (3xx, 4xx, 5xx, 6xx) response was received for an active client transaction.
     ///
@@ -87,6 +91,8 @@ pub enum TransactionEvent {
         transaction_id: TransactionKey,
         /// The SIP response message.
         response: Response,
+        /// The network address from which the response was received.
+        source: SocketAddr,
     },
 
     // --- Response Sending (Informational events, primarily for Server Transactions) ---
@@ -232,6 +238,60 @@ pub enum TransactionEvent {
         /// A string identifying the specific timer that fired (e.g., "A", "B", "Timer_F", "Timer_G").
         timer: String, 
     },
+
+    /// A CANCEL request has been received that matches an active INVITE transaction.
+    /// The TU should attempt to cancel the INVITE request's processing.
+    CancelRequest {
+        /// The unique identifier for the CANCEL server transaction.
+        transaction_id: TransactionKey,
+        /// The transaction ID of the INVITE transaction being canceled.
+        target_transaction_id: TransactionKey,
+        /// The CANCEL request
+        request: Request,
+        /// The network address from which the request was received.
+        source: SocketAddr,
+    },
+    
+    /// An ACK request for a 2xx response has been received.
+    /// Since these ACKs are end-to-end, they don't belong to the transaction,
+    /// but the TU needs to know about them.
+    AckRequest {
+        /// The transaction ID of the original INVITE transaction.
+        transaction_id: TransactionKey,
+        /// The ACK request.
+        request: Request,
+        /// The network address from which the request was received.
+        source: SocketAddr,
+    },
+    
+    /// An INVITE request has been received and a new server transaction has been created.
+    InviteRequest {
+        /// The unique identifier for the newly created INVITE server transaction.
+        transaction_id: TransactionKey,
+        /// The INVITE request.
+        request: Request,
+        /// The network address from which the request was received.
+        source: SocketAddr,
+    },
+    
+    /// A non-INVITE request has been received and a new server transaction has been created.
+    NonInviteRequest {
+        /// The unique identifier for the newly created non-INVITE server transaction.
+        transaction_id: TransactionKey,
+        /// The non-INVITE request.
+        request: Request,
+        /// The network address from which the request was received.
+        source: SocketAddr,
+    },
+    
+    /// An ACK request was received that did not match any active INVITE server transaction.
+    /// This is usually sent directly to the TU since ACKs for 2xx don't have transactions.
+    StrayAckRequest {
+        /// The received ACK request.
+        request: Request,
+        /// The network address from which the ACK was received.
+        source: SocketAddr,
+    },
 }
 
 #[cfg(test)]
@@ -256,6 +316,8 @@ mod tests {
         let event = TransactionEvent::SuccessResponse {
             transaction_id: TransactionKey::new("branch456".to_string(), Method::Invite, false),
             response,
+            need_ack: true,
+            source: "127.0.0.1:5060".parse().unwrap(),
         };
         assert!(matches!(event, TransactionEvent::SuccessResponse { .. }));
     }

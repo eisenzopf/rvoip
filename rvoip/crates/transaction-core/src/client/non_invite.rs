@@ -316,7 +316,8 @@ impl ClientNonInviteLogic {
             response.clone(), 
             current_state, 
             &data.events_tx,
-            false // non-INVITE
+            false, // non-INVITE
+            data.remote_addr
         ).await;
         
         Ok(new_state)
@@ -503,11 +504,15 @@ impl ClientTransaction for ClientNonInviteTransaction {
     fn initiate(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data.clone();
         let kind = self.kind(); // Get kind for the error message
+        let tx_id = self.data.id.clone(); // Get ID for logging
         
         Box::pin(async move {
+            println!("ClientNonInviteTransaction::initiate called for {}", tx_id);
             let current_state = data.state.get();
+            println!("Current state is {:?}", current_state);
             
             if current_state != TransactionState::Initial {
+                println!("Invalid state transition: {:?} -> Trying", current_state);
                 // Corrected Error::invalid_state_transition call
                 return Err(Error::invalid_state_transition(
                     kind, // Pass the correct kind
@@ -517,9 +522,27 @@ impl ClientTransaction for ClientNonInviteTransaction {
                 ));
             }
 
-            data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Trying)).await
-                .map_err(|e| Error::Other(format!("Failed to send command: {}", e)))?;
-            Ok(())
+            println!("Sending TransitionTo(Trying) command for {}", tx_id);
+            match data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Trying)).await {
+                Ok(_) => {
+                    println!("Successfully sent TransitionTo command for {}", tx_id);
+                    // Wait a small amount of time to allow the transaction runner to process the command
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    
+                    // Verify state change
+                    let new_state = data.state.get();
+                    println!("State after sending command: {:?}", new_state);
+                    if new_state != TransactionState::Trying {
+                        println!("WARNING: State didn't change to Trying, still: {:?}", new_state);
+                    }
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    println!("Failed to send command: {}", e);
+                    Err(Error::Other(format!("Failed to send command: {}", e)))
+                }
+            }
         })
     }
 
@@ -541,6 +564,15 @@ impl ClientTransaction for ClientNonInviteTransaction {
         Box::pin(async move {
             let req = request_arc.lock().await;
             Some(req.clone()) // Clone the request out of the Mutex guard
+        })
+    }
+
+    // Add the required last_response implementation for ClientTransaction
+    fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>> {
+        // Create a future that just returns the last response
+        let last_response = self.data.last_response.clone();
+        Box::pin(async move {
+            last_response.lock().await.clone()
         })
     }
 }

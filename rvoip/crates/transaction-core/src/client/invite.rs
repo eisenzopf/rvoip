@@ -344,7 +344,7 @@ impl ClientInviteLogic {
                     return Ok(Some(TransactionState::Proceeding));
                 } else if is_success {
                     // 2xx -> Terminated (RFC 3261 17.1.1.2)
-                    common_logic::send_success_response_event(tx_id, response, &data.events_tx).await;
+                    common_logic::send_success_response_event(tx_id, response, &data.events_tx, data.remote_addr).await;
                     return Ok(Some(TransactionState::Terminated));
                 } else {
                     // 3xx-6xx -> Completed
@@ -365,7 +365,7 @@ impl ClientInviteLogic {
                     return Ok(None); // Stay in Proceeding
                 } else if is_success {
                     // 2xx responses transition directly to Terminated (RFC 3261 17.1.1.2)
-                    common_logic::send_success_response_event(tx_id, response, &data.events_tx).await;
+                    common_logic::send_success_response_event(tx_id, response, &data.events_tx, data.remote_addr).await;
                     return Ok(Some(TransactionState::Terminated));
                 } else {
                     // 3xx-6xx transition to Completed
@@ -542,13 +542,15 @@ impl ClientInviteTransaction {
         events_tx: mpsc::Sender<TransactionEvent>,
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
+        println!("Creating new ClientInviteTransaction: {}", id);
+        
         if request.method() != Method::Invite {
             return Err(Error::Other("Request must be INVITE for INVITE client transaction".to_string()));
         }
 
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(32);
-        
+
         let data = Arc::new(ClientTransactionData {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Initial)),
@@ -557,7 +559,7 @@ impl ClientInviteTransaction {
             remote_addr,
             transport,
             events_tx,
-            cmd_tx: cmd_tx.clone(), // For the transaction itself to send commands to its loop
+            cmd_tx: cmd_tx.clone(),
             event_loop_handle: Arc::new(Mutex::new(None)),
             timer_config: timer_config.clone(),
         });
@@ -569,17 +571,23 @@ impl ClientInviteTransaction {
 
         let data_for_runner = data.clone();
         let logic_for_runner = logic.clone();
-
+        
+        // Create a clone for logging in the spawn function
+        let id_for_logging = id.clone();
+        
         // Spawn the generic event loop runner
         let event_loop_handle = tokio::spawn(async move {
-            // local_cmd_rx is moved into the loop here
+            println!("Starting event loop for INVITE Client transaction: {}", id_for_logging);
             run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
+            println!("Event loop for INVITE Client transaction ended: {}", id_for_logging);
         });
-        
+
         // Store the handle for cleanup
         if let Ok(mut handle_guard) = data.event_loop_handle.try_lock() {
             *handle_guard = Some(event_loop_handle);
         }
+        
+        println!("Created ClientInviteTransaction: {}", id);
         
         Ok(Self { data, logic })
     }
@@ -589,11 +597,15 @@ impl ClientTransaction for ClientInviteTransaction {
     fn initiate(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data.clone();
         let kind = self.kind(); // Get kind for the error message
+        let tx_id = self.data.id.clone(); // Get ID for logging
         
         Box::pin(async move {
+            println!("ClientInviteTransaction::initiate called for {}", tx_id);
             let current_state = data.state.get();
+            println!("Current state is {:?}", current_state);
             
             if current_state != TransactionState::Initial {
+                println!("Invalid state transition: {:?} -> Calling", current_state);
                 return Err(Error::invalid_state_transition(
                     kind,
                     current_state,
@@ -602,9 +614,27 @@ impl ClientTransaction for ClientInviteTransaction {
                 ));
             }
 
-            data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Calling)).await
-                .map_err(|e| Error::Other(format!("Failed to send command: {}", e)))?;
-            Ok(())
+            println!("Sending TransitionTo(Calling) command for {}", tx_id);
+            match data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Calling)).await {
+                Ok(_) => {
+                    println!("Successfully sent TransitionTo command for {}", tx_id);
+                    // Wait a small amount of time to allow the transaction runner to process the command
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    
+                    // Verify state change
+                    let new_state = data.state.get();
+                    println!("State after sending command: {:?}", new_state);
+                    if new_state != TransactionState::Calling {
+                        println!("WARNING: State didn't change to Calling, still: {:?}", new_state);
+                    }
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    println!("Failed to send command: {}", e);
+                    Err(Error::Other(format!("Failed to send command: {}", e)))
+                }
+            }
         })
     }
 
@@ -626,6 +656,15 @@ impl ClientTransaction for ClientInviteTransaction {
         Box::pin(async move {
             let req = request_arc.lock().await;
             Some(req.clone()) // Clone the request out of the Mutex guard
+        })
+    }
+
+    // Add the required last_response implementation for ClientTransaction
+    fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>> {
+        // Create a future that just returns the last response
+        let last_response = self.data.last_response.clone();
+        Box::pin(async move {
+            last_response.lock().await.clone()
         })
     }
 }
