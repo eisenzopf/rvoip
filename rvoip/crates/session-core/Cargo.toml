@@ -20,6 +20,7 @@ rvoip-sip-transport = { path = "../sip-transport" }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"
+futures = "0.3"
 
 # Error handling
 thiserror = { workspace = true }
@@ -30,7 +31,7 @@ bytes = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 dashmap = "5.5"
 parking_lot = "0.12"
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time;
-use rand::{thread_rng, Rng};
+use rand::{rngs::SmallRng, SeedableRng, Rng};
 use rvoip_sip_core::{
     Request, Response, Method, StatusCode, Uri, HeaderName, TypedHeader,
     builder::{SimpleRequestBuilder, SimpleResponseBuilder},
@@ -26,6 +26,9 @@ use rvoip_session_core::{
     make_call, end_call, create_dialog_from_invite
 };
 use uuid::Uuid;
+use std::collections::HashMap;
+use futures::future::{join_all, try_join_all};
+use tokio::task::JoinHandle;
 
 // Mock transport implementation for benchmarking
 #[derive(Clone, Debug)]
@@ -96,35 +99,54 @@ fn create_test_response(request: &Request, status: StatusCode, with_to_tag: bool
     builder.build()
 }
 
+// Session and its associated transaction data
+struct SessionData {
+    session: Arc<Session>,
+    transaction_id: Option<TransactionKey>,
+    request: Option<Request>,
+    dialog_id: Option<DialogId>,
+}
+
 // Send an artificial transaction event
 async fn send_artificial_transaction_event(
     tx: &mpsc::Sender<TransactionEvent>,
     transaction_id: TransactionKey,
     request: Request,
     status: StatusCode,
-) -> Result<(), mpsc::error::SendError<TransactionEvent>> {
+) -> Result<Response, mpsc::error::SendError<TransactionEvent>> {
     let response = create_test_response(&request, status, true);
     
     let event = if status.is_success() {
         TransactionEvent::SuccessResponse {
             transaction_id,
-            response,
+            response: response.clone(),
             source: "127.0.0.1:5060".parse().unwrap(),
             need_ack: status == StatusCode::Ok && request.method() == Method::Invite,
         }
     } else if status.is_provisional() {
         TransactionEvent::ProvisionalResponse {
             transaction_id,
-            response,
+            response: response.clone(),
         }
     } else {
         TransactionEvent::FailureResponse {
             transaction_id,
-            response,
+            response: response.clone(),
         }
     };
     
-    tx.send(event).await
+    // Send without blocking if possible
+    match tx.try_send(event) {
+        Ok(_) => Ok(response),
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            // Fall back to blocking send if channel is full
+            tx.send(event).await?;
+            Ok(response)
+        },
+        Err(mpsc::error::TrySendError::Closed(event)) => {
+            Err(mpsc::error::SendError(event))
+        }
+    }
 }
 
 // Benchmark configuration
@@ -143,6 +165,9 @@ struct BenchmarkConfig {
     
     // Time between cleanup operations
     cleanup_interval: Duration,
+
+    // Maximum concurrent operations
+    max_concurrency: usize,
 }
 
 impl Default for BenchmarkConfig {
@@ -153,6 +178,7 @@ impl Default for BenchmarkConfig {
             max_dialogs_per_session: 3,
             termination_percentage: 30,
             cleanup_interval: Duration::from_secs(5),
+            max_concurrency: 500,
         }
     }
 }
@@ -257,17 +283,16 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
     
     // Create a transport and transaction manager
     let transport = Arc::new(BenchmarkTransport::new());
-    let (transport_tx, transport_rx) = mpsc::channel::<rvoip_sip_transport::TransportEvent>(1000);
-    let (transaction_manager, event_rx) = TransactionManager::new(transport.clone(), transport_rx, Some(100)).await.unwrap();
+    let (transport_tx, transport_rx) = mpsc::channel::<rvoip_sip_transport::TransportEvent>(config.session_count * 2);
+    let (transaction_manager, event_rx) = TransactionManager::new(transport.clone(), transport_rx, Some(config.session_count)).await.unwrap();
     let transaction_manager = Arc::new(transaction_manager);
 
     // Create a transaction event channel that the transaction manager will use
-    let (tx, mut rx) = mpsc::channel::<rvoip_transaction_core::TransactionEvent>(1000);
-
+    let (tx, mut rx) = mpsc::channel::<rvoip_transaction_core::TransactionEvent>(config.session_count * 2);
+    
     // Create a task to forward events to the transaction manager's event subscribers
     let tx_clone = tx.clone();
     tokio::spawn(async move {
-        let mut event_rx = event_rx;
         while let Some(event) = rx.recv().await {
             // Forward to any existing subscribers
             if let Err(e) = tx_clone.send(event).await {
@@ -275,15 +300,17 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
             }
         }
     });
+    
+    // Create an event bus with larger capacity
+    let event_bus = EventBus::new(config.session_count * 2);
 
-    // Create an event bus
-    let event_bus = EventBus::new(1000);
+    // Track dialog creations with a counter
+    let dialog_counter = Arc::new(tokio::sync::Mutex::new(0));
+    let dialog_counter_clone = dialog_counter.clone();
 
     // Add an event handler to track dialog creations
-    let metrics_for_events = Arc::new(tokio::sync::Mutex::new(BenchmarkMetrics::default()));
-    let metrics_for_events_clone = metrics_for_events.clone();
-
     struct DialogTrackingHandler {
+        counter: Arc<tokio::sync::Mutex<usize>>,
         metrics: Arc<tokio::sync::Mutex<BenchmarkMetrics>>,
     }
 
@@ -292,19 +319,24 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
         async fn handle_event(&self, event: SessionEvent) {
             match event {
                 SessionEvent::DialogUpdated { session_id: _, dialog_id: _ } => {
+                    // Record that a dialog was created/updated
+                    let mut counter = self.counter.lock().await;
+                    *counter += 1;
+
                     let start = Instant::now();
-                    // Record the dialog creation
+                    // Record metrics
                     let mut metrics = self.metrics.lock().await;
-                    metrics.dialog_creation_count += 1;
-                    metrics.dialog_creation_total_ns += start.elapsed().as_nanos() as u64;
+                    metrics.record_dialog_creation(start.elapsed());
                 },
                 _ => {}
             }
         }
     }
 
+    let metrics_for_events = Arc::new(tokio::sync::Mutex::new(BenchmarkMetrics::default()));
     let event_handler = Arc::new(DialogTrackingHandler {
-        metrics: metrics_for_events_clone,
+        counter: dialog_counter_clone,
+        metrics: metrics_for_events.clone(),
     });
     event_bus.register_handler(event_handler).await;
     
@@ -327,38 +359,76 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
     // Start the session manager
     let _ = session_manager.start().await;
     
-    // Store active sessions and their associated transactions
-    let mut active_sessions = Vec::with_capacity(config.session_count);
-    let mut active_transactions = Vec::new();
+    // Store active session data
+    let active_sessions = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(config.session_count)));
     
     // Start timestamp
     let start_time = Instant::now();
     
-    // Create initial sessions
-    println!("Creating {} sessions...", config.session_count);
-    for _ in 0..config.session_count {
-        let creation_start = Instant::now();
+    // Create semaphore for controlling concurrency
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
+    
+    // Create initial sessions in parallel
+    println!("Creating {} sessions concurrently...", config.session_count);
+    
+    let session_manager_clone = session_manager.clone();
+    let active_sessions_clone = active_sessions.clone();
+    let metrics_arc = Arc::new(tokio::sync::Mutex::new(metrics));
+    
+    let mut session_tasks = Vec::with_capacity(config.session_count);
+    
+    for i in 0..config.session_count {
+        let session_manager = session_manager_clone.clone();
+        let active_sessions = active_sessions_clone.clone();
+        let metrics = metrics_arc.clone();
+        let semaphore = semaphore.clone();
         
-        // Create a destination URI for the call
-        let destination = Uri::sip(&format!("bench-user-{}@example.com", Uuid::new_v4().as_simple()));
-        
-        // Use make_call helper instead of direct session creation
-        let session = match make_call(&session_manager, destination).await {
-            Ok(s) => s,
-            Err(_) => {
-                metrics.record_error();
-                continue;
+        let task = tokio::spawn(async move {
+            // Acquire semaphore permit
+            let _permit = semaphore.acquire().await.unwrap();
+            
+            let creation_start = Instant::now();
+            
+            // Create a destination URI for the call
+            let destination = Uri::sip(&format!("bench-user-{}-{}", i, Uuid::new_v4().as_simple()));
+            
+            // Use make_call helper
+            match make_call(&session_manager, destination).await {
+                Ok(session) => {
+                    // Record metrics
+                    metrics.lock().await.record_session_creation(creation_start.elapsed());
+                    
+                    // Store session data
+                    let session_data = SessionData {
+                        session,
+                        transaction_id: None,
+                        request: None,
+                        dialog_id: None,
+                    };
+                    
+                    // Add to active sessions
+                    active_sessions.lock().await.push(session_data);
+                    
+                    true
+                },
+                Err(_) => {
+                    metrics.lock().await.record_error();
+                    false
+                }
             }
-        };
-        metrics.record_session_creation(creation_start.elapsed());
+        });
         
-        // The helper already sets the state to Dialing, so we don't need to do it again
-        active_sessions.push(session);
+        session_tasks.push(task);
     }
+    
+    // Wait for all session creation tasks to complete
+    let results = join_all(session_tasks).await;
+    let successful_sessions = results.iter().filter(|r| r.as_ref().map_or(false, |&x| x)).count();
+    
+    println!("Created {} sessions successfully.", successful_sessions);
     
     // Set up periodic cleanup
     let session_manager_clone = session_manager.clone();
-    let metrics_arc = Arc::new(tokio::sync::Mutex::new(metrics));
     let metrics_cleanup_clone = metrics_arc.clone();
     
     let cleanup_handle = tokio::spawn(async move {
@@ -378,138 +448,294 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
         }
     });
     
-    // Create random client transactions and state transitions
-    let mut rng = thread_rng();
+    // Create dialogs concurrently for all sessions
+    println!("Creating dialogs concurrently for all sessions...");
     
-    // Main benchmark loop
-    while start_time.elapsed() < config.duration {
-        // Randomly select a session
-        if active_sessions.is_empty() {
-            break;
+    let tx_for_tasks = tx.clone();
+    let session_manager_clone = session_manager.clone();
+    let metrics_clone = metrics_arc.clone();
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
+    
+    let active_sessions_locked = active_sessions.lock().await;
+    let session_count = active_sessions_locked.len();
+    drop(active_sessions_locked); // Release the lock
+    
+    let mut dialog_tasks = Vec::with_capacity(session_count);
+    
+    for i in 0..session_count {
+        let tx = tx_for_tasks.clone();
+        let session_manager = session_manager_clone.clone();
+        let active_sessions = active_sessions.clone();
+        let metrics = metrics_clone.clone();
+        let semaphore_clone = semaphore.clone();
+        
+        let dialog_task = tokio::spawn(async move {
+            // Acquire permit to control concurrency
+            let _permit = semaphore_clone.acquire().await.unwrap();
+            
+            // Get the session
+            let mut sessions = active_sessions.lock().await;
+            if i >= sessions.len() {
+                return false;
+            }
+            
+            let session_data = &mut sessions[i];
+            let session = session_data.session.clone();
+            
+            // Release the active_sessions lock early
+            drop(sessions);
+            
+            // Get session ID
+            let session_id = session.id.clone();
+            
+            // Only process session if it's in Initializing or Dialing state
+            let session_state = session.state().await;
+            if session_state != SessionState::Initializing && session_state != SessionState::Dialing {
+                return false;
+            }
+            
+            // Create dialog for this session
+            let call_id = format!("bench-{}", Uuid::new_v4().as_simple());
+            let from_tag = format!("tag-{}", Uuid::new_v4().as_simple());
+            let request = create_test_invite(&call_id, &from_tag);
+            
+            // Create transaction ID
+            let branch = format!("z9hG4bK-{}", Uuid::new_v4().as_simple());
+            let transaction_id = TransactionKey::new(
+                branch,
+                Method::Invite,
+                false // Client transaction
+            );
+            
+            // Associate the transaction with the session
+            let _ = session.track_transaction(transaction_id.clone(), 
+                rvoip_session_core::session::SessionTransactionType::InitialInvite).await;
+            
+            // Send provisional response
+            let response = match send_artificial_transaction_event(
+                &tx,
+                transaction_id.clone(),
+                request.clone(),
+                StatusCode::Ringing
+            ).await {
+                Ok(r) => r,
+                Err(_) => return false,
+            };
+            
+            // Change state to Ringing
+            let transition_start = Instant::now();
+            if let Err(_) = session.set_state(SessionState::Ringing).await {
+                metrics.lock().await.record_error();
+                return false;
+            }
+            metrics.lock().await.record_state_transition(transition_start.elapsed());
+            
+            // Create dialog from the request/response
+            let dialog_creation_start = Instant::now();
+            let dialog_mgr = session_manager.dialog_manager();
+            
+            // Create dialog using the transaction key
+            let dialog_result = dialog_mgr.create_dialog_from_transaction(
+                &transaction_id,
+                &request,
+                &response,
+                true  // We're the initiator (UAC)
+            ).await;
+            
+            if let Some(dialog_id) = dialog_result {
+                // Associate with session
+                if let Err(_) = dialog_mgr.associate_with_session(&dialog_id, &session_id) {
+                    metrics.lock().await.record_error();
+                    return false;
+                }
+                
+                // Record dialog creation metrics
+                metrics.lock().await.record_dialog_creation(dialog_creation_start.elapsed());
+                
+                // Update the session_data with transaction and dialog information
+                let mut sessions = active_sessions.lock().await;
+                if i < sessions.len() {
+                    let session_data = &mut sessions[i];
+                    session_data.transaction_id = Some(transaction_id);
+                    session_data.request = Some(request);
+                    session_data.dialog_id = Some(dialog_id);
+                }
+                
+                return true;
+            } else {
+                metrics.lock().await.record_error();
+                return false;
+            }
+        });
+        
+        dialog_tasks.push(dialog_task);
+    }
+    
+    // Process dialog creation tasks in batches to see progress
+    let batch_size = (1000).min(dialog_tasks.len());
+    let mut remaining_tasks = dialog_tasks;
+    let mut completed_dialogs = 0;
+    let mut batch_num = 0;
+    
+    // Process multiple batches concurrently to improve throughput
+    let max_concurrent_batches = 5;
+    
+    while !remaining_tasks.is_empty() {
+        let mut batch_handles = Vec::new();
+        
+        // Start up to max_concurrent_batches batches
+        for _ in 0..max_concurrent_batches {
+            if remaining_tasks.is_empty() {
+                break;
+            }
+            
+            let (batch, rest) = if remaining_tasks.len() <= batch_size {
+                (remaining_tasks, vec![])
+            } else {
+                let rest = remaining_tasks.split_off(batch_size);
+                (remaining_tasks, rest)
+            };
+            
+            remaining_tasks = rest;
+            batch_num += 1;
+            
+            // Process this batch in a separate task
+            let batch_handle = tokio::spawn(async move {
+                let batch_size = batch.len();
+                let results = join_all(batch).await;
+                let successful = results.iter()
+                    .filter(|r| r.as_ref().map_or(false, |&success| success))
+                    .count();
+                (successful, batch_size)
+            });
+            
+            batch_handles.push(batch_handle);
         }
         
-        let session_idx = rng.gen_range(0..active_sessions.len());
-        let session = active_sessions[session_idx].clone();
+        // Wait for all started batches to complete
+        let batch_results = join_all(batch_handles).await;
         
-        // Random operation based on session state
-        let session_state = session.state().await;
-        
-        match session_state {
-            SessionState::Initializing | SessionState::Dialing => {
-                // Simulate dialog creation with the benchmark
-                let session_id = session.id.clone();
-                let call_id = format!("bench-{}", Uuid::new_v4().as_simple());
-                let from_tag = format!("tag-{}", Uuid::new_v4().as_simple());
-                let request = create_test_invite(&call_id, &from_tag);
-
-                // Create transaction ID
-                let branch = format!("z9hG4bK-{}", Uuid::new_v4().as_simple());
-                let transaction_id = TransactionKey::new(
-                    branch,
-                    Method::Invite,
-                    false // Client transaction
-                );
-
-                // Create a provisional response
-                let response = create_test_response(&request, StatusCode::Ringing, true);
-
-                // Track transaction
-                active_transactions.push((transaction_id.clone(), request.clone()));
-
-                // Associate the transaction with the session
-                let _ = session.track_transaction(transaction_id.clone(), 
-                    rvoip_session_core::session::SessionTransactionType::InitialInvite).await;
-
-                // Create dialog from the request/response
-                let dialog_creation_start = Instant::now();
-                let dialog_mgr = session_manager.dialog_manager();
-
-                // Create dialog using the public API
-                if let Some(dialog_id) = dialog_mgr.create_dialog_from_transaction(
-                    &transaction_id,
-                    &request,
-                    &response,
-                    true
-                ).await {
-                    // Associate with session
-                    dialog_mgr.associate_with_session(&dialog_id, &session_id).unwrap_or_default();
-                    
-                    // Record dialog creation metrics
-                    metrics_arc.lock().await.record_dialog_creation(dialog_creation_start.elapsed());
-                }
-
-                // Send provisional response
-                let _ = send_artificial_transaction_event(
-                    &tx,
-                    transaction_id.clone(),
-                    request.clone(),
-                    StatusCode::Ringing
-                ).await;
-                
-                // Change state to Ringing
-                let transition_start = Instant::now();
-                if let Err(_) = session.set_state(SessionState::Ringing).await {
-                    metrics_arc.lock().await.record_error();
-                } else {
-                    metrics_arc.lock().await.record_state_transition(transition_start.elapsed());
-                }
-                
-                // Add artificial delay
-                time::sleep(Duration::from_millis(rng.gen_range(10..50))).await;
-            },
-            SessionState::Ringing => {
-                // Find a transaction for this session
-                if let Some((transaction_id, request)) = active_transactions.first().cloned() {
-                    // Send success response
-                    let _ = send_artificial_transaction_event(
-                        &tx,
-                        transaction_id.clone(),
-                        request,
-                        StatusCode::Ok
-                    ).await;
-                    
-                    // Change state to Connected
-                    let transition_start = Instant::now();
-                    if let Err(_) = session.set_state(SessionState::Connected).await {
-                        metrics_arc.lock().await.record_error();
-                    } else {
-                        metrics_arc.lock().await.record_state_transition(transition_start.elapsed());
-                    }
-                }
-                
-                // Add artificial delay
-                time::sleep(Duration::from_millis(rng.gen_range(10..50))).await;
-            },
-            SessionState::Connected => {
-                // Decide whether to terminate
-                let should_terminate = rng.gen_range(0..100) < config.termination_percentage;
-                
-                if should_terminate {
-                    // Use end_call helper instead of manual state transitions
-                    let transition_start = Instant::now();
-                    if let Err(_) = end_call(&session).await {
-                        metrics_arc.lock().await.record_error();
-                    } else {
-                        // Record both state transitions at once since end_call makes two transitions
-                        metrics_arc.lock().await.record_state_transition(transition_start.elapsed());
-                        metrics_arc.lock().await.record_state_transition(Duration::from_nanos(0)); // Second transition
-                    }
-                    
-                    // Remove from active sessions
-                    if session_idx < active_sessions.len() {
-                        active_sessions.swap_remove(session_idx);
-                    }
-                }
-                
-                // Add artificial delay
-                time::sleep(Duration::from_millis(rng.gen_range(10..100))).await;
-            },
-            _ => {
-                // For other states, just wait
-                time::sleep(Duration::from_millis(rng.gen_range(10..50))).await;
+        for result in batch_results {
+            if let Ok((successful, total)) = result {
+                completed_dialogs += successful;
+                println!("Batch {}: Created {} of {} dialogs. Total: {} dialogs.", 
+                    batch_num, successful, total, completed_dialogs);
             }
         }
     }
+    
+    println!("Dialog creation complete. Created {} dialogs for {} sessions.", 
+        completed_dialogs, session_count);
+    
+    // Move sessions through their lifecycle concurrently (ringing -> connected -> terminated)
+    println!("Running session lifecycle simulation...");
+    let remaining_time = config.duration.saturating_sub(start_time.elapsed());
+    let end_time = Instant::now() + remaining_time;
+    
+    let active_sessions_clone = active_sessions.clone();
+    let tx_clone = tx.clone();
+    let metrics_clone = metrics_arc.clone();
+    
+    // Create a fixed pool of workers to process sessions
+    let worker_count = config.max_concurrency / 10; // More workers for better concurrency
+    let mut worker_tasks = Vec::with_capacity(worker_count);
+    
+    for worker_id in 0..worker_count {
+        let active_sessions = active_sessions_clone.clone();
+        let tx = tx_clone.clone();
+        let metrics = metrics_clone.clone();
+        let end = end_time;
+        
+        let worker = tokio::spawn(async move {
+            // Use SmallRng which is Send-compatible
+            let mut rng = SmallRng::from_entropy();
+            let mut processed_count = 0;
+            
+            while Instant::now() < end {
+                // Get a random session to process
+                let mut sessions = active_sessions.lock().await;
+                if sessions.is_empty() {
+                    break;
+                }
+                
+                let session_idx = rng.gen_range(0..sessions.len());
+                let session_data = &mut sessions[session_idx];
+                let session = session_data.session.clone();
+                
+                let session_state = session.state().await;
+                let transaction_id = session_data.transaction_id.clone();
+                let request = session_data.request.clone();
+                
+                // Drop lock early
+                drop(sessions);
+                
+                match session_state {
+                    SessionState::Ringing => {
+                        // Use the transaction associated with this session
+                        if let (Some(transaction_id), Some(request)) = (transaction_id, request) {
+                            // Send success response
+                            let _ = send_artificial_transaction_event(
+                                &tx,
+                                transaction_id,
+                                request,
+                                StatusCode::Ok
+                            ).await;
+                            
+                            // Change state to Connected
+                            let transition_start = Instant::now();
+                            if let Err(_) = session.set_state(SessionState::Connected).await {
+                                metrics.lock().await.record_error();
+                            } else {
+                                metrics.lock().await.record_state_transition(transition_start.elapsed());
+                                processed_count += 1;
+                            }
+                        }
+                    },
+                    SessionState::Connected => {
+                        // Decide whether to terminate
+                        let should_terminate = rng.gen_range(0..100) < config.termination_percentage;
+                        
+                        if should_terminate {
+                            // Use end_call helper instead of manual state transitions
+                            let transition_start = Instant::now();
+                            if let Err(_) = end_call(&session).await {
+                                metrics.lock().await.record_error();
+                            } else {
+                                // Record both state transitions at once
+                                metrics.lock().await.record_state_transition(transition_start.elapsed());
+                                metrics.lock().await.record_state_transition(Duration::from_nanos(0));
+                                processed_count += 1;
+                                
+                                // Remove from active sessions
+                                let mut sessions = active_sessions.lock().await;
+                                if session_idx < sessions.len() && sessions[session_idx].session.id == session.id {
+                                    sessions.swap_remove(session_idx);
+                                }
+                            }
+                        }
+                    },
+                    _ => {
+                        // For other states, just continue to next session
+                    }
+                }
+                
+                // Small delay to prevent CPU spinning
+                tokio::task::yield_now().await;
+            }
+            
+            processed_count
+        });
+        
+        worker_tasks.push(worker);
+    }
+    
+    // Wait for all workers to complete
+    let worker_results = join_all(worker_tasks).await;
+    let total_processed = worker_results.iter()
+        .filter_map(|r| r.as_ref().ok())
+        .sum::<usize>();
+    
+    println!("Processed {} state transitions.", total_processed);
     
     // Terminate all sessions
     println!("Terminating all sessions...");
@@ -522,7 +748,10 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
     cleanup_handle.abort();
     let _ = cleanup_handle.await;
 
-    // Retrieve metrics from the Arc - if we can't unwrap it, just lock and clone the data
+    // Get dialog count for reporting
+    let dialog_count = *dialog_counter.lock().await;
+    
+    // Retrieve metrics from the Arc
     let final_metrics = match Arc::try_unwrap(metrics_arc) {
         Ok(mutex) => mutex.into_inner(),
         Err(arc) => {
@@ -532,16 +761,25 @@ async fn run_benchmark(config: BenchmarkConfig) -> BenchmarkMetrics {
         }
     };
 
-    // Merge in dialog metrics
-    let dialog_metrics = match Arc::try_unwrap(metrics_for_events) {
+    // Merge in event metrics
+    let event_metrics = match Arc::try_unwrap(metrics_for_events) {
         Ok(mutex) => mutex.into_inner(),
         Err(arc) => arc.lock().await.clone(),
     };
 
     // Combine the metrics
     let mut combined_metrics = final_metrics;
-    combined_metrics.dialog_creation_count = dialog_metrics.dialog_creation_count;
-    combined_metrics.dialog_creation_total_ns = dialog_metrics.dialog_creation_total_ns;
+    
+    // If event_metrics has more dialog creations, use that count
+    if event_metrics.dialog_creation_count > combined_metrics.dialog_creation_count {
+        combined_metrics.dialog_creation_count = event_metrics.dialog_creation_count;
+        combined_metrics.dialog_creation_total_ns = event_metrics.dialog_creation_total_ns;
+    }
+    
+    // If we have a direct dialog count from the counter, that's most accurate
+    if dialog_count > 0 {
+        combined_metrics.dialog_creation_count = dialog_count;
+    }
 
     combined_metrics
 }
@@ -555,11 +793,12 @@ async fn main() {
     
     // Custom benchmark configuration
     let config = BenchmarkConfig {
-        session_count: 10_000,   // Benchmark with 10,000 concurrent sessions
+        session_count: 10000,   // Benchmark with 10,000 concurrent sessions
         duration: Duration::from_secs(30),
         max_dialogs_per_session: 2,
         termination_percentage: 25,
         cleanup_interval: Duration::from_secs(3),
+        max_concurrency: 10000,   // Increased to full concurrency
     };
     
     // Run the benchmark

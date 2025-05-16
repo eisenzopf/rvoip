@@ -1992,6 +1992,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
+ "futures",
  "parking_lot",
  "rand",
  "rvoip-media-core",
