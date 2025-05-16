@@ -8,5 +8,5 @@ State after send_request: Calling
 Waiting for Calling state
 wait_for_transaction_state result: true
 Final state: Calling
-Received event: StateChanged { transaction_id: z9hG4bK.originalbranchvalue:INVITE:client:INVITE_LIKE, previous_state: Initial, new_state: Calling }
+Received event: StateChanged { transaction_id: z9hG4bK.originalbranchvalue:INVITE:client, previous_state: Initial, new_state: Calling }
 Test completed

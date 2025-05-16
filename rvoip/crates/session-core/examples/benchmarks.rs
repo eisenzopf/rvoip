@@ -15,6 +15,7 @@ use rvoip_sip_core::{
         cseq::CSeq,
         address::Address,
         contact::Contact,
+        via::Via,
     }
 };
 use rvoip_transaction_core::{
@@ -273,11 +274,45 @@ async fn process_session_lifecycle(
     let (uas_transaction_id, received_request) = result;
     println!("Got INVITE on UAS side for session {}: {}", session_idx, uas_transaction_id);
     
+    // IMPORTANT: Fix the transaction ID for use with the UAS transaction manager
+    // The transaction ID from the event might not directly match what the transaction manager expects 
+    // because of how toString/Debug and lookup implementations differ
+    
+    // Create a clean server transaction ID from the components
+    let fixed_transaction_id = {
+        // Let's first try to extract the branch from the transaction_id display representation
+        // Format is usually like: Key(z9hG4bK-xxx:INVITE:server)
+        let tx_str = uas_transaction_id.to_string();
+        
+        // If that fails, we can parse it from the request itself
+        if let Some(via_header) = received_request.typed_header::<Via>() {
+            if let Some(via_value) = via_header.0.first() {
+                if let Some(branch) = via_value.branch() {
+                    // Create a new TransactionKey with the same components
+                    TransactionKey::new(
+                        branch.to_string(), 
+                        Method::Invite, 
+                        true // is_server=true
+                    )
+                } else {
+                    // If we can't get the branch, just use the original
+                    uas_transaction_id.clone()
+                }
+            } else {
+                uas_transaction_id.clone()
+            }
+        } else {
+            uas_transaction_id.clone()
+        }
+    };
+    
+    println!("Using fixed transaction ID for UAS: {}", fixed_transaction_id);
+    
     // Step 3: UAS sends provisional response
     let ringing_response = create_test_response(&received_request, StatusCode::Ringing, true, &uas_transport_addr);
     
-    // Send the response through UAS transaction manager
-    match uas_transaction_manager.send_response(&uas_transaction_id, ringing_response.clone()).await {
+    // Send the response through UAS transaction manager with the fixed ID
+    match uas_transaction_manager.send_response(&fixed_transaction_id, ringing_response.clone()).await {
         Ok(_) => println!("Sent RINGING response for session {}", session_idx),
         Err(e) => {
             println!("Failed to send RINGING response: {:?}", e);
@@ -350,7 +385,7 @@ async fn process_session_lifecycle(
     let ok_response = create_test_response(&received_request, StatusCode::Ok, true, &uas_transport_addr);
     
     // Send the OK response through UAS transaction manager
-    match uas_transaction_manager.send_response(&uas_transaction_id, ok_response.clone()).await {
+    match uas_transaction_manager.send_response(&fixed_transaction_id, ok_response.clone()).await {
         Ok(_) => println!("Sent 200 OK for session {}", session_idx),
         Err(e) => {
             println!("Failed to send 200 OK response: {:?}", e);

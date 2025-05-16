@@ -32,6 +32,7 @@
 use std::fmt;
 // use std::net::SocketAddr; // This import seems unused in this file. Commenting out.
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 
 use rvoip_sip_core::prelude::*;
 // Removed: use rvoip_sip_core::common::Branch;
@@ -223,7 +224,7 @@ impl TransactionKey {
 impl fmt::Debug for TransactionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let side = if self.is_server { "server" } else { "client" };
-        write!(f, "{}:{}:{}:{}", self.branch, self.method, side, if self.method == Method::Invite || self.method == Method::Ack { "INVITE_LIKE"} else {"NON_INVITE_LIKE"} )
+        write!(f, "{}:{}:{}", self.branch, self.method, side)
     }
 }
 
@@ -267,6 +268,64 @@ impl Hash for TransactionKey {
 /// than `TransactionKey`.
 pub type TransactionId = TransactionKey;
 
+/// Implements the FromStr trait for TransactionKey to allow parsing from strings.
+/// This handles both display and debug format strings.
+///
+/// # Format
+/// The accepted formats are:
+/// - "branch:METHOD:side" (Debug format)
+/// - "Key(branch:METHOD:side)" (Display format)
+///
+/// Where side is "server" or "client"
+impl FromStr for TransactionKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // Handle both Display format "Key(branch:METHOD:side)" and Debug format "branch:METHOD:side"
+        let parts_str = if s.starts_with("Key(") && s.ends_with(")") {
+            // Display format - extract content between "Key(" and ")"
+            &s[4..s.len()-1]
+        } else {
+            // Debug format or already stripped
+            s
+        };
+        
+        // Remove any potential :INVITE_LIKE or :NON_INVITE_LIKE suffix
+        let parts_str = if parts_str.ends_with(":INVITE_LIKE") || parts_str.ends_with(":NON_INVITE_LIKE") {
+            // Find the last colon before the suffix
+            if let Some(idx) = parts_str.rfind(':') {
+                if let Some(prev_idx) = parts_str[..idx].rfind(':') {
+                    &parts_str[..prev_idx+idx-prev_idx]
+                } else {
+                    parts_str
+                }
+            } else {
+                parts_str
+            }
+        } else {
+            parts_str
+        };
+
+        // Split by colons
+        let parts: Vec<&str> = parts_str.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!("Invalid transaction key format: {}, expected branch:METHOD:side", s));
+        }
+
+        let branch = parts[0].to_string();
+        let method = match Method::from_str(parts[1]) {
+            Ok(m) => m,
+            Err(_) => return Err(format!("Invalid method: {}", parts[1])),
+        };
+        let is_server = match parts[2] {
+            "server" => true,
+            "client" => false,
+            _ => return Err(format!("Invalid side: {}, expected 'server' or 'client'", parts[2])),
+        };
+
+        Ok(Self::new(branch, method, is_server))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -437,14 +496,14 @@ mod tests {
         let key_client = TransactionKey::new("z9hG4bKbeta".to_string(), Method::Message, false);
 
         assert_eq!(format!("{}", key_server), "Key(z9hG4bKalpha:INVITE:server)");
-        assert_eq!(format!("{:?}", key_server), "z9hG4bKalpha:INVITE:server:INVITE_LIKE");
+        assert_eq!(format!("{:?}", key_server), "z9hG4bKalpha:INVITE:server");
 
         assert_eq!(format!("{}", key_client), "Key(z9hG4bKbeta:MESSAGE:client)");
-        assert_eq!(format!("{:?}", key_client), "z9hG4bKbeta:MESSAGE:client:NON_INVITE_LIKE");
+        assert_eq!(format!("{:?}", key_client), "z9hG4bKbeta:MESSAGE:client");
         
         // Test ACK for INVITE_LIKE in Debug
         let key_ack = TransactionKey::new("z9hG4bKgamma".to_string(), Method::Ack, true); // ACK for server
-        assert_eq!(format!("{:?}", key_ack), "z9hG4bKgamma:ACK:server:INVITE_LIKE");
+        assert_eq!(format!("{:?}", key_ack), "z9hG4bKgamma:ACK:server");
     }
 
     #[test]
@@ -452,5 +511,51 @@ mod tests {
         let key = TransactionKey::new("id_branch".to_string(), Method::Info, true);
         let id: TransactionId = key.clone();
         assert_eq!(key, id);
+    }
+
+    #[test]
+    fn test_transaction_key_from_str() {
+        // Test parsing from Debug format
+        let debug_str = "z9hG4bKalpha:INVITE:server";
+        let key1 = TransactionKey::from_str(debug_str).unwrap();
+        assert_eq!(key1.branch(), "z9hG4bKalpha");
+        assert_eq!(*key1.method(), Method::Invite);
+        assert!(key1.is_server());
+        
+        // Test parsing from Display format
+        let display_str = "Key(z9hG4bKbeta:MESSAGE:client)";
+        let key2 = TransactionKey::from_str(display_str).unwrap();
+        assert_eq!(key2.branch(), "z9hG4bKbeta");
+        assert_eq!(*key2.method(), Method::Message);
+        assert!(!key2.is_server());
+        
+        // Test that the old debug format with INVITE_LIKE suffix is handled
+        let old_debug_str = "z9hG4bKgamma:INVITE:server:INVITE_LIKE";
+        let key3 = TransactionKey::from_str(old_debug_str).unwrap();
+        assert_eq!(key3.branch(), "z9hG4bKgamma");
+        assert_eq!(*key3.method(), Method::Invite);
+        assert!(key3.is_server());
+        
+        // Test with non-INVITE_LIKE suffix
+        let old_debug_str2 = "z9hG4bKdelta:MESSAGE:client:NON_INVITE_LIKE";
+        let key4 = TransactionKey::from_str(old_debug_str2).unwrap();
+        assert_eq!(key4.branch(), "z9hG4bKdelta");
+        assert_eq!(*key4.method(), Method::Message);
+        assert!(!key4.is_server());
+    }
+    
+    #[test]
+    fn test_transaction_key_from_str_error() {
+        // Invalid format - not enough parts
+        let invalid_str = "z9hG4bKalpha:INVITE";
+        assert!(TransactionKey::from_str(invalid_str).is_err());
+        
+        // Empty method - actually invalid
+        let empty_method = "z9hG4bKalpha::server";
+        assert!(TransactionKey::from_str(empty_method).is_err());
+        
+        // Invalid side
+        let invalid_side = "z9hG4bKalpha:INVITE:invalid";
+        assert!(TransactionKey::from_str(invalid_side).is_err());
     }
 } 
