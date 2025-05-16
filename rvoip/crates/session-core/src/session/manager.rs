@@ -239,9 +239,22 @@ impl SessionManager {
         count
     }
     
-    /// Get the dialog manager
-    pub fn dialog_manager(&self) -> Arc<DialogManager> {
-        self.dialog_manager.clone()
+    /// Get a reference to the dialog manager
+    pub fn dialog_manager(&self) -> &Arc<DialogManager> {
+        &self.dialog_manager
+    }
+    
+    /// Get the current number of active sessions
+    pub async fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+    
+    /// Help check if we're below the max session limit
+    async fn can_create_session(&self) -> bool {
+        if let Some(max_sessions) = self.config.max_sessions {
+            return self.sessions.len() < max_sessions;
+        }
+        true
     }
     
     /// Stop the session manager

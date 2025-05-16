@@ -766,6 +766,11 @@ impl DialogManager {
         count
     }
     
+    /// Get the current number of active dialogs
+    pub fn dialog_count(&self) -> usize {
+        self.dialogs.len()
+    }
+    
     // Helper method to find a session associated with a transaction
     fn find_session_for_transaction(&self, transaction_id: &TransactionKey) -> Option<SessionId> {
         // First, look up the dialog ID
