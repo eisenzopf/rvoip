@@ -1,32 +1,44 @@
 //! SIP transport layer implementation for the rvoip stack
 //!
-//! This crate provides the transport layer for SIP messages, including
+//! This crate provides transport implementations for SIP messages, including
 //! UDP, TCP, TLS, and WebSocket transports.
 
+// Re-export modules from the transport directory
 pub mod transport;
 pub mod error;
-pub mod udp;
-pub mod tls;
+pub mod factory;
+pub mod manager;
 
+// Internal modules
+#[cfg(test)]
+mod tests;
+
+// Re-export commonly used types and functions
 pub use transport::{Transport, TransportEvent};
 pub use error::{Error, Result};
-pub use udp::UdpTransport;
-pub use tls::TlsTransport;
+pub use transport::udp::UdpTransport;
+pub use transport::tcp::TcpTransport;
+pub use transport::tls::TlsTransport;
+pub use transport::ws::WebSocketTransport;
 
-/// Simplified bind function for UdpTransport
+// Simplified helper functions
+/// Bind a UDP transport to the specified address
 pub async fn bind_udp(addr: std::net::SocketAddr) -> Result<(UdpTransport, tokio::sync::mpsc::Receiver<TransportEvent>)> {
     UdpTransport::bind(addr, None).await
 }
 
-/// Re-export of common types for easier use
-pub mod prelude {
-    pub use super::{Error, Result, Transport, TransportEvent, UdpTransport, bind_udp};
+/// Bind a TCP transport to the specified address
+pub async fn bind_tcp(addr: std::net::SocketAddr) -> Result<(TcpTransport, tokio::sync::mpsc::Receiver<TransportEvent>)> {
+    TcpTransport::bind(addr, None, None).await
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
+/// Re-export of common types for easier use
+pub mod prelude {
+    pub use crate::{
+        Error, Result, Transport, TransportEvent,
+        UdpTransport, TcpTransport, TlsTransport, WebSocketTransport,
+        bind_udp, bind_tcp,
+        factory::TransportFactory,
+        manager::TransportManager,
+    };
 } 
