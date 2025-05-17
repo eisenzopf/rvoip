@@ -25,6 +25,7 @@ use rvoip_sip_core::types::from::From as FromHeader;
 use rvoip_sip_core::types::to::To as ToHeader;
 use rvoip_sip_core::types::param::Param;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+use rvoip_sip_transport::transport::TransportType;
 
 /// Helper function to create a simple test SDP
 #[cfg(test)]
@@ -1325,6 +1326,280 @@ pub async fn update_codec_preferences(
     })?;
     
     Ok(())
+}
+
+/// Get information about available transport types and capabilities
+///
+/// This function retrieves detailed information about which transport types
+/// are available and their capabilities. This can be used to make decisions
+/// about which transports to use for different SIP requests.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+///
+/// # Returns
+/// Transport capabilities information
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::get_transport_capabilities;
+/// use rvoip_transaction_core::TransactionManager;
+/// use std::sync::Arc;
+///
+/// fn display_transport_info(transaction_manager: &Arc<TransactionManager>) {
+///     let capabilities = get_transport_capabilities(transaction_manager);
+///     println!("Available transports:");
+///     println!("UDP: {}", capabilities.supports_udp);
+///     println!("TCP: {}", capabilities.supports_tcp);
+///     println!("TLS: {}", capabilities.supports_tls);
+///     println!("WS: {}", capabilities.supports_ws);
+///     println!("WSS: {}", capabilities.supports_wss);
+/// }
+/// ```
+pub fn get_transport_capabilities(
+    transaction_manager: &Arc<TransactionManager>
+) -> rvoip_transaction_core::transport::TransportCapabilities {
+    transaction_manager.get_transport_capabilities()
+}
+
+/// Get network information for SDP generation
+///
+/// This function retrieves network information that can be used for generating
+/// SDP offers and answers, such as the local IP address and port ranges.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+///
+/// # Returns
+/// Network information for SDP generation
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::get_network_info_for_sdp;
+/// use rvoip_transaction_core::TransactionManager;
+/// use std::sync::Arc;
+///
+/// fn create_sdp_with_network_info(transaction_manager: &Arc<TransactionManager>) {
+///     let network_info = get_network_info_for_sdp(transaction_manager);
+///     println!("Using local IP: {} for SDP", network_info.local_ip);
+///     println!("RTP port range: {:?}", network_info.rtp_port_range);
+/// }
+/// ```
+pub fn get_network_info_for_sdp(
+    transaction_manager: &Arc<TransactionManager>
+) -> rvoip_transaction_core::transport::NetworkInfoForSdp {
+    transaction_manager.get_network_info_for_sdp()
+}
+
+/// Get detailed information about a specific transport type
+///
+/// This function returns detailed information about a specific transport type,
+/// such as connection status, local address, etc.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+/// * `transport_type` - The transport type to get information about
+///
+/// # Returns
+/// Optional transport information, or None if the transport type is not supported
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::get_transport_info;
+/// use rvoip_transaction_core::{TransactionManager, transport::TransportType};
+/// use std::sync::Arc;
+///
+/// fn check_websocket_status(transaction_manager: &Arc<TransactionManager>) {
+///     if let Some(info) = get_transport_info(transaction_manager, TransportType::Ws) {
+///         println!("WebSocket is connected: {}", info.is_connected);
+///         println!("Active connections: {}", info.connection_count);
+///     } else {
+///         println!("WebSocket transport not supported");
+///     }
+/// }
+/// ```
+pub fn get_transport_info(
+    transaction_manager: &Arc<TransactionManager>,
+    transport_type: rvoip_sip_transport::transport::TransportType
+) -> Option<rvoip_transaction_core::transport::TransportInfo> {
+    transaction_manager.get_transport_info(transport_type)
+}
+
+/// Get the best transport type to use for a given URI
+///
+/// This function analyzes a URI and determines the best transport type to use
+/// based on the URI scheme and available transports.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+/// * `uri` - The URI to analyze
+///
+/// # Returns
+/// The recommended transport type for the URI
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::get_best_transport_for_uri;
+/// use rvoip_transaction_core::TransactionManager;
+/// use rvoip_sip_core::Uri;
+/// use std::sync::Arc;
+///
+/// fn select_transport(transaction_manager: &Arc<TransactionManager>, uri: Uri) {
+///     let transport = get_best_transport_for_uri(transaction_manager, &uri);
+///     println!("Best transport for {}: {}", uri, transport);
+/// }
+/// ```
+pub fn get_best_transport_for_uri(
+    transaction_manager: &Arc<TransactionManager>,
+    uri: &rvoip_sip_core::Uri
+) -> rvoip_sip_transport::transport::TransportType {
+    transaction_manager.get_best_transport_for_uri(uri)
+}
+
+/// Check if WebSocket transport is available and get connection status
+///
+/// This function checks if WebSocket transport is available and returns
+/// detailed information about the current WebSocket connections.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+///
+/// # Returns
+/// Optional WebSocket status, or None if WebSocket is not supported
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::get_websocket_status;
+/// use rvoip_transaction_core::TransactionManager;
+/// use std::sync::Arc;
+///
+/// fn display_websocket_info(transaction_manager: &Arc<TransactionManager>) {
+///     if let Some(status) = get_websocket_status(transaction_manager) {
+///         println!("WS connections: {}", status.ws_connections);
+///         println!("WSS connections: {}", status.wss_connections);
+///         println!("Has active connection: {}", status.has_active_connection);
+///     } else {
+///         println!("WebSocket transport not supported");
+///     }
+/// }
+/// ```
+pub fn get_websocket_status(
+    transaction_manager: &Arc<TransactionManager>
+) -> Option<rvoip_transaction_core::transport::WebSocketStatus> {
+    transaction_manager.get_websocket_status()
+}
+
+/// Create an SDP offer with correct network information from transport layer
+///
+/// This is a convenience function that creates an SDP offer using network
+/// information retrieved from the transport layer via transaction-core.
+///
+/// # Arguments
+/// * `transaction_manager` - Reference to the transaction manager
+/// * `supported_codecs` - List of supported audio codecs
+/// * `session_name` - Optional session name (defaults to "RVOIP Session")
+///
+/// # Returns
+/// A session description with correct network information
+///
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::helpers::create_sdp_offer_with_transport_info;
+/// use rvoip_session_core::media::AudioCodecType;
+/// use rvoip_transaction_core::TransactionManager;
+/// use std::sync::Arc;
+///
+/// async fn create_call_with_sdp(transaction_manager: &Arc<TransactionManager>) {
+///     let codecs = vec![AudioCodecType::PCMU, AudioCodecType::PCMA];
+///     let sdp = create_sdp_offer_with_transport_info(
+///         transaction_manager,
+///         &codecs,
+///         Some("My Call")
+///     );
+///     println!("Created SDP offer with correct network information");
+/// }
+/// ```
+pub fn create_sdp_offer_with_transport_info(
+    transaction_manager: &Arc<TransactionManager>,
+    supported_codecs: &[crate::media::AudioCodecType],
+    session_name: Option<&str>
+) -> crate::sdp::SessionDescription {
+    // Get network information from the transport layer
+    let network_info = transaction_manager.get_network_info_for_sdp();
+    
+    // Create a unique session ID
+    let session_id = uuid::Uuid::new_v4().as_u128().to_string();
+    
+    // Create the origin with network information
+    let origin = rvoip_sip_core::Origin {
+        username: "rvoip".to_string(),
+        sess_id: session_id,
+        sess_version: "1".to_string(),
+        net_type: "IN".to_string(),
+        addr_type: if network_info.local_ip.is_ipv4() { "IP4" } else { "IP6" }.to_string(),
+        unicast_address: network_info.local_ip.to_string(),
+    };
+    
+    // Create a session description with the origin and name
+    let mut sdp = crate::sdp::SessionDescription::new(
+        origin,
+        session_name.unwrap_or("RVOIP Session")
+    );
+    
+    // Add connection information
+    let connection = rvoip_sip_core::ConnectionData {
+        net_type: "IN".to_string(),
+        addr_type: if network_info.local_ip.is_ipv4() { "IP4" } else { "IP6" }.to_string(),
+        connection_address: network_info.local_ip.to_string(),
+        ttl: None,
+        multicast_count: None,
+    };
+    sdp.connection_info = Some(connection);
+    
+    // Add a time description
+    let time = rvoip_sip_core::TimeDescription {
+        start_time: "0".to_string(),
+        stop_time: "0".to_string(),
+        repeat_times: vec![],
+    };
+    sdp.time_descriptions.push(time);
+    
+    // Choose a port from the RTP port range
+    let (min_port, max_port) = network_info.rtp_port_range;
+    let port = min_port + (max_port - min_port) / 2;
+    
+    // Create a media description for audio
+    let mut formats = Vec::new();
+    for codec in supported_codecs {
+        match codec {
+            crate::media::AudioCodecType::PCMU => formats.push("0".to_string()),
+            crate::media::AudioCodecType::PCMA => formats.push("8".to_string()),
+            // Add more codec mappings as needed
+        }
+    }
+    
+    // If no codecs were provided, add default ones
+    if formats.is_empty() {
+        formats.push("0".to_string()); // PCMU
+        formats.push("8".to_string()); // PCMA
+    }
+    
+    // Create the media description
+    let media = rvoip_sip_core::MediaDescription {
+        media: "audio".to_string(),
+        port,
+        protocol: "RTP/AVP".to_string(),
+        formats,
+        ptime: None,
+        direction: Some(rvoip_sip_core::MediaDirection::SendRecv),
+        connection_info: None,
+        generic_attributes: vec![],
+    };
+    
+    // Add the media description to the SDP
+    sdp.media_descriptions.push(media);
+    
+    sdp
 }
 
 #[cfg(test)]

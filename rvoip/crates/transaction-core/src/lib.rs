@@ -19,6 +19,11 @@ pub use client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTran
 pub use server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction, TransactionExt as ServerTransactionExt};
 pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
 pub use transport::TransportManager;
+pub use rvoip_sip_transport::transport::TransportType;
+pub use transport::{
+    TransportCapabilities, TransportInfo, NetworkInfoForSdp, 
+    WebSocketStatus, TransportCapabilitiesExt
+};
 
 /// # SIP Transaction Layer
 /// 
@@ -834,15 +839,14 @@ pub use transport::TransportManager;
 /// use std::time::Duration;
 /// ```
 pub mod prelude {
-    pub use crate::error::{Error, Result};
+    pub use crate::transaction::{TransactionKey, TransactionEvent, TransactionState, TransactionKind};
     pub use crate::manager::TransactionManager;
-    pub use crate::transaction::{
-        Transaction, TransactionAsync, TransactionEvent, TransactionKey, TransactionKind, TransactionState,
-        InternalTransactionCommand,
+    pub use rvoip_sip_transport::transport::TransportType;
+    pub use crate::transport::{
+        TransportCapabilities, TransportInfo,
+        NetworkInfoForSdp, WebSocketStatus, TransportCapabilitiesExt
     };
-    pub use crate::client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, TransactionExt as ClientTransactionExt};
-    pub use crate::server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction, TransactionExt as ServerTransactionExt};
-    pub use crate::timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
+    pub use crate::error::{Error, Result};
 }
 
 #[cfg(test)]

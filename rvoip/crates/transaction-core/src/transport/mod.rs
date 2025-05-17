@@ -11,6 +11,7 @@ use rvoip_sip_transport::{
     TcpTransport, WebSocketTransport,
     error::{Error as TransportError, Result as TransportResult}
 };
+use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 
 use crate::error::{Error, Result};
@@ -395,6 +396,143 @@ impl TransportManager {
         *self.running.lock().await = false;
         
         Ok(())
+    }
+}
+
+/// Information about available transport types and capabilities
+#[derive(Debug, Clone)]
+pub struct TransportCapabilities {
+    /// Whether UDP transport is supported
+    pub supports_udp: bool,
+    /// Whether TCP transport is supported
+    pub supports_tcp: bool,
+    /// Whether TLS transport is supported
+    pub supports_tls: bool,
+    /// Whether WebSocket transport is supported
+    pub supports_ws: bool,
+    /// Whether Secure WebSocket transport is supported
+    pub supports_wss: bool,
+    /// Local address used by the transport
+    pub local_addr: Option<std::net::SocketAddr>,
+    /// Default transport type
+    pub default_transport: TransportType,
+}
+
+/// Detailed information about a specific transport type
+#[derive(Debug, Clone)]
+pub struct TransportInfo {
+    /// Transport type
+    pub transport_type: TransportType,
+    /// Whether the transport is currently connected
+    pub is_connected: bool,
+    /// Local address for this transport
+    pub local_addr: Option<std::net::SocketAddr>,
+    /// Number of active connections (for connection-oriented transports)
+    pub connection_count: usize,
+}
+
+/// Network information for SDP generation
+#[derive(Debug, Clone)]
+pub struct NetworkInfoForSdp {
+    /// Local IP address to use in SDP
+    pub local_ip: std::net::IpAddr,
+    /// Port range for RTP (min, max)
+    pub rtp_port_range: (u16, u16),
+}
+
+/// WebSocket connection status
+#[derive(Debug, Clone)]
+pub struct WebSocketStatus {
+    /// Number of active insecure WebSocket connections
+    pub ws_connections: usize,
+    /// Number of active secure WebSocket connections
+    pub wss_connections: usize,
+    /// Whether there is at least one active WebSocket connection
+    pub has_active_connection: bool,
+}
+
+/// Extension trait for the transport to provide additional capabilities
+pub trait TransportCapabilitiesExt {
+    /// Check if UDP transport is supported
+    fn supports_udp(&self) -> bool;
+    
+    /// Check if TCP transport is supported
+    fn supports_tcp(&self) -> bool;
+    
+    /// Check if TLS transport is supported
+    fn supports_tls(&self) -> bool;
+    
+    /// Check if WebSocket transport is supported
+    fn supports_ws(&self) -> bool;
+    
+    /// Check if Secure WebSocket transport is supported
+    fn supports_wss(&self) -> bool;
+    
+    /// Check if a specific transport type is supported
+    fn supports_transport(&self, transport_type: TransportType) -> bool;
+    
+    /// Get the default transport type
+    fn default_transport_type(&self) -> TransportType;
+    
+    /// Check if a specific transport is currently connected
+    fn is_transport_connected(&self, transport_type: TransportType) -> bool;
+    
+    /// Get the local address for a specific transport type
+    fn get_transport_local_addr(&self, transport_type: TransportType) -> crate::error::Result<std::net::SocketAddr>;
+    
+    /// Get the number of active connections for a transport type
+    fn get_connection_count(&self, transport_type: TransportType) -> usize;
+}
+
+impl<T: rvoip_sip_transport::Transport + ?Sized> TransportCapabilitiesExt for T {
+    fn supports_udp(&self) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_udp(self)
+    }
+    
+    fn supports_tcp(&self) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_tcp(self)
+    }
+    
+    fn supports_tls(&self) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_tls(self)
+    }
+    
+    fn supports_ws(&self) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_ws(self)
+    }
+    
+    fn supports_wss(&self) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_wss(self)
+    }
+    
+    fn supports_transport(&self, transport_type: TransportType) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::supports_transport(self, transport_type)
+    }
+    
+    fn default_transport_type(&self) -> TransportType {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::default_transport_type(self)
+    }
+    
+    fn is_transport_connected(&self, transport_type: TransportType) -> bool {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::is_transport_connected(self, transport_type)
+    }
+    
+    fn get_transport_local_addr(&self, _transport_type: TransportType) -> crate::error::Result<std::net::SocketAddr> {
+        // Default implementation just returns the main local address
+        self.local_addr().map_err(|e| crate::Error::transport_error(e, "Failed to get local address"))
+    }
+    
+    fn get_connection_count(&self, transport_type: TransportType) -> usize {
+        // Use the method directly from sip-transport Transport trait
+        rvoip_sip_transport::Transport::get_connection_count(self, transport_type)
     }
 }
 

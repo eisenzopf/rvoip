@@ -186,6 +186,7 @@ use async_trait::async_trait;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::transport::TransportType;
 
 use crate::error::{self, Error, Result};
 use crate::transaction::{
@@ -202,6 +203,10 @@ use crate::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteT
 use crate::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
 use crate::method::{cancel, update, ack};
 use crate::utils::{transaction_key_from_message, generate_branch, extract_cseq, create_ack_from_invite};
+use crate::transport::{
+    TransportCapabilities, TransportInfo, 
+    NetworkInfoForSdp, WebSocketStatus, TransportCapabilitiesExt
+};
 
 // Type aliases without Sync requirement
 type BoxedTransaction = Box<dyn Transaction + Send>;
@@ -2134,6 +2139,118 @@ impl TransactionManager {
         }
         
         self.create_client_transaction(request, destination).await
+    }
+
+    /// Get information about available transport types and their capabilities
+    /// 
+    /// This method returns information about which transport types are available
+    /// and their capabilities. This is useful for session-level components that
+    /// need to know what transport options are available.
+    pub fn get_transport_capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            supports_udp: self.transport.supports_udp(),
+            supports_tcp: self.transport.supports_tcp(),
+            supports_tls: self.transport.supports_tls(),
+            supports_ws: self.transport.supports_ws(),
+            supports_wss: self.transport.supports_wss(),
+            local_addr: self.transport.local_addr().ok(),
+            default_transport: self.transport.default_transport_type(),
+        }
+    }
+
+    /// Get detailed information about a specific transport type
+    /// 
+    /// This method returns detailed information about a specific transport type,
+    /// such as connection status, local address, etc.
+    pub fn get_transport_info(&self, transport_type: TransportType) -> Option<TransportInfo> {
+        if !self.transport.supports_transport(transport_type) {
+            return None;
+        }
+
+        Some(TransportInfo {
+            transport_type,
+            is_connected: self.transport.is_transport_connected(transport_type),
+            local_addr: self.transport.get_transport_local_addr(transport_type).ok(),
+            connection_count: self.transport.get_connection_count(transport_type),
+        })
+    }
+
+    /// Check if a specific transport type is available
+    pub fn is_transport_available(&self, transport_type: TransportType) -> bool {
+        self.transport.supports_transport(transport_type)
+    }
+
+    /// Get network information for SDP generation
+    /// 
+    /// This method returns network information that can be used for SDP generation,
+    /// such as the local IP address and ports for different media types.
+    pub fn get_network_info_for_sdp(&self) -> NetworkInfoForSdp {
+        NetworkInfoForSdp {
+            local_ip: self.transport.local_addr()
+                .map(|addr| addr.ip())
+                .unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+            rtp_port_range: (10000, 20000), // Default port range, could be configurable
+        }
+    }
+
+    /// Get the best transport type for a given URI
+    /// 
+    /// This method analyzes a URI and returns the best transport type to use
+    /// based on the URI scheme and available transports.
+    pub fn get_best_transport_for_uri(&self, uri: &rvoip_sip_core::Uri) -> TransportType {
+        // Determine the best transport based on the URI scheme
+        let scheme = uri.scheme().to_string();
+        
+        match scheme.as_str() {
+            "sips" => {
+                if self.transport.supports_tls() {
+                    TransportType::Tls
+                } else {
+                    // Fallback to another secure transport if TLS is not available
+                    if self.transport.supports_wss() {
+                        TransportType::Wss
+                    } else {
+                        // Last resort: use any available transport
+                        self.transport.default_transport_type()
+                    }
+                }
+            },
+            "ws" => {
+                if self.transport.supports_ws() {
+                    TransportType::Ws
+                } else {
+                    self.transport.default_transport_type()
+                }
+            },
+            "wss" => {
+                if self.transport.supports_wss() {
+                    TransportType::Wss
+                } else if self.transport.supports_tls() {
+                    TransportType::Tls
+                } else {
+                    self.transport.default_transport_type()
+                }
+            },
+            // Default for "sip:" and any other schemes
+            _ => self.transport.default_transport_type()
+        }
+    }
+
+    /// Get WebSocket connection status if available
+    /// 
+    /// This method returns information about WebSocket connections if WebSocket
+    /// transport is supported and enabled.
+    pub fn get_websocket_status(&self) -> Option<WebSocketStatus> {
+        if !self.transport.supports_ws() && !self.transport.supports_wss() {
+            return None;
+        }
+
+        Some(WebSocketStatus {
+            ws_connections: self.transport.get_connection_count(TransportType::Ws),
+            wss_connections: self.transport.get_connection_count(TransportType::Wss),
+            has_active_connection: self.transport.is_transport_connected(TransportType::Ws) || 
+                                   self.transport.is_transport_connected(TransportType::Wss),
+        })
     }
 }
 

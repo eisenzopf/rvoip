@@ -295,6 +295,40 @@ These issues were identified through benchmark testing and have been fixed:
 - [x] Add tests for handling various failure scenarios (network errors, timeouts, etc.)
 - [x] Fix session termination issues in benchmarks
 
+## Integration with Improved Transport Layer
+
+Following the integration of transaction-core with sip-transport, these tasks will ensure session-core properly leverages the improved transport capabilities while maintaining appropriate layer separation:
+
+### 1. Transport Information Access
+- [ ] Add methods to get transport capabilities through transaction-core API
+- [ ] Ensure SDP generation uses accurate network information from transaction-core
+- [ ] Add transport status reporting in dialog recovery mechanisms
+- [ ] Implement connection status awareness for long-running dialogs
+
+### 2. Transport-aware Routing
+- [ ] Update URI handling to properly select transport based on scheme (sip:, sips:, ws:, wss:)
+- [ ] Enhance dialog route set processing to respect transport parameters
+- [ ] Add support for failover between transport types when primary transport fails
+- [ ] Implement RFC 3263 DNS-based SIP server location support
+
+### 3. WebSocket Support
+- [ ] Add session-level logic for WebSocket connection handling
+- [ ] Implement proper connection lifecycle management for persistent connections
+- [ ] Add reconnection logic with backoff for WebSocket transport
+- [ ] Handle WebSocket-specific SIP behaviors (e.g., connection correlation headers)
+
+### 4. Testing and Validation
+- [ ] Update test suite to use real transport implementations instead of mocks
+- [ ] Create tests for transport failover scenarios
+- [ ] Test WebSocket connection handling in session-core
+- [ ] Verify proper SDP generation with real network interfaces
+
+### 5. Examples and Documentation
+- [ ] Update the integrated_call.rs example to use real UDP/TCP/WebSocket transports
+- [ ] Add examples demonstrating transport failover
+- [ ] Document best practices for transport selection in session-core
+- [ ] Create advanced examples showing WebSocket-based calls
+
 ## Future Scope
 
 ### Advanced Media Features

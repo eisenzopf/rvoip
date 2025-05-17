@@ -15,6 +15,28 @@ pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
 pub use ws::WebSocketTransport;
 
+/// Represents the transport type/protocol
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportType {
+    Udp,
+    Tcp,
+    Tls,
+    Ws,
+    Wss,
+}
+
+impl fmt::Display for TransportType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportType::Udp => write!(f, "UDP"),
+            TransportType::Tcp => write!(f, "TCP"),
+            TransportType::Tls => write!(f, "TLS"),
+            TransportType::Ws => write!(f, "WS"),
+            TransportType::Wss => write!(f, "WSS"),
+        }
+    }
+}
+
 /// Events emitted by a transport
 #[derive(Debug, Clone)]
 pub enum TransportEvent {
@@ -54,6 +76,70 @@ pub trait Transport: Send + Sync + fmt::Debug {
     
     /// Checks if the transport is closed
     fn is_closed(&self) -> bool;
+
+    /// Check if UDP transport is supported
+    fn supports_udp(&self) -> bool {
+        // Default implementation - UDP is commonly supported
+        true
+    }
+    
+    /// Check if TCP transport is supported
+    fn supports_tcp(&self) -> bool {
+        // Default implementation
+        false
+    }
+    
+    /// Check if TLS transport is supported
+    fn supports_tls(&self) -> bool {
+        // Default implementation
+        false
+    }
+    
+    /// Check if WebSocket transport is supported
+    fn supports_ws(&self) -> bool {
+        // Default implementation
+        false
+    }
+    
+    /// Check if Secure WebSocket transport is supported
+    fn supports_wss(&self) -> bool {
+        // Default implementation
+        false
+    }
+    
+    /// Check if a specific transport type is supported
+    fn supports_transport(&self, transport_type: TransportType) -> bool {
+        match transport_type {
+            TransportType::Udp => self.supports_udp(),
+            TransportType::Tcp => self.supports_tcp(),
+            TransportType::Tls => self.supports_tls(),
+            TransportType::Ws => self.supports_ws(),
+            TransportType::Wss => self.supports_wss(),
+        }
+    }
+    
+    /// Get the default transport type
+    fn default_transport_type(&self) -> TransportType {
+        // Most implementations default to UDP
+        TransportType::Udp
+    }
+    
+    /// Check if a specific transport is currently connected
+    fn is_transport_connected(&self, transport_type: TransportType) -> bool {
+        // For UDP, always considered connected
+        // For connection-oriented transports, this would check connection status
+        if transport_type == TransportType::Udp {
+            true
+        } else {
+            !self.is_closed()
+        }
+    }
+    
+    /// Get the number of active connections for a transport type
+    fn get_connection_count(&self, transport_type: TransportType) -> usize {
+        // Default implementation
+        if self.is_closed() { 0 } else { 1 }
+    }
 }
 
 #[cfg(test)]
