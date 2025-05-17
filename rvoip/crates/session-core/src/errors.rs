@@ -197,6 +197,13 @@ impl std::fmt::Display for ErrorContext {
     }
 }
 
+impl ErrorContext {
+    pub fn with_message(mut self, message: &str) -> Self {
+        self.details = Some(message.to_string());
+        self
+    }
+}
+
 /// Errors related to session management with enhanced context
 #[derive(Error, Debug)]
 pub enum Error {
@@ -204,9 +211,9 @@ pub enum Error {
     // Session-related errors
     //
     
-    /// Session not found
-    #[error("Session not found: {0}")]
-    SessionNotFound(String, Option<Box<dyn std::error::Error + Send + Sync>>, ErrorContext),
+    /// Session not found with ID
+    #[error("Session not found with ID: {0}")]
+    SessionNotFoundWithId(String, ErrorContext),
 
     /// Session already exists
     #[error("Session already exists: {0}")]
@@ -217,9 +224,9 @@ pub enum Error {
     SessionTerminated(String, ErrorContext),
 
     /// Invalid session state transition
-    #[error("Invalid session state transition: {from} -> {to}")]
+    #[error("Invalid session state transition from {from} to {to}")]
     InvalidSessionStateTransition {
-        from: String, 
+        from: String,
         to: String,
         context: ErrorContext,
     },
@@ -474,13 +481,33 @@ pub enum Error {
         /// Error context
         context: ErrorContext,
     },
+
+    /// Transport error
+    #[error("Transport error: {0}")]
+    TransportError(rvoip_sip_transport::error::Error, ErrorContext),
+
+    /// Feature not supported
+    #[error("Feature not supported: {feature}")]
+    Unsupported {
+        /// The feature that is not supported
+        feature: String,
+        /// Error context
+        context: ErrorContext,
+    },
+
+    /// Missing required dialog data
+    #[error("Missing required dialog data")]
+    MissingDialogData {
+        /// Error context 
+        context: ErrorContext,
+    },
 }
 
 impl Error {
     /// Get the error context
     pub fn context(&self) -> &ErrorContext {
         match self {
-            Error::SessionNotFound(_, _, ctx) => ctx,
+            Error::SessionNotFoundWithId(_, ctx) => ctx,
             Error::SessionAlreadyExists(_, ctx) => ctx,
             Error::SessionTerminated(_, ctx) => ctx,
             Error::InvalidSessionStateTransition { context, .. } => context,
@@ -530,6 +557,9 @@ impl Error {
             Error::UnexpectedError(_, _, ctx) => ctx,
             Error::SerializationError(_, ctx) => ctx,
             Error::InvalidMediaState { context, .. } => context,
+            Error::TransportError(error, ctx) => ctx,
+            Error::Unsupported { feature, context, .. } => context,
+            Error::MissingDialogData { context, .. } => context,
         }
     }
 
@@ -555,9 +585,8 @@ impl Error {
 
     /// Create a new session not found error
     pub fn session_not_found(id: &str) -> Self {
-        Error::SessionNotFound(
+        Error::SessionNotFoundWithId(
             id.to_string(),
-            None,
             ErrorContext {
                 category: ErrorCategory::Session,
                 severity: ErrorSeverity::Error,
@@ -622,6 +651,22 @@ impl Error {
                 severity: ErrorSeverity::Error,
                 recovery: RecoveryAction::CheckConfiguration("credentials".to_string()),
                 retryable: false,
+                ..Default::default()
+            }
+        )
+    }
+
+    /// Create a transport error with context
+    pub fn transport_error(error: rvoip_sip_transport::error::Error, details: &str) -> Self {
+        Self::TransportError(
+            error,
+            ErrorContext {
+                category: ErrorCategory::Network,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::Retry,
+                retryable: true,
+                timestamp: std::time::SystemTime::now(),
+                details: Some(details.to_string()),
                 ..Default::default()
             }
         )

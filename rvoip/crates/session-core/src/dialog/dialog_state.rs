@@ -1,24 +1,32 @@
 use std::fmt;
 use serde::{Serialize, Deserialize};
 
-/// SIP dialog state as defined in RFC 3261
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Represents the state of a dialog
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DialogState {
-    /// Early dialog - created from provisional response
+    /// Initial state (before any response has been sent/received)
+    Initial,
+    
+    /// Early dialog (1xx responses with tag)
     Early,
     
-    /// Confirmed dialog - created from final response
+    /// Confirmed dialog (2xx response)
     Confirmed,
     
-    /// Terminated dialog - ended by BYE or other means
+    /// Dialog is in the process of recovering from a network failure
+    Recovering,
+    
+    /// Dialog has been terminated
     Terminated,
 }
 
 impl fmt::Display for DialogState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DialogState::Initial => write!(f, "Initial"),
             DialogState::Early => write!(f, "Early"),
             DialogState::Confirmed => write!(f, "Confirmed"),
+            DialogState::Recovering => write!(f, "Recovering"),
             DialogState::Terminated => write!(f, "Terminated"),
         }
     }

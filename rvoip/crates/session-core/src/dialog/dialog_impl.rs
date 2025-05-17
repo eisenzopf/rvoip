@@ -62,6 +62,22 @@ pub struct Dialog {
     /// SDP context for this dialog
     #[serde(skip)]  // Skip serialization as it might be too large
     pub sdp_context: SdpContext,
+    
+    /// Last known good remote socket address
+    pub last_known_remote_addr: Option<std::net::SocketAddr>,
+    
+    /// Time of the last successful transaction
+    pub last_successful_transaction_time: Option<std::time::SystemTime>,
+    
+    /// Number of recovery attempts made
+    pub recovery_attempts: u32,
+    
+    /// Reason for recovery (if in recovering state)
+    pub recovery_reason: Option<String>,
+    
+    /// Time when the dialog was last successfully recovered
+    #[serde(skip)] // Skip in serialization
+    pub recovered_at: Option<std::time::SystemTime>,
 }
 
 impl Dialog {
@@ -232,6 +248,11 @@ impl Dialog {
                             route_set,
                             is_initiator,
                             sdp_context,
+                            last_known_remote_addr: None,
+                            last_successful_transaction_time: None,
+                            recovery_attempts: 0,
+                            recovery_reason: None,
+                            recovered_at: None,
                         });
                     } else {
                         debug!("Dialog creation failed: Empty Contact header");
@@ -399,6 +420,11 @@ impl Dialog {
                             route_set,
                             is_initiator,
                             sdp_context,
+                            last_known_remote_addr: None,
+                            last_successful_transaction_time: None,
+                            recovery_attempts: 0,
+                            recovery_reason: None,
+                            recovered_at: None,
                         });
                     }
                 },
@@ -627,6 +653,47 @@ impl Dialog {
         }
         
         false
+    }
+    
+    /// Mark this dialog as recovering from a network failure
+    pub fn enter_recovery_mode(&mut self, reason: &str) {
+        super::recovery::begin_recovery(self, reason);
+    }
+    
+    /// Increment recovery attempts
+    pub fn increment_recovery_attempts(&mut self) -> u32 {
+        self.recovery_attempts += 1;
+        self.recovery_attempts
+    }
+    
+    /// Complete recovery and return to normal state
+    pub fn complete_recovery(&mut self) -> bool {
+        super::recovery::complete_recovery(self)
+    }
+    
+    /// Abandon recovery and terminate the dialog
+    pub fn abandon_recovery(&mut self) {
+        super::recovery::abandon_recovery(self);
+    }
+    
+    /// Update the last known remote address
+    pub fn update_remote_address(&mut self, remote_addr: std::net::SocketAddr) {
+        self.last_known_remote_addr = Some(remote_addr);
+        self.last_successful_transaction_time = Some(std::time::SystemTime::now());
+    }
+    
+    /// Check if this dialog is in recovery mode
+    pub fn is_recovering(&self) -> bool {
+        self.state == DialogState::Recovering
+    }
+    
+    /// Get time since last successful transaction
+    pub fn time_since_last_transaction(&self) -> Option<std::time::Duration> {
+        self.last_successful_transaction_time.map(|time| {
+            std::time::SystemTime::now()
+                .duration_since(time)
+                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        })
     }
 }
 
@@ -862,5 +929,110 @@ mod tests {
         if let Some(TypedHeader::To(to)) = bye_request.header(&HeaderName::To) {
             assert_eq!(to.tag(), dialog.remote_tag.as_deref());
         }
+    }
+    
+    #[test]
+    fn test_dialog_recovery_mode() {
+        // Create a mock INVITE request
+        let request = create_mock_invite_request();
+        
+        // Create a mock 200 OK response with to-tag
+        let response = create_mock_response(StatusCode::Ok, true);
+        
+        // Create dialog
+        let mut dialog = Dialog::from_2xx_response(&request, &response, true).unwrap();
+        assert_eq!(dialog.state, DialogState::Confirmed);
+        
+        // Enter recovery mode
+        let reason = "Network failure";
+        dialog.enter_recovery_mode(reason);
+        
+        // Verify state and reason
+        assert_eq!(dialog.state, DialogState::Recovering);
+        assert_eq!(dialog.recovery_reason, Some(reason.to_string()));
+        assert_eq!(dialog.recovery_attempts, 0);
+        assert!(dialog.is_recovering());
+        
+        // Increment recovery attempts
+        let attempts = dialog.increment_recovery_attempts();
+        assert_eq!(attempts, 1);
+        assert_eq!(dialog.recovery_attempts, 1);
+        
+        // Complete recovery
+        let recovery_completed = dialog.complete_recovery();
+        assert!(recovery_completed);
+        assert_eq!(dialog.state, DialogState::Confirmed);
+        assert_eq!(dialog.recovery_reason, None);
+        assert!(dialog.last_successful_transaction_time.is_some());
+        assert!(!dialog.is_recovering());
+    }
+    
+    #[test]
+    fn test_dialog_recovery_abandonment() {
+        // Create a mock INVITE request
+        let request = create_mock_invite_request();
+        
+        // Create a mock 200 OK response with to-tag
+        let response = create_mock_response(StatusCode::Ok, true);
+        
+        // Create dialog
+        let mut dialog = Dialog::from_2xx_response(&request, &response, true).unwrap();
+        
+        // Enter recovery mode
+        dialog.enter_recovery_mode("Network failure");
+        assert_eq!(dialog.state, DialogState::Recovering);
+        
+        // Abandon recovery
+        dialog.abandon_recovery();
+        assert_eq!(dialog.state, DialogState::Terminated);
+        assert!(dialog.recovery_reason.is_some());
+        assert!(dialog.recovery_reason.unwrap().contains("failed"));
+    }
+    
+    #[test]
+    fn test_dialog_remote_address_tracking() {
+        // Create a mock INVITE request
+        let request = create_mock_invite_request();
+        
+        // Create a mock 200 OK response with to-tag
+        let response = create_mock_response(StatusCode::Ok, true);
+        
+        // Create dialog
+        let mut dialog = Dialog::from_2xx_response(&request, &response, true).unwrap();
+        
+        // Update remote address
+        let remote_addr = "192.168.1.100:5060".parse().unwrap();
+        dialog.update_remote_address(remote_addr);
+        
+        // Verify address and timestamp
+        assert_eq!(dialog.last_known_remote_addr, Some(remote_addr));
+        assert!(dialog.last_successful_transaction_time.is_some());
+        
+        // Check time since last transaction
+        let duration = dialog.time_since_last_transaction();
+        assert!(duration.is_some());
+        assert!(duration.unwrap().as_secs() < 1); // Should be very recent
+    }
+    
+    #[test]
+    fn test_dialog_recovery_only_for_active_dialogs() {
+        // Create a mock INVITE request
+        let request = create_mock_invite_request();
+        
+        // Create a mock 200 OK response with to-tag
+        let response = create_mock_response(StatusCode::Ok, true);
+        
+        // Create dialog and terminate it
+        let mut dialog = Dialog::from_2xx_response(&request, &response, true).unwrap();
+        dialog.terminate();
+        assert_eq!(dialog.state, DialogState::Terminated);
+        
+        // Try to enter recovery mode on terminated dialog
+        dialog.enter_recovery_mode("Network failure");
+        
+        // Verify state didn't change
+        assert_eq!(dialog.state, DialogState::Terminated);
+        assert_eq!(dialog.recovery_reason, None);
+        assert!(!dialog.is_recovering());
     }
 } 

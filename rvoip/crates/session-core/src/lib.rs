@@ -37,16 +37,25 @@ pub use metrics::MetricsCollector;
 // Re-export helper functions for internal use
 pub(crate) use helpers::{dialog_not_found_error, network_unreachable_error, transaction_creation_error, transaction_send_error};
 
-// Re-export session helper functions
-pub use helpers::{make_call, answer_call, end_call};
-
-// Re-export dialog helper functions 
+// Re-export dialog helper functions
 pub use helpers::{
+    // Basic dialog operations
+    create_dialog,
     create_dialog_from_invite,
     send_dialog_request,
-    terminate_dialog, 
+    terminate_dialog,
+    
+    // Dialog management and updates
     update_dialog_media,
-    create_dialog
+    refresh_dialog,
+    accept_refresh_request,
+    
+    // Recovery
+    attempt_dialog_recovery,
+    
+    // UPDATE method support
+    send_update_request,
+    accept_update_request,
 };
 
 /// Production-ready client implementation
@@ -204,4 +213,4 @@ pub mod prelude {
         // Following SDPs are not fully implemented yet or need to be imported differently
         // SessionDescription, MediaDescription, MediaFormat, MediaDirection,
     };
-} 
+}

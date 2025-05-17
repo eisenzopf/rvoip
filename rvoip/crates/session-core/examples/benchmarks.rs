@@ -1,36 +1,45 @@
+// Performance benchmark example for the session-core library
+// This is used to benchmark various operations in the library
+// such as dialog creation, SDP negotiation, etc.
+
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Semaphore, broadcast};
-use tokio::task::JoinSet;
-use rand::{rngs::SmallRng, SeedableRng, Rng};
-use std::env;
-use dashmap::DashMap;
-use rvoip_sip_core::{
-    Request, Response, Method, StatusCode, Uri, HeaderName, TypedHeader,
-    builder::{SimpleRequestBuilder, SimpleResponseBuilder},
-    types::{
-        call_id::CallId,
-        from::From as FromHeader,
-        to::To as ToHeader,
-        cseq::CSeq,
-        address::Address,
-        contact::Contact,
-        via::Via,
-    }
-};
+use std::net::SocketAddr;
+use std::time::{Instant, Duration};
+use tokio::time::sleep;
+use anyhow::Result;
+use std::str::FromStr;
+
 use rvoip_transaction_core::{
-    TransactionManager, TransactionEvent, TransactionKey, TransactionKind
+    TransactionManager, 
+    TransactionEvent,
 };
+
+use rvoip_sip_core::{
+    Method, Uri, Request, Response,
+    types::{status::StatusCode, address::Address},
+};
+
+use rvoip_sip_transport::{Transport, TransportEvent};
+
+// Update imports to use proper modules
 use rvoip_session_core::{
-    dialog::{Dialog, DialogId, DialogManager, DialogState},
-    session::{Session, SessionId, SessionManager, SessionState, SessionConfig, SessionDirection},
-    events::{EventBus, SessionEvent, EventHandler},
-    Error,
-    make_call, end_call, create_dialog_from_invite
+    events::{EventBus, SessionEvent},
+    session::{
+        SessionConfig, 
+        SessionId, 
+        session::Session, 
+        manager::SessionManager
+    },
+    dialog::{
+        DialogId, 
+        dialog_manager::DialogManager,
+        dialog_state::DialogState,
+        dialog_utils
+    },
+    sdp::SessionDescription,
+    errors::Error,
+    helpers
 };
-use uuid::Uuid;
-use std::collections::HashMap;
-use futures::future::{join_all, try_join_all};
 
 // Global verbose flag
 static mut VERBOSE: bool = false;

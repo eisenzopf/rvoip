@@ -1,35 +1,49 @@
+// Example code to demonstrate basic integration with the session-core library
+// This example shows how to create a simple outgoing call with dialog and SDP negotiation
+
 use std::sync::Arc;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use tokio::time::{sleep, Duration};
+use std::str::FromStr;
 use anyhow::Result;
-use tokio::time::sleep;
-use std::time::Duration;
-use async_trait::async_trait;
-
-use rvoip_transaction_core::{
-    TransactionManager,
-    TransactionEvent,
-    TransactionKey,
-};
 
 use rvoip_sip_core::{
-    Method, 
-    Uri, 
-    Request,
-    Message,
-    HeaderName,
-    TypedHeader,
+    Method, Request, Response, Uri,
+    types::{
+        status::StatusCode,
+        address::Address,
+    }
 };
 
+use rvoip_sip_transport::{ TransportEvent, Transport };
+use rvoip_transaction_core::{ TransactionManager, TransactionEvent };
+
+// Remove nonexistent imports and use the proper module imports
 use rvoip_session_core::{
-    events::{EventBus, EventHandler, SessionEvent},
-    session::{SessionConfig, manager::SessionManager},
-    make_call, end_call
+    session::{
+        SessionConfig, 
+        SessionId, 
+        session::Session, 
+        manager::SessionManager
+    },
+    dialog::{
+        DialogId,
+        dialog_manager::DialogManager,
+        dialog_state::DialogState
+    },
+    events::EventBus,
+    sdp::SessionDescription,
+    errors::Error
 };
+
+// Import helpers for this example
+use rvoip_session_core::helpers;
 
 // A simple event handler that just prints out session events
 struct SimpleEventHandler;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl EventHandler for SimpleEventHandler {
     async fn handle_event(&self, event: SessionEvent) {
         match event {
@@ -59,7 +73,7 @@ impl DummyTransport {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl rvoip_sip_transport::Transport for DummyTransport {
     async fn send_message(
         &self, 

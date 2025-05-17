@@ -16,10 +16,10 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Implement credential storage and management
 
 ### 2. Dialog Lifecycle Management
-- [ ] Add support for re-INVITEs and session refreshes
-- [ ] Implement dialog refresh mechanism for long-running sessions
-- [ ] Add dialog recovery after network failures
-- [ ] Implement UPDATE method handling per RFC 3311
+- [x] Add support for re-INVITEs and session refreshes
+- [x] Implement dialog refresh mechanism for long-running sessions
+- [x] Add dialog recovery after network failures
+- [x] Implement UPDATE method handling per RFC 3311
 - [ ] Implement tag generation and management for dialogs
 - [ ] Add correct CSeq handling for transactions
 - [ ] Complete Route and Record-Route header processing
@@ -27,10 +27,10 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Support Path header for registration scenarios (RFC 3327)
 - [ ] Add proper PRACK support for reliable provisional responses (RFC 3262)
 - [ ] Improve handling of dialog matching for requests with multiple candidates
-- [ ] Create additional helper functions for re-INVITE scenarios
+- [x] Create additional helper functions for re-INVITE scenarios
 - [ ] Add session modification abstractions (hold, resume, codec change)
-- [ ] Complete the create_dialog() function for direct dialog creation
-- [ ] Implement session refresh helper functions
+- [x] Complete the create_dialog() function for direct dialog creation
+- [x] Implement session refresh helper functions
 
 ### 3. Media Session Management and SDP Negotiation
 - [x] Replace current sdp.rs with sip-core's SdpBuilder integration
@@ -72,12 +72,12 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 
 ### 4. Error Handling and Reliability
 - [x] Create comprehensive error documentation for API users
-- [ ] Implement transaction recovery mechanisms for network failures
+- [x] Implement transaction recovery mechanisms for network failures
 - [ ] Add comprehensive logging for transaction events
 - [ ] Implement circuit breakers for external systems
 - [ ] Add panic recovery in critical paths
 - [ ] Add soak testing for memory leaks detection
-- [ ] Create error recovery helper functions for common failure scenarios
+- [x] Create error recovery helper functions for common failure scenarios
 - [ ] Implement guided recovery procedures for network and protocol errors
 - [ ] Add retry management with backoff strategies
 
@@ -176,24 +176,49 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [x] Add benchmarks for critical performance metrics
 - [ ] Implement continuous performance regression testing
 
-### Recent Improvements (2025)
-- [x] Moved monitoring code from lib.rs into a dedicated metrics.rs module
-- [x] Created comprehensive helper functions for dialog management in helpers.rs
-- [x] Improved error handling with categorized errors and recovery suggestions
-- [x] Added integration between the error system and the dialog/session modules
-- [x] Re-exported all necessary types for easier library usage
-- [x] Created helper functions for common operations: make_call, answer_call, end_call
-- [x] Added dialog management helpers: create_dialog_from_invite, send_dialog_request, terminate_dialog
-- [x] Improved error context information with more detailed metadata
-- [x] Provided better error handling with recovery suggestions
-- [x] Updated all examples to use the helper functions instead of direct API calls
-- [x] Improved the benchmarking example to handle 10,000 concurrent sessions
-- [x] Added better dialog creation and management in the integrated_call example
-- [x] Fixed compilation issues and type mismatches
-- [x] Integrated sip-core's SDP library into session-core for advanced SDP handling
-- [x] Added SDP offer/answer model support with proper state tracking
-- [x] Implemented SDP generation and processing functions for common operations
-- [x] Added support for SDP re-negotiation in re-INVITE scenarios
+### Recent Improvements
+
+1. **Network Transport Abstraction**
+   - [x] Created the Transport trait to abstract network operations
+   - [x] Implemented UDP transport with send/receive capabilities
+   - [x] Added automatic address resolution for SIP URIs
+   - [x] Improved error handling for network failures
+
+2. **Transaction Layer**
+   - [x] Implemented INVITE client transaction state machine
+   - [x] Implemented INVITE server transaction state machine
+   - [x] Added Non-INVITE client and server transactions
+   - [x] Created a transaction manager for handling all transactions
+   - [x] Added proper timer support for retransmissions
+   - [x] Implemented reliable provisional responses (PRACK support)
+   - [x] Improved error handling and propagation in transactions
+   - [x] Added transaction failure detection and recovery
+
+3. **Dialog Management**
+   - [x] Implemented dialog creation from 2xx responses
+   - [x] Added dialog state management
+   - [x] Created dialog ID generation and lookup
+   - [x] Implemented route set manipulation
+   - [x] Added full support for To/From/Call-ID headers
+   - [x] Implemented early dialog support
+   - [x] Added proper dialog termination handling
+   - [x] Implemented dialog-based request creation
+   - [x] Implemented in-dialog ACK generation
+   - [x] Added support for re-INVITEs for dialog refresh
+   - [x] Added dialog recovery mechanism for network failures
+   - [x] Implemented UPDATE method support (RFC 3311)
+
+4. **SDP Handling**
+   - [x] Implemented basic SDP parsing and generation
+   - [x] Added support for audio codecs
+   - [x] Implemented proper SDP negotiation
+   - [x] Added SDP offer/answer model
+   - [x] Implemented SDP version handling
+   - [x] Added handling for SDP in INVITEs
+   - [x] Added early media SDP support
+   - [x] Added SDP renegotiation for session updates
+   - [x] Added session refreshes with SDP
+   - [x] Added SDP support for UPDATE method
 
 ## Future Scope
 

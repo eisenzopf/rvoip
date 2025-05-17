@@ -4,11 +4,13 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use anyhow::{Result, Context};
+use std::str::FromStr;
+use async_trait::async_trait;
 
 // Import the correct types from our libraries
 use rvoip_sip_core::{
     Uri, Message, Method, StatusCode, 
-    Request, Response, HeaderName, TypedHeader
+    Request, Response, HeaderName, TypedHeader, types::{status::StatusCode as SIPStatusCode, address::Address},
 };
 use rvoip_sip_transport::{Transport, TransportEvent};
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
@@ -16,11 +18,21 @@ use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKe
 // Import from session-core with correct paths
 use rvoip_session_core::{
     events::{EventBus, EventHandler, SessionEvent},
-    session::{SessionConfig, manager::SessionManager},
-    media::AudioCodecType,
-    // Import helper functions
-    make_call, answer_call, end_call, 
-    create_dialog_from_invite, send_dialog_request
+    session::{
+        SessionConfig, 
+        SessionId, 
+        session::Session, 
+        manager::SessionManager,
+        SessionState
+    },
+    dialog::{
+        DialogId,
+        dialog_manager::DialogManager, 
+        dialog_state::DialogState
+    },
+    sdp::SessionDescription,
+    errors::Error,
+    helpers
 };
 
 /// Simple SIP transport implementation for the example

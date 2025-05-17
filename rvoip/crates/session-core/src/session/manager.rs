@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use std::time::SystemTime;
 use tracing::{debug, info, error, warn};
+use uuid::Uuid;
 
 use rvoip_transaction_core::{
     TransactionManager, 
@@ -27,6 +28,12 @@ pub struct SessionManager {
     
     /// Active sessions by ID
     sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    
+    /// Default dialog for each session
+    default_dialogs: DashMap<SessionId, DialogId>,
+    
+    /// Mapping between dialogs and sessions
+    dialog_to_session: DashMap<DialogId, SessionId>,
     
     /// Transaction manager reference
     transaction_manager: Arc<TransactionManager>,
@@ -58,6 +65,8 @@ impl SessionManager {
             dialog_manager: Arc::new(dialog_manager),
             event_bus,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            default_dialogs: DashMap::new(),
+            dialog_to_session: DashMap::new(),
         }
     }
     
@@ -161,28 +170,31 @@ impl SessionManager {
     }
     
     /// Get a session by ID
-    pub fn get_session(&self, session_id: &SessionId) -> Option<Arc<Session>> {
-        self.sessions.get(session_id).map(|s| s.clone())
-    }
-    
-    /// Get a session by ID with error handling
-    pub fn get_session_or_error(&self, session_id: &SessionId) -> Result<Arc<Session>, Error> {
-        self.get_session(session_id).ok_or_else(|| 
-            Error::SessionNotFound(
-                session_id.to_string(),
-                None,
+    pub fn get_session(&self, id: &SessionId) -> Result<Arc<Session>, Error> {
+        match self.sessions.get(id) {
+            Some(session) => Ok(session.value().clone()),
+            None => Err(Error::SessionNotFoundWithId(
+                id.to_string(),
                 ErrorContext {
                     category: ErrorCategory::Session,
                     severity: ErrorSeverity::Error,
                     recovery: RecoveryAction::None,
                     retryable: false,
-                    session_id: Some(session_id.to_string()),
-                    timestamp: SystemTime::now(),
-                    details: Some(format!("Session {} not found", session_id)),
+                    session_id: Some(id.to_string()),
+                    timestamp: std::time::SystemTime::now(),
+                    details: Some(format!("Session {} not found", id)),
                     ..Default::default()
                 }
-            )
-        )
+            )),
+        }
+    }
+    
+    /// Get a session by ID with error handling
+    pub fn get_session_or_error(&self, session_id: &SessionId) -> Result<Arc<Session>, Error> {
+        match self.get_session(session_id) {
+            Ok(session) => Ok(session),
+            Err(_) => Err(Error::session_not_found(&session_id.to_string()))
+        }
     }
     
     /// List all active sessions
@@ -226,7 +238,7 @@ impl SessionManager {
         
         // Now check each session and remove terminated ones
         for id in session_ids {
-            if let Some(session) = self.get_session(&id) {
+            if let Ok(session) = self.get_session(&id) {
                 let state = session.state().await;
                 if state == SessionState::Terminated {
                     if self.sessions.remove(&id).is_some() {
@@ -249,7 +261,7 @@ impl SessionManager {
         self.sessions.len()
     }
     
-    /// Help check if we're below the max session limit
+    /// Check if we're below the max session limit
     async fn can_create_session(&self) -> bool {
         if let Some(max_sessions) = self.config.max_sessions {
             return self.sessions.len() < max_sessions;
@@ -261,5 +273,107 @@ impl SessionManager {
     pub async fn stop(&self) {
         // Set running flag to false
         self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    
+    /// Get session with dialog
+    pub fn get_session_with_dialog(&self, session_id: &SessionId) -> Result<Arc<Session>, Error> {
+        // Get the session
+        match self.get_session(session_id) {
+            Ok(session) => Ok(session),
+            Err(e) => Err(e)
+        }
+    }
+
+    /// Terminate session
+    pub async fn terminate_session(&self, session_id: &SessionId, reason: &str) -> Result<(), Error> {
+        // Get the session
+        let session = self.get_session(session_id)?;
+        
+        // Set the session state to terminating
+        session.set_state(SessionState::Terminating).await?;
+        
+        // Publish event
+        self.event_bus.publish(SessionEvent::Terminated {
+            session_id: session_id.clone(),
+            reason: reason.to_string(),
+        });
+        
+        // Set the session state to terminated
+        session.set_state(SessionState::Terminated).await?;
+        
+        // Remove the session from the repository
+        self.sessions.remove(session_id);
+        
+        Ok(())
+    }
+    
+    /// Find session by dialog
+    pub fn find_session_by_dialog(&self, dialog_id: &DialogId) -> Result<Arc<Session>, Error> {
+        for entry in self.dialog_to_session.iter() {
+            if entry.key() == dialog_id {
+                let id = entry.value().clone();
+                return self.get_session(&id);
+            }
+        }
+        
+        Err(Error::session_not_found(&format!("No session found for dialog {}", dialog_id)))
+    }
+
+    /// Set default dialog for a session
+    pub fn set_default_dialog(&self, session_id: &SessionId, dialog_id: &DialogId) -> Result<(), Error> {
+        // Verify the session exists
+        self.get_session(session_id)?;
+        
+        // Set the default dialog
+        self.default_dialogs.insert(session_id.clone(), dialog_id.clone());
+        Ok(())
+    }
+
+    /// Check if a session with the given ID exists
+    pub fn has_session(&self, id: &SessionId) -> bool {
+        match self.get_session(id) {
+            Ok(_) => true,
+            Err(_) => false
+        }
+    }
+
+    // A helper to handle session-based transaction
+    async fn handle_session_based_transaction(
+        &self,
+        transaction_id: &rvoip_transaction_core::TransactionKey,
+        method: &rvoip_sip_core::Method,
+    ) -> bool {
+        // Get the dialog associated with this transaction if any
+        if let Some(dialog_id) = self.dialog_manager.find_dialog_for_transaction(transaction_id) {
+            // Find the session for this dialog
+            if let Ok(session) = self.find_session_by_dialog(&dialog_id) {
+                // Map the SIP method to SessionTransactionType
+                let tx_type = match method {
+                    rvoip_sip_core::Method::Invite => crate::session::SessionTransactionType::InitialInvite,
+                    rvoip_sip_core::Method::Bye => crate::session::SessionTransactionType::Bye,
+                    rvoip_sip_core::Method::Update => crate::session::SessionTransactionType::Update,
+                    _ => crate::session::SessionTransactionType::Other(method.to_string()),
+                };
+                
+                session.track_transaction(transaction_id.clone(), tx_type).await;
+                
+                // Process specific methods that might affect session state
+                match *method {
+                    rvoip_sip_core::Method::Bye => {
+                        let _ = session.set_state(SessionState::Terminating).await;
+                    },
+                    _ => {}
+                }
+                
+                // We handled this transaction
+                return true;
+            } else {
+                // No session found for this dialog
+                debug!("No session found for dialog {}", dialog_id);
+            }
+        }
+        
+        // We did not handle this transaction
+        false
     }
 } 

@@ -190,7 +190,7 @@ async fn test_session_manager_basics() -> Result<()> {
     
     // Verify the session was added to the manager
     let retrieved = session_manager.get_session(&session_id);
-    assert!(retrieved.is_some());
+    assert!(retrieved.is_ok());
     
     // Check list_sessions
     let sessions = session_manager.list_sessions();

@@ -169,6 +169,26 @@ pub enum SessionEvent {
         /// Dialog ID
         dialog_id: DialogId,
     },
+    
+    /// Dialog recovery started
+    DialogRecoveryStarted {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+        /// Reason for entering recovery mode
+        reason: String,
+    },
+    
+    /// Dialog recovery completed (successfully or not)
+    DialogRecoveryCompleted {
+        /// Session ID
+        session_id: SessionId,
+        /// Dialog ID
+        dialog_id: DialogId,
+        /// Whether recovery was successful
+        success: bool,
+    },
 }
 
 /// Trait for handling session events
