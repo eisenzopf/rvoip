@@ -1,6 +1,46 @@
 // Performance benchmark example for the session-core library
 // This is used to benchmark various operations in the library
 // such as dialog creation, SDP negotiation, etc.
+//
+// ## How to Run
+// 
+// From the project root directory:
+// ```
+// cargo run --example benchmarks -- [SESSION_COUNT] [OPTIONS]
+// ```
+//
+// ### Arguments
+//
+// - `SESSION_COUNT`: (Optional) Number of concurrent SIP sessions to test (default: 1000)
+// - `OPTIONS`:
+//   - `-v, --verbose`: Enable verbose output to see detailed transaction logs
+//
+// ### Examples
+//
+// Run with 100 concurrent sessions:
+// ```
+// cargo run --example benchmarks -- 100
+// ```
+//
+// Run with 10 sessions and verbose logging:
+// ```
+// cargo run --example benchmarks -- 10 --verbose
+// ```
+//
+// ### Output
+//
+// The benchmark results will show:
+// - Number of successful and failed sessions
+// - Total duration of the test
+// - Average time per session
+// - Sessions processed per second
+//
+// ### Notes
+//
+// - The benchmark creates a simulated network environment with UAC (client) and UAS (server)
+// - It tests the full SIP transaction flow including INVITE, responses, and dialog creation
+// - For debugging purposes, use a small number of sessions with verbose mode
+// - For performance testing, use a larger number of sessions without verbose mode
 
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -8,6 +48,11 @@ use std::time::{Instant, Duration};
 use tokio::time::sleep;
 use anyhow::Result;
 use std::str::FromStr;
+use std::env;
+use tokio::sync::{mpsc, broadcast};
+use tokio::task::JoinSet;
+use dashmap::DashMap;
+use uuid::Uuid;
 
 use rvoip_transaction_core::{
     TransactionManager, 
@@ -15,8 +60,9 @@ use rvoip_transaction_core::{
 };
 
 use rvoip_sip_core::{
-    Method, Uri, Request, Response,
+    Method, Uri, Request, Response, HeaderName, TypedHeader,
     types::{status::StatusCode, address::Address},
+    builder::{SimpleRequestBuilder, SimpleResponseBuilder},
 };
 
 use rvoip_sip_transport::{Transport, TransportEvent};
@@ -28,7 +74,8 @@ use rvoip_session_core::{
         SessionConfig, 
         SessionId, 
         session::Session, 
-        manager::SessionManager
+        manager::SessionManager,
+        SessionState
     },
     dialog::{
         DialogId, 
@@ -38,7 +85,7 @@ use rvoip_session_core::{
     },
     sdp::SessionDescription,
     errors::Error,
-    helpers
+    helpers::{make_call, end_call}
 };
 
 // Global verbose flag
@@ -273,22 +320,7 @@ async fn process_session_lifecycle(
         _ => {
             // Timeout or error
             log(&format!("Timeout or error waiting for INVITE on UAS side"));
-            
-            // For the benchmark, let's just simulate the server side
-            // to avoid getting stuck
-            log(&format!("Simulating UAS processing for benchmarking"));
-            
-            // Change UAC to connected state
-            if uac_session.set_state(SessionState::Connected).await.is_err() {
-                log(&format!("Failed to set UAC state to Connected"));
-            }
-            
-            // End the call on UAC side
-            if end_call(&uac_session).await.is_err() {
-                log(&format!("Failed to end UAC call"));
-            }
-            
-            return true; // Simulated success for benchmarking
+            return false; // Return failure instead of simulating success
         }
     };
     
@@ -321,9 +353,7 @@ async fn process_session_lifecycle(
         Ok(_) => log(&format!("Sent RINGING response for session {}", session_idx)),
         Err(e) => {
             log(&format!("Failed to send RINGING response: {:?}", e));
-            
-            // For benchmarking purposes, continue even if response sending fails
-            log(&format!("Continuing benchmark despite response sending failure"));
+            return false; // Don't continue after a response sending failure
         }
     }
     
@@ -344,7 +374,7 @@ async fn process_session_lifecycle(
                 },
                 Err(e) => {
                     log(&format!("Error receiving UAC event: {:?}", e));
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    return false; // Return false on error instead of continuing
                 }
             }
         }
@@ -352,8 +382,7 @@ async fn process_session_lifecycle(
         Ok(true) => true,
         _ => {
             log(&format!("Timeout waiting for RINGING response on UAC side"));
-            // We'll continue anyway with a simulated response
-            true
+            return false; // Return false on timeout instead of simulating success
         }
     };
     
@@ -394,8 +423,7 @@ async fn process_session_lifecycle(
         Ok(_) => log(&format!("Sent 200 OK for session {}", session_idx)),
         Err(e) => {
             log(&format!("Failed to send 200 OK response: {:?}", e));
-            // For benchmarking purposes, continue even if response sending fails
-            log(&format!("Continuing benchmark despite response sending failure"));
+            return false; // Don't continue after failure
         }
     }
     
@@ -416,7 +444,7 @@ async fn process_session_lifecycle(
                 },
                 Err(e) => {
                     log(&format!("Error receiving UAC event: {:?}", e));
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    return false; // Return false on error
                 }
             }
         }
@@ -424,8 +452,7 @@ async fn process_session_lifecycle(
         Ok(true) => true,
         _ => {
             log(&format!("Timeout waiting for 200 OK response on UAC side"));
-            // We'll continue anyway with a simulated response
-            true
+            return false; // Return false on timeout
         }
     };
     

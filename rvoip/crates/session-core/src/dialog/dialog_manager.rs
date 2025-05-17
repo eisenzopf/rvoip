@@ -1008,8 +1008,32 @@ impl DialogManager {
         // Release the lock on the dialog before network operation
         drop(dialog);
         
-        // Send the request
-        match self.transaction_manager.send_request(&transaction_id).await {
+        // Try to send the request, but handle the case where the transaction might have
+        // terminated immediately (especially in test environments)
+        let send_result = self.transaction_manager.send_request(&transaction_id).await;
+        
+        // Check if the transaction still exists before proceeding
+        let exists = self.transaction_manager.transaction_exists(&transaction_id).await;
+        
+        if !exists {
+            // In tests, we might see the transaction terminated immediately
+            // This can happen with simulated transports or in certain test cases
+            debug!("Transaction {} terminated immediately after creation", transaction_id);
+            
+            if let Err(e) = send_result {
+                // Only clean up on error - the transaction might have terminated successfully
+                self.transaction_to_dialog.remove(&transaction_id);
+                
+                let error_msg = format!("Transaction terminated immediately: {}", e);
+                return Err(transaction_send_error(&error_msg, &transaction_id.to_string()));
+            }
+            
+            // Even with termination, we return the transaction ID for tracking purposes
+            return Ok(transaction_id);
+        }
+        
+        // Normal path - check the send result
+        match send_result {
             Ok(_) => Ok(transaction_id),
             Err(e) => {
                 // Clean up the transaction mapping on error

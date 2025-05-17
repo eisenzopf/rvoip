@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use tokio::time::{sleep, Duration};
 use std::str::FromStr;
 use anyhow::Result;
+use async_trait::async_trait;
 
 use rvoip_sip_core::{
     Method, Request, Response, Uri,
@@ -25,25 +26,24 @@ use rvoip_session_core::{
         SessionConfig, 
         SessionId, 
         session::Session, 
-        manager::SessionManager
+        manager::SessionManager,
+        SessionState
     },
     dialog::{
         DialogId,
         dialog_manager::DialogManager,
         dialog_state::DialogState
     },
-    events::EventBus,
+    events::{EventBus, EventHandler, SessionEvent},
     sdp::SessionDescription,
-    errors::Error
+    errors::Error,
+    helpers::{make_call, end_call}
 };
-
-// Import helpers for this example
-use rvoip_session_core::helpers;
 
 // A simple event handler that just prints out session events
 struct SimpleEventHandler;
 
-#[async_trait::async_trait]
+#[async_trait]
 impl EventHandler for SimpleEventHandler {
     async fn handle_event(&self, event: SessionEvent) {
         match event {

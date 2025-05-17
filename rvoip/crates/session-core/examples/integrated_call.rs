@@ -31,8 +31,9 @@ use rvoip_session_core::{
         dialog_state::DialogState
     },
     sdp::SessionDescription,
+    media::AudioCodecType,
     errors::Error,
-    helpers
+    helpers::{make_call, end_call}
 };
 
 /// Simple SIP transport implementation for the example
