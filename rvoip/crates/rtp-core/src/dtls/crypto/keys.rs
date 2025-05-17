@@ -422,4 +422,52 @@ pub fn extract_srtp_keys(
         let master_salt = server_master_salt;
         Ok((master_key, master_salt))
     }
+}
+
+/// Calculate verify data for the Finished message
+///
+/// This implements the TLS 1.2 PRF for generating the verify data
+/// in the Finished message as defined in RFC 5246 section 7.4.9.
+pub fn calculate_verify_data(
+    master_secret: &[u8],
+    handshake_messages: &[u8],
+    is_client: bool,
+    hash_algorithm: HashAlgorithm,
+) -> Result<Bytes> {
+    // Calculate the hash of all handshake messages
+    let handshake_hash = match hash_algorithm {
+        HashAlgorithm::Sha1 => {
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(handshake_messages);
+            Bytes::copy_from_slice(&hasher.finalize())
+        },
+        HashAlgorithm::Sha256 => {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(handshake_messages);
+            Bytes::copy_from_slice(&hasher.finalize())
+        },
+        HashAlgorithm::Sha384 => {
+            let mut hasher = sha2::Sha384::new();
+            hasher.update(handshake_messages);
+            Bytes::copy_from_slice(&hasher.finalize())
+        }
+    };
+    
+    // Choose the appropriate label
+    let label = if is_client {
+        b"client finished"
+    } else {
+        b"server finished"
+    };
+    
+    // Use PRF to generate verify data (12 bytes as per RFC 5246)
+    let verify_data = prf_tls12(
+        master_secret,
+        label,
+        &handshake_hash,
+        12, // Fixed size for TLS 1.2
+        hash_algorithm,
+    )?;
+    
+    Ok(verify_data)
 } 

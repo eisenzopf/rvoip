@@ -255,6 +255,10 @@ impl HandshakeMessage {
                 let serialized = msg.serialize()?;
                 buf.extend_from_slice(&serialized);
             }
+            Self::Finished(msg) => {
+                let serialized = msg.serialize()?;
+                buf.extend_from_slice(&serialized);
+            }
             // Add other message types as needed
             _ => {
                 return Err(crate::error::Error::NotImplemented(
@@ -288,6 +292,10 @@ impl HandshakeMessage {
             HandshakeType::ServerKeyExchange => {
                 let server_key_exchange = ServerKeyExchange::parse(data)?;
                 Ok(Self::ServerKeyExchange(server_key_exchange))
+            }
+            HandshakeType::Finished => {
+                let finished = Finished::parse(data)?;
+                Ok(Self::Finished(finished))
             }
             // Add other message types as needed
             _ => {
@@ -1074,4 +1082,27 @@ impl ClientKeyExchange {
 pub struct Finished {
     /// Verify data
     pub verify_data: Bytes,
+}
+
+impl Finished {
+    /// Create a new Finished message with the provided verify data
+    pub fn new(verify_data: Bytes) -> Self {
+        Self {
+            verify_data,
+        }
+    }
+    
+    /// Serialize the Finished message to bytes
+    pub fn serialize(&self) -> Result<Bytes> {
+        // Just return the verify data directly
+        Ok(self.verify_data.clone())
+    }
+    
+    /// Parse a Finished message from bytes
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        // The entire message data is the verify data
+        Ok(Self {
+            verify_data: Bytes::copy_from_slice(data),
+        })
+    }
 } 

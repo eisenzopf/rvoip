@@ -178,9 +178,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("Client connecting to server at {}", server_addr);
         
-        // Skip sending an initial packet - let the DTLS handshake handle this
-        // The ClientHello will be sent by start_handshake
-        
         // Start handshake
         println!("Client starting handshake...");
         client_conn.start_handshake(server_addr).await.unwrap();

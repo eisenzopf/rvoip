@@ -343,6 +343,50 @@ src/dtls/
   - [ ] Prevent timing attacks
   - [ ] Ensure proper key handling
 
+### DTLS Implementation Improvements
+Following a review of the current implementation, several weaknesses were identified that need to be addressed:
+
+- [ ] Strengthen cookie validation
+  - [ ] Implement cryptographically secure cookie generation with server secret
+  - [ ] Add MAC to bind cookies to client IP addresses
+  - [ ] Implement proper cookie verification logic
+- [ ] Complete the handshake implementation
+  - [ ] Add ChangeCipherSpec handling
+  - [ ] Implement Finished message exchange with proper verification
+  - [ ] Create full handshake state machine with complete message flows
+- [ ] Expand cipher suite support
+  - [ ] Add support for modern AEAD ciphers (AES-GCM, ChaCha20-Poly1305)
+  - [ ] Implement proper cipher suite negotiation
+  - [ ] Phase out older, less secure cipher suites
+- [ ] Improve error handling
+  - [ ] Implement proper recovery mechanisms for all error paths
+  - [ ] Add handling for out-of-order packets in UDP transport
+  - [ ] Create comprehensive alert message system
+- [ ] Enhance certificate handling
+  - [ ] Implement proper certificate chain validation
+  - [ ] Add certificate revocation checking
+  - [ ] Support identity verification beyond fingerprints
+- [ ] Expand SRTP protection profile support
+  - [ ] Add AEAD GCM profile implementations (AES-128-GCM, AES-256-GCM)
+  - [ ] Implement newer, more secure hash algorithms
+  - [ ] Create proper profile negotiation logic
+- [ ] Add message fragmentation support
+  - [ ] Implement message fragmentation for large handshake messages
+  - [ ] Create proper fragment reassembly with timeout handling
+  - [ ] Add MTU discovery to optimize fragmentation
+- [ ] Implement session resumption
+  - [ ] Add session ticket support
+  - [ ] Implement pre-shared key (PSK) mode
+  - [ ] Create session caching mechanism
+- [ ] Improve state machine robustness
+  - [ ] Redesign state transitions to be more resilient
+  - [ ] Add comprehensive state validation
+  - [ ] Implement proper timeout handling for all states
+- [ ] Add DTLS 1.3 support
+  - [ ] Implement TLS 1.3 handshake protocol adaptations
+  - [ ] Add 0-RTT support for faster connections
+  - [ ] Implement required cryptographic primitives
+
 ## Next Priorities
 
 - [ ] Integrate DTLS for SRTP key exchange
