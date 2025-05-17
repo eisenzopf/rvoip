@@ -32,6 +32,18 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use futures::future::{join_all, try_join_all};
 
+// Global verbose flag
+static mut VERBOSE: bool = false;
+
+// Helper function for conditional logging
+fn log(msg: &str) {
+    unsafe {
+        if VERBOSE {
+            println!("{}", msg);
+        }
+    }
+}
+
 // Loopback Transport Implementation
 #[derive(Clone, Debug)]
 struct LoopbackTransport {
@@ -64,7 +76,7 @@ impl rvoip_sip_transport::Transport for LoopbackTransport {
         -> std::result::Result<(), rvoip_sip_transport::error::Error> {
         // Find the destination transport in the registry
         let send_count = self.sent_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        println!("[{} -> {}] Sending message #{}: {:?}", self.local_addr, destination, send_count, message.short_description());
+        log(&format!("[{} -> {}] Sending message #{}: {:?}", self.local_addr, destination, send_count, message.short_description()));
         
         if let Some(tx) = self.registry.get(&destination) {
             // Create a TransportEvent for the destination
@@ -77,22 +89,22 @@ impl rvoip_sip_transport::Transport for LoopbackTransport {
             // Send the message to the destination transport with timeout
             match tokio::time::timeout(Duration::from_secs(5), tx.send(event)).await {
                 Ok(Ok(_)) => {
-                    println!("[{} -> {}] Message #{} successfully sent", self.local_addr, destination, send_count);
+                    log(&format!("[{} -> {}] Message #{} successfully sent", self.local_addr, destination, send_count));
                     let recv_count = self.received_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    println!("[{} -> {}] Received count: {}", self.local_addr, destination, recv_count);
+                    log(&format!("[{} -> {}] Received count: {}", self.local_addr, destination, recv_count));
                     Ok(())
                 },
                 Ok(Err(_)) => {
-                    println!("[{} -> {}] Failed to send message #{}; channel closed", self.local_addr, destination, send_count);
+                    log(&format!("[{} -> {}] Failed to send message #{}; channel closed", self.local_addr, destination, send_count));
                     Err(rvoip_sip_transport::error::Error::Other("Send error: channel closed".to_string()))
                 },
                 Err(_) => {
-                    println!("[{} -> {}] Failed to send message #{}; timeout", self.local_addr, destination, send_count);
+                    log(&format!("[{} -> {}] Failed to send message #{}; timeout", self.local_addr, destination, send_count));
                     Err(rvoip_sip_transport::error::Error::Other("Send error: timeout".to_string()))
                 }
             }
         } else {
-            println!("[{} -> {}] Destination not found for message #{}", self.local_addr, destination, send_count);
+            log(&format!("[{} -> {}] Destination not found for message #{}", self.local_addr, destination, send_count));
             Err(rvoip_sip_transport::error::Error::Other(format!("Destination unreachable: {}", destination)))
         }
     }
@@ -171,19 +183,19 @@ async fn process_session_lifecycle(
     mut uas_events_rx: broadcast::Receiver<TransactionEvent>,
     session_idx: usize,
 ) -> bool {
-    println!("Processing session {}", session_idx);
+    log(&format!("Processing session {}", session_idx));
     
     // Step 1: Create UAC session
     let destination = Uri::sip(&format!("bench-user-{}-{}", session_idx, Uuid::new_v4().as_simple()));
     let uac_session = match make_call(&uac_session_manager, destination).await {
         Ok(session) => session,
         Err(e) => {
-            println!("Failed to create UAC session: {:?}", e);
+            log(&format!("Failed to create UAC session: {:?}", e));
             return false;
         },
     };
     
-    println!("Created UAC session {}: {}", session_idx, uac_session.id);
+    log(&format!("Created UAC session {}: {}", session_idx, uac_session.id));
     
     // Step 2: Create an INVITE request and send it via UAC transaction manager
     let call_id = format!("bench-{}", Uuid::new_v4().as_simple());
@@ -197,12 +209,12 @@ async fn process_session_lifecycle(
     ).await {
         Ok(id) => id,
         Err(e) => {
-            println!("Failed to create UAC transaction: {:?}", e);
+            log(&format!("Failed to create UAC transaction: {:?}", e));
             return false
         }
     };
     
-    println!("Created UAC transaction {}: {}", session_idx, uac_transaction_id);
+    log(&format!("Created UAC transaction {}: {}", session_idx, uac_transaction_id));
     
     // Associate transaction with session
     uac_session.track_transaction(uac_transaction_id.clone(), 
@@ -210,39 +222,39 @@ async fn process_session_lifecycle(
     
     // Send the INVITE through the transaction layer
     match uac_transaction_manager.send_request(&uac_transaction_id).await {
-        Ok(_) => println!("Sent INVITE request for session {}", session_idx),
+        Ok(_) => log(&format!("Sent INVITE request for session {}", session_idx)),
         Err(e) => {
-            println!("Failed to send INVITE request: {:?}", e);
+            log(&format!("Failed to send INVITE request: {:?}", e));
             return false;
         }
     }
     
     // Wait for UAS to receive the INVITE with timeout
-    println!("Waiting for UAS to receive INVITE...");
+    log(&format!("Waiting for UAS to receive INVITE..."));
     let result = match tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match uas_events_rx.recv().await {
                 Ok(event) => {
-                    println!("Session {} received UAS event: {:?}", session_idx, event);
+                    log(&format!("Session {} received UAS event: {:?}", session_idx, event));
                     match event {
-                        TransactionEvent::InviteRequest { transaction_id, request, source: _ } => {
+                        TransactionEvent::InviteRequest { transaction_id, request, source } => {
                             // Got an INVITE
-                            return Ok((transaction_id, request));
+                            return Ok((transaction_id, request, source));
                         },
-                        TransactionEvent::NewRequest { transaction_id, request, source: _ } => {
+                        TransactionEvent::NewRequest { transaction_id, request, source } => {
                             if request.method() == Method::Invite {
                                 // Got an INVITE as NewRequest
-                                return Ok((transaction_id, request));
+                                return Ok((transaction_id, request, source));
                             }
                         },
                         _ => {
-                            println!("Ignoring event: {:?}", event);
+                            log(&format!("Ignoring event: {:?}", event));
                             continue;
                         },
                     }
                 },
                 Err(e) => {
-                    println!("Error receiving UAS event: {:?}", e);
+                    log(&format!("Error receiving UAS event: {:?}", e));
                     return Err(e);
                 },
             }
@@ -251,84 +263,68 @@ async fn process_session_lifecycle(
         Ok(Ok(result)) => result,
         _ => {
             // Timeout or error
-            println!("Timeout or error waiting for INVITE on UAS side");
+            log(&format!("Timeout or error waiting for INVITE on UAS side"));
             
             // For the benchmark, let's just simulate the server side
             // to avoid getting stuck
-            println!("Simulating UAS processing for benchmarking");
+            log(&format!("Simulating UAS processing for benchmarking"));
             
             // Change UAC to connected state
             if uac_session.set_state(SessionState::Connected).await.is_err() {
-                println!("Failed to set UAC state to Connected");
+                log(&format!("Failed to set UAC state to Connected"));
             }
             
             // End the call on UAC side
             if end_call(&uac_session).await.is_err() {
-                println!("Failed to end UAC call");
+                log(&format!("Failed to end UAC call"));
             }
             
             return true; // Simulated success for benchmarking
         }
     };
     
-    let (uas_transaction_id, received_request) = result;
-    println!("Got INVITE on UAS side for session {}: {}", session_idx, uas_transaction_id);
+    let (event_transaction_id, received_request, source_addr) = result;
+    log(&format!("Got INVITE on UAS side for session {}: {}", session_idx, event_transaction_id));
     
-    // IMPORTANT: Fix the transaction ID for use with the UAS transaction manager
-    // The transaction ID from the event might not directly match what the transaction manager expects 
-    // because of how toString/Debug and lookup implementations differ
-    
-    // Create a clean server transaction ID from the components
-    let fixed_transaction_id = {
-        // Let's first try to extract the branch from the transaction_id display representation
-        // Format is usually like: Key(z9hG4bK-xxx:INVITE:server)
-        let tx_str = uas_transaction_id.to_string();
-        
-        // If that fails, we can parse it from the request itself
-        if let Some(via_header) = received_request.typed_header::<Via>() {
-            if let Some(via_value) = via_header.0.first() {
-                if let Some(branch) = via_value.branch() {
-                    // Create a new TransactionKey with the same components
-                    TransactionKey::new(
-                        branch.to_string(), 
-                        Method::Invite, 
-                        true // is_server=true
-                    )
-                } else {
-                    // If we can't get the branch, just use the original
-                    uas_transaction_id.clone()
-                }
-            } else {
-                uas_transaction_id.clone()
-            }
-        } else {
-            uas_transaction_id.clone()
+    // CRITICAL FIX: Create a proper server transaction in the UAS transaction manager
+    // This was missing and is the root cause of the transaction lookup failures
+    log(&format!("Creating server transaction for the received INVITE..."));
+    let server_transaction = match uas_transaction_manager.create_server_transaction(
+        received_request.clone(),
+        source_addr
+    ).await {
+        Ok(tx) => tx,
+        Err(e) => {
+            log(&format!("Failed to create server transaction: {:?}", e));
+            return false;
         }
     };
     
-    println!("Using fixed transaction ID for UAS: {}", fixed_transaction_id);
+    // Get the transaction ID from the created server transaction
+    let server_transaction_id = server_transaction.id().clone();
+    log(&format!("Created UAS server transaction with ID: {}", server_transaction_id));
     
     // Step 3: UAS sends provisional response
     let ringing_response = create_test_response(&received_request, StatusCode::Ringing, true, &uas_transport_addr);
     
-    // Send the response through UAS transaction manager with the fixed ID
-    match uas_transaction_manager.send_response(&fixed_transaction_id, ringing_response.clone()).await {
-        Ok(_) => println!("Sent RINGING response for session {}", session_idx),
+    // Send the response through UAS transaction manager using the proper transaction ID
+    match uas_transaction_manager.send_response(&server_transaction_id, ringing_response.clone()).await {
+        Ok(_) => log(&format!("Sent RINGING response for session {}", session_idx)),
         Err(e) => {
-            println!("Failed to send RINGING response: {:?}", e);
+            log(&format!("Failed to send RINGING response: {:?}", e));
             
             // For benchmarking purposes, continue even if response sending fails
-            println!("Continuing benchmark despite response sending failure");
+            log(&format!("Continuing benchmark despite response sending failure"));
         }
     }
     
     // Wait for UAC to receive the response and update state
-    println!("Waiting for UAC to receive RINGING response...");
+    log(&format!("Waiting for UAC to receive RINGING response..."));
     let ringing_received = match tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match uac_events_rx.recv().await {
                 Ok(event) => {
-                    println!("Session {} received UAC event: {:?}", session_idx, event);
+                    log(&format!("Session {} received UAC event: {:?}", session_idx, event));
                     match event {
                         TransactionEvent::Response { transaction_id, response, .. } 
                             if transaction_id == uac_transaction_id && response.status() == StatusCode::Ringing => {
@@ -338,7 +334,7 @@ async fn process_session_lifecycle(
                     }
                 },
                 Err(e) => {
-                    println!("Error receiving UAC event: {:?}", e);
+                    log(&format!("Error receiving UAC event: {:?}", e));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -346,7 +342,7 @@ async fn process_session_lifecycle(
     }).await {
         Ok(true) => true,
         _ => {
-            println!("Timeout waiting for RINGING response on UAC side");
+            log(&format!("Timeout waiting for RINGING response on UAC side"));
             // We'll continue anyway with a simulated response
             true
         }
@@ -354,7 +350,7 @@ async fn process_session_lifecycle(
     
     // UAC changes state to Ringing
     if uac_session.set_state(SessionState::Ringing).await.is_err() {
-        println!("Failed to set UAC state to Ringing");
+        log(&format!("Failed to set UAC state to Ringing"));
         return false;
     }
     
@@ -368,39 +364,39 @@ async fn process_session_lifecycle(
     ).await {
         Some(id) => id,
         None => {
-            println!("Failed to create UAC dialog");
+            log(&format!("Failed to create UAC dialog"));
             return false;
         },
     };
     
     // Associate dialog with UAC session
     if uac_dialog_mgr.associate_with_session(&uac_dialog_id, &uac_session.id).is_err() {
-        println!("Failed to associate dialog with UAC session");
+        log(&format!("Failed to associate dialog with UAC session"));
         return false;
     }
     
-    println!("Created and associated UAC dialog for session {}", session_idx);
+    log(&format!("Created and associated UAC dialog for session {}", session_idx));
     
     // Step 4: UAS sends 200 OK response
     let ok_response = create_test_response(&received_request, StatusCode::Ok, true, &uas_transport_addr);
     
     // Send the OK response through UAS transaction manager
-    match uas_transaction_manager.send_response(&fixed_transaction_id, ok_response.clone()).await {
-        Ok(_) => println!("Sent 200 OK for session {}", session_idx),
+    match uas_transaction_manager.send_response(&server_transaction_id, ok_response.clone()).await {
+        Ok(_) => log(&format!("Sent 200 OK for session {}", session_idx)),
         Err(e) => {
-            println!("Failed to send 200 OK response: {:?}", e);
+            log(&format!("Failed to send 200 OK response: {:?}", e));
             // For benchmarking purposes, continue even if response sending fails
-            println!("Continuing benchmark despite response sending failure");
+            log(&format!("Continuing benchmark despite response sending failure"));
         }
     }
     
     // Wait for UAC to receive the final response
-    println!("Waiting for UAC to receive 200 OK response...");
+    log(&format!("Waiting for UAC to receive 200 OK response..."));
     let ok_received = match tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match uac_events_rx.recv().await {
                 Ok(event) => {
-                    println!("Session {} received UAC event: {:?}", session_idx, event);
+                    log(&format!("Session {} received UAC event: {:?}", session_idx, event));
                     match event {
                         TransactionEvent::Response { transaction_id, response, .. } 
                             if transaction_id == uac_transaction_id && response.status() == StatusCode::Ok => {
@@ -410,7 +406,7 @@ async fn process_session_lifecycle(
                     }
                 },
                 Err(e) => {
-                    println!("Error receiving UAC event: {:?}", e);
+                    log(&format!("Error receiving UAC event: {:?}", e));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -418,7 +414,7 @@ async fn process_session_lifecycle(
     }).await {
         Ok(true) => true,
         _ => {
-            println!("Timeout waiting for 200 OK response on UAC side");
+            log(&format!("Timeout waiting for 200 OK response on UAC side"));
             // We'll continue anyway with a simulated response
             true
         }
@@ -426,13 +422,13 @@ async fn process_session_lifecycle(
     
     // UAC changes state to Connected
     if uac_session.set_state(SessionState::Connected).await.is_err() {
-        println!("Failed to set UAC state to Connected");
+        log(&format!("Failed to set UAC state to Connected"));
         return false;
     }
     
     // Step 5: UAC session sends BYE to terminate
     if end_call(&uac_session).await.is_err() {
-        println!("Failed to end call on UAC side");
+        log(&format!("Failed to end call on UAC side"));
         return false;
     }
     
@@ -442,18 +438,42 @@ async fn process_session_lifecycle(
 
 #[tokio::main]
 async fn main() {
-    // Parse command line arguments for session count
+    // Parse command line arguments for session count and verbose flag
     let args: Vec<String> = env::args().collect();
-    let session_count = if args.len() > 1 {
-        args[1].parse::<usize>().unwrap_or(1000)
-    } else {
-        1000 // Default
-    };
+    
+    // Set up default values
+    let mut session_count = 1000; // Default
+    let mut verbose = false;
+    
+    // Parse arguments
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-v" | "--verbose" => {
+                verbose = true;
+                i += 1;
+            },
+            arg => {
+                // Try to parse as session count
+                if let Ok(count) = arg.parse::<usize>() {
+                    session_count = count;
+                }
+                i += 1;
+            }
+        }
+    }
+    
+    // Set global verbose flag
+    unsafe {
+        VERBOSE = verbose;
+    }
     
     // Setup tracing
     tracing_subscriber::fmt::init();
     
-    println!("Starting benchmark with {} concurrent sessions...", session_count);
+    println!("Starting benchmark with {} concurrent sessions{}...", 
+             session_count, 
+             if verbose { " (verbose mode)" } else { "" });
     
     // Create loopback transport registry
     let transport_registry = Arc::new(DashMap::new());
@@ -501,7 +521,9 @@ async fn main() {
     tokio::spawn(async move {
         let mut rx = uac_events_rx;
         while let Some(event) = rx.recv().await {
-            println!("UAC received event: {:?}", event);
+            if verbose {
+                println!("UAC received event: {:?}", event);
+            }
             let _ = uac_events_tx_clone.send(event);
         }
     });
@@ -510,7 +532,9 @@ async fn main() {
     tokio::spawn(async move {
         let mut rx = uas_events_rx;
         while let Some(event) = rx.recv().await {
-            println!("UAS received event: {:?}", event);
+            if verbose {
+                println!("UAS received event: {:?}", event);
+            }
             let _ = uas_events_tx_clone.send(event);
         }
     });
@@ -597,10 +621,11 @@ async fn main() {
             _ => failure_count += 1,
         }
         
-        // Print progress every 1000 sessions
-        if (success_count + failure_count) % 1000 == 0 || (success_count + failure_count) == session_count {
+        // Print progress every 1000 sessions or when verbose
+        let total = success_count + failure_count;
+        if total % 1000 == 0 || total == session_count || (verbose && total % 100 == 0) {
             println!("Progress: {}/{} complete ({} success, {} failure)", 
-                success_count + failure_count, 
+                total, 
                 session_count,
                 success_count,
                 failure_count
