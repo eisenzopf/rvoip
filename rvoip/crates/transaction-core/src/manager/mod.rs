@@ -651,14 +651,130 @@ impl TransactionManager {
         let tx = locked_txs.get_mut(transaction_id).unwrap();
         debug!(%transaction_id, kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
         
+        // Remember initial state to detect quick state transitions
+        let initial_state = tx.state();
+        
+        // First subscribe to events BEFORE initiating the transaction
+        // so we don't miss any events that happen during initiation
+        let mut event_rx = self.subscribe();
+        
         // Use the TransactionExt trait to safely downcast
         use crate::client::TransactionExt;
         
         if let Some(client_tx) = tx.as_client_transaction() {
             debug!(%transaction_id, "TransactionManager::send_request - initiating client transaction");
+            
+            // Issue the initiate command
             let result = client_tx.initiate().await;
             debug!(%transaction_id, success=?result.is_ok(), "TransactionManager::send_request - initiate result");
-            result
+            
+            // If initiate() returned an error, return it immediately
+            if let Err(e) = result {
+                debug!(%transaction_id, error=%e, "TransactionManager::send_request - initiate failed immediately");
+                return Err(e);
+            }
+            
+            // Check transaction state immediately after initiate
+            let current_state = tx.state();
+            if current_state == TransactionState::Terminated {
+                // Transaction terminated immediately - likely due to transport error
+                debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
+                return Err(Error::transport_error(
+                    rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated immediately".into()),
+                    "Failed to send request - transaction terminated immediately"
+                ));
+            }
+            
+            // Release lock to allow transaction processing
+            drop(locked_txs);
+            
+            // Now wait for a short time to catch any asynchronous errors
+            // We'll use a timeout to avoid hanging if no events are received
+            let timeout_duration = tokio::time::Duration::from_millis(100);
+            
+            match tokio::time::timeout(timeout_duration, async {
+                // Wait for events until timeout
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        TransactionEvent::TransportError { transaction_id: tx_id, .. } if tx_id == *transaction_id => {
+                            debug!(%transaction_id, "Received TransportError event");
+                            return Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ConnectionFailed("Transport error during request send".into()),
+                                "Failed to send request - transport error"
+                            ));
+                        },
+                        TransactionEvent::StateChanged { transaction_id: tx_id, previous_state, new_state } 
+                            if tx_id == *transaction_id => {
+                            debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
+                            
+                            // If transaction moved directly to Terminated state
+                            if new_state == TransactionState::Terminated && 
+                               (previous_state == TransactionState::Initial || 
+                                previous_state == TransactionState::Calling || 
+                                previous_state == TransactionState::Trying) {
+                                
+                                debug!(%transaction_id, "Transaction moved to Terminated state - likely transport error");
+                                return Err(Error::transport_error(
+                                    rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated unexpectedly".into()),
+                                    "Failed to send request - transaction terminated"
+                                ));
+                            }
+                        },
+                        _ => {} // Ignore other events
+                    }
+                }
+                
+                // Check final transaction state
+                let locked_txs = self.client_transactions.lock().await;
+                if let Some(tx) = locked_txs.get(transaction_id) {
+                    let final_state = tx.state();
+                    if final_state == TransactionState::Terminated {
+                        debug!(%transaction_id, "Transaction is terminated after events processed");
+                        return Err(Error::transport_error(
+                            rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated after processing".into()),
+                            "Failed to send request - transaction terminated"
+                        ));
+                    }
+                } else {
+                    // Transaction was removed
+                    debug!(%transaction_id, "Transaction was removed - likely due to termination");
+                    return Err(Error::transport_error(
+                        rvoip_sip_transport::Error::ConnectionFailed("Transaction was removed".into()),
+                        "Failed to send request - transaction removed"
+                    ));
+                }
+                
+                Ok(())
+            }).await {
+                // Timeout occurred
+                Err(_) => {
+                    // Check one more time if the transaction still exists or has terminated
+                    let locked_txs = self.client_transactions.lock().await;
+                    if let Some(tx) = locked_txs.get(transaction_id) {
+                        let final_state = tx.state();
+                        if final_state == TransactionState::Terminated {
+                            debug!(%transaction_id, "Transaction terminated after timeout");
+                            return Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated after timeout".into()),
+                                "Failed to send request - transaction terminated"
+                            ));
+                        }
+                        
+                        // If we still have a transaction and it's not terminated, assume it's okay
+                        debug!(%transaction_id, state=?final_state, "Transaction still exists and is not terminated after timeout");
+                        Ok(())
+                    } else {
+                        // Transaction was removed
+                        debug!(%transaction_id, "Transaction was removed after timeout");
+                        Err(Error::transport_error(
+                            rvoip_sip_transport::Error::ConnectionFailed("Transaction was removed after timeout".into()),
+                            "Failed to send request - transaction removed"
+                        ))
+                    }
+                },
+                // Got a result from the event processing
+                Ok(result) => result,
+            }
         } else {
             debug!(%transaction_id, "TransactionManager::send_request - failed to downcast to client transaction");
             Err(Error::Other("Failed to downcast to client transaction".to_string()))

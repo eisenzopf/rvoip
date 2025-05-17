@@ -12,6 +12,8 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Implement quality of protection (qop) support
 - [ ] Add TLS transport support integration for secure signaling
 - [ ] Create high-level authentication API for both client and server usage
+- [ ] Add helper functions for common authentication scenarios
+- [ ] Implement credential storage and management
 
 ### 2. Dialog Lifecycle Management
 - [ ] Add support for re-INVITEs and session refreshes
@@ -25,6 +27,10 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Support Path header for registration scenarios (RFC 3327)
 - [ ] Add proper PRACK support for reliable provisional responses (RFC 3262)
 - [ ] Improve handling of dialog matching for requests with multiple candidates
+- [ ] Create additional helper functions for re-INVITE scenarios
+- [ ] Add session modification abstractions (hold, resume, codec change)
+- [ ] Complete the create_dialog() function for direct dialog creation
+- [ ] Implement session refresh helper functions
 
 ### 3. Media Session Management and SDP Negotiation
 - [x] Replace current sdp.rs with sip-core's SdpBuilder integration
@@ -41,22 +47,23 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
   - [x] Create SdpContext to store and track local and remote SDP state
   - [x] Implement SDP offer/answer state machine per RFC 3264
   - [x] Add media capability negotiation for codec selection
-- [ ] Complete dialog-level SDP integration
-  - [ ] Integrate SdpContext with dialog state
-  - [ ] Handle early media scenarios properly
-  - [ ] Add automatic SDP state updates on dialog events
+- [x] Complete dialog-level SDP integration
+  - [x] Integrate SdpContext with dialog state
+  - [x] Handle early media scenarios properly
+  - [x] Add automatic SDP state updates on dialog events
 - [x] Add helper functions for SDP operations
   - [x] Create high-level functions for common SDP tasks
   - [x] Update helpers.rs with SDP-focused convenience methods
   - [x] Ensure proper error handling for SDP operations
-- [ ] Complete SDP body handling in SIP messages
+- [x] Complete SDP body handling in SIP messages
   - [x] Add functions to attach SDP to requests
-  - [ ] Implement automatic extraction and processing of SDP from responses
+  - [x] Implement automatic extraction and processing of SDP from responses
   - [x] Ensure proper Content-Type handling
 - [ ] Enhance session-level media management
   - [x] Implement SDP-to-MediaConfig conversion
   - [ ] Add automatic media stream setup based on negotiated parameters
   - [ ] Implement media state tracking in session objects
+  - [ ] Create helper functions for media operations (mute, codec change)
 - [ ] Add advanced media features
   - [ ] Add proper ICE integration for NAT traversal (RFC 8445)
   - [ ] Support RTCP feedback mechanisms (RFC 4585)
@@ -70,6 +77,9 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Implement circuit breakers for external systems
 - [ ] Add panic recovery in critical paths
 - [ ] Add soak testing for memory leaks detection
+- [ ] Create error recovery helper functions for common failure scenarios
+- [ ] Implement guided recovery procedures for network and protocol errors
+- [ ] Add retry management with backoff strategies
 
 ### 5. Feature Extensions
 - [ ] Complete implementation of REFER handling (RFC 3515)
@@ -148,6 +158,9 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [ ] Create high-level authentication handling
 - [x] Add quality metrics reporting API
 - [x] Implement event subscription model for asynchronous operations
+- [ ] Improve event subscription interface with type-safe callbacks
+- [ ] Add helper methods for common event handling scenarios
+- [ ] Create standardized event filtering and prioritization
 - [x] Create logging and tracing interfaces
 - [x] Add configuration management API
 - [x] Create transport abstraction for protocol flexibility

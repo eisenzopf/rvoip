@@ -25,12 +25,14 @@ mod tests {
     use tracing::{info, debug};
     use std::fs::File;
     use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Create a mock transport for testing
     #[derive(Debug, Clone)]
     struct MockTransport {
         local_addr: SocketAddr,
         sent_messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
+        should_fail_send: Arc<AtomicBool>,
     }
 
     impl MockTransport {
@@ -38,7 +40,20 @@ mod tests {
             Self {
                 local_addr: SocketAddr::from_str(addr).unwrap(),
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
+                should_fail_send: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        fn with_send_failure(addr: &str, should_fail: bool) -> Self {
+            Self {
+                local_addr: SocketAddr::from_str(addr).unwrap(),
+                sent_messages: Arc::new(Mutex::new(Vec::new())),
+                should_fail_send: Arc::new(AtomicBool::new(should_fail)),
+            }
+        }
+
+        fn set_send_failure(&self, should_fail: bool) {
+            self.should_fail_send.store(should_fail, Ordering::SeqCst);
         }
 
         async fn get_sent_messages(&self) -> Vec<(Message, SocketAddr)> {
@@ -53,6 +68,15 @@ mod tests {
             message: Message,
             destination: SocketAddr,
         ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            // Check if we should simulate a failure
+            if self.should_fail_send.load(Ordering::SeqCst) {
+                println!("MockTransport::send_message - Simulating failure");
+                return Err(rvoip_sip_transport::error::Error::ConnectionFailed(
+                    "Simulated network failure for testing".into()
+                ));
+            }
+
+            // Otherwise process normally
             let mut messages = self.sent_messages.lock().await;
             println!("MockTransport::send_message - Sending message: {:?} to {}", 
                      if let Message::Request(ref req) = message { req.method() } else { Method::Ack }, 
@@ -1240,6 +1264,61 @@ mod tests {
         // Clean up
         manager.shutdown().await;
         writeln!(debug_file, "Test completed").unwrap();
+        
+        Ok(())
+    }
+
+    /// Test that transport errors are properly propagated
+    #[tokio::test]
+    async fn test_transport_error_propagation() -> Result<()> {
+        // Setup mock transport with send failure
+        let transport = Arc::new(MockTransport::with_send_failure("127.0.0.1:5060", true));
+        let (_, transport_rx) = mpsc::channel(10);
+        
+        // Create the transaction manager
+        let (manager, _) = TransactionManager::new(
+            transport.clone(),
+            transport_rx,
+            Some(10),
+        ).await?;
+        
+        // Create an INVITE request
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        
+        // Create a client transaction
+        let tx_id = manager.create_client_transaction(
+            invite_request.clone(),
+            destination,
+        ).await?;
+        
+        // Attempt to send the request, which should fail
+        let result = manager.send_request(&tx_id).await;
+        
+        // Verify that the error is properly propagated
+        assert!(result.is_err(), "Expected send_request to fail due to transport error");
+        
+        // Verify the error type is ConnectionFailed
+        if let Err(err) = result {
+            println!("Error: {:?}", err);
+            match err {
+                Error::TransportError { source, .. } => {
+                    // The TransportErrorWrapper contains a string representation of the error
+                    // Check if the string contains any of our expected error patterns
+                    let error_str = source.0;
+                    assert!(error_str.contains("ConnectionFailed") || 
+                            error_str.contains("connection failed") ||
+                            error_str.contains("Simulated network failure") ||
+                            error_str.contains("Transaction terminated") ||
+                            error_str.contains("transport error"),
+                           "Expected connection failed error, got: {}", error_str);
+                },
+                _ => panic!("Unexpected error type: {:?}", err),
+            }
+        }
+        
+        // Clean up
+        manager.shutdown().await;
         
         Ok(())
     }

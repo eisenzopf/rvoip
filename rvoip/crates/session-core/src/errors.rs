@@ -340,9 +340,14 @@ pub enum Error {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String, ErrorContext),
 
-    /// Authentication challenge
-    #[error("Authentication challenge: {0}")]
-    AuthenticationChallenge(String, ErrorContext),
+    /// Authentication challenge received, credentials required
+    #[error("Authentication challenge: {challenge}")]
+    AuthChallenge {
+        /// The challenge details
+        challenge: String,
+        /// Error context
+        context: ErrorContext,
+    },
 
     /// Invalid credentials
     #[error("Invalid credentials: {0}")]
@@ -462,6 +467,13 @@ pub enum Error {
     /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String, ErrorContext),
+
+    /// Invalid media state
+    #[error("Invalid media state")]
+    InvalidMediaState {
+        /// Error context
+        context: ErrorContext,
+    },
 }
 
 impl Error {
@@ -495,7 +507,7 @@ impl Error {
             Error::MediaResourceError(_, ctx) => ctx,
             Error::SdpError(_, ctx) => ctx,
             Error::AuthenticationFailed(_, ctx) => ctx,
-            Error::AuthenticationChallenge(_, ctx) => ctx,
+            Error::AuthChallenge { context, .. } => context,
             Error::InvalidCredentials(_, ctx) => ctx,
             Error::InvalidRequest(_, ctx) => ctx,
             Error::InvalidResponse(_, ctx) => ctx,
@@ -517,6 +529,7 @@ impl Error {
             Error::InternalError(_, ctx) => ctx,
             Error::UnexpectedError(_, _, ctx) => ctx,
             Error::SerializationError(_, ctx) => ctx,
+            Error::InvalidMediaState { context, .. } => context,
         }
     }
 

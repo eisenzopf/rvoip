@@ -852,6 +852,83 @@ impl DialogManager {
             }
         }
     }
+    
+    /// Create a dialog directly (without transaction events)
+    ///
+    /// This method allows creating dialogs programmatically, which is useful for
+    /// reconstructing dialogs from persisted state or creating dialogs for testing.
+    pub fn create_dialog_directly(
+        &self,
+        dialog_id: DialogId,
+        call_id: String,
+        local_uri: Uri,
+        remote_uri: Uri,
+        local_tag: Option<String>,
+        remote_tag: Option<String>,
+        is_initiator: bool
+    ) -> DialogId {
+        // Create a new dialog with remote URI cloned for the remote target field
+        let remote_target = remote_uri.clone();
+        
+        // Create a new dialog
+        let dialog = Dialog {
+            id: dialog_id.clone(),
+            state: DialogState::Confirmed,
+            call_id: call_id.clone(),
+            local_uri,
+            remote_uri,
+            local_tag: local_tag.clone(),
+            remote_tag: remote_tag.clone(),
+            local_seq: 1,  // Initialize at 1 for first request
+            remote_seq: 0, // Will be set when receiving a request
+            remote_target, // Use remote URI as target initially
+            route_set: Vec::new(),
+            is_initiator, // Use provided initiator flag
+            sdp_context: crate::sdp::SdpContext::new(),
+        };
+        
+        // Store the dialog
+        self.dialogs.insert(dialog_id.clone(), dialog.clone());
+        
+        // If we have both local and remote tags, add to dialog_lookup for faster in-dialog request matching
+        if let (Some(local_tag), Some(remote_tag)) = (local_tag, remote_tag) {
+            let dialog_tuple = (call_id, local_tag, remote_tag);
+            self.dialog_lookup.insert(dialog_tuple, dialog_id.clone());
+        }
+        
+        // Return the dialog ID
+        dialog_id
+    }
+    
+    /// Associate a dialog with a session and emit dialog created event
+    pub fn associate_and_notify(
+        &self,
+        dialog_id: &DialogId,
+        session_id: &SessionId
+    ) -> Result<(), Error> {
+        // Associate with session
+        self.associate_with_session(dialog_id, session_id)?;
+        
+        // Emit a dialog created event
+        self.event_bus.publish(crate::events::SessionEvent::DialogCreated {
+            session_id: session_id.clone(),
+            dialog_id: dialog_id.clone(),
+        });
+        
+        Ok(())
+    }
+    
+    /// Send a response using the transaction manager
+    ///
+    /// This is just a convenience wrapper to avoid having to access the
+    /// transaction manager directly.
+    pub async fn send_response(
+        &self,
+        transaction_id: &TransactionKey,
+        response: Response
+    ) -> Result<(), rvoip_transaction_core::Error> {
+        self.transaction_manager.send_response(transaction_id, response).await
+    }
 }
 
 #[cfg(test)]
