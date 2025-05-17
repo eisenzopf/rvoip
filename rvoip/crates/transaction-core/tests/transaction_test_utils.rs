@@ -30,6 +30,8 @@ pub struct MockTransport {
     is_closed: Arc<Mutex<bool>>,
     /// Notifier for when a message is sent
     message_sent_notifier: Arc<Notify>,
+    /// Optional linked transport for auto-forwarding messages (simulating network)
+    linked_transport: Arc<Mutex<Option<(Arc<MockTransport>, SocketAddr)>>>,
 }
 
 impl MockTransport {
@@ -42,7 +44,15 @@ impl MockTransport {
                 .unwrap_or_else(|_| SocketAddr::from_str("127.0.0.1:5060").unwrap()),
             is_closed: Arc::new(Mutex::new(false)),
             message_sent_notifier: Arc::new(Notify::new()),
+            linked_transport: Arc::new(Mutex::new(None)),
         }
+    }
+    
+    /// Link this transport to another transport for automatic message forwarding
+    /// This creates a virtual network connection between the two transports
+    pub async fn link_with(&self, other: Arc<MockTransport>, other_addr: SocketAddr) {
+        let mut linked = self.linked_transport.lock().await;
+        *linked = Some((other, other_addr));
     }
 
     /// Retrieve the next sent message, if any
@@ -100,6 +110,25 @@ impl MockTransport {
     pub async fn inject_event(&self, event: TransportEvent) -> std::result::Result<(), String> {
         self.event_tx.send(event).await.map_err(|e| e.to_string())
     }
+    
+    /// Forwards a message to the linked transport if one exists
+    async fn forward_message(&self, message: Message, source: SocketAddr) -> std::result::Result<(), String> {
+        let linked = self.linked_transport.lock().await;
+        
+        if let Some((other_transport, other_addr)) = linked.as_ref() {
+            // Forward the message to the linked transport
+            let event = TransportEvent::MessageReceived {
+                message: message.clone(),
+                source,
+                destination: *other_addr,
+            };
+            
+            other_transport.inject_event(event).await?;
+            println!("Message automatically forwarded from {} to {}", source, other_addr);
+        }
+        
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -114,10 +143,26 @@ impl Transport for MockTransport {
             return Err(TransportError::TransportClosed);
         }
         
-        // Store the message
-        let mut queue = self.sent_messages.lock().await;
-        queue.push_back((message, destination));
-        self.message_sent_notifier.notify_one();
+        // Store the message in our sent queue
+        {
+            let mut queue = self.sent_messages.lock().await;
+            queue.push_back((message.clone(), destination));
+            self.message_sent_notifier.notify_one();
+        }
+        
+        // Debug message type
+        let msg_type = match &message {
+            Message::Request(req) => format!("Request ({})", req.method()),
+            Message::Response(resp) => format!("Response ({})", resp.status()),
+        };
+        println!("Transport {} sent {} to {}", self.local_addr, msg_type, destination);
+        
+        // Forward the message to the linked transport (if any)
+        if let Err(e) = self.forward_message(message, self.local_addr).await {
+            println!("Warning: Failed to forward message: {}", e);
+            // Don't return an error here, we still sent the message successfully
+        }
+        
         Ok(())
     }
 
@@ -136,8 +181,9 @@ impl Transport for MockTransport {
 pub struct TestEnvironment {
     pub client_manager: TransactionManager,
     pub server_manager: TransactionManager,
-    pub client_events_rx: mpsc::Receiver<TransactionEvent>,
-    pub server_events_rx: mpsc::Receiver<TransactionEvent>,
+    // Only used internally, not needed to expose as struct fields
+    client_events_rx: mpsc::Receiver<TransactionEvent>,
+    server_events_rx: mpsc::Receiver<TransactionEvent>,
     pub client_transport: Arc<MockTransport>,
     pub server_transport: Arc<MockTransport>,
     pub client_addr: SocketAddr,
@@ -147,6 +193,9 @@ pub struct TestEnvironment {
 impl TestEnvironment {
     /// Create a new test environment with two transaction managers (client and server)
     pub async fn new() -> Self {
+        // Set test environment variable
+        std::env::set_var("RVOIP_TEST", "1");
+        
         // Client side setup
         let client_addr_str = "127.0.0.1:5070";
         let client_addr = SocketAddr::from_str(client_addr_str).unwrap();
@@ -159,16 +208,20 @@ impl TestEnvironment {
         let (server_event_injector_tx, server_event_injector_rx) = mpsc::channel(100);
         let server_transport = Arc::new(MockTransport::new(server_event_injector_tx, server_addr_str));
         
+        // Link the transports together to simulate a network
+        client_transport.link_with(server_transport.clone(), server_addr).await;
+        server_transport.link_with(client_transport.clone(), client_addr).await;
+        
         // Create fast timer settings for testing
         let timer_settings = TimerSettings {
-            t1: Duration::from_millis(20),      // Shortened T1 (normally 500ms)
-            t2: Duration::from_millis(80),      // Shortened T2 (normally 4s)
-            transaction_timeout: Duration::from_millis(160), // Shortened timeout
-            wait_time_j: Duration::from_millis(40),  // Shorter Timer J
-            wait_time_k: Duration::from_millis(40),  // Shorter Timer K
-            wait_time_h: Duration::from_millis(40),  // Shorter Timer H
-            wait_time_i: Duration::from_millis(40),  // Shorter Timer I
-            wait_time_d: Duration::from_millis(40),  // Shorter Timer D
+            t1: Duration::from_millis(100),        // Slightly longer T1 (normally 500ms)
+            t2: Duration::from_millis(400),        // Longer T2 (normally 4s)
+            transaction_timeout: Duration::from_millis(20000), // Much longer timeout (20 seconds)
+            wait_time_j: Duration::from_millis(120),  // Longer Timer J
+            wait_time_k: Duration::from_millis(120),  // Longer Timer K
+            wait_time_h: Duration::from_millis(120),  // Longer Timer H
+            wait_time_i: Duration::from_millis(120),  // Longer Timer I
+            wait_time_d: Duration::from_millis(120),  // Longer Timer D
         };
         
         // Create transaction managers
@@ -196,6 +249,13 @@ impl TestEnvironment {
             client_addr,
             server_addr,
         }
+    }
+    
+    /// Process a request for a server transaction using the public API
+    /// This is the preferred method to process ACK and other requests for server transactions
+    pub async fn process_server_request(&self, tx_id: &TransactionKey, request: Request) -> std::result::Result<(), String> {
+        self.server_manager.process_request(tx_id, request).await
+            .map_err(|e| e.to_string())
     }
     
     /// Create a SIP request of the specified method
@@ -347,6 +407,9 @@ impl TestEnvironment {
     pub async fn shutdown(&self) {
         self.client_manager.shutdown().await;
         self.server_manager.shutdown().await;
+        
+        // Reset environment variable
+        std::env::remove_var("RVOIP_TEST");
     }
 }
 

@@ -744,4 +744,44 @@ impl TransactionManager {
             Err(Error::Other("Failed to downcast to client transaction".to_string()))
         }
     }
+
+    /// Process a request for an existing server transaction.
+    ///
+    /// This method allows direct processing of a request (like ACK or CANCEL) by a 
+    /// specific server transaction. It's primarily used for handling ACK requests 
+    /// for non-2xx responses in INVITE server transactions according to RFC 3261.
+    ///
+    /// ## Uses in SIP Transaction Layer
+    /// 
+    /// - Processing ACK requests for non-2xx responses
+    /// - Processing retransmitted requests
+    /// - Test environments that need direct access to transactions
+    ///
+    /// ## RFC References
+    /// - RFC 3261 Section 17.2.1: INVITE server transaction ACK handling
+    ///
+    /// # Arguments
+    /// * `tx_id` - The server transaction ID
+    /// * `request` - The SIP request to process
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or an error if the transaction doesn't exist or processing fails
+    pub async fn process_request(&self, tx_id: &TransactionKey, request: Request) -> Result<()> {
+        // Only server transactions can process requests
+        if !tx_id.is_server() {
+            return Err(Error::Other("Cannot process request for client transaction".to_string()));
+        }
+        
+        // Get the server transaction
+        let server_txs = self.server_transactions.lock().await;
+        let tx = server_txs.get(tx_id)
+            .ok_or_else(|| Error::transaction_not_found(tx_id.clone(), "process_request - transaction not found"))?;
+        
+        // Clone it so we can drop the lock before the async call
+        let tx_clone = tx.clone();
+        drop(server_txs);
+        
+        // Process the request using the transaction's implementation
+        tx_clone.process_request(request).await
+    }
 } 

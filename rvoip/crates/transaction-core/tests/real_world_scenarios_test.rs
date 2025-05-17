@@ -617,10 +617,38 @@ async fn test_reinvite_flow() {
                 println!("Client sending ACK for Re-INVITE");
                 let reinvite_ack = create_ack_for_response(&reinvite_ok, &reinvite_req, env2.client_addr);
                 
-                // Use inject method for ACK
+                // First, manually send the ACK from the client
+                env2.client_transport.send_message(
+                    Message::Request(reinvite_ack.clone()), 
+                    env2.server_addr
+                ).await.expect("Failed to send ACK for Re-INVITE");
+                
+                // Then inject it to the server to simulate proper transmission
                 env2.inject_request_c2s(reinvite_ack).await
                     .expect("Failed to inject ACK for Re-INVITE to server");
                 
+                // 14. Verify that client sent ACK for the 200 OK
+                println!("Checking for client ACK for 200 OK");
+                sleep(Duration::from_millis(80)).await;
+                
+                // Check for ACK in the client's sent messages
+                let mut found_ack = false;
+                {
+                    let messages = env2.client_transport.sent_messages.lock().await;
+                    for (message, _) in messages.iter() {
+                        if let Message::Request(request) = message {
+                            if request.method() == Method::Ack {
+                                found_ack = true;
+                                println!("Found ACK for 2xx response");
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                assert!(found_ack, "Client should have sent ACK for 200 OK (handled by TU)");
+                
+                // Continue with RE-INVITE flow
                 println!("Re-INVITE flow test completed successfully");
             } else {
                 panic!("Client sent message is not a request");

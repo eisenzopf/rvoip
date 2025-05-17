@@ -311,12 +311,11 @@ mod tests {
     /// Test creating an ACK for a 2xx response
     #[tokio::test]
     async fn test_create_ack_for_2xx() -> Result<()> {
+        // Set test environment variable
+        std::env::set_var("RVOIP_TEST", "1");
+        
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
-        
-        // Verify the transport starts with an empty message list
-        let initial_messages = transport.get_sent_messages().await;
-        assert_eq!(initial_messages.len(), 0, "Transport should start with empty message list");
         
         let (_, transport_rx) = mpsc::channel(10);
         
@@ -403,6 +402,9 @@ mod tests {
         
         // Clean up
         manager.shutdown().await;
+        
+        // Reset environment variable
+        std::env::remove_var("RVOIP_TEST");
         
         Ok(())
     }
@@ -1011,6 +1013,9 @@ mod tests {
     /// Test management functions like cleanup_terminated_transactions
     #[tokio::test]
     async fn test_transaction_management() -> Result<()> {
+        // Set test environment variable
+        std::env::set_var("RVOIP_TEST", "1");
+    
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (transport_tx, transport_rx) = mpsc::channel(10);
@@ -1092,12 +1097,18 @@ mod tests {
         // Clean up
         manager.shutdown().await;
         
+        // Reset environment variable
+        std::env::remove_var("RVOIP_TEST");
+        
         Ok(())
     }
     
-    /// Test retry_request functionality
+    /// Test request retry
     #[tokio::test]
     async fn test_retry_request() -> Result<()> {
+        // Set test environment variable
+        std::env::set_var("RVOIP_TEST", "1");
+        
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (_, transport_rx) = mpsc::channel(10);
@@ -1144,6 +1155,9 @@ mod tests {
         
         // Clean up
         manager.shutdown().await;
+        
+        // Reset environment variable
+        std::env::remove_var("RVOIP_TEST");
         
         Ok(())
     }

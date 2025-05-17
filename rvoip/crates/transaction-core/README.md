@@ -394,6 +394,24 @@ let cancel_tx_id = manager.cancel_invite_transaction(&invite_tx_id).await?;
 // 4. Managing the relationship between the INVITE and CANCEL transactions
 ```
 
+### Handling ACK for non-2xx Responses
+
+```rust
+// When the server transaction has sent a non-2xx response to an INVITE,
+// the client will send an ACK directly to the server transaction.
+// This ACK needs to be processed by the server transaction:
+
+// Assuming you have the server transaction ID and the ACK request:
+let server_invite_tx_id = /* ID of the INVITE server transaction */;
+let ack_request = /* The ACK request received from the client */;
+
+// Process the ACK in the server transaction
+manager.process_request(&server_invite_tx_id, ack_request).await?;
+
+// This will cause the server INVITE transaction to transition to Confirmed state,
+// and eventually to Terminated after Timer I expires.
+```
+
 ## Error Handling
 
 The library provides specific error types for different failure scenarios:
