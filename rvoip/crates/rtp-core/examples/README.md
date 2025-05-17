@@ -77,16 +77,15 @@ cargo run --example rtcp_bye
 
 ### 9. RTCP APP Packet Handling (`rtcp_app.rs`)
 
-Shows how RTCP Application-Defined (APP) packets can be sent and received between RTP sessions.
+Shows how to use RTCP APP packets for application-specific functions.
 
 ```
 cargo run --example rtcp_app
 ```
 
-### 10. RTCP Extended Reports (XR) and Compound Packets (`rtcp_xr_example.rs`)
+### 10. RTCP Extended Reports (`rtcp_xr_example.rs`)
 
-Demonstrates creating and processing RTCP Extended Reports (XR) with VoIP metrics and 
-including them in compound RTCP packets along with SR/RR and other packet types.
+Demonstrates RTCP XR (Extended Reports) for detailed media quality metrics.
 
 ```
 cargo run --example rtcp_xr_example
@@ -94,8 +93,7 @@ cargo run --example rtcp_xr_example
 
 ### 11. RFC 3551 Compatibility (`rfc3551_compatibility.rs`)
 
-Tests and validates compatibility with RFC 3551 (RTP Audio/Video Profile), which defines 
-standard payload types, clock rates, and other parameters for RTP media streams.
+Tests compatibility with RFC 3551 (RTP A/V Profile) including payload types.
 
 ```
 cargo run --example rfc3551_compatibility
@@ -103,12 +101,25 @@ cargo run --example rfc3551_compatibility
 
 ### 12. Header Extensions (`header_extensions.rs`)
 
-Demonstrates the use of RTP header extensions as defined in RFC 8285, including both one-byte 
-and two-byte formats. Shows how to add, parse, and manipulate extensions like audio levels 
-and video orientation information with practical real-world examples.
+Demonstrates RTP header extensions (RFC 8285) for carrying additional metadata.
 
 ```
 cargo run --example header_extensions
+```
+
+### 13. CSRC Management for Mixed Streams (`csrc_management.rs`)
+
+Demonstrates how to use CSRC management capabilities in mixed RTP streams for conferencing.
+This example shows:
+
+- Creating and managing mappings between SSRCs and CSRCs
+- Adding contributing sources to RTP headers
+- Generating RTCP SDES packets that describe all sources
+- Simulating a conferencing mixer that combines multiple audio sources
+- Properly attributing media to active participants using CSRCs
+
+```
+cargo run --example csrc_management
 ```
 
 ## Running with Logging

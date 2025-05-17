@@ -520,6 +520,59 @@ impl RtpHeader {
         Ok(())
     }
 
+    /// Add a CSRC (Contributing Source) identifier to the header
+    /// This will automatically update the cc count field
+    pub fn add_csrc(&mut self, csrc: RtpCsrc) {
+        self.csrc.push(csrc);
+        self.cc = self.csrc.len() as u8;
+    }
+    
+    /// Add multiple CSRC identifiers at once
+    pub fn add_csrcs(&mut self, csrcs: &[RtpCsrc]) {
+        self.csrc.extend_from_slice(csrcs);
+        self.cc = self.csrc.len() as u8;
+    }
+    
+    /// Get a CSRC by index
+    pub fn get_csrc(&self, index: usize) -> Option<RtpCsrc> {
+        self.csrc.get(index).copied()
+    }
+    
+    /// Remove a CSRC by value
+    /// Returns true if the CSRC was found and removed
+    pub fn remove_csrc(&mut self, csrc: RtpCsrc) -> bool {
+        if let Some(index) = self.csrc.iter().position(|&c| c == csrc) {
+            self.csrc.remove(index);
+            self.cc = self.csrc.len() as u8;
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// Remove a CSRC by index
+    /// Returns the removed CSRC value if the index was valid
+    pub fn remove_csrc_at(&mut self, index: usize) -> Option<RtpCsrc> {
+        if index < self.csrc.len() {
+            let csrc = self.csrc.remove(index);
+            self.cc = self.csrc.len() as u8;
+            Some(csrc)
+        } else {
+            None
+        }
+    }
+    
+    /// Clear all CSRC identifiers
+    pub fn clear_csrcs(&mut self) {
+        self.csrc.clear();
+        self.cc = 0;
+    }
+    
+    /// Check if a specific CSRC is present in the list
+    pub fn has_csrc(&self, csrc: RtpCsrc) -> bool {
+        self.csrc.contains(&csrc)
+    }
+    
     /// Add a header extension element
     /// This will automatically create and configure the extensions container if needed
     pub fn add_extension(&mut self, id: u8, data: impl Into<Bytes>) -> Result<()> {

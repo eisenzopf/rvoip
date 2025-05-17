@@ -67,7 +67,7 @@ rtp-core/
 - [x] Implement RFC 3550 compliant RTP packet parsing
 - [x] Create RtpPacket struct with all required fields
 - [x] Implement header extension support
-- [ ] Add CSRC list handling
+- [x] Add CSRC list handling
 - [ ] Implement payload format identification
 - [x] Create efficient serialization/deserialization
 - [x] Add verification for RTP header validity
@@ -89,7 +89,7 @@ rtp-core/
 - [x] Implement timestamp management
 - [x] Add clock rate conversion utilities
 - [x] Implement synchronization source (SSRC) handling
-- [ ] Add contributing source (CSRC) management
+- [x] Add contributing source (CSRC) management
 
 ## Phase 2: Media Transport (2-3 weeks)
 
@@ -237,11 +237,15 @@ rtp-core/
 - [x] Implemented MOS score estimation and R-factor calculation for voice quality metrics
 - [x] Implemented RFC 8285 header extensions support with one-byte and two-byte formats
 - [x] Created comprehensive example for RTP header extensions usage
+- [x] Added contributing source (CSRC) management with support for mixed streams
+- [x] Implemented CsrcManager for SSRC to CSRC mappings in mixer scenarios
+- [x] Created helper methods in RtpHeader for easy CSRC manipulation
+- [x] Developed comprehensive example simulating an RTP mixer with CSRC attribution
+- [x] Integrated CSRC information with RTCP SDES packets
 
 ## Next Priorities
 
 - [ ] Integrate DTLS for SRTP key exchange
-- [ ] Add contributing source (CSRC) management
 - [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
 - [ ] Add cross-platform socket validation
 - [ ] Create RTCP BYE packet generation logic

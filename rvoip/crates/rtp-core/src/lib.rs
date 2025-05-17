@@ -14,6 +14,7 @@
 //! - `traits`: Public traits for integration with other crates
 //! - `payload`: RTP payload format handlers
 //! - `buffer`: High-performance buffer management for receiving and transmitting packets
+//! - `csrc`: CSRC management
 //!
 //! ## Buffer Management
 //!
@@ -41,6 +42,7 @@ pub mod time;
 pub mod traits;
 pub mod payload;
 pub mod buffer;
+pub mod csrc;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -72,24 +74,33 @@ pub use packet::rtcp::{
     RtcpGoodbye, RtcpApplicationDefined, RtcpExtendedReport,
     RtcpCompoundPacket, RtcpXrBlock, VoipMetricsBlock
 };
+pub use packet::extension::{
+    ExtensionElement, RtpHeaderExtensions,
+    ids::AUDIO_LEVEL, ids::VIDEO_ORIENTATION, 
+    ids::TRANSPORT_CC,
+    ids::FRAME_MARKING, ids::SDES, 
+    uris::ABS_SEND_TIME, uris::MID, uris::STREAM_ID, uris::REPAIR_RTP_STREAM_ID,
+    uris::VIDEO_CONTENT_TYPE
+};
 
 // Re-export session types
-pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats};
+pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats};
 
 // Re-export transport types
-pub use transport::{RtpTransport, UdpRtpTransport};
+pub use transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 
 // Re-export traits for media-core integration
-pub use traits::{MediaTransport, RtpEvent, RtpEventConsumer};
+pub use traits::{MediaTransport, RtpEvent};
 pub use traits::media_transport::RtpMediaTransport;
 
 // Re-export payload format types
 pub use payload::{
     PayloadType, PayloadFormat, PayloadFormatFactory, create_payload_format,
-    G711UPayloadFormat, G711APayloadFormat, G722PayloadFormat,
-    OpusPayloadFormat, OpusBandwidth,
-    Vp8PayloadFormat, Vp9PayloadFormat,
+    G711UPayloadFormat, G711APayloadFormat, G722PayloadFormat, 
+    OpusPayloadFormat, OpusBandwidth, Vp8PayloadFormat, Vp9PayloadFormat
 };
+
+pub use csrc::{CsrcMapping, CsrcManager, MAX_CSRC_COUNT};
 
 /// Prelude module with commonly used types
 pub mod prelude {
