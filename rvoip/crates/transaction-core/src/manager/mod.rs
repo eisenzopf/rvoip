@@ -237,6 +237,12 @@ pub struct TransactionManager {
     events_tx: mpsc::Sender<TransactionEvent>,
     /// Additional event subscribers
     event_subscribers: Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
+    /// Maps subscribers to transactions they're interested in
+    subscriber_to_transactions: Arc<Mutex<HashMap<usize, Vec<TransactionKey>>>>,
+    /// Maps transactions to subscribers interested in them
+    transaction_to_subscribers: Arc<Mutex<HashMap<TransactionKey, Vec<usize>>>>,
+    /// Subscriber counter for assigning unique IDs
+    next_subscriber_id: Arc<Mutex<usize>>,
     /// Transport message channel
     transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
     /// Running flag
@@ -312,6 +318,9 @@ impl TransactionManager {
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
         let event_subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscriber_id = Arc::new(Mutex::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
         
@@ -330,6 +339,9 @@ impl TransactionManager {
             transaction_destinations,
             events_tx,
             event_subscribers,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            next_subscriber_id,
             transport_rx,
             running,
             timer_settings,
@@ -412,6 +424,9 @@ impl TransactionManager {
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
         let event_subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscriber_id = Arc::new(Mutex::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
         
@@ -429,6 +444,9 @@ impl TransactionManager {
             transaction_destinations,
             events_tx,
             event_subscribers,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            next_subscriber_id,
             transport_rx,
             running,
             timer_settings,
@@ -511,20 +529,22 @@ impl TransactionManager {
     /// # }
     /// ```
     pub fn with_config(transport: Arc<dyn Transport>, timer_settings_opt: Option<TimerSettings>) -> Self {
-        let (events_tx, _) = mpsc::channel(100);
-        let (_, transport_rx) = mpsc::channel(100);
-        
+        let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
         let event_subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let (_, transport_rx) = mpsc::channel(100); // Dummy channel
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
         
         // Create timer settings
-        let timer_settings = timer_settings_opt.unwrap_or_else(TimerSettings::default);
+        let timer_settings = timer_settings_opt.unwrap_or_default();
         
-        // Create the timer manager with custom config
+        // Create the timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
         
@@ -535,6 +555,9 @@ impl TransactionManager {
             transaction_destinations,
             events_tx,
             event_subscribers,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            next_subscriber_id,
             transport_rx,
             running,
             timer_settings,
@@ -578,6 +601,11 @@ impl TransactionManager {
         // Track destinations
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
         
+        // Initialize subscriber-related fields
+        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscriber_id = Arc::new(Mutex::new(0));
+        
         Self {
             transport,
             events_tx,
@@ -589,6 +617,9 @@ impl TransactionManager {
             timer_settings,
             running,
             transaction_destinations,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
         }
     }
@@ -1054,79 +1085,164 @@ impl TransactionManager {
         self.transport.clone()
     }
 
-    /// Subscribes to transaction events.
+    /// Subscribe to events from all transactions.
     ///
-    /// This method returns a receiver that will receive all transaction events
-    /// emitted by this manager. This is the primary way for the application
-    /// to be notified of transaction state changes, incoming messages, and
-    /// other important events.
-    ///
-    /// ## Transaction Events
-    ///
-    /// The subscriber will receive events including:
-    /// - Transaction state changes
-    /// - Incoming requests
-    /// - Response events (provisional and final)
-    /// - Transaction timeouts
-    /// - Special events for ACK and CANCEL
+    /// This method creates a new subscription to all transaction events.
+    /// The returned receiver will get all events regardless of which transaction
+    /// generated them. This is useful for monitoring or logging all transaction activity.
     ///
     /// # Returns
-    /// * `mpsc::Receiver<TransactionEvent>` - Channel for receiving events
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use rvoip_transaction_core::TransactionManager;
-    /// # use rvoip_transaction_core::transaction::TransactionEvent;
-    /// # use tokio::sync::mpsc;
-    /// # async fn example(manager: &TransactionManager) {
-    /// // Subscribe to transaction events
-    /// let mut event_rx = manager.subscribe();
-    ///
-    /// // Process events in a loop
-    /// tokio::spawn(async move {
-    ///     while let Some(event) = event_rx.recv().await {
-    ///         match event {
-    ///             TransactionEvent::StateChanged { transaction_id, previous_state, new_state } => {
-    ///                 println!("Transaction {} changed state: {:?} -> {:?}",
-    ///                     transaction_id, previous_state, new_state);
-    ///             },
-    ///             TransactionEvent::SuccessResponse { transaction_id, response, .. } => {
-    ///                 println!("Transaction {} received success response: {}",
-    ///                     transaction_id, response.status());
-    ///             },
-    ///             _ => println!("Received event: {:?}", event),
-    ///         }
-    ///     }
-    /// });
-    /// # }
-    /// ```
+    /// * `mpsc::Receiver<TransactionEvent>` - The event receiver
     pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
-        // Use a larger buffer to prevent backpressure
         let (tx, rx) = mpsc::channel(100);
-
-        // Add logging and diagnostics
-        debug!("New subscription to transaction events created");
         
-        // Clone necessary variables for the async block
-        let subscribers_clone = self.event_subscribers.clone();
-        let tx_clone = tx.clone();
-        
-        // Add the sender asynchronously
-        tokio::spawn(async move {
-            // Add subscriber to the list immediately
-            subscribers_clone.lock().await.push(tx_clone);
+        let _ = tokio::spawn({
+            let subscribers = self.event_subscribers.clone();
+            let next_subscriber_id = self.next_subscriber_id.clone();
             
-            // Periodically check if the channel is still open
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                if tx.is_closed() {
-                    debug!("Event subscription channel is closed, will be removed on next broadcast");
-                    break;
-                }
+            async move {
+                let mut subscriber_id = next_subscriber_id.lock().await;
+                let id = *subscriber_id;
+                *subscriber_id += 1;
+                
+                // Add to global subscribers list
+                let mut subs = subscribers.lock().await;
+                subs.push(tx);
+                
+                debug!("Added global subscriber with ID {}", id);
             }
         });
-
+        
         rx
+    }
+    
+    /// Subscribe to events from a specific transaction.
+    ///
+    /// This method creates a subscription to events from a single transaction.
+    /// The returned receiver will only get events from the specified transaction,
+    /// reducing noise and unnecessary event processing.
+    ///
+    /// # Arguments
+    /// * `transaction_id` - The ID of the transaction to subscribe to
+    ///
+    /// # Returns
+    /// * `Result<mpsc::Receiver<TransactionEvent>>` - The event receiver
+    pub async fn subscribe_to_transaction(&self, transaction_id: &TransactionKey) -> Result<mpsc::Receiver<TransactionEvent>> {
+        // Validate that transaction exists
+        if !self.transaction_exists(transaction_id).await {
+            return Err(Error::transaction_not_found(transaction_id.clone(), "subscribe_to_transaction - transaction not found"));
+        }
+        
+        let (tx, rx) = mpsc::channel(100);
+        
+        // Register the subscription
+        let subscriber_id = {
+            let mut next_id = self.next_subscriber_id.lock().await;
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+        
+        // Add to global subscribers list
+        {
+            let mut subs = self.event_subscribers.lock().await;
+            subs.push(tx);
+        }
+        
+        // Add to transaction-specific mapping
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            
+            // Create entry if it doesn't exist
+            let subscriber_list = tx_to_subs.entry(transaction_id.clone())
+                .or_insert_with(Vec::new);
+            
+            // Add this subscriber
+            subscriber_list.push(subscriber_id);
+        }
+        
+        // Add to subscriber-to-transactions mapping
+        {
+            let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+            
+            // Create entry if it doesn't exist
+            let transaction_list = sub_to_txs.entry(subscriber_id)
+                .or_insert_with(Vec::new);
+            
+            // Add this transaction
+            transaction_list.push(transaction_id.clone());
+        }
+        
+        debug!(%transaction_id, subscriber_id, "Added transaction-specific subscriber");
+        
+        Ok(rx)
+    }
+    
+    /// Subscribe to events from multiple transactions.
+    ///
+    /// This method creates a subscription to events from multiple transactions.
+    /// The returned receiver will only get events from the specified transactions.
+    ///
+    /// # Arguments
+    /// * `transaction_ids` - The IDs of the transactions to subscribe to
+    ///
+    /// # Returns
+    /// * `Result<mpsc::Receiver<TransactionEvent>>` - The event receiver
+    pub async fn subscribe_to_transactions(&self, transaction_ids: &[TransactionKey]) -> Result<mpsc::Receiver<TransactionEvent>> {
+        // Validate that all transactions exist
+        for tx_id in transaction_ids {
+            if !self.transaction_exists(tx_id).await {
+                return Err(Error::transaction_not_found(tx_id.clone(), "subscribe_to_transactions - transaction not found"));
+            }
+        }
+        
+        let (tx, rx) = mpsc::channel(100);
+        
+        // Register the subscription
+        let subscriber_id = {
+            let mut next_id = self.next_subscriber_id.lock().await;
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+        
+        // Add to global subscribers list
+        {
+            let mut subs = self.event_subscribers.lock().await;
+            subs.push(tx);
+        }
+        
+        // Add to transaction-specific mapping
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            
+            for tx_id in transaction_ids {
+                // Create entry if it doesn't exist
+                let subscriber_list = tx_to_subs.entry(tx_id.clone())
+                    .or_insert_with(Vec::new);
+                
+                // Add this subscriber
+                subscriber_list.push(subscriber_id);
+            }
+        }
+        
+        // Add to subscriber-to-transactions mapping
+        {
+            let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+            
+            // Create entry if it doesn't exist
+            let transaction_list = sub_to_txs.entry(subscriber_id)
+                .or_insert_with(Vec::new);
+            
+            // Add these transactions
+            for tx_id in transaction_ids {
+                transaction_list.push(tx_id.clone());
+            }
+        }
+        
+        debug!(subscriber_id, transaction_count = transaction_ids.len(), "Added multi-transaction subscriber");
+        
+        Ok(rx)
     }
 
     /// Shutdown the transaction manager
@@ -1144,96 +1260,96 @@ impl TransactionManager {
         debug!("Transaction manager shutdown");
     }
 
-    /// Broadcast events to primary and all subscriber channels
+    /// Broadcasts a transaction event to all subscribers.
+    ///
+    /// This method is responsible for delivering transaction events to subscribers.
+    /// It implements event filtering based on subscriber preferences, ensuring
+    /// subscribers only receive events they're interested in.
+    ///
+    /// # Arguments
+    /// * `event` - The transaction event to broadcast
+    /// * `primary_tx` - The primary event channel
+    /// * `subscribers` - Additional event subscribers
+    /// * `transaction_to_subscribers` - Maps transactions to interested subscribers
+    /// * `manager` - Optional manager for processing termination events
     async fn broadcast_event(
         event: TransactionEvent,
         primary_tx: &mpsc::Sender<TransactionEvent>,
         subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
-        manager: Option<TransactionManager>, // Optional manager for processing termination events
+        transaction_to_subscribers: Option<&Arc<Mutex<HashMap<TransactionKey, Vec<usize>>>>>,
+        manager: Option<TransactionManager>,
     ) {
-        // Create detailed logging about the event
-        if let TransactionEvent::StateChanged { transaction_id, previous_state, new_state } = &event {
-            debug!(%transaction_id, previous_state=?previous_state, new_state=?new_state, "Broadcasting state change event");
-        } else if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
-            debug!(%transaction_id, "Broadcasting transaction termination event");
+        // Extract transaction ID from the event for filtering
+        let transaction_id = match &event {
+            TransactionEvent::StateChanged { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::SuccessResponse { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::FailureResponse { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::ProvisionalResponse { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::TransactionTerminated { transaction_id } => Some(transaction_id),
+            TransactionEvent::TimerTriggered { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::AckReceived { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::CancelReceived { transaction_id, .. } => Some(transaction_id),
+            // These events don't have a specific transaction ID
+            TransactionEvent::NewRequest { .. } => None,
+            TransactionEvent::StrayResponse { .. } => None,
+            TransactionEvent::StrayAck { .. } => None,
+            TransactionEvent::StrayCancel { .. } => None,
+            // Add other event types for completeness
+            _ => None,
+        };
+
+        // Get list of interested subscribers for this transaction
+        let interested_subscribers = if let (Some(tx_id), Some(tx_to_subs_map)) = (transaction_id, transaction_to_subscribers) {
+            let tx_to_subs = tx_to_subs_map.lock().await;
+            tx_to_subs.get(tx_id).cloned().unwrap_or_default()
         } else {
-            debug!(event_type=?std::mem::discriminant(&event), "Broadcasting event");
+            Vec::new() // No specific subscribers for this transaction or global event
+        };
+        
+        // Send to primary channel if it's available
+        if let Err(e) = primary_tx.send(event.clone()).await {
+            warn!("Failed to send event to primary channel: {}", e);
         }
         
-        // Process termination events with the manager if provided
+        // Send to interested subscribers only
+        let mut subs = subscribers.lock().await;
+        
+        // If we have transaction-specific subscribers, filter events
+        if let Some(tx_to_subs_map) = transaction_to_subscribers {
+            for (idx, sub) in subs.iter().enumerate() {
+                // Send to this subscriber if:
+                // 1. It's a global event (no transaction ID)
+                // 2. This subscriber is interested in this transaction
+                // 3. There are no interested subscribers specified (backward compatibility)
+                let should_send = transaction_id.is_none() || 
+                                 interested_subscribers.contains(&idx) ||
+                                 interested_subscribers.is_empty();
+                
+                if should_send {
+                    if let Err(e) = sub.send(event.clone()).await {
+                        warn!("Failed to send event to subscriber {}: {}", idx, e);
+                    }
+                }
+            }
+        } else {
+            // No transaction filtering, send to all (backward compatibility)
+            for (idx, sub) in subs.iter().enumerate() {
+                if let Err(e) = sub.send(event.clone()).await {
+                    warn!("Failed to send event to subscriber {}: {}", idx, e);
+                }
+            }
+        }
+        
+        // Special handling for transaction termination
         if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
-            if let Some(manager) = manager.clone() {
-                let transaction_id_clone = transaction_id.clone();
-                // Process in the background to avoid blocking event distribution
+            if let Some(manager_instance) = manager {
+                // Process the termination in a separate task to avoid deadlocks
+                let tx_id = transaction_id.clone();
+                let manager_clone = manager_instance.clone();
                 tokio::spawn(async move {
-                    manager.process_transaction_terminated(&transaction_id_clone).await;
+                    manager_clone.process_transaction_terminated(&tx_id).await;
                 });
             }
-        }
-        
-        // First send to primary with retry
-        for retry in 0..3 {
-            match primary_tx.send(event.clone()).await {
-                Ok(_) => {
-                    debug!("Event sent to primary channel");
-                    break;
-                },
-                Err(e) if retry < 2 => {
-                    warn!("Failed to send event to primary channel, retrying: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                },
-                Err(e) => {
-                    error!("Failed to send event to primary channel after retries: {}", e);
-                }
-            }
-        }
-        
-        // Send to all subscribers and collect any that failed
-        let mut subscribers_guard = subscribers.lock().await;
-        let mut closed_indices = Vec::new();
-        
-        for (idx, subscriber) in subscribers_guard.iter().enumerate() {
-            if subscriber.is_closed() {
-                closed_indices.push(idx);
-                continue;
-            }
-            
-            match subscriber.try_send(event.clone()) {
-                Ok(_) => {
-                    trace!("Event sent to subscriber");
-                },
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    // Channel is full, try async send with small timeout
-                    match tokio::time::timeout(tokio::time::Duration::from_millis(50), 
-                                              subscriber.send(event.clone())).await {
-                        Ok(Ok(_)) => trace!("Event sent to subscriber after waiting"),
-                        Ok(Err(_)) => {
-                            warn!("Subscriber channel closed after waiting");
-                            closed_indices.push(idx);
-                        },
-                        Err(_) => {
-                            warn!("Timed out sending to subscriber channel");
-                            // Don't mark for removal since it might just be slow
-                        }
-                    }
-                },
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!("Subscriber channel closed, marking for removal");
-                    closed_indices.push(idx);
-                },
-            }
-        }
-        
-        // Remove any closed subscribers
-        if !closed_indices.is_empty() {
-            closed_indices.sort_unstable_by(|a, b| b.cmp(a)); // Sort in reverse order
-            let indices_count = closed_indices.len();
-            for idx in closed_indices {
-                if idx < subscribers_guard.len() {
-                    subscribers_guard.swap_remove(idx);
-                }
-            }
-            debug!("Removed {} closed subscriber channels", indices_count);
         }
     }
 
@@ -1351,6 +1467,7 @@ impl TransactionManager {
                             transaction_event, 
                             &events_tx, 
                             &event_subscribers,
+                            Some(&manager_arc.transaction_to_subscribers),
                             Some(manager_arc.clone()),
                         ).await;
                     }

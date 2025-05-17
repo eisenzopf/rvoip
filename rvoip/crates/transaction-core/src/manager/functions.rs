@@ -516,6 +516,7 @@ impl TransactionManager {
                 event,
                 &self.events_tx,
                 &self.event_subscribers,
+                Some(&self.transaction_to_subscribers),
                 None,
             ).await;
             

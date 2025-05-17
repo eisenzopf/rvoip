@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::fmt;
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn, error};
 use std::str::FromStr;
 use std::net::SocketAddr;
 use std::time::SystemTime;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use rvoip_sip_core::{
     Request, Response, Method, StatusCode, Uri, TypedHeader, HeaderName
@@ -41,6 +43,8 @@ use async_trait::async_trait;
 use super::recovery::{RecoveryConfig, RecoveryMetrics};
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Manager for SIP dialogs that integrates with the transaction layer
 #[derive(Clone)]
@@ -59,6 +63,12 @@ pub struct DialogManager {
     
     /// Transaction to Dialog mapping
     transaction_to_dialog: DashMap<TransactionKey, DialogId>,
+    
+    /// Track which transactions we've subscribed to
+    subscribed_transactions: Arc<Mutex<HashSet<TransactionKey>>>,
+    
+    /// Counter for subscription batches
+    subscription_counter: Arc<AtomicUsize>,
     
     /// Event bus for dialog events
     event_bus: EventBus,
@@ -85,6 +95,8 @@ impl DialogManager {
             dialog_to_session: DashMap::new(),
             transaction_manager,
             transaction_to_dialog: DashMap::new(),
+            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
+            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
             run_recovery_in_background: true,
             recovery_config: RecoveryConfig::default(),
@@ -104,6 +116,8 @@ impl DialogManager {
             dialog_to_session: DashMap::new(),
             transaction_manager,
             transaction_to_dialog: DashMap::new(),
+            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
+            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
             run_recovery_in_background: true,
             recovery_config,
@@ -123,6 +137,8 @@ impl DialogManager {
             dialog_to_session: DashMap::new(),
             transaction_manager,
             transaction_to_dialog: DashMap::new(),
+            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
+            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
             run_recovery_in_background,
             recovery_config: RecoveryConfig::default(),
@@ -143,6 +159,8 @@ impl DialogManager {
             dialog_to_session: DashMap::new(),
             transaction_manager,
             transaction_to_dialog: DashMap::new(),
+            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
+            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
             run_recovery_in_background,
             recovery_config,
@@ -152,16 +170,76 @@ impl DialogManager {
     
     /// Subscribe to transaction events and start processing them
     pub async fn start(&self) -> mpsc::Receiver<TransactionEvent> {
-        // Subscribe to transaction events
-        let mut events_rx = self.transaction_manager.subscribe();
+        // Create a dedicated channel for our own use
+        let (events_tx, events_rx) = mpsc::channel(100);
         
         // Clone references for the task
         let dialog_manager = self.clone();
         
-        // Spawn a task to process transaction events
+        // Spawn a task to periodically check for new transactions to subscribe to
         tokio::spawn(async move {
-            while let Some(event) = events_rx.recv().await {
-                dialog_manager.process_transaction_event(event).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            
+            loop {
+                interval.tick().await;
+                
+                // Get current transaction-to-dialog mappings
+                let transactions_to_subscribe: Vec<TransactionKey> = dialog_manager.transaction_to_dialog.iter()
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                
+                // Check which ones we haven't subscribed to yet
+                let mut subscribed = dialog_manager.subscribed_transactions.lock().await;
+                
+                // Find transactions we need to subscribe to
+                let new_transactions: Vec<TransactionKey> = transactions_to_subscribe.into_iter()
+                    .filter(|tx_key| !subscribed.contains(tx_key))
+                    .collect();
+                
+                if !new_transactions.is_empty() {
+                    let batch_id = dialog_manager.subscription_counter.fetch_add(1, Ordering::SeqCst);
+                    debug!("Found {} new transactions to subscribe to in batch {}", new_transactions.len(), batch_id);
+                    
+                    // Subscribe to these transactions
+                    match dialog_manager.transaction_manager.subscribe_to_transactions(&new_transactions).await {
+                        Ok(mut rx) => {
+                            let events_tx_clone = events_tx.clone();
+                            
+                            // Add all transactions to subscribed set
+                            for tx_key in &new_transactions {
+                                subscribed.insert(tx_key.clone());
+                            }
+                            
+                            // Create a task to forward events from this subscription
+                            tokio::spawn(async move {
+                                debug!("Starting event forwarding for batch {}", batch_id);
+                                while let Some(event) = rx.recv().await {
+                                    if let Err(e) = events_tx_clone.send(event).await {
+                                        error!("Failed to forward transaction event: {}", e);
+                                        break;
+                                    }
+                                }
+                                debug!("Event forwarding completed for batch {}", batch_id);
+                            });
+                        },
+                        Err(e) => {
+                            error!("Failed to subscribe to transactions: {}", e);
+                        }
+                    }
+                }
+                
+                // We don't need to clean up the subscribed_transactions set because
+                // the subscription will automatically end when the transaction is terminated
+            }
+        });
+        
+        // Spawn a task to process transaction events from our channel
+        let dialog_manager_clone = self.clone();
+        tokio::spawn(async move {
+            // Use the non-cloned events_rx
+            let mut rx = events_rx;
+            while let Some(event) = rx.recv().await {
+                dialog_manager_clone.process_transaction_event(event).await;
             }
         });
         
@@ -333,6 +411,84 @@ impl DialogManager {
                     }
                 }
             },
+            TransactionEvent::AckReceived { transaction_id: tx_key, request } => {
+                debug!("Received ACK for transaction {}:\n{}", tx_key, request);
+                
+                // Find dialog associated with this transaction
+                let dialog_id = match self.transaction_to_dialog.get(&tx_key) {
+                    Some(dialog_id) => dialog_id.clone(),
+                    None => {
+                        debug!("No dialog found for transaction {:?}", tx_key);
+                        return;
+                    }
+                };
+                
+                // Get the dialog
+                let mut dialog_opt = self.dialogs.get_mut(&dialog_id);
+                if dialog_opt.is_none() {
+                    debug!("Dialog {} not found for transaction {}", dialog_id, tx_key);
+                    return;
+                }
+                
+                let mut dialog = dialog_opt.unwrap();
+                
+                // Update dialog with ACK information
+                dialog.update_remote_seq_from_request(&request);
+                
+                // Fire event for ACK received
+                if let Some(session_id) = self.find_session_for_transaction(&tx_key) {
+                    self.event_bus.publish(crate::events::SessionEvent::Custom {
+                        session_id,
+                        event_type: "ack_received".to_string(),
+                        data: serde_json::json!({
+                            "dialog_id": dialog_id.to_string(),
+                        }),
+                    });
+                }
+            },
+            TransactionEvent::NewRequest { transaction_id: tx_key, request, source } => {
+                debug!("Received new request {}:\n{}", tx_key, request);
+                
+                // Handle ACK requests specially - they should be forwarded to the server transaction
+                // for proper processing using our new process_request method
+                if request.method() == Method::Ack {
+                    // Try to find the associated INVITE transaction
+                    // First, look for existing dialog that matches the ACK request
+                    if let Some(dialog_id) = self.find_dialog_for_request(&request) {
+                        debug!("Found dialog {} for ACK request", dialog_id);
+                        
+                        // Look for INVITE server transaction associated with this dialog
+                        let invite_tx_key = self.transaction_to_dialog.iter()
+                            .filter(|entry| entry.value().clone() == dialog_id)
+                            .filter_map(|entry| {
+                                if !entry.key().is_server() || entry.key().method() != &Method::Invite {
+                                    return None;
+                                }
+                                Some(entry.key().clone())
+                            })
+                            .next();
+                        
+                        if let Some(invite_tx_key) = invite_tx_key {
+                            debug!("Found INVITE transaction {} for ACK, forwarding request", invite_tx_key);
+                            
+                            // Forward the ACK request to the INVITE transaction
+                            if let Err(e) = self.transaction_manager.process_request(&invite_tx_key, request.clone()).await {
+                                warn!("Failed to process ACK request: {}", e);
+                            } else {
+                                // Successfully processed the ACK
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // If we get here, we couldn't match the ACK to a transaction
+                    debug!("Could not match ACK request to any INVITE transaction, treating as stray ACK");
+                }
+                
+                // Process other new requests as usual...
+                // For new dialogs, create a server transaction
+                self.create_server_transaction_for_request(tx_key, request, source).await;
+            },
             TransactionEvent::Error { transaction_id, error } => {
                 debug!("Transaction error event received for {:?}: {:?}", transaction_id, error);
                 
@@ -376,6 +532,48 @@ impl DialogManager {
             _ => {
                 // Log the event type for debugging
                 debug!("Received unhandled transaction event: {:?}", event);
+            }
+        }
+    }
+    
+    /// Create a server transaction for a new request
+    async fn create_server_transaction_for_request(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        source: SocketAddr
+    ) {
+        match request.method() {
+            Method::Invite => {
+                debug!("Creating server transaction for new INVITE request");
+                
+                // For INVITE requests, we need to create a new dialog
+                // This will happen later when a response is sent
+                
+                // Emit event for new INVITE
+                self.event_bus.publish(crate::events::SessionEvent::Custom {
+                    session_id: SessionId::new(), // We don't know the session yet
+                    event_type: "new_invite".to_string(),
+                    data: serde_json::json!({
+                        "transaction_id": transaction_id.to_string(),
+                    }),
+                });
+            },
+            Method::Bye => {
+                // For BYE requests, find the dialog and terminate it
+                self.handle_bye_request(&transaction_id, request).await;
+            },
+            _ => {
+                debug!("Received {} request", request.method());
+                
+                // For other methods, emit a generic event
+                self.event_bus.publish(crate::events::SessionEvent::Custom {
+                    session_id: SessionId::new(), // We don't know the session yet
+                    event_type: format!("new_{}", request.method().to_string().to_lowercase()),
+                    data: serde_json::json!({
+                        "transaction_id": transaction_id.to_string(),
+                    }),
+                });
             }
         }
     }

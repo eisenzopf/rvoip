@@ -220,6 +220,40 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
    - [x] Added session refreshes with SDP
    - [x] Added SDP support for UPDATE method
 
+## Transaction Integration Issues Discovered in Benchmark Testing
+
+These issues were identified through benchmark testing and require immediate attention:
+
+### 1. Transaction-to-Session Mapping Issues
+- [ ] Fix transaction-to-session mapping to ensure sessions only receive events for their own transactions
+- [ ] Implement proper filtering of transaction events at the session layer
+- [ ] Add transaction ownership tracking to prevent cross-session interference
+- [ ] Implement transaction reference counting to prevent premature transaction termination
+
+### 2. Event Handling Issues
+- [ ] Fix global event distribution that causes all sessions to process events for all transactions
+- [ ] Implement transaction ID-based event routing to target specific sessions
+- [ ] Add transaction context to events to facilitate proper routing
+- [ ] Create session-specific event queues to prevent interference between sessions
+
+### 3. Message Processing Issues
+- [ ] Improve handling of retransmissions at the session layer
+- [ ] Add proper coordination between transaction state and session state
+- [ ] Fix race conditions in concurrent event processing
+- [ ] Add robust error handling for transaction failures
+
+### 4. Dialog Integration Issues
+- [ ] Ensure dialog state properly transitions based on transaction events
+- [ ] Fix race conditions in dialog creation and update operations
+- [ ] Improve coordination between dialog and transaction lifecycle management
+- [ ] Add proper handling of dialog-related issues in SIP transaction processing
+
+### 5. Test Improvements
+- [ ] Create more realistic end-to-end session tests
+- [ ] Add benchmarks with different concurrent session counts
+- [ ] Implement tests that verify proper transaction-to-session event routing
+- [ ] Add tests for handling various failure scenarios (network errors, timeouts, etc.)
+
 ## Future Scope
 
 ### Advanced Media Features

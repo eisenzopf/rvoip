@@ -701,6 +701,22 @@ impl Dialog {
                 .unwrap_or_else(|_| std::time::Duration::from_secs(0))
         })
     }
+    
+    /// Update the remote sequence number from a request
+    pub fn update_remote_seq_from_request(&mut self, request: &Request) {
+        if let Some(cseq_header) = request.cseq() {
+            let seq = cseq_header.sequence();
+            
+            // Only update if the new sequence number is higher
+            if seq > self.remote_seq {
+                debug!(
+                    "Updating dialog remote sequence from {} to {} from {} request",
+                    self.remote_seq, seq, request.method()
+                );
+                self.remote_seq = seq;
+            }
+        }
+    }
 }
 
 /// Extract SDP from a SIP request if present

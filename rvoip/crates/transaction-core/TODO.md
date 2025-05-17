@@ -9,6 +9,41 @@ This document outlines the plan to redesign the transaction-core library to bett
 3. Improve handling of special cases like CANCEL and ACK for 2xx responses
 4. Simplify the developer experience 
 
+## Critical Issues Discovered in Benchmark Testing
+
+These issues were identified through benchmark testing and require immediate attention:
+
+### 1. Transaction Event Broadcasting Issues
+- [x] Fix indiscriminate event broadcasting that sends all events to all subscribers
+- [x] Implement proper event filtering mechanism to direct events only to interested subscribers
+- [x] Add transaction-to-subscriber mapping to ensure events are routed correctly
+- [x] Add proper synchronization to prevent race conditions in event delivery
+
+### 2. Server Transaction Management Issues
+- [x] Fix server transaction lookup to properly identify retransmitted requests
+- [x] Ensure retransmitted requests are associated with existing transactions per RFC 3261
+- [x] Implement correct branch parameter matching for server transactions
+- [x] Add transaction matching diagnostic tools for easier debugging
+
+### 3. Transaction Lifecycle Management Issues
+- [x] Fix premature command channel closing in transaction runners
+- [x] Ensure transactions remain active long enough to process ACKs for non-2xx responses
+- [x] Add proper coordination between transaction termination and related cleanup tasks
+- [x] Implement graceful handling of commands to terminated transactions
+- [x] Keep transactions alive until all pending operations complete
+
+### 4. Request Processing Issues
+- [x] Fix race conditions in concurrent transaction processing
+- [x] Implement proper locking for shared transaction state
+- [x] Add robust error handling for all edge cases in message processing
+- [x] Ensure transactions properly follow RFC 3261 state machine definitions
+
+### 5. Test Improvements
+- [x] Create more realistic network simulation tests
+- [x] Add tests that explicitly verify retransmission handling
+- [x] Implement tests for race conditions and concurrency issues
+- [ ] Add benchmarks that detect performance regressions
+
 ## Architectural Changes
 
 ### Current Structure

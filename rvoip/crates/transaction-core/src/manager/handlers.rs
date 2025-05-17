@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::json::ext::SipMessageJson;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
 use crate::error::{self, Error, Result};
@@ -90,52 +91,124 @@ pub async fn handle_transport_message(
                     
                     // Handle ACK specially
                     if request.method() == Method::Ack {
-                        let mut server_txs = server_transactions.lock().await;
+                        // Clone the request before we start working with it
+                        let ack_request = request.clone();
                         
-                        // Check if we have a matching transaction
-                        if server_txs.contains_key(&tx_id) {
-                            let tx_kind = server_txs[&tx_id].kind();
+                        // Get a lock on server transactions
+                        let server_txs = server_transactions.lock().await;
+                        
+                        // Check if we have a direct matching transaction
+                        let tx_opt = if server_txs.contains_key(&tx_id) {
+                            Some(server_txs[&tx_id].clone())
+                        } else {
+                            // If not directly matched, try to find a matching INVITE transaction
+                            // based on dialog identifiers (Call-ID, From tag, To tag)
+                            let matching_tx = server_txs.iter()
+                                .filter(|(key, tx)| {
+                                    // Only look at INVITE server transactions
+                                    key.method() == &Method::Invite && key.is_server()
+                                })
+                                .find_map(|(key, tx)| {
+                                    // Try to match based on dialog identifiers
+                                    if let (Some(req_call_id), Some(ack_call_id)) = (tx.original_request_call_id(), ack_request.call_id()) {
+                                        if req_call_id == ack_call_id.value() {
+                                            // Found potential match by Call-ID, now check From/To tags
+                                            if let (Some(req_from), Some(ack_from)) = (tx.original_request_from_tag(), ack_request.from_tag()) {
+                                                if req_from == ack_from {
+                                                    // If To tag exists in both, it should match
+                                                    let to_matches = match (tx.original_request_to_tag(), ack_request.to_tag()) {
+                                                        (Some(req_to), Some(ack_to)) => req_to == ack_to,
+                                                        // In early dialogs, original request might not have To tag
+                                                        _ => true
+                                                    };
+                                                    
+                                                    if to_matches {
+                                                        debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
+                                                        return Some(tx.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                });
+                            
+                            matching_tx
+                        };
+                        
+                        // If we found a transaction, process the ACK
+                        if let Some(tx) = tx_opt {
+                            let tx_id = tx.id().clone();
+                            let tx_kind = tx.kind();
                             
                             if tx_kind == TransactionKind::InviteServer {
                                 debug!(%tx_id, "Processing ACK for server INVITE transaction");
                                 
-                                // Process the request while still holding the lock
-                                // The implementation of process_request will handle async operations properly
-                                let result = server_txs[&tx_id].process_request(request.clone()).await;
+                                // Clone what we need so we can release the lock
+                                let tx_clone = tx.clone();
                                 
-                                // Now we can drop the lock
+                                // Drop the lock before async operations
                                 drop(server_txs);
                                 
-                                // Check for errors
-                                result?;
-                                
-                                // Broadcast the event after dropping lock
-                                TransactionManager::broadcast_event(
-                                    TransactionEvent::AckReceived {
-                                        transaction_id: tx_id.clone(),
-                                        request,
+                                // Use a timeout to avoid blocking indefinitely if the transaction is shutting down
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(500), 
+                                    tx_clone.process_request(ack_request.clone())
+                                ).await {
+                                    Ok(result) => {
+                                        // Process the result
+                                        match result {
+                                            Ok(_) => {
+                                                // Successfully processed ACK
+                                                
+                                                // Broadcast the event
+                                                TransactionManager::broadcast_event(
+                                                    TransactionEvent::AckReceived {
+                                                        transaction_id: tx_id.clone(),
+                                                        request: ack_request,
+                                                    },
+                                                    events_tx,
+                                                    event_subscribers,
+                                                    None,
+                                                    None,
+                                                ).await;
+                                                
+                                                return Ok(());
+                                            },
+                                            Err(e) => {
+                                                // Transaction error - likely channel closed
+                                                warn!(%tx_id, error=%e, "Failed to process ACK request, treating as stray ACK");
+                                                // Fall through to stray ACK handling
+                                            }
+                                        }
                                     },
-                                    events_tx,
-                                    event_subscribers,
-                                    None,
-                                ).await;
-                                
-                                return Ok(());
+                                    Err(_) => {
+                                        // Timeout waiting for transaction to process ACK
+                                        warn!(%tx_id, "Timeout processing ACK request, treating as stray ACK");
+                                        // Fall through to stray ACK handling
+                                    }
+                                }
+                            } else {
+                                // Transaction is not an INVITE server transaction
+                                drop(server_txs);
+                                // Fall through to stray ACK handling
                             }
+                        } else {
+                            // No matching transaction found
+                            drop(server_txs);
+                            // Fall through to stray ACK handling
                         }
                         
-                        // Release the lock if transaction not found
-                        drop(server_txs);
-                        
-                        // Handle stray ACK
+                        // Handle as stray ACK if we reached this point
                         debug!("Received ACK that doesn't match any server transaction");
                         TransactionManager::broadcast_event(
                             TransactionEvent::StrayAck {
-                                request,
+                                request: ack_request,
                                 source,
                             },
                             events_tx,
                             event_subscribers,
+                            None,
                             None,
                         ).await;
                         
@@ -165,6 +238,7 @@ pub async fn handle_transport_message(
                                     },
                                     events_tx,
                                     event_subscribers,
+                                    None,
                                     None,
                                 ).await;
                                 
@@ -253,6 +327,7 @@ pub async fn handle_transport_message(
                             events_tx,
                             event_subscribers,
                             None,
+                            None,
                         ).await;
                         
                         return Ok(());
@@ -293,6 +368,7 @@ pub async fn handle_transport_message(
                         },
                         events_tx,
                         event_subscribers,
+                        None,
                         None,
                     ).await;
                     
@@ -371,6 +447,7 @@ pub async fn handle_transport_message(
                         },
                         events_tx,
                         event_subscribers,
+                        None,
                         None,
                     ).await;
                     

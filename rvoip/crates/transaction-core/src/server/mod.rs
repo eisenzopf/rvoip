@@ -59,6 +59,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::transaction::{Transaction, TransactionState, TransactionKey, TransactionAsync};
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::json::ext::SipMessageJson;
 
 /// Common interface for server transactions, implementing the behavior defined in RFC 3261 Section 17.2.
 ///
@@ -116,6 +117,72 @@ pub trait ServerTransaction: Transaction + TransactionAsync + Send + Sync + 'sta
     ///
     /// The last SIP response sent by this transaction, or None if no response has been sent.
     fn last_response(&self) -> Option<Response>;
+    
+    /// Gets the Call-ID from the original request that created this transaction.
+    ///
+    /// Call-ID is a critical dialog identifier used to match ACK with its INVITE.
+    /// According to RFC 3261 section 8.1.1.4, Call-ID must be identical for all
+    /// requests and responses in a dialog, including the ACK for a final response.
+    ///
+    /// # Returns
+    /// 
+    /// Some(call_id) if the transaction has an original request with a Call-ID header,
+    /// None otherwise.
+    fn original_request_call_id(&self) -> Option<String> {
+        if let Some(req) = self.original_request_sync() {
+            req.call_id().map(|hdr| hdr.value().to_string())
+        } else {
+            None
+        }
+    }
+    
+    /// Gets the From tag from the original request that created this transaction.
+    ///
+    /// From tag is part of the dialog identifiers used to match ACK with its INVITE.
+    /// According to RFC 3261 section 8.1.1.7, the From tag must be identical for all
+    /// requests and responses in a dialog (including ACK and CANCEL).
+    ///
+    /// # Returns
+    /// 
+    /// Some(from_tag) if the transaction has an original request with a From tag,
+    /// None otherwise.
+    fn original_request_from_tag(&self) -> Option<String> {
+        if let Some(req) = self.original_request_sync() {
+            req.from_tag()
+        } else {
+            None
+        }
+    }
+    
+    /// Gets the To tag from the original request that created this transaction.
+    ///
+    /// To tag may be part of the dialog identifiers used to match ACK with its INVITE.
+    /// In early dialogs, the original INVITE may not have a To tag, but subsequent
+    /// ACKs for final responses will include the To tag from the response.
+    ///
+    /// # Returns
+    /// 
+    /// Some(to_tag) if the transaction has an original request with a To tag,
+    /// None otherwise.
+    fn original_request_to_tag(&self) -> Option<String> {
+        if let Some(req) = self.original_request_sync() {
+            req.to_tag()
+        } else {
+            None
+        }
+    }
+    
+    /// Synchronous accessor for the original request if it's available without async operations.
+    /// This is an internal helper method that should be implemented by transaction types
+    /// that can provide synchronous access to the original request.
+    ///
+    /// # Returns
+    /// 
+    /// Some(Request) if the transaction has cached the original request,
+    /// None if it would require an async operation to retrieve.
+    fn original_request_sync(&self) -> Option<Request> {
+        None
+    }
 }
 
 /// Extension trait for Transaction to safely downcast to ServerTransaction.

@@ -457,6 +457,13 @@ impl ServerTransaction for ServerNonInviteTransaction {
         // If the lock is already held, we return None
         self.data.last_response.try_lock().ok()?.clone()
     }
+    
+    // Implement the synchronous original request accessor
+    fn original_request_sync(&self) -> Option<Request> {
+        // Try to get the original request from the data structure's request field
+        // We use try_lock() to avoid blocking if the lock is held
+        self.data.request.try_lock().ok().map(|req| req.clone())
+    }
 }
 
 #[cfg(test)]
