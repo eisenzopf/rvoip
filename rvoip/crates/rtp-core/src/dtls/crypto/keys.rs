@@ -218,6 +218,18 @@ pub fn prf_tls12(secret: &[u8], label: &[u8], seed: &[u8], output_len: usize, ha
     combined_seed.extend_from_slice(label);
     combined_seed.extend_from_slice(seed);
     
+    // Debug info
+    if label == b"master secret" {
+        println!("PRF input for master secret:");
+        println!("  - Label: {:?}", std::str::from_utf8(label).unwrap_or("invalid utf8"));
+        println!("  - Secret length: {}", secret.len());
+        println!("  - Secret first bytes: {:02X?}", &secret[..std::cmp::min(secret.len(), 8)]);
+        println!("  - Seed length: {}", seed.len());
+        println!("  - Seed first bytes: {:02X?}", &seed[..std::cmp::min(seed.len(), 8)]);
+        println!("  - Combined seed length: {}", combined_seed.len());
+        println!("  - Combined seed first bytes: {:02X?}", &combined_seed[..std::cmp::min(combined_seed.len(), 8)]);
+    }
+    
     // Use P_hash with the specified hash algorithm
     p_hash(secret, &combined_seed, output_len, hash_algorithm)
 }
@@ -358,19 +370,36 @@ pub fn calculate_master_secret(
     // Master secret is 48 bytes
     const MASTER_SECRET_LENGTH: usize = 48;
     
+    // Print first bytes of input for debugging
+    println!("Calculate master secret inputs:");
+    println!("  - Pre-master secret first bytes: {:02X?}", 
+             &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]);
+    println!("  - Client random first bytes: {:02X?}", 
+             &client_random[..std::cmp::min(client_random.len(), 8)]);
+    println!("  - Server random first bytes: {:02X?}", 
+             &server_random[..std::cmp::min(server_random.len(), 8)]);
+    
     // Seed is client_random + server_random
     let mut seed = BytesMut::with_capacity(client_random.len() + server_random.len());
     seed.extend_from_slice(client_random);
     seed.extend_from_slice(server_random);
     
+    println!("  - Combined seed size: {}", seed.len());
+    
     // Use PRF to generate master secret
-    prf_tls12(
+    let master_secret = prf_tls12(
         pre_master_secret,
         b"master secret",
         &seed,
         MASTER_SECRET_LENGTH,
         HashAlgorithm::Sha256,
-    )
+    )?;
+    
+    // Print first bytes of master secret for debugging
+    println!("  - Generated master secret first bytes: {:02X?}", 
+             &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+    
+    Ok(master_secret)
 }
 
 /// Extract keys for SRTP from DTLS keying material (RFC 5764)
@@ -453,6 +482,11 @@ pub fn calculate_verify_data(
         }
     };
     
+    // Debugging: print hash of handshake messages for verification checks
+    println!("Handshake hash for {} verification: {:02X?}",  
+             if is_client { "client" } else { "server" },
+             &handshake_hash[..std::cmp::min(handshake_hash.len(), 16)]);
+    
     // Choose the appropriate label
     let label = if is_client {
         b"client finished"
@@ -468,6 +502,13 @@ pub fn calculate_verify_data(
         12, // Fixed size for TLS 1.2
         hash_algorithm,
     )?;
+    
+    // Print debug info for PRF inputs
+    println!("PRF inputs for verification:");
+    println!("  - Label: {:?}", std::str::from_utf8(label).unwrap_or("invalid utf8"));
+    println!("  - Master secret length: {}", master_secret.len());
+    println!("  - Master secret first bytes: {:02X?}", &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+    println!("  - Hash algorithm: {:?}", hash_algorithm);
     
     Ok(verify_data)
 } 

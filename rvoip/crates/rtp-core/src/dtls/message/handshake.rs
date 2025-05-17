@@ -407,6 +407,11 @@ impl ClientHello {
         )
     }
     
+    /// Set the random value to a specific value
+    pub fn set_random(&mut self, random: [u8; 32]) {
+        self.random.copy_from_slice(&random);
+    }
+    
     /// Serialize the ClientHello message to bytes
     pub fn serialize(&self) -> Result<Bytes> {
         let mut buf = BytesMut::new();

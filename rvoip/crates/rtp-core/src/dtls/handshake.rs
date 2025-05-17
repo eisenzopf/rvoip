@@ -328,19 +328,15 @@ impl HandshakeState {
             crate::error::Error::InvalidState("No master secret available".to_string())
         })?;
         
-        // When verifying, we use the opposite role
-        let is_client_finished = self.role != DtlsRole::Client;
-        
-        // For verification, we always use the combined handshake_messages buffer
-        // which has been carefully constructed in transcript order
+        // For verification, we need to check that the Finished message contains the correct verify_data
         let verify_buffer = &self.handshake_messages;
         
-        // Debug output
+        // Print verification information for debugging
         println!("Verifying Finished message:");
         println!("  - Client messages size: {}", self.client_handshake_messages.len());
         println!("  - Server messages size: {}", self.server_handshake_messages.len());
         println!("  - Total verify buffer size: {}", verify_buffer.len());
-        println!("  - Verifying message from: {}", if is_client_finished { "client" } else { "server" });
+        println!("  - Verifying message from: {}", if self.role == DtlsRole::Client { "server" } else { "client" });
         println!("  - Verify buffer first bytes: {:02X?}", &verify_buffer[..std::cmp::min(verify_buffer.len(), 32)]);
         
         // Print detailed debug information
@@ -350,7 +346,8 @@ impl HandshakeState {
         let expected_verify_data = super::crypto::keys::calculate_verify_data(
             master_secret,
             verify_buffer,
-            is_client_finished,
+            // If we're a client, we're verifying a server message, and vice versa
+            self.role != DtlsRole::Client,
             super::crypto::cipher::HashAlgorithm::Sha256, // Using SHA-256 for TLS 1.2
         )?;
         
@@ -358,19 +355,16 @@ impl HandshakeState {
         println!("  - Received verify data length: {}", finished.verify_data.len());
         
         // Compare the verify data
-        let result = finished.verify_data == expected_verify_data;
+        let result = expected_verify_data == finished.verify_data;
         
         if !result {
             println!("WARNING: Finished message verification failed!");
-            println!("  - Expected: {:02X?}", expected_verify_data);
-            println!("  - Received: {:02X?}", finished.verify_data);
+            println!("  - Expected: {:?}", expected_verify_data);
+            println!("  - Received: {:?}", finished.verify_data);
             
-            // For development, accept failure with a warning
-            #[cfg(debug_assertions)]
-            {
-                println!("  - Accepting Finished message anyway for development purposes");
-                return Ok(true);
-            }
+            return Err(crate::error::Error::DtlsHandshakeError(
+                "Finished message verification failed".to_string()
+            ));
         } else {
             println!("  - Finished message verification succeeded!");
         }
@@ -423,22 +417,24 @@ impl HandshakeState {
             HandshakeStep::SentClientHello => {
                 match message {
                     HandshakeMessage::HelloVerifyRequest(hello_verify) => {
-                        // Save the cookie
+                        // Store the cookie
                         self.cookie = Some(hello_verify.cookie.clone());
                         
-                        // Update state
-                        self.step = HandshakeStep::ReceivedHelloVerifyRequest;
-                        
                         // Generate a new ClientHello with the cookie
-                        let client_hello = self.generate_client_hello_with_cookie()?;
+                        let client_hello = self.generate_client_hello()?;
                         
-                        // For DTLS, the second ClientHello with cookie replaces the first one in the transcript
-                        // So we need to clear our previous handshake messages and start fresh
+                        // Print client random for debugging
+                        println!("Client sending second ClientHello with random (first 8 bytes): {:02X?}", 
+                                 &client_hello.random[..8]);
+                        
+                        // Clear the handshake buffers and add the new ClientHello
+                        // This is because in DTLS, the handshake hash only starts from
+                        // the second ClientHello (with cookie)
                         self.client_handshake_messages.clear();
                         self.server_handshake_messages.clear();
                         self.handshake_messages.clear();
                         
-                        // Add the new ClientHello to the verification buffer
+                        // Add to verification buffer (as client message)
                         if let Ok(msg_data) = client_hello.serialize() {
                             self.add_handshake_message(HandshakeType::ClientHello, &msg_data, true);
                         }
@@ -446,6 +442,7 @@ impl HandshakeState {
                         // Update state
                         self.step = HandshakeStep::SentClientHello;
                         
+                        // Return the ClientHello
                         Ok(Some(vec![HandshakeMessage::ClientHello(client_hello)]))
                     },
                     HandshakeMessage::ServerHello(server_hello) => {
@@ -503,54 +500,56 @@ impl HandshakeState {
                         // Create ClientKeyExchange message with our public key
                         let client_key_exchange = super::message::handshake::ClientKeyExchange::new_ecdhe(encoded_public_key);
                         
-                        // Explicitly add the ClientKeyExchange to our verification buffer BEFORE sending
-                        // This is critical for proper Finished message verification
-                        if let Ok(client_key_exchange_data) = client_key_exchange.serialize() {
-                            self.add_handshake_message(HandshakeType::ClientKeyExchange, &client_key_exchange_data, true);
-                        }
-                        
-                        // Derive the shared secret using ECDHE
-                        if let (Some(ref private_key), Some(ref server_public_key)) = 
-                            (&self.local_ecdhe_private_key, &self.remote_ecdhe_public_key) {
-                            
-                            // Encode private key to bytes
-                            let private_key_bytes = super::crypto::keys::encode_private_key(private_key)?;
-                            
-                            // Generate the pre-master secret
-                            let pre_master_secret = super::crypto::keys::generate_ecdhe_pre_master_secret(
-                                server_public_key,
-                                &private_key_bytes,
-                            )?;
-                            
-                            // Save the pre-master secret
-                            self.pre_master_secret = Some(pre_master_secret.to_vec());
-                            
-                            // Calculate master secret
-                            if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
-                                let master_secret = calculate_master_secret(
-                                    &self.pre_master_secret.as_ref().unwrap(),
-                                    client_random,
-                                    server_random,
+                        // Calculate the pre-master secret (ECDHE shared secret)
+                        if let Some(local_private_key) = &self.local_ecdhe_private_key {
+                            if let Some(remote_public_key) = &self.remote_ecdhe_public_key {
+                                // Encode private key for pre-master secret calculation
+                                let encoded_private_key = super::crypto::keys::encode_private_key(local_private_key)?;
+                                
+                                // Calculate pre-master secret
+                                let pre_master_secret = super::crypto::keys::generate_ecdhe_pre_master_secret(
+                                    remote_public_key,
+                                    &encoded_private_key,
                                 )?;
                                 
-                                // Store the master secret
-                                self.master_secret = Some(master_secret.to_vec());
-                            } else {
-                                return Err(crate::error::Error::InvalidState(
-                                    "Missing client or server random for master secret calculation".to_string()
-                                ));
+                                // Store pre-master secret
+                                self.pre_master_secret = Some(pre_master_secret.to_vec());
+                                
+                                // Print first bytes of pre-master secret for debugging
+                                println!("Client pre-master secret first bytes: {:02X?}", 
+                                        &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]);
+                                
+                                // Calculate master secret
+                                if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
+                                    // Calculate master secret
+                                    let master_secret = super::crypto::keys::calculate_master_secret(
+                                        &pre_master_secret,
+                                        client_random,
+                                        server_random,
+                                    )?;
+                                    
+                                    // Store master secret
+                                    self.master_secret = Some(master_secret.to_vec());
+                                    
+                                    // Print first bytes of master secret for debugging
+                                    println!("Client master secret first bytes: {:02X?}", 
+                                           &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+                                }
                             }
-                        } else {
-                            return Err(crate::error::Error::InvalidState(
-                                "Missing keys for ECDHE key exchange".to_string()
-                            ));
+                        }
+                        
+                        // Add to verification buffer (as client message)
+                        if let Ok(msg_data) = client_key_exchange.serialize() {
+                            self.add_handshake_message(HandshakeType::ClientKeyExchange, &msg_data, true);
                         }
                         
                         // Update state
                         self.step = HandshakeStep::SentClientKeyExchange;
                         
-                        // Return the ClientKeyExchange message to be sent
-                        Ok(Some(vec![HandshakeMessage::ClientKeyExchange(client_key_exchange)]))
+                        // Return ClientKeyExchange message
+                        Ok(Some(vec![
+                            HandshakeMessage::ClientKeyExchange(client_key_exchange),
+                        ]))
                     },
                     _ => {
                         // Unexpected message
@@ -623,6 +622,10 @@ impl HandshakeState {
                         // Save client random
                         self.client_random = Some(client_hello.random);
                         
+                        // Print client random for debugging
+                        println!("Server received ClientHello with random (first 8 bytes): {:02X?}", 
+                                 &client_hello.random[..8]);
+                        
                         // Check for cookie
                         if client_hello.cookie.is_empty() {
                             // No cookie - send HelloVerifyRequest
@@ -655,6 +658,11 @@ impl HandshakeState {
                         } else {
                             // Cookie present - validate it
                             // (In a real implementation, we'd verify the cookie)
+                            
+                            // This is the second ClientHello with cookie that we'll use for verification
+                            // Print client random again for confirmation
+                            println!("Server received ClientHello WITH COOKIE, random (first 8 bytes): {:02X?}", 
+                                     &client_hello.random[..8]);
                             
                             // Generate a session ID
                             let mut rng = rand::thread_rng();
@@ -891,50 +899,51 @@ impl HandshakeState {
                     HandshakeMessage::ClientKeyExchange(client_key_exchange) => {
                         println!("Server received ClientKeyExchange, length: {}", client_key_exchange.exchange_data.len());
                         
-                        // Store the client's public key
+                        // Store client's public key
                         self.remote_ecdhe_public_key = Some(client_key_exchange.exchange_data.clone());
                         
-                        // Derive the shared secret using ECDHE
-                        if let (Some(ref private_key), Some(ref client_public_key)) = 
-                            (&self.local_ecdhe_private_key, &self.remote_ecdhe_public_key) {
-                            
-                            // Encode private key to bytes
-                            let private_key_bytes = super::crypto::keys::encode_private_key(private_key)?;
-                            
-                            // Generate the pre-master secret
-                            let pre_master_secret = super::crypto::keys::generate_ecdhe_pre_master_secret(
-                                client_public_key,
-                                &private_key_bytes,
-                            )?;
-                            
-                            // Save the pre-master secret
-                            self.pre_master_secret = Some(pre_master_secret.to_vec());
-                            
-                            // Calculate master secret
-                            if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
-                                let master_secret = calculate_master_secret(
-                                    &self.pre_master_secret.as_ref().unwrap(),
-                                    client_random,
-                                    server_random,
+                        // Calculate the pre-master secret (ECDHE shared secret)
+                        if let Some(local_private_key) = &self.local_ecdhe_private_key {
+                            if let Some(remote_public_key) = &self.remote_ecdhe_public_key {
+                                // Encode private key for pre-master secret calculation
+                                let encoded_private_key = super::crypto::keys::encode_private_key(local_private_key)?;
+                                
+                                // Calculate pre-master secret
+                                let pre_master_secret = super::crypto::keys::generate_ecdhe_pre_master_secret(
+                                    remote_public_key,
+                                    &encoded_private_key,
                                 )?;
                                 
-                                // Store the master secret
-                                self.master_secret = Some(master_secret.to_vec());
-                            } else {
-                                return Err(crate::error::Error::InvalidState(
-                                    "Missing client or server random for master secret calculation".to_string()
-                                ));
+                                // Store pre-master secret
+                                self.pre_master_secret = Some(pre_master_secret.to_vec());
+                                
+                                // Print first bytes of pre-master secret for debugging
+                                println!("Server pre-master secret first bytes: {:02X?}", 
+                                        &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]);
+                                
+                                // Calculate master secret
+                                if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
+                                    // Calculate master secret
+                                    let master_secret = super::crypto::keys::calculate_master_secret(
+                                        &pre_master_secret,
+                                        client_random,
+                                        server_random,
+                                    )?;
+                                    
+                                    // Store master secret
+                                    self.master_secret = Some(master_secret.to_vec());
+                                    
+                                    // Print first bytes of master secret for debugging
+                                    println!("Server master secret first bytes: {:02X?}", 
+                                           &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+                                }
                             }
-                        } else {
-                            return Err(crate::error::Error::InvalidState(
-                                "Missing keys for ECDHE key exchange".to_string()
-                            ));
                         }
                         
                         // Update state
                         self.step = HandshakeStep::ReceivedClientKeyExchange;
                         
-                        // Wait for ChangeCipherSpec before responding
+                        // Return ChangeCipherSpec and Finished messages
                         Ok(None)
                     },
                     _ => {
@@ -1005,20 +1014,18 @@ impl HandshakeState {
         )
     }
     
-    /// Generate a ClientHello message with a cookie
-    fn generate_client_hello_with_cookie(&mut self) -> Result<ClientHello> {
-        // In a real implementation, we'd use the same values as the original ClientHello
-        // but add the cookie. For now, we'll create a new one.
-        
+    /// Generate a ClientHello message
+    fn generate_client_hello(&mut self) -> Result<super::message::handshake::ClientHello> {
+        // Available cipher suites
         let cipher_suites = vec![
-            0xC02B, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-            0xC02F, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+            // Only ECDHE ciphers for now
             0xC009, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
             0xC013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
-            0x002F, // TLS_RSA_WITH_AES_128_CBC_SHA
+            0xC02B, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+            0xC02F, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
         ];
         
-        // No compression
+        // Compression methods (0 = none)
         let compression_methods = vec![0];
         
         // Add SRTP extension
@@ -1030,7 +1037,8 @@ impl HandshakeState {
             Extension::UseSrtp(srtp_extension),
         ];
         
-        let hello = ClientHello::new(
+        // Create ClientHello
+        let mut client_hello = ClientHello::new(
             self.version,
             Bytes::new(), // Empty session ID
             self.cookie.clone().unwrap_or_else(Bytes::new), // Add the cookie
@@ -1039,12 +1047,21 @@ impl HandshakeState {
             extensions,
         );
         
-        // Save the client random
-        if self.client_random.is_none() {
-            self.client_random = Some(hello.random);
+        // If this is the second ClientHello with cookie, reuse the same random
+        // from the first ClientHello to ensure consistent verification
+        if let Some(existing_random) = self.client_random {
+            // Copy over the existing random to ensure consistency
+            client_hello.random.copy_from_slice(&existing_random);
+            println!("Reusing existing client random (first 8 bytes): {:02X?}", 
+                     &client_hello.random[..8]);
+        } else {
+            // Save the client random
+            self.client_random = Some(client_hello.random);
+            println!("Generated new client random (first 8 bytes): {:02X?}", 
+                     &client_hello.random[..8]);
         }
         
-        Ok(hello)
+        Ok(client_hello)
     }
     
     /// Start the handshake process
@@ -1053,10 +1070,7 @@ impl HandshakeState {
             DtlsRole::Client => {
                 println!("Starting handshake as CLIENT");
                 // Generate ClientHello
-                let client_hello = ClientHello::with_defaults(self.version);
-                
-                // Save the client random
-                self.client_random = Some(client_hello.random);
+                let client_hello = self.generate_client_hello()?;
                 
                 // Add to verification buffer (as client message)
                 if let Ok(msg_data) = client_hello.serialize() {
