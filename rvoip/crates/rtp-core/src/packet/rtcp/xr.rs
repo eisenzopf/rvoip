@@ -73,9 +73,26 @@ impl RtcpExtendedReport {
         self.blocks.push(block);
     }
     
+    /// Add a VoIP metrics block
+    pub fn add_voip_metrics(&mut self, metrics: VoipMetricsBlock) {
+        self.blocks.push(RtcpXrBlock::VoipMetrics(metrics));
+    }
+    
+    /// Add a receiver reference time block
+    pub fn add_receiver_reference_time(&mut self, ntp: NtpTimestamp) {
+        self.blocks.push(RtcpXrBlock::ReceiverReferenceTimes(
+            ReceiverReferenceTimeBlock { ntp }
+        ));
+    }
+    
+    /// Get the total size of the XR packet in bytes
+    pub fn size(&self) -> usize {
+        4 + self.blocks.iter().map(|b| b.size()).sum::<usize>()
+    }
+    
     /// Serialize the XR packet to bytes
     pub fn serialize(&self) -> Result<BytesMut> {
-        let total_size = 4 + self.blocks.iter().map(|b| b.size()).sum::<usize>();
+        let total_size = self.size();
         let mut buf = BytesMut::with_capacity(total_size);
         
         // SSRC
@@ -223,10 +240,36 @@ fn parse_receiver_reference_time_block(buf: &mut impl Buf) -> Result<ReceiverRef
 }
 
 fn parse_dlrr_block(buf: &mut impl Buf, length: usize) -> Result<DlrrBlock> {
-    // Skip for now
-    buf.advance(length);
+    if buf.remaining() < length {
+        return Err(Error::BufferTooSmall {
+            required: length,
+            available: buf.remaining(),
+        });
+    }
+    
+    let mut sub_blocks = Vec::new();
+    let sub_block_len = 12; // Each DLRR sub-block is 12 bytes
+    
+    // Process all sub-blocks
+    let num_sub_blocks = length / sub_block_len;
+    for _ in 0..num_sub_blocks {
+        if buf.remaining() < sub_block_len {
+            break;
+        }
+        
+        let ssrc = buf.get_u32();
+        let last_rr = buf.get_u32();
+        let delay = buf.get_u32();
+        
+        sub_blocks.push(DlrrSubBlock {
+            ssrc,
+            last_rr,
+            delay,
+        });
+    }
+    
     Ok(DlrrBlock {
-        sub_blocks: Vec::new(),
+        sub_blocks,
     })
 }
 
@@ -417,27 +460,106 @@ impl RtcpXrBlock {
         
         // Block specific serialization
         match self {
-            RtcpXrBlock::LossRle(_) => {
-                // Not implemented yet
+            RtcpXrBlock::LossRle(block) => {
+                // Implementation incomplete
+                buf.put_u32(block.ssrc);
+                buf.put_u16(block.begin_seq);
+                buf.put_u16(block.end_seq);
+                // We would add the chunks here in a full implementation
             },
-            RtcpXrBlock::DuplicateRle(_) => {
-                // Not implemented yet
+            RtcpXrBlock::DuplicateRle(block) => {
+                // Implementation incomplete
+                buf.put_u32(block.ssrc);
+                buf.put_u16(block.begin_seq);
+                buf.put_u16(block.end_seq);
+                // We would add the chunks here in a full implementation
             },
-            RtcpXrBlock::PacketReceiptTimes(_) => {
-                // Not implemented yet
+            RtcpXrBlock::PacketReceiptTimes(block) => {
+                // Implementation incomplete
+                buf.put_u32(block.ssrc);
+                buf.put_u16(block.begin_seq);
+                buf.put_u16(block.end_seq);
+                // We would add the receipt times here in a full implementation
             },
             RtcpXrBlock::ReceiverReferenceTimes(block) => {
                 buf.put_u32(block.ntp.seconds);
                 buf.put_u32(block.ntp.fraction);
             },
-            RtcpXrBlock::Dlrr(_) => {
-                // Not implemented yet
+            RtcpXrBlock::Dlrr(block) => {
+                // Serialize each sub-block
+                for sub_block in &block.sub_blocks {
+                    buf.put_u32(sub_block.ssrc);
+                    buf.put_u32(sub_block.last_rr);
+                    buf.put_u32(sub_block.delay);
+                }
             },
-            RtcpXrBlock::StatisticsSummary(_) => {
-                // Not implemented yet
+            RtcpXrBlock::StatisticsSummary(block) => {
+                buf.put_u32(block.ssrc);
+                
+                // Construct flags byte
+                let mut flags = 0u8;
+                if block.loss_report { flags |= 0x01; }
+                if block.duplicate_report { flags |= 0x02; }
+                if block.jitter_report { flags |= 0x04; }
+                if block.ttr_report { flags |= 0x08; }
+                
+                buf.put_u8(flags);
+                buf.put_u8(0); // Reserved
+                buf.put_u16(block.begin_seq);
+                buf.put_u16(block.end_seq);
+                buf.put_u32(block.lost_packets);
+                buf.put_u32(block.dup_packets);
+                
+                // Add optional jitter fields if present
+                if block.jitter_report {
+                    if let Some(min_jitter) = block.min_jitter {
+                        buf.put_u32(min_jitter);
+                    } else {
+                        buf.put_u32(0);
+                    }
+                    
+                    if let Some(max_jitter) = block.max_jitter {
+                        buf.put_u32(max_jitter);
+                    } else {
+                        buf.put_u32(0);
+                    }
+                    
+                    if let Some(mean_jitter) = block.mean_jitter {
+                        buf.put_u32(mean_jitter);
+                    } else {
+                        buf.put_u32(0);
+                    }
+                    
+                    if let Some(dev_jitter) = block.dev_jitter {
+                        buf.put_u32(dev_jitter);
+                    } else {
+                        buf.put_u32(0);
+                    }
+                }
             },
-            RtcpXrBlock::VoipMetrics(_) => {
-                // Not implemented yet
+            RtcpXrBlock::VoipMetrics(block) => {
+                buf.put_u32(block.ssrc);
+                buf.put_u8(block.loss_rate);
+                buf.put_u8(block.discard_rate);
+                buf.put_u8(block.burst_density);
+                buf.put_u8(block.gap_density);
+                buf.put_u16(block.burst_duration);
+                buf.put_u16(block.gap_duration);
+                buf.put_u16(block.round_trip_delay);
+                buf.put_u16(block.end_system_delay);
+                buf.put_u8(block.signal_level);
+                buf.put_u8(block.noise_level);
+                buf.put_u8(block.rerl);
+                buf.put_u8(block.gmin);
+                buf.put_u8(block.r_factor);
+                buf.put_u8(block.ext_r_factor);
+                buf.put_u8(block.mos_lq);
+                buf.put_u8(block.mos_cq);
+                buf.put_u8(block.rx_config);
+                buf.put_u8(0); // Reserved
+                buf.put_u16(block.jb_nominal);
+                buf.put_u16(block.jb_maximum);
+                buf.put_u16(block.jb_abs_max);
             },
         }
         
@@ -668,6 +790,93 @@ pub struct VoipMetricsBlock {
     pub jb_abs_max: u16,
 }
 
+impl VoipMetricsBlock {
+    /// Create a new VoIP metrics block
+    pub fn new(ssrc: RtpSsrc) -> Self {
+        Self {
+            ssrc,
+            loss_rate: 0,
+            discard_rate: 0,
+            burst_density: 0,
+            gap_density: 0,
+            burst_duration: 0,
+            gap_duration: 0,
+            round_trip_delay: 0,
+            end_system_delay: 0,
+            signal_level: 0,
+            noise_level: 0,
+            rerl: 0,
+            gmin: 16, // Default value from RFC 3611
+            r_factor: 0,
+            ext_r_factor: 0,
+            mos_lq: 0,
+            mos_cq: 0,
+            rx_config: 0,
+            jb_nominal: 0,
+            jb_maximum: 0,
+            jb_abs_max: 0,
+        }
+    }
+    
+    /// Calculate R-factor from network metrics
+    ///
+    /// This implements a simplified E-model calculation as per ITU-T G.107
+    /// R = R0 - Is - Id - Ie_eff + A
+    pub fn calculate_r_factor(
+        &mut self,
+        packet_loss_percent: f32,
+        round_trip_ms: u16,
+        jitter_ms: f32
+    ) {
+        // Base R-factor (modern codecs typically use 93.2)
+        let r0 = 93.2;
+        
+        // Signal-to-noise impairment (Is)
+        let is = 0.0; // Assuming perfect conditions in digital networks
+        
+        // Delay impairment (Id)
+        // Simplified model: Id = 0.024*d + 0.11*(d-177.3)*H(d-177.3)
+        // where H(x) = 1 if x > 0, 0 otherwise
+        let delay = round_trip_ms as f32 / 2.0; // One-way delay
+        let id = if delay < 177.3 {
+            0.024 * delay
+        } else {
+            0.024 * delay + 0.11 * (delay - 177.3)
+        };
+        
+        // Equipment impairment (Ie_eff)
+        // Simplified model for modern codecs: Ie_eff = Ie + (95 - Ie) * Ppl/(Ppl + BurstR)
+        // Ie depends on codec (e.g., 0 for G.711, 11 for G.722, 15 for Opus)
+        // BurstR is related to packet loss burstiness (typically 1-2)
+        let ie = 10.0; // Approximate middle value for common codecs
+        let burstR = 1.0; // Assume random loss
+        let ppl = packet_loss_percent;
+        let ie_eff = ie + (95.0 - ie) * ppl / (ppl + burstR);
+        
+        // Advantage factor (A)
+        // Mobility/convenience advantage, typically 0-20
+        let a = 0.0; // Conservative default
+        
+        // Calculate final R-factor, clamped to 0-100
+        let r = (r0 - is - id - ie_eff + a).clamp(0.0, 100.0);
+        
+        // Store the result (scaled to 0-255 for byte representation)
+        self.r_factor = ((r * 255.0) / 100.0) as u8;
+        
+        // Calculate MOS scores from R-factor
+        // MOS-LQ (listening quality)
+        // MOS-LQ = 1 + 0.035*R + R*(R-60)*(100-R)*7e-6
+        let mut mos_lq = 1.0 + 0.035 * r + r * (r - 60.0) * (100.0 - r) * 7.0e-6;
+        mos_lq = mos_lq.clamp(1.0, 4.5);
+        self.mos_lq = ((mos_lq * 254.0) / 4.5) as u8 + 1;
+        
+        // MOS-CQ (conversational quality) - typically slightly lower than MOS-LQ due to delay
+        let mut mos_cq = mos_lq - 0.1 * (delay / 150.0).min(0.5);
+        mos_cq = mos_cq.clamp(1.0, 4.5);
+        self.mos_cq = ((mos_cq * 254.0) / 4.5) as u8 + 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +913,59 @@ mod tests {
     }
     
     #[test]
+    fn test_voip_metrics_block() {
+        // Create a VoIP metrics block
+        let mut voip_metrics = VoipMetricsBlock::new(0x12345678);
+        
+        // Set some metrics
+        voip_metrics.loss_rate = 5; // 5% loss
+        voip_metrics.discard_rate = 2; // 2% discard
+        voip_metrics.round_trip_delay = 150; // 150ms RTT
+        voip_metrics.end_system_delay = 20; // 20ms end system delay
+        
+        // Calculate R-factor and MOS scores
+        voip_metrics.calculate_r_factor(5.0, 150, 30.0);
+        
+        // Wrap in an XR block
+        let xr_block = RtcpXrBlock::VoipMetrics(voip_metrics);
+        
+        // Check block type
+        assert_eq!(xr_block.block_type(), RtcpXrBlockType::VoipMetrics);
+        
+        // Check size
+        assert_eq!(xr_block.size(), 28); // 4-byte header + 24-byte metrics
+        
+        // Serialize
+        let mut buf = BytesMut::with_capacity(xr_block.size());
+        xr_block.serialize(&mut buf).unwrap();
+        
+        // Check serialized data
+        assert_eq!(buf.len(), 28);
+        assert_eq!(buf[0], RtcpXrBlockType::VoipMetrics as u8);
+        assert_eq!(buf[1], 0); // Reserved
+        assert_eq!(buf[2], 0); // Length high byte
+        assert_eq!(buf[3], 6); // Length low byte (6 words = 24 bytes)
+        
+        // Parse back
+        let mut read_buf = buf.clone().freeze();
+        let block_type = RtcpXrBlockType::try_from(read_buf[0]).unwrap();
+        read_buf.advance(4); // Skip header
+        
+        assert_eq!(block_type, RtcpXrBlockType::VoipMetrics);
+        let parsed_metrics = parse_voip_metrics_block(&mut read_buf).unwrap();
+        
+        // Check parsed fields
+        assert_eq!(parsed_metrics.ssrc, 0x12345678);
+        assert_eq!(parsed_metrics.loss_rate, 5);
+        assert_eq!(parsed_metrics.discard_rate, 2);
+        assert_eq!(parsed_metrics.round_trip_delay, 150);
+        assert_eq!(parsed_metrics.end_system_delay, 20);
+        assert!(parsed_metrics.r_factor > 0);
+        assert!(parsed_metrics.mos_lq > 0);
+        assert!(parsed_metrics.mos_cq > 0);
+    }
+    
+    #[test]
     fn test_xr_packet() {
         // Create an XR packet
         let mut xr = RtcpExtendedReport::new(0x12345678);
@@ -718,11 +980,44 @@ mod tests {
             ReceiverReferenceTimeBlock { ntp }
         ));
         
+        // Add a VoIP metrics block
+        let mut voip_metrics = VoipMetricsBlock::new(0x87654321);
+        voip_metrics.loss_rate = 3;
+        voip_metrics.round_trip_delay = 120;
+        voip_metrics.calculate_r_factor(3.0, 120, 25.0);
+        
+        xr.add_block(RtcpXrBlock::VoipMetrics(voip_metrics));
+        
         // Serialize
         let buf = xr.serialize().unwrap();
         
         // Check serialized data
-        assert_eq!(buf.len(), 16); // 4-byte SSRC + 12-byte block
+        assert_eq!(buf.len(), 44); // 4-byte SSRC + 12-byte ref time block + 28-byte VoIP metrics
         assert_eq!(&buf[0..4], &0x12345678u32.to_be_bytes());
+        
+        // Parse back
+        let mut read_buf = buf.freeze();
+        let parsed_xr = parse_xr(&mut read_buf).unwrap();
+        
+        // Check parsed packet
+        assert_eq!(parsed_xr.ssrc, 0x12345678);
+        assert_eq!(parsed_xr.blocks.len(), 2);
+        
+        match &parsed_xr.blocks[0] {
+            RtcpXrBlock::ReceiverReferenceTimes(block) => {
+                assert_eq!(block.ntp.seconds, 0x12345678);
+                assert_eq!(block.ntp.fraction, 0xabcdef01);
+            },
+            _ => panic!("Expected ReferenceTimeBlock"),
+        }
+        
+        match &parsed_xr.blocks[1] {
+            RtcpXrBlock::VoipMetrics(block) => {
+                assert_eq!(block.ssrc, 0x87654321);
+                assert_eq!(block.loss_rate, 3);
+                assert_eq!(block.round_trip_delay, 120);
+            },
+            _ => panic!("Expected VoipMetricsBlock"),
+        }
     }
 } 

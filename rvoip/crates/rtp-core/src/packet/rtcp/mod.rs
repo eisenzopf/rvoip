@@ -61,6 +61,7 @@ mod app;
 mod report_block;
 mod ntp;
 mod xr;
+mod compound;
 
 // Re-export all public types
 pub use report_block::RtcpReportBlock;
@@ -74,6 +75,7 @@ pub use xr::{
     RtcpExtendedReport, RtcpXrBlock, RtcpXrBlockType,
     ReceiverReferenceTimeBlock, VoipMetricsBlock
 };
+pub use compound::RtcpCompoundPacket;
 
 /// RTCP packet variants
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,17 +178,92 @@ impl RtcpPacket {
         let mut buf = BytesMut::new();
         
         match self {
-            RtcpPacket::SenderReport(_sr) => {
-                // Not fully implemented yet
-                return Err(Error::RtcpError("Serializing SR packets not fully implemented".to_string()));
+            RtcpPacket::SenderReport(sr) => {
+                // Create a buffer for the SR content
+                let sr_content = sender_report::serialize_sender_report(sr)?;
+                let content_size = sr_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | report count (5 bits)
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | (sr.report_blocks.len() as u8 & 0x1F);
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::SenderReport as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write SR content
+                buf.extend_from_slice(&sr_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
             }
-            RtcpPacket::ReceiverReport(_rr) => {
-                // Not fully implemented yet
-                return Err(Error::RtcpError("Serializing RR packets not fully implemented".to_string()));
+            RtcpPacket::ReceiverReport(rr) => {
+                // Create a buffer for the RR content
+                let rr_content = receiver_report::serialize_receiver_report(rr)?;
+                let content_size = rr_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | report count (5 bits)
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | (rr.report_blocks.len() as u8 & 0x1F);
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::ReceiverReport as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write RR content
+                buf.extend_from_slice(&rr_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
             }
-            RtcpPacket::SourceDescription(_sdes) => {
-                // Not fully implemented yet
-                return Err(Error::RtcpError("Serializing SDES packets not fully implemented".to_string()));
+            RtcpPacket::SourceDescription(sdes) => {
+                // Create a buffer for the SDES content
+                let sdes_content = sdes::serialize_sdes(sdes)?;
+                let content_size = sdes_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | chunk count (5 bits)
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | (sdes.chunks.len() as u8 & 0x1F);
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::SourceDescription as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write SDES content
+                buf.extend_from_slice(&sdes_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
             }
             RtcpPacket::Goodbye(bye) => {
                 // Create a buffer for the BYE packet content
@@ -247,13 +324,50 @@ impl RtcpPacket {
                     buf.put_u8(0);
                 }
             }
-            RtcpPacket::ExtendedReport(_xr) => {
-                // Not fully implemented yet
-                return Err(Error::RtcpError("Serializing XR packets not fully implemented".to_string()));
+            RtcpPacket::ExtendedReport(xr) => {
+                // Create a buffer for the XR packet content
+                let xr_content = xr.serialize()?;
+                let content_size = xr_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | reserved (5 bits)
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | 0;
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::ExtendedReport as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write XR content
+                buf.extend_from_slice(&xr_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
             }
         }
         
         Ok(buf.freeze())
+    }
+    
+    /// Get the RTCP packet type
+    pub fn packet_type(&self) -> RtcpPacketType {
+        match self {
+            RtcpPacket::SenderReport(_) => RtcpPacketType::SenderReport,
+            RtcpPacket::ReceiverReport(_) => RtcpPacketType::ReceiverReport,
+            RtcpPacket::SourceDescription(_) => RtcpPacketType::SourceDescription,
+            RtcpPacket::Goodbye(_) => RtcpPacketType::Goodbye,
+            RtcpPacket::ApplicationDefined(_) => RtcpPacketType::ApplicationDefined,
+            RtcpPacket::ExtendedReport(_) => RtcpPacketType::ExtendedReport,
+        }
     }
 }
 

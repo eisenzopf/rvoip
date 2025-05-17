@@ -67,14 +67,6 @@ deployments with tens of thousands of concurrent connections. Features include:
 cargo run --example high_performance_buffers
 ```
 
-## Running with Logging
-
-You can control the log level using the `RUST_LOG` environment variable:
-
-```
-RUST_LOG=debug cargo run --example high_performance_buffers
-```
-
 ### 8. RTCP BYE Packet Handling (`rtcp_bye.rs`)
 
 Demonstrates RTCP BYE packet sending and receiving when RTP sessions are closed.
@@ -89,6 +81,23 @@ Shows how RTCP Application-Defined (APP) packets can be sent and received betwee
 
 ```
 cargo run --example rtcp_app
+```
+
+### 10. RTCP Extended Reports (XR) and Compound Packets (`rtcp_xr_example.rs`)
+
+Demonstrates creating and processing RTCP Extended Reports (XR) with VoIP metrics and 
+including them in compound RTCP packets along with SR/RR and other packet types.
+
+```
+cargo run --example rtcp_xr_example
+```
+
+## Running with Logging
+
+You can control the log level using the `RUST_LOG` environment variable:
+
+```
+RUST_LOG=debug cargo run --example high_performance_buffers
 ```
 
 ## Known Issues

@@ -69,7 +69,8 @@ pub use packet::header::RtpHeader;
 pub use packet::rtcp::{
     RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
     RtcpReportBlock, NtpTimestamp, RtcpSourceDescription,
-    RtcpGoodbye, RtcpApplicationDefined
+    RtcpGoodbye, RtcpApplicationDefined, RtcpExtendedReport,
+    RtcpCompoundPacket, RtcpXrBlock, VoipMetricsBlock
 };
 
 // Re-export session types
