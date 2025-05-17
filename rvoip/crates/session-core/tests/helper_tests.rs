@@ -70,8 +70,9 @@ impl rvoip_sip_transport::Transport for MockTransport {
         destination: SocketAddr
     ) -> Result<(), rvoip_sip_transport::error::Error> {
         if self.fail_send.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(rvoip_sip_transport::error::Error::ConnectionFailed(
-                "Simulated failure".to_string()
+            return Err(rvoip_sip_transport::error::Error::ConnectFailed(
+                "0.0.0.0:0".parse().unwrap(),
+                std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Simulated network failure")
             ));
         }
         

@@ -214,7 +214,10 @@ impl rvoip_sip_transport::Transport for MockTransport {
                 debug!("MockTransport: Simulated network failure error");
             }
             
-            return Err(TransportError::ConnectionFailed("Simulated network failure".into()));
+            return Err(TransportError::ConnectFailed(
+                "0.0.0.0:0".parse().unwrap(),
+                std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Simulated network failure")
+            ));
         }
         
         // For testing, just return success

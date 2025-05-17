@@ -653,7 +653,10 @@ mod tests {
             // Check if this transport should fail immediately
             if self.should_fail {
                 let error_msg = self.send_result.lock().await.clone().unwrap_or_else(|| "Simulated failure".to_string());
-                return Err(TransportError::ConnectionFailed(error_msg.into()));
+                return Err(TransportError::ConnectFailed(
+                    "0.0.0.0:0".parse().unwrap(),
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, error_msg)
+                ));
             }
             
             // Check if we should still be failing based on remaining fail attempts
@@ -662,7 +665,10 @@ mod tests {
                 *fail_attempts -= 1;
                 let error_opt = self.send_result.lock().await.clone();
                 match error_opt {
-                    Some(error) => return Err(TransportError::ConnectionFailed(error.into())),
+                    Some(error) => return Err(TransportError::ConnectFailed(
+                        "0.0.0.0:0".parse().unwrap(),
+                        std::io::Error::new(std::io::ErrorKind::ConnectionRefused, error)
+                    )),
                     None => {},
                 }
             }

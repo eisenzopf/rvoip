@@ -1406,7 +1406,8 @@ pub fn get_network_info_for_sdp(
 /// # Example
 /// ```no_run
 /// use rvoip_session_core::helpers::get_transport_info;
-/// use rvoip_transaction_core::{TransactionManager, transport::TransportType};
+/// use rvoip_transaction_core::TransactionManager;
+/// use rvoip_sip_transport::transport::TransportType;
 /// use std::sync::Arc;
 ///
 /// fn check_websocket_status(transaction_manager: &Arc<TransactionManager>) {
@@ -1663,8 +1664,12 @@ mod tests {
         ) -> Result<(), rvoip_sip_transport::error::Error> {
             if self.should_fail_send.load(Ordering::SeqCst) {
                 // Create the error
-                let error = rvoip_sip_transport::error::Error::ConnectionFailed(
-                    "Simulated network failure for testing".into()
+                let error = rvoip_sip_transport::error::Error::ConnectFailed(
+                    "0.0.0.0:0".parse().unwrap(),
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "Simulated network failure for testing"
+                    )
                 );
                 
                 // Emit a transport error event if we have a channel
