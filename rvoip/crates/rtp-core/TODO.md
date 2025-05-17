@@ -122,6 +122,14 @@ rtp-core/
 
 ### Secure RTP (SRTP)
 - [ ] Integrate DTLS for key exchange
+  - [ ] Implement DTLS 1.2 protocol
+  - [ ] Create handshake protocol (ClientHello, ServerHello, certificates, etc.)
+  - [ ] Implement record layer protocol
+  - [ ] Add alert protocol for error handling
+  - [ ] Support cryptographic operations leveraging existing Rust crates
+  - [ ] Implement SRTP profile negotiation
+  - [ ] Extract keying material for SRTP key derivation
+  - [ ] Add certificate and fingerprint validation
 - [x] Implement SRTP/SRTCP encryption
 - [x] Add authentication tag handling
 - [x] Implement replay protection
@@ -242,6 +250,98 @@ rtp-core/
 - [x] Created helper methods in RtpHeader for easy CSRC manipulation
 - [x] Developed comprehensive example simulating an RTP mixer with CSRC attribution
 - [x] Integrated CSRC information with RTCP SDES packets
+
+## Next Priorities
+
+- [ ] Integrate DTLS for SRTP key exchange
+- [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
+- [ ] Add cross-platform socket validation
+- [ ] Create RTCP BYE packet generation logic
+- [ ] Implement concealment metrics
+- [ ] Add event-based quality alerts
+- [ ] Create quality trend analysis
+- [ ] Implement port allocation strategy
+- [ ] Add IPv4/IPv6 dual-stack support
+- [ ] Create media synchronization mechanisms 
+
+## DTLS Implementation Plan
+
+### Directory Structure
+```
+src/dtls/
+├── mod.rs               # Main module exports
+├── connection.rs        # DTLS connection state management
+├── handshake.rs         # Handshake protocol implementation
+├── record.rs            # Record layer protocol
+├── alert.rs             # Alert protocol
+├── crypto/
+│   ├── mod.rs           # Crypto module exports
+│   ├── cipher.rs        # Cipher suite implementations
+│   ├── keys.rs          # Key derivation and management
+│   └── verify.rs        # Certificate verification
+├── message/
+│   ├── mod.rs           # Message module exports
+│   ├── handshake.rs     # Handshake message types
+│   ├── content.rs       # Content type definitions
+│   └── extension.rs     # Extension handling (incl. SRTP profiles)
+├── transport/
+│   ├── mod.rs           # Transport layer exports
+│   └── udp.rs           # UDP transport implementation
+└── srtp/
+    ├── mod.rs           # SRTP integration exports
+    └── extractor.rs     # SRTP key material extraction
+```
+
+### Implementation Phases
+
+#### Phase 1: Core DTLS Structure and Transport
+- [ ] Define basic types and constants
+  - [ ] DTLS record types, handshake message types
+  - [ ] DTLS version constants
+  - [ ] Error types
+- [ ] Implement record layer
+  - [ ] DTLS record format
+  - [ ] Record parsing and serialization
+  - [ ] Sequence numbers and replay protection
+- [ ] Create transport integration
+  - [ ] UDP-based transport for DTLS packets
+  - [ ] Retransmission logic for lost packets
+  - [ ] MTU handling
+
+#### Phase 2: Handshake Protocol
+- [ ] Implement basic handshake
+  - [ ] ClientHello/ServerHello messages
+  - [ ] Certificate messaging
+  - [ ] Integration with existing crypto libraries
+- [ ] Add key exchange
+  - [ ] ECDHE using elliptic-curve crate
+  - [ ] Key derivation using ring or RustCrypto HKDF
+- [ ] Handle certificates
+  - [ ] Generate certificates using rcgen
+  - [ ] Parse certificates with x509-parser
+  - [ ] Implement fingerprint validation for SDP
+
+#### Phase 3: SRTP Integration
+- [ ] Implement SRTP profile negotiation
+  - [ ] Add use_srtp extension
+  - [ ] Create profile selection logic
+- [ ] Extract keys for SRTP
+  - [ ] Extract keying material from handshake
+  - [ ] Implement RFC 5764 key derivation
+  - [ ] Integrate with existing SRTP code
+- [ ] Manage connections
+  - [ ] Handle session lifecycle
+  - [ ] Implement rekeying and teardown
+
+#### Phase 4: Testing and Security
+- [ ] Create comprehensive tests
+  - [ ] Test against RFC test vectors
+  - [ ] Test interoperability
+  - [ ] Implement stress testing and fuzzing
+- [ ] Conduct security review
+  - [ ] Review crypto operations
+  - [ ] Prevent timing attacks
+  - [ ] Ensure proper key handling
 
 ## Next Priorities
 

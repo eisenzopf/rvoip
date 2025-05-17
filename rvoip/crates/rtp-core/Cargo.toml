@@ -21,6 +21,21 @@ async-trait = "0.1"
 base64 = "0.13"
 log = "0.4"
 futures = "0.3"
+# Cryptographic dependencies for DTLS
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+aes-gcm = "0.10"
+p256 = { version = "0.13", features = ["ecdh"] }
+x509-parser = "0.15"
+rcgen = "0.11"
 
 [dev-dependencies]
-tokio-test = "0.4" 
+tokio-test = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[[example]]
+name = "dtls_test"
+path = "examples/dtls_test.rs" 

@@ -15,6 +15,9 @@
 //! - `payload`: RTP payload format handlers
 //! - `buffer`: High-performance buffer management for receiving and transmitting packets
 //! - `csrc`: CSRC management
+//! - `error`: Error handling
+//! - `rtcp`: RTCP packet definitions and processing
+//! - `dtls`: DTLS support
 //!
 //! ## Buffer Management
 //!
@@ -43,6 +46,8 @@ pub mod traits;
 pub mod payload;
 pub mod buffer;
 pub mod csrc;
+pub mod rtcp;
+pub mod dtls;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;

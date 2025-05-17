@@ -58,6 +58,46 @@ pub enum Error {
     /// Timing error
     #[error("Timing error: {0}")]
     TimingError(String),
+
+    /// Invalid protocol version
+    #[error("Invalid protocol version: {0}")]
+    InvalidProtocolVersion(String),
+
+    /// Unsupported feature
+    #[error("Unsupported feature: {0}")]
+    UnsupportedFeature(String),
+    
+    /// Not implemented yet
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+    
+    /// Invalid state for operation
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+    
+    /// DTLS handshake error
+    #[error("DTLS handshake error: {0}")]
+    DtlsHandshakeError(String),
+    
+    /// DTLS alert received
+    #[error("DTLS alert received: {0}")]
+    DtlsAlertReceived(String),
+    
+    /// Certificate validation error
+    #[error("Certificate validation error: {0}")]
+    CertificateValidationError(String),
+    
+    /// Cryptographic operation error
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
+    
+    /// Packet too short
+    #[error("Packet too short")]
+    PacketTooShort,
+    
+    /// Timeout error
+    #[error("Operation timed out: {0}")]
+    Timeout(String),
 }
 
 impl From<io::Error> for Error {
