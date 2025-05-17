@@ -3,8 +3,8 @@
 //! This module provides structures for handling RTP packets as defined in RFC 3550.
 //! It includes implementations for RTP headers, packet parsing and serialization.
 
-mod rtp;
-mod header;
+pub mod rtp;
+pub mod header;
 pub mod rtcp;
 
 pub use rtp::*;

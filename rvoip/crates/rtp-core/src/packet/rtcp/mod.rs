@@ -155,16 +155,12 @@ impl RtcpPacket {
             }
             RtcpPacketType::Goodbye => {
                 Ok(RtcpPacket::Goodbye(
-                    RtcpGoodbye { sources: Vec::new(), reason: None }
+                    bye::parse_bye(&mut buf, report_count)?
                 ))
             }
             RtcpPacketType::ApplicationDefined => {
                 Ok(RtcpPacket::ApplicationDefined(
-                    RtcpApplicationDefined {
-                        ssrc: 0,
-                        name: [0; 4],
-                        data: Bytes::new(),
-                    }
+                    app::parse_app(&mut buf)?
                 ))
             }
             RtcpPacketType::ExtendedReport => {
@@ -177,9 +173,86 @@ impl RtcpPacket {
     
     /// Serialize an RTCP packet to bytes
     pub fn serialize(&self) -> Result<Bytes> {
-        // This is a placeholder implementation
-        // In a real implementation, this would serialize the packet based on its type
-        let buf = BytesMut::new();
+        let mut buf = BytesMut::new();
+        
+        match self {
+            RtcpPacket::SenderReport(_sr) => {
+                // Not fully implemented yet
+                return Err(Error::RtcpError("Serializing SR packets not fully implemented".to_string()));
+            }
+            RtcpPacket::ReceiverReport(_rr) => {
+                // Not fully implemented yet
+                return Err(Error::RtcpError("Serializing RR packets not fully implemented".to_string()));
+            }
+            RtcpPacket::SourceDescription(_sdes) => {
+                // Not fully implemented yet
+                return Err(Error::RtcpError("Serializing SDES packets not fully implemented".to_string()));
+            }
+            RtcpPacket::Goodbye(bye) => {
+                // Create a buffer for the BYE packet content
+                let bye_content = bye.serialize()?;
+                let content_size = bye_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | source count (5 bits)
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | (bye.sources.len() as u8 & 0x1F);
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::Goodbye as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write BYE content
+                buf.extend_from_slice(&bye_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
+            }
+            RtcpPacket::ApplicationDefined(app) => {
+                // Create a buffer for the APP packet content
+                let app_content = app.serialize()?;
+                let content_size = app_content.len();
+                
+                // Calculate length in 32-bit words minus one
+                let words = (content_size + 4) / 4; // content plus header, in 32-bit words
+                let length = words - 1; // minus one as per RFC
+                
+                // Write header
+                // First byte: version (2 bits) | padding (1 bit) | subtype (5 bits)
+                // For APP packets, subtype is always 0 in this implementation
+                let first_byte = (RTCP_VERSION << 6) | (0 << 5) | 0;
+                buf.put_u8(first_byte);
+                
+                // Write packet type
+                buf.put_u8(RtcpPacketType::ApplicationDefined as u8);
+                
+                // Write length
+                buf.put_u16(length as u16);
+                
+                // Write APP content
+                buf.extend_from_slice(&app_content);
+                
+                // Pad to 32-bit boundary if needed
+                let padding_bytes = (4 - (buf.len() % 4)) % 4;
+                for _ in 0..padding_bytes {
+                    buf.put_u8(0);
+                }
+            }
+            RtcpPacket::ExtendedReport(_xr) => {
+                // Not fully implemented yet
+                return Err(Error::RtcpError("Serializing XR packets not fully implemented".to_string()));
+            }
+        }
+        
         Ok(buf.freeze())
     }
 }

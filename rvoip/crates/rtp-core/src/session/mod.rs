@@ -113,9 +113,50 @@ pub enum RtpSessionEvent {
     
     /// Error in the session
     Error(Error),
+    
+    /// BYE RTCP packet received (a party is leaving the session)
+    Bye {
+        /// SSRC of the source that sent the BYE
+        ssrc: RtpSsrc,
+        
+        /// Optional reason text
+        reason: Option<String>,
+    },
+    
+    /// New stream detected with a specific SSRC
+    /// This event is emitted as soon as the first packet for a new SSRC is received,
+    /// even if the packet is being held in a jitter buffer.
+    NewStreamDetected {
+        /// SSRC of the new stream
+        ssrc: RtpSsrc,
+    },
 }
 
 /// RTP session for sending and receiving RTP packets
+///
+/// This class manages an RTP session, including sending and receiving packets,
+/// jitter buffer management, and demultiplexing of multiple streams.
+///
+/// # SSRC Demultiplexing
+///
+/// An RTP session can receive packets from multiple sources, each identified by
+/// a unique Synchronization Source identifier (SSRC). This implementation
+/// automatically demultiplexes incoming packets based on their SSRC:
+///
+/// 1. When a packet arrives, its SSRC is extracted
+/// 2. If this is the first packet from this SSRC, a new stream is created
+/// 3. The packet is processed by the appropriate stream, which handles:
+///    - Sequence number tracking
+///    - Jitter calculation
+///    - Duplicate detection
+///    - Packet reordering (via jitter buffer)
+///
+/// Each stream maintains its own statistics and state. You can access information
+/// about individual streams using the `get_stream()`, `get_all_streams()`, and
+/// `stream_count()` methods.
+///
+/// This approach aligns with RFC 3550 Section 8.2, which describes how to handle
+/// multiple sources in a single RTP session.
 pub struct RtpSession {
     /// Session configuration
     config: RtpSessionConfig,
@@ -127,7 +168,7 @@ pub struct RtpSession {
     transport: Arc<dyn RtpTransport>,
     
     /// Map of received streams by SSRC
-    streams: HashMap<RtpSsrc, RtpStream>,
+    streams: Arc<Mutex<HashMap<RtpSsrc, RtpStream>>>,
     
     /// Packet scheduler for sending packets
     scheduler: Option<RtpScheduler>,
@@ -189,7 +230,7 @@ impl RtpSession {
             config,
             ssrc,
             transport,
-            streams: HashMap::new(),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             scheduler,
             receiver: receiver_rx,
             sender: sender_tx,
@@ -225,6 +266,18 @@ impl RtpSession {
         let clock_rate = self.config.clock_rate;
         let payload_type = self.config.payload_type;
         let ssrc = self.ssrc;
+        let streams_map = self.streams.clone();
+        let jitter_buffer_enabled = self.config.enable_jitter_buffer;
+        let jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
+        let max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
+        
+        // If we have a remote address, set it on the transport
+        if let Some(addr) = remote_addr {
+            // Set the remote RTP address on the UDP transport
+            if let Some(t) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                t.set_remote_rtp_addr(addr).await;
+            }
+        }
         
         // Start the scheduler if available
         if let Some(scheduler) = &mut self.scheduler {
@@ -245,13 +298,25 @@ impl RtpSession {
             let mut last_remote_addr = remote_addr;
             
             while let Some(packet) = sender_rx.recv().await {
-                // Get destination address
+                // Try to get the remote address from different sources
                 let dest = if let Some(addr) = last_remote_addr {
                     addr
                 } else {
-                    // No destination address, can't send
-                    warn!("No destination address for RTP packet, dropping");
-                    continue;
+                    // Try to get from transport if available
+                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                        match t.remote_rtp_addr().await {
+                            Some(addr) => addr,
+                            None => {
+                                // No destination address, can't send
+                                warn!("No destination address for RTP packet, dropping");
+                                continue;
+                            }
+                        }
+                    } else {
+                        // No destination address, can't send
+                        warn!("No destination address for RTP packet, dropping");
+                        continue;
+                    }
                 };
                 
                 // Send the packet
@@ -263,6 +328,9 @@ impl RtpSession {
                     continue;
                 }
                 
+                // Update local copy of remote address
+                last_remote_addr = Some(dest);
+                
                 // Update stats
                 if let Ok(mut session_stats) = stats_send.lock() {
                     session_stats.packets_sent += 1;
@@ -273,81 +341,188 @@ impl RtpSession {
         
         // Start receiving task
         let recv_transport = transport.clone();
-        let recv_jitter_buffer = self.config.enable_jitter_buffer;
-        let jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
-        let max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
+        
+        // Subscribe to transport events to handle RTCP packets
+        let mut transport_events = recv_transport.subscribe();
         
         let recv_task = tokio::spawn(async move {
             let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
             
+            // Create a basic select loop to handle both direct packet reception
+            // and events from the transport
             loop {
-                // We'll use recv_from for now and process one packet at a time
-                let sock_addr = recv_transport.local_rtp_addr().unwrap_or_else(|_| {
-                    "0.0.0.0:0".parse().unwrap()
-                });
-                
-                // This is a placeholder for now - we need to implement the receiving logic
-                // in the transport trait properly
-                let udp_socket = UdpSocket::bind(sock_addr).await.unwrap();
-                
-                let result = udp_socket.recv_from(&mut buffer).await;
-                match result {
-                    Ok((size, addr)) => {
-                        if size < RTP_MIN_HEADER_SIZE {
-                            warn!("Received packet too small to be RTP: {} bytes", size);
-                            continue;
-                        }
-                        
-                        // Parse RTP packet
-                        match RtpPacket::parse(&buffer[..size]) {
-                            Ok(packet) => {
-                                // Update stats
-                                if let Ok(mut session_stats) = stats_recv.lock() {
-                                    session_stats.packets_received += 1;
-                                    session_stats.bytes_received += size as u64;
-                                    session_stats.remote_addr = Some(addr);
+                tokio::select! {
+                    // Handle direct packet reception from the transport
+                    result = recv_transport.receive_packet(&mut buffer) => {
+                        match result {
+                            Ok((size, addr)) => {
+                                // Process RTP packet
+                                if size < RTP_MIN_HEADER_SIZE {
+                                    warn!("Received packet too small to be RTP: {} bytes", size);
+                                    continue;
                                 }
                                 
-                                // Process stream for this SSRC
-                                let ssrc = packet.header.ssrc;
-                                let mut streams_map = HashMap::new(); // This is a placeholder - we need a proper streams map
-                                
-                                let stream = streams_map.entry(ssrc).or_insert_with(|| {
-                                    if recv_jitter_buffer {
-                                        RtpStream::with_jitter_buffer(ssrc, clock_rate, jitter_size, max_age_ms as u64)
-                                    } else {
-                                        RtpStream::new(ssrc, clock_rate)
-                                    }
-                                });
-                                
-                                // Process the packet and get the output packet (if any)
-                                if let Some(output_packet) = stream.process_packet(packet) {
-                                    // Update jitter stats
-                                    if let Ok(mut session_stats) = stats_recv.lock() {
-                                        session_stats.jitter_ms = stream.get_jitter_ms();
+                                // Parse RTP packet
+                                match RtpPacket::parse(&buffer[..size]) {
+                                    Ok(packet) => {
+                                        // Extract the SSRC from the packet
+                                        let packet_ssrc = packet.header.ssrc;
+                                        debug!("Received packet with SSRC={:08x}, seq={}, timestamp={}",
+                                               packet_ssrc, packet.header.sequence_number, packet.header.timestamp);
                                         
-                                        // Update other stream-specific stats
-                                        let stream_stats = stream.get_stats();
-                                        session_stats.packets_lost += stream_stats.packets_lost;
-                                        session_stats.packets_duplicated += stream_stats.duplicates;
+                                        // Update stats
+                                        if let Ok(mut session_stats) = stats_recv.lock() {
+                                            session_stats.packets_received += 1;
+                                            session_stats.bytes_received += size as u64;
+                                            session_stats.remote_addr = Some(addr);
+                                        }
+                                        
+                                        // Get or create the stream for this SSRC
+                                        let (is_new_stream, output_packet) = {
+                                            let mut streams = match streams_map.lock() {
+                                                Ok(streams) => streams,
+                                                Err(e) => {
+                                                    error!("Failed to lock streams map: {}", e);
+                                                    continue;
+                                                }
+                                            };
+                                            
+                                            // Check if this is a new stream
+                                            let is_new = !streams.contains_key(&packet_ssrc);
+                                            if is_new {
+                                                debug!("Creating new stream for SSRC={:08x}", packet_ssrc);
+                                            } else {
+                                                debug!("Found existing stream for SSRC={:08x}", packet_ssrc);
+                                            }
+                                            
+                                            // Get or create the stream for this SSRC
+                                            let stream = streams.entry(packet_ssrc).or_insert_with(|| {
+                                                info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
+                                                if jitter_buffer_enabled {
+                                                    debug!("Creating stream with jitter buffer for SSRC={:08x}", packet_ssrc);
+                                                    RtpStream::with_jitter_buffer(
+                                                        packet_ssrc, 
+                                                        clock_rate, 
+                                                        jitter_size, 
+                                                        max_age_ms as u64
+                                                    )
+                                                } else {
+                                                    debug!("Creating stream without jitter buffer for SSRC={:08x}", packet_ssrc);
+                                                    RtpStream::new(packet_ssrc, clock_rate)
+                                                }
+                                            });
+                                            
+                                            // Make sure the stream is initialized with the first sequence number
+                                            // This ensures all streams are properly initialized even if their packets
+                                            // are being held in the jitter buffer or discarded for some reason
+                                            if is_new {
+                                                stream.ensure_initialized(packet.header.sequence_number);
+                                                debug!("Initialized new stream for SSRC={:08x} with seq={}", 
+                                                       packet_ssrc, packet.header.sequence_number);
+                                            }
+                                            
+                                            // Process the packet and get the output packet (if any)
+                                            let output = stream.process_packet(packet.clone());
+                                            if output.is_some() {
+                                                debug!("Stream {:08x} returned a packet for delivery", packet_ssrc);
+                                            } else {
+                                                debug!("Stream {:08x} held the packet in jitter buffer", packet_ssrc);
+                                            }
+                                            
+                                            (is_new, output)
+                                        };
+                                        
+                                        // If this is a new stream, emit the NewStreamDetected event
+                                        if is_new_stream {
+                                            // Broadcast new stream event
+                                            debug!("Emitting NewStreamDetected event for SSRC={:08x}", packet_ssrc);
+                                            let _ = event_tx_recv.send(RtpSessionEvent::NewStreamDetected {
+                                                ssrc: packet_ssrc,
+                                            });
+                                        }
+                                        
+                                        // If we have an output packet, forward it
+                                        if let Some(output) = output_packet {
+                                            // Update jitter stats - get the stream again
+                                            if let Ok(streams) = streams_map.lock() {
+                                                if let Some(stream) = streams.get(&packet_ssrc) {
+                                                    if let Ok(mut session_stats) = stats_recv.lock() {
+                                                        session_stats.jitter_ms = stream.get_jitter_ms();
+                                                        
+                                                        // Update other stream-specific stats
+                                                        let stream_stats = stream.get_stats();
+                                                        session_stats.packets_lost = stream_stats.packets_lost;
+                                                        session_stats.packets_duplicated = stream_stats.duplicates;
+                                                        session_stats.packets_out_of_order = 0; // TODO: Track this
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Forward the packet to the receiver channel
+                                            if let Err(e) = receiver_tx.send(output.clone()).await {
+                                                error!("Failed to forward RTP packet to receiver: {}", e);
+                                            }
+                                            
+                                            // Broadcast packet received event
+                                            debug!("Emitting PacketReceived event for SSRC={:08x}", packet_ssrc);
+                                            let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output));
+                                        }
                                     }
-                                    
-                                    // Forward the packet to the receiver channel
-                                    if let Err(e) = receiver_tx.send(output_packet.clone()).await {
-                                        error!("Failed to forward RTP packet to receiver: {}", e);
+                                    Err(e) => {
+                                        warn!("Failed to parse RTP packet: {}", e);
                                     }
-                                    
-                                    // Broadcast packet received event
-                                    let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output_packet));
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to parse RTP packet: {}", e);
+                                error!("Error receiving from transport: {}", e);
+                                continue;
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("Error receiving RTP packet: {}", e);
+                    
+                    // Handle events from the transport (like RTCP packets)
+                    event = transport_events.recv() => {
+                        match event {
+                            Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
+                                // Try to parse the RTCP packet
+                                if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
+                                    // Handle the RTCP packet based on its type
+                                    match rtcp_packet {
+                                        crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
+                                            // Extract the SSRC and reason
+                                            if !bye.sources.is_empty() {
+                                                let source_ssrc = bye.sources[0];
+                                                
+                                                // Broadcast BYE event
+                                                let _ = event_tx_recv.send(RtpSessionEvent::Bye {
+                                                    ssrc: source_ssrc,
+                                                    reason: bye.reason,
+                                                });
+                                                
+                                                info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
+                                            }
+                                        }
+                                        // Handle other RTCP packet types as needed
+                                        _ => {
+                                            // For now, we're only handling BYE packets
+                                            trace!("Received RTCP packet: {:?}", rtcp_packet);
+                                        }
+                                    }
+                                } else {
+                                    warn!("Failed to parse RTCP packet");
+                                }
+                            }
+                            Ok(crate::traits::RtpEvent::MediaReceived { .. }) => {
+                                // This is handled by the direct packet reception above
+                            }
+                            Ok(crate::traits::RtpEvent::Error(e)) => {
+                                error!("Transport error: {}", e);
+                                let _ = event_tx_recv.send(RtpSessionEvent::Error(e));
+                            }
+                            Err(e) => {
+                                debug!("Transport event channel error: {}", e);
+                            }
+                        }
                     }
                 }
             }
@@ -405,12 +580,17 @@ impl RtpSession {
     }
     
     /// Set the remote address
-    pub fn set_remote_addr(&mut self, addr: SocketAddr) {
+    pub async fn set_remote_addr(&mut self, addr: SocketAddr) {
         self.config.remote_addr = Some(addr);
         
         // Update stats with remote address
         if let Ok(mut stats) = self.stats.lock() {
             stats.remote_addr = Some(addr);
+        }
+        
+        // Update the transport's remote address
+        if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
+            t.set_remote_rtp_addr(addr).await;
         }
     }
     
@@ -419,8 +599,38 @@ impl RtpSession {
         self.transport.local_rtp_addr()
     }
     
+    /// Get the transport
+    pub fn transport(&self) -> Arc<dyn RtpTransport> {
+        self.transport.clone()
+    }
+    
     /// Close the session and clean up resources
-    pub async fn close(&mut self) {
+    pub async fn close(&mut self) -> Result<()> {
+        // Send BYE packet if we have a remote address
+        if let Some(remote_addr) = self.config.remote_addr {
+            // Create BYE packet
+            let bye = crate::packet::rtcp::RtcpGoodbye::new_with_reason(
+                self.ssrc,
+                "Session closed".to_string(),
+            );
+            
+            // Create RTCP packet
+            let rtcp_packet = crate::packet::rtcp::RtcpPacket::Goodbye(bye);
+            
+            // Serialize and send
+            match rtcp_packet.serialize() {
+                Ok(data) => {
+                    // Send using transport (through RTCP port if available)
+                    if let Err(e) = self.transport.send_rtcp_bytes(&data, remote_addr).await {
+                        warn!("Failed to send RTCP BYE: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to serialize RTCP BYE: {}", e);
+                }
+            }
+        }
+        
         // Stop the scheduler if running
         if let Some(scheduler) = &mut self.scheduler {
             scheduler.stop().await;
@@ -441,6 +651,8 @@ impl RtpSession {
         
         self.active = false;
         info!("Closed RTP session with SSRC={:08x}", self.ssrc);
+        
+        Ok(())
     }
     
     /// Get the current timestamp
@@ -472,5 +684,103 @@ impl RtpSession {
     /// Subscribe to session events
     pub fn subscribe(&self) -> broadcast::Receiver<RtpSessionEvent> {
         self.event_tx.subscribe()
+    }
+    
+    /// Get the current payload type
+    pub fn get_payload_type(&self) -> u8 {
+        self.config.payload_type
+    }
+    
+    /// Set the payload type
+    pub fn set_payload_type(&mut self, payload_type: u8) {
+        self.config.payload_type = payload_type;
+    }
+    
+    /// Get a stream by SSRC, if it exists
+    pub async fn get_stream(&self, ssrc: RtpSsrc) -> Option<RtpStreamStats> {
+        let streams = match self.streams.lock() {
+            Ok(streams) => streams,
+            Err(_) => return None,
+        };
+        
+        streams.get(&ssrc).map(|stream| stream.get_stats())
+    }
+    
+    /// Get a list of all current streams
+    pub async fn get_all_streams(&self) -> Vec<RtpStreamStats> {
+        let streams = match self.streams.lock() {
+            Ok(streams) => streams,
+            Err(_) => return Vec::new(),
+        };
+        
+        streams.values().map(|stream| stream.get_stats()).collect()
+    }
+    
+    /// Get the number of active streams
+    pub async fn stream_count(&self) -> usize {
+        let streams = match self.streams.lock() {
+            Ok(streams) => streams,
+            Err(_) => return 0,
+        };
+        
+        streams.len()
+    }
+    
+    /// Get a list of all SSRCs known to this session
+    /// 
+    /// This returns all SSRCs that have been seen, even if their streams
+    /// haven't released any packets from their jitter buffers yet.
+    pub async fn get_all_ssrcs(&self) -> Vec<RtpSsrc> {
+        if let Ok(streams) = self.streams.lock() {
+            streams.keys().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Force creation of a stream for a specific SSRC
+    /// 
+    /// This is useful when we want to ensure a stream exists for an SSRC
+    /// even if no packets have been received yet.
+    pub async fn create_stream_for_ssrc(&mut self, ssrc: RtpSsrc) -> bool {
+        let mut streams = match self.streams.lock() {
+            Ok(streams) => streams,
+            Err(e) => {
+                error!("Failed to lock streams map: {}", e);
+                return false;
+            }
+        };
+        
+        // Check if this SSRC already exists
+        if streams.contains_key(&ssrc) {
+            debug!("Stream for SSRC={:08x} already exists", ssrc);
+            return false;
+        }
+        
+        // Create the stream
+        info!("Manually creating new RTP stream for SSRC={:08x}", ssrc);
+        let stream = if self.config.enable_jitter_buffer {
+            debug!("Creating stream with jitter buffer for SSRC={:08x}", ssrc);
+            RtpStream::with_jitter_buffer(
+                ssrc, 
+                self.config.clock_rate, 
+                self.config.jitter_buffer_size.unwrap_or(50), 
+                self.config.max_packet_age_ms.unwrap_or(200) as u64
+            )
+        } else {
+            debug!("Creating stream without jitter buffer for SSRC={:08x}", ssrc);
+            RtpStream::new(ssrc, self.config.clock_rate)
+        };
+        
+        // Add the stream
+        streams.insert(ssrc, stream);
+        
+        // Emit the new stream event
+        debug!("Emitting NewStreamDetected event for SSRC={:08x}", ssrc);
+        let _ = self.event_tx.send(RtpSessionEvent::NewStreamDetected {
+            ssrc,
+        });
+        
+        true
     }
 } 

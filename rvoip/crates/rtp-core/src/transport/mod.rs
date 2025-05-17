@@ -3,13 +3,16 @@
 //! This module provides abstractions for sending and receiving RTP/RTCP packets over the network.
 
 use std::net::SocketAddr;
+use std::any::Any;
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::sync::broadcast;
 
 use crate::error::Error;
 use crate::Result;
 use crate::packet::RtpPacket;
 use crate::packet::rtcp::RtcpPacket;
+use crate::traits::RtpEvent;
 
 /// Trait for RTP transport implementations
 #[async_trait]
@@ -31,6 +34,19 @@ pub trait RtpTransport: Send + Sync {
     
     /// Send raw RTCP bytes
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()>;
+    
+    /// Receive a packet into the provided buffer
+    /// 
+    /// Returns the number of bytes read and the source address
+    async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)>;
+    
+    /// Subscribe to transport events
+    ///
+    /// This allows receiving both RTP and RTCP packets as events
+    fn subscribe(&self) -> broadcast::Receiver<RtpEvent>;
+    
+    /// Get a reference to this object as Any
+    fn as_any(&self) -> &dyn std::any::Any;
     
     /// Close the transport
     async fn close(&self) -> Result<()>;

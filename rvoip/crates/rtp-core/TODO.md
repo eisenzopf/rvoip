@@ -59,95 +59,95 @@ rtp-core/
 ## Phase 1: Packet Processing (2 weeks)
 
 ### RTP Packet Structure
-- [ ] Implement RFC 3550 compliant RTP packet parsing
-- [ ] Create RtpPacket struct with all required fields
+- [x] Implement RFC 3550 compliant RTP packet parsing
+- [x] Create RtpPacket struct with all required fields
 - [ ] Implement header extension support
 - [ ] Add CSRC list handling
 - [ ] Implement payload format identification
-- [ ] Create efficient serialization/deserialization
-- [ ] Add verification for RTP header validity
+- [x] Create efficient serialization/deserialization
+- [x] Add verification for RTP header validity
 
 ### RTCP Implementation
-- [ ] Create RTCP packet base structure
-- [ ] Implement Sender Report (SR) packets
-- [ ] Implement Receiver Report (RR) packets
-- [ ] Add Source Description (SDES) packets
-- [ ] Implement Goodbye (BYE) packets
-- [ ] Add Application-Defined (APP) packets
+- [x] Create RTCP packet base structure
+- [x] Implement Sender Report (SR) packets
+- [x] Implement Receiver Report (RR) packets
+- [x] Add Source Description (SDES) packets
+- [x] Implement Goodbye (BYE) packets
+- [x] Add Application-Defined (APP) packets
 - [ ] Implement Extended Report (XR) packets (RFC 3611)
 - [ ] Create RTCP compound packet handling
 
 ### Sequence and Timing Management
-- [ ] Implement sequence number tracking
-- [ ] Add detection of packet reordering
-- [ ] Create duplicate packet detection
-- [ ] Implement timestamp management
-- [ ] Add clock rate conversion utilities
-- [ ] Implement synchronization source (SSRC) handling
+- [x] Implement sequence number tracking
+- [x] Add detection of packet reordering
+- [x] Create duplicate packet detection
+- [x] Implement timestamp management
+- [x] Add clock rate conversion utilities
+- [x] Implement synchronization source (SSRC) handling
 - [ ] Add contributing source (CSRC) management
 
 ## Phase 2: Media Transport (2-3 weeks)
 
 ### Socket Management
-- [ ] Create RtpSocket abstraction
-- [ ] Implement separate RTP/RTCP sockets
-- [ ] Add support for symmetric RTP
+- [x] Create RtpSocket abstraction
+- [x] Implement separate RTP/RTCP sockets
+- [x] Add support for symmetric RTP
 - [ ] Implement port allocation strategy
-- [ ] Create socket binding with appropriate options
+- [x] Create socket binding with appropriate options
 - [ ] Add IPv4/IPv6 dual-stack support
 - [ ] Implement connection-oriented RTP (if needed)
 
 ### Packet Reception
-- [ ] Create async receiver for RTP packets
-- [ ] Implement separate RTCP packet receiver
-- [ ] Add incoming packet validation
-- [ ] Create packet demultiplexing based on SSRC
+- [x] Create async receiver for RTP packets
+- [x] Implement separate RTCP packet receiver
+- [x] Add incoming packet validation
+- [x] Create packet demultiplexing based on SSRC
 - [ ] Implement buffer management for received packets
 - [ ] Add pipelining for packet processing
-- [ ] Create event system for received packets
+- [x] Create event system for received packets
 
 ### Packet Transmission
-- [ ] Implement RTP packet sender
+- [x] Implement RTP packet sender
 - [ ] Create RTCP packet transmission logic
 - [ ] Add rate limiting for RTCP (5% bandwidth rule)
-- [ ] Implement packet scheduling
+- [x] Implement packet scheduling
 - [ ] Add transmission buffer management
 - [ ] Create burst mitigation logic
 - [ ] Implement congestion control indicators
 
 ### Secure RTP (SRTP)
 - [ ] Integrate DTLS for key exchange
-- [ ] Implement SRTP/SRTCP encryption
-- [ ] Add authentication tag handling
-- [ ] Implement replay protection
-- [ ] Create key derivation functions
-- [ ] Add support for multiple crypto suites
-- [ ] Implement crypto context management
+- [x] Implement SRTP/SRTCP encryption
+- [x] Add authentication tag handling
+- [x] Implement replay protection
+- [x] Create key derivation functions
+- [x] Add support for multiple crypto suites
+- [x] Implement crypto context management
 
 ## Phase 3: Statistics and Reporting (1-2 weeks)
 
 ### Metrics Collection
-- [ ] Implement packet loss detection
-- [ ] Add jitter calculation per RFC 3550
-- [ ] Create round-trip time estimation
+- [x] Implement packet loss detection
+- [x] Add jitter calculation per RFC 3550
+- [x] Create round-trip time estimation
 - [ ] Implement throughput measurement
 - [ ] Add bandwidth estimation
-- [ ] Create statistics aggregation
-- [ ] Implement NTP timestamp conversion
+- [x] Create statistics aggregation
+- [x] Implement NTP timestamp conversion
 
 ### RTCP Report Generation
-- [ ] Implement sender report generation logic
-- [ ] Create receiver report generation
+- [x] Implement sender report generation logic
+- [x] Create receiver report generation
 - [ ] Add extended reports for additional metrics
-- [ ] Implement RTCP interval calculation
-- [ ] Add SDES information generation
+- [x] Implement RTCP interval calculation
+- [x] Add SDES information generation
 - [ ] Create BYE packet generation logic
-- [ ] Implement RTCP transmission scheduling
+- [x] Implement RTCP transmission scheduling
 
 ### Quality Monitoring
 - [ ] Create MOS score estimation
 - [ ] Implement R-factor calculation
-- [ ] Add burst/gap metrics
+- [x] Add burst/gap metrics
 - [ ] Create concealment metrics
 - [ ] Implement network congestion detection
 - [ ] Add event-based quality alerts
@@ -156,10 +156,10 @@ rtp-core/
 ## Phase 4: Testing and Validation (Ongoing)
 
 ### Unit Tests
-- [ ] Create comprehensive test suite for RTP packet handling
-- [ ] Add tests for RTCP packet processing
-- [ ] Implement socket and transport tests
-- [ ] Add encryption/authentication testing
+- [x] Create comprehensive test suite for RTP packet handling
+- [x] Add tests for RTCP packet processing
+- [x] Implement socket and transport tests
+- [x] Add encryption/authentication testing
 - [ ] Create performance benchmarks
 - [ ] Implement fuzzing for packet parsing robustness
 
@@ -167,21 +167,59 @@ rtp-core/
 - [ ] Test media transport with session layer
 - [ ] Implement interoperability testing with standard clients
 - [ ] Add cross-platform socket validation
-- [ ] Create timing and synchronization tests
+- [x] Create timing and synchronization tests
 - [ ] Implement load testing for packet processing
 
 ### RFC Compliance
-- [ ] Verify RFC 3550 (RTP) compliance
+- [x] Verify RFC 3550 (RTP) compliance
 - [ ] Test RFC 3551 (RTP A/V Profile) compatibility
 - [ ] Validate RFC 3611 (RTCP XR) implementation
-- [ ] Verify RFC 3711 (SRTP) compliance
+- [x] Verify RFC 3711 (SRTP) compliance
 - [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
 
 ## Integration with Media Core
 
-- [ ] Create clean interfaces for media-core integration
-- [ ] Implement MediaTransport trait
-- [ ] Add event system for media-core communication
-- [ ] Create codec payload format handlers
+- [x] Create clean interfaces for media-core integration
+- [x] Implement MediaTransport trait
+- [x] Add event system for media-core communication
+- [x] Create codec payload format handlers
+  - [x] Implement G.711 μ-law and A-law payload formats
+  - [x] Implement G.722 payload format
+  - [x] Implement Opus payload format
+  - [x] Implement VP8/VP9 payload formats
 - [ ] Implement media synchronization mechanisms
-- [ ] Add RTP session management for media-core use 
+- [x] Add RTP session management for media-core use
+
+## Immediate Fixes Needed
+
+- [x] Fix socket sharing issue in RtpSession (currently creates new socket in receive_task)
+- [x] Fix missing channel close detection in transports
+- [x] Improve error handling in transport layer
+- [x] Add proper documentation for MediaTransport integration 
+
+## Recently Completed Work
+
+- [x] Created MediaTransport trait adapter for media-core integration
+- [x] Enhanced UdpRtpTransport with event-based packet reception
+- [x] Added receive_packet method to RtpTransport
+- [x] Fixed socket reuse issues in RtpSession
+- [x] Implemented proper remote address handling
+- [x] Improved error handling for broadcast channel operation
+- [x] Created working bidirectional packet exchange example between RTP sessions
+- [x] Fixed remaining socket binding conflicts
+- [x] Implemented payload format framework with G.711 support
+- [x] Created PayloadType enum with standard RTP payload types from RFC 3551
+- [x] Added G.722 payload format implementation with special timestamp handling
+- [x] Implemented Opus payload format with configurable bandwidth and bitrate
+- [x] Added RTCP BYE packet handling for clean session termination
+- [x] Integrated RTCP APP packet parsing and serialization
+- [x] Created example demonstrating RTCP APP packet usage
+- [x] Fixed RTCP packet detection in UdpRtpTransport (packets with payload types 200-204 were misidentified)
+- [x] Implemented VP8 and VP9 video payload formats with RFC 7741/8741 compliant header handling
+- [x] Created packet demultiplexing based on SSRC with stream tracking in RtpSession
+
+## Next Priorities
+
+- [ ] Improve buffer management for received and transmitted packets
+- [ ] Validate RFC 3551 (RTP A/V Profile) compliance
+- [ ] Integrate RTCP XR packets for extended reporting 

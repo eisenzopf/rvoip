@@ -10,13 +10,17 @@ use bytes::Bytes;
 use crate::error::Error;
 use crate::Result;
 
+// Export the media_transport module
+pub mod media_transport;
+pub use media_transport::RtpMediaTransport;
+
 /// Media Transport trait for transporting media data
 ///
 /// This trait is used by media-core to send media samples over RTP.
 #[async_trait]
 pub trait MediaTransport: Send + Sync {
     /// Get the local address for media transport
-    fn local_addr(&self) -> Result<SocketAddr>;
+    async fn local_addr(&self) -> Result<SocketAddr>;
     
     /// Send media data with the given payload type, timestamp, and marker bit
     async fn send_media(

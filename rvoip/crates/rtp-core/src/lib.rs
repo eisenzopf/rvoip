@@ -6,12 +6,13 @@
 //! The library is organized into several modules:
 //!
 //! - `packet`: RTP and RTCP packet definitions and processing
-//! - `session`: RTP session management
+//! - `session`: RTP session management including SSRC demultiplexing
 //! - `transport`: Network transport for RTP/RTCP
 //! - `srtp`: Secure RTP implementation
 //! - `stats`: RTP statistics collection
 //! - `time`: Timing and clock utilities
 //! - `traits`: Public traits for integration with other crates
+//! - `payload`: RTP payload format handlers
 
 mod error;
 
@@ -23,20 +24,7 @@ pub mod srtp;
 pub mod stats;
 pub mod time;
 pub mod traits;
-
-// Re-export core types
-pub use error::Error;
-
-// Re-export common types from packet module
-pub use packet::{RtpPacket, RtpHeader};
-pub use packet::rtcp::{
-    RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
-    RtcpReportBlock, NtpTimestamp, RtcpSourceDescription,
-    RtcpGoodbye, RtcpApplicationDefined
-};
-
-// Re-export session types
-pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats};
+pub mod payload;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -56,6 +44,36 @@ pub type RtpCsrc = u32;
 /// Result type for RTP operations
 pub type Result<T> = std::result::Result<T, Error>;
 
+// Re-export core types
+pub use error::Error;
+
+// Re-export common types from packet module
+pub use packet::rtp::RtpPacket;
+pub use packet::header::RtpHeader;
+pub use packet::rtcp::{
+    RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
+    RtcpReportBlock, NtpTimestamp, RtcpSourceDescription,
+    RtcpGoodbye, RtcpApplicationDefined
+};
+
+// Re-export session types
+pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats};
+
+// Re-export transport types
+pub use transport::{RtpTransport, UdpRtpTransport};
+
+// Re-export traits for media-core integration
+pub use traits::{MediaTransport, RtpEvent, RtpEventConsumer};
+pub use traits::media_transport::RtpMediaTransport;
+
+// Re-export payload format types
+pub use payload::{
+    PayloadType, PayloadFormat, PayloadFormatFactory, create_payload_format,
+    G711UPayloadFormat, G711APayloadFormat, G722PayloadFormat,
+    OpusPayloadFormat, OpusBandwidth,
+    Vp8PayloadFormat, Vp9PayloadFormat,
+};
+
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
@@ -68,6 +86,8 @@ pub mod prelude {
         RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
         RtcpReportBlock, NtpTimestamp
     };
+    
+    pub use crate::traits::{MediaTransport, RtpMediaTransport};
 }
 
 #[cfg(test)]

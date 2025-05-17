@@ -284,6 +284,28 @@ impl RtpStream {
             is_active: self.last_packet_time.elapsed() < Duration::from_secs(30),
         }
     }
+    
+    /// Ensure the stream is initialized with the given sequence number
+    /// This is useful when packets might be held in the jitter buffer
+    /// or discarded, but we still want to track the stream.
+    pub fn ensure_initialized(&mut self, seq: u16) {
+        if !self.initialized {
+            self.init_sequence(seq as RtpSequenceNumber);
+            
+            // Make sure all required state is properly initialized
+            self.packets_received = 0;
+            self.highest_seq = seq as u32;
+            self.latest_seq = seq as RtpSequenceNumber;
+            self.packets_lost = 0;
+            self.duplicates = 0;
+            self.jitter = 0.0;
+            self.last_arrival = None;
+            self.last_timestamp = None;
+            
+            self.initialized = true;
+            debug!("Initialized RTP stream with seq={}", seq);
+        }
+    }
 }
 
 /// Determines if sequence a is newer than sequence b, accounting for wraparound
