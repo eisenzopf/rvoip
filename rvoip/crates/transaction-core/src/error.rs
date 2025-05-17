@@ -79,6 +79,10 @@ pub enum Error {
         transaction_id: Option<TransactionKey>,
     },
 
+    /// Transport manager error
+    #[error("Transport management error: {0}")]
+    Transport(String),
+
     /// Other miscellaneous errors.
     #[error("Other error: {0}")]
     Other(String),

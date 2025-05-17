@@ -6,6 +6,7 @@ pub mod transaction;
 pub mod timer;
 pub mod utils;
 pub mod method;
+pub mod transport;
 
 // Re-export core types
 pub use error::{Error, Result};
@@ -17,6 +18,7 @@ pub use transaction::{
 pub use client::{ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, TransactionExt as ClientTransactionExt};
 pub use server::{ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction, TransactionExt as ServerTransactionExt};
 pub use timer::{Timer, TimerManager, TimerFactory, TimerSettings, TimerType};
+pub use transport::TransportManager;
 
 /// # SIP Transaction Layer
 /// 

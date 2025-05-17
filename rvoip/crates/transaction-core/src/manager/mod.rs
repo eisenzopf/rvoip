@@ -490,6 +490,104 @@ impl TransactionManager {
         Self::with_config(transport, None)
     }
     
+    /// Creates a new TransactionManager that uses a TransportManager for SIP transport.
+    ///
+    /// This method integrates the transaction layer with the transport manager, allowing
+    /// for advanced transport capabilities such as multiple transport types, failover,
+    /// and transport selection based on destination.
+    ///
+    /// # Arguments
+    /// * `transport_manager` - The TransportManager to use for sending messages
+    /// * `transport_rx` - Channel for receiving transport events
+    /// * `capacity` - Optional event queue capacity (defaults to 100)
+    ///
+    /// # Returns
+    /// * `Result<(Self, mpsc::Receiver<TransactionEvent>)>` - The manager and event receiver
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use std::net::SocketAddr;
+    /// # use tokio::sync::mpsc;
+    /// # use rvoip_transaction_core::{TransactionManager, transport::TransportManager, transport::TransportManagerConfig};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create a transport manager configuration
+    /// let config = TransportManagerConfig {
+    ///    bind_addresses: vec!["127.0.0.1:5060".parse().unwrap()],
+    ///    enable_udp: true,
+    ///    enable_tcp: true,
+    ///    ..Default::default()
+    /// };
+    ///
+    /// // Create and initialize the transport manager
+    /// let (mut transport_manager, transport_rx) = TransportManager::new(config).await?;
+    /// transport_manager.initialize().await?;
+    ///
+    /// // Create transaction manager with the transport manager
+    /// let (transaction_manager, event_rx) = TransactionManager::with_transport_manager(
+    ///     transport_manager,
+    ///     transport_rx,
+    ///     Some(100),
+    /// ).await?;
+    ///
+    /// // Now use the transaction manager
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_transport_manager(
+        transport_manager: crate::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
+        // Get the default transport from the manager
+        let default_transport = transport_manager.default_transport().await
+            .ok_or_else(|| Error::Transport("No default transport available from TransportManager".into()))?;
+        
+        // Create the transaction manager using the default transport and event channel
+        let events_capacity = capacity.unwrap_or(100);
+        let (events_tx, events_rx) = mpsc::channel(events_capacity);
+        
+        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
+        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let transport_rx = Arc::new(Mutex::new(transport_rx));
+        let running = Arc::new(Mutex::new(false));
+        
+        let timer_settings = TimerSettings::default();
+        
+        // Setup timer manager
+        let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
+        
+        // Create timer factory with the timer manager
+        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
+        
+        let manager = Self {
+            transport: default_transport,
+            client_transactions,
+            server_transactions,
+            transaction_destinations,
+            events_tx,
+            event_subscribers,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            next_subscriber_id,
+            transport_rx,
+            running,
+            timer_settings,
+            timer_manager,
+            timer_factory,
+        };
+        
+        // Start the message processing loop
+        manager.start_message_loop();
+        
+        Ok((manager, events_rx))
+    }
+    
     /// Creates a transaction manager with custom timer configuration (sync version).
     ///
     /// This synchronous constructor allows customizing the timer settings
@@ -711,7 +809,7 @@ impl TransactionManager {
                 // Transaction terminated immediately - likely due to transport error
                 debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
                 return Err(Error::transport_error(
-                    rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated immediately".into()),
+                    rvoip_sip_transport::Error::ProtocolError("Transaction terminated immediately".into()),
                     "Failed to send request - transaction terminated immediately"
                 ));
             }
@@ -730,7 +828,7 @@ impl TransactionManager {
                         TransactionEvent::TransportError { transaction_id: tx_id, .. } if tx_id == *transaction_id => {
                             debug!(%transaction_id, "Received TransportError event");
                             return Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ConnectionFailed("Transport error during request send".into()),
+                                rvoip_sip_transport::Error::ProtocolError("Transport error during request send".into()),
                                 "Failed to send request - transport error"
                             ));
                         },
@@ -746,7 +844,7 @@ impl TransactionManager {
                                 
                                 debug!(%transaction_id, "Transaction moved to Terminated state - likely transport error");
                                 return Err(Error::transport_error(
-                                    rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated unexpectedly".into()),
+                                    rvoip_sip_transport::Error::ProtocolError("Transaction terminated unexpectedly".into()),
                                     "Failed to send request - transaction terminated"
                                 ));
                             }
@@ -762,7 +860,7 @@ impl TransactionManager {
                     if final_state == TransactionState::Terminated {
                         debug!(%transaction_id, "Transaction is terminated after events processed");
                         return Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated after processing".into()),
+                            rvoip_sip_transport::Error::ProtocolError("Transaction terminated after processing".into()),
                             "Failed to send request - transaction terminated"
                         ));
                     }
@@ -770,7 +868,7 @@ impl TransactionManager {
                     // Transaction was removed
                     debug!(%transaction_id, "Transaction was removed - likely due to termination");
                     return Err(Error::transport_error(
-                        rvoip_sip_transport::Error::ConnectionFailed("Transaction was removed".into()),
+                        rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
                         "Failed to send request - transaction removed"
                     ));
                 }
@@ -786,7 +884,7 @@ impl TransactionManager {
                         if final_state == TransactionState::Terminated {
                             debug!(%transaction_id, "Transaction terminated after timeout");
                             return Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ConnectionFailed("Transaction terminated after timeout".into()),
+                                rvoip_sip_transport::Error::ProtocolError("Transaction terminated after timeout".into()),
                                 "Failed to send request - transaction terminated"
                             ));
                         }
@@ -798,7 +896,7 @@ impl TransactionManager {
                         // Transaction was removed
                         debug!(%transaction_id, "Transaction was removed after timeout");
                         Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ConnectionFailed("Transaction was removed after timeout".into()),
+                            rvoip_sip_transport::Error::ProtocolError("Transaction was removed after timeout".into()),
                             "Failed to send request - transaction removed"
                         ))
                     }

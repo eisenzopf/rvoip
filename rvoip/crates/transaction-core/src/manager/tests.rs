@@ -71,7 +71,7 @@ mod tests {
             // Check if we should simulate a failure
             if self.should_fail_send.load(Ordering::SeqCst) {
                 println!("MockTransport::send_message - Simulating failure");
-                return Err(rvoip_sip_transport::error::Error::ConnectionFailed(
+                return Err(rvoip_sip_transport::error::Error::ProtocolError(
                     "Simulated network failure for testing".into()
                 ));
             }

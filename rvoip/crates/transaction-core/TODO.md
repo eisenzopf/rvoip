@@ -260,6 +260,42 @@ pub async fn transaction_count(&self) -> usize;
 - [x] Implement proper error recovery for dialog-transaction interactions
 - [ ] Add transaction event batching for more efficient processing
 
+## Integration with Transport Layer
+
+### 1. Dependency Setup
+- [x] Add sip-transport dependency to Cargo.toml
+- [x] Configure appropriate feature flags (udp, tcp, ws)
+- [x] Verify dependency version alignment
+
+### 2. Transport Manager Implementation
+- [x] Create TransportManager to manage multiple transport instances
+- [x] Implement transport lifecycle management (init, shutdown)
+- [x] Add configuration options for transport parameters
+- [x] Use TransportFactory for creating transport instances
+- [x] Support multiple transport types simultaneously
+- [x] Add URI scheme to transport type mapping
+
+### 3. Event Handling and Message Routing
+- [x] Implement handler for sip-transport's TransportEvent
+- [x] Route incoming messages to appropriate transactions
+- [x] Process transport errors correctly in transaction layer
+- [x] Update transaction send mechanism to use real transports
+- [x] Implement transport selection logic based on message properties
+
+### 4. Connection Management
+- [x] Add connection tracking to associate transactions with connections
+- [ ] Handle connection failures with appropriate transaction notifications
+- [ ] Implement reconnection logic for persistent connections
+- [ ] Add transport failover for when primary transport fails
+- [ ] Create backoff/retry policies for connection failures
+
+### 5. Testing and Validation
+- [x] Update unit tests to use real transport or suitable mocks
+- [x] Create integration tests for full network stack
+- [ ] Test various transport combinations and failure scenarios
+- [x] Add example showing transaction-core with real transport
+- [ ] Create benchmarks for measuring performance
+
 ## Special Notes
 
 ### CANCEL Handling
@@ -280,3 +316,22 @@ ACK for 2xx responses is a special case:
 - [x] Add special handling for ACK requests in INVITE server transactions
 - [x] Add proper validation of requests against transaction state
 - [x] Ensure retransmitted requests are properly identified and handled 
+
+## Integration Progress (May 17, 2025)
+
+The integration between sip-transport and transaction-core is now complete and working correctly. We have:
+
+1. Successfully implemented the transport layer integration through TransportManager
+2. Created a working example (integrated_transport.rs) that demonstrates the full flow:
+   - Client sending REGISTER request
+   - Server responding with 100 Trying and 200 OK
+   - Client receiving and processing responses
+   - Both client and server handling state transitions correctly
+
+3. Fixed issues with timer management during transaction processing
+4. Ensured proper resource cleanup after transactions complete
+
+Next priorities:
+- Complete the transport failover capabilities
+- Add client-side WebSocket connection support
+- Implement reconnection logic for persistent connections 

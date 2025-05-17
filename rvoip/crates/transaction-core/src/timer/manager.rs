@@ -135,6 +135,10 @@ impl TimerManager {
     /// This allows the `TimerManager` to send timer-fired events to the transaction via the provided `command_tx` channel.
     /// Typically called when a new transaction is created and needs timer supervision.
     ///
+    /// If a transaction with the same ID is already registered, this method will replace the existing
+    /// command channel with the new one. This is a normal operation in some cases, such as when a transaction
+    /// is being processed through multiple functions or when timers are reset.
+    ///
     /// # Arguments
     /// * `transaction_id` - The [`TransactionKey`] of the transaction to register.
     /// * `command_tx` - The `mpsc::Sender` channel for sending [`InternalTransactionCommand`]s to the transaction.
@@ -151,7 +155,7 @@ impl TimerManager {
     ) {
         let mut channels = self.transaction_channels.lock().await;
         if channels.insert(transaction_id.clone(), command_tx).is_some() {
-            warn!(id=%transaction_id, "Transaction channel replaced for already registered transaction.");
+            debug!(id=%transaction_id, "Transaction channel replaced for already registered transaction.");
         }
         trace!(id=%transaction_id, "Transaction registered with TimerManager.");
     }

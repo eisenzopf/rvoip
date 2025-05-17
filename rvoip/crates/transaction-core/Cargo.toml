@@ -16,7 +16,7 @@ dead_code = "allow"
 [dependencies]
 # Our own crates
 rvoip-sip-core = { path = "../sip-core" }
-rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"] }
 
 # Async runtime
 tokio = { version = "1.28.2", features = ["full"] }

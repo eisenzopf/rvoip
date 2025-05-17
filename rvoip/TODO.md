@@ -196,11 +196,12 @@ The Transaction User (TU) functionality should be properly distributed:
 
 - [ ] Implement connection pooling for TCP
 - [ ] Add TLS support with proper certificate handling
-- [ ] Create WebSocket transport for WebRTC signaling
+- [x] Create WebSocket transport for WebRTC signaling
 - [ ] Implement proper DNS SRV resolution
 - [ ] Create NAT traversal strategy (using STUN/ICE)
 - [ ] Add IPv6 support
 - [ ] Implement keep-alive mechanisms for persistent connections
+- [x] Successfully integrate sip-transport with transaction-core
 
 ## Dialog Layer
 - [ ] Design core dialog state management
