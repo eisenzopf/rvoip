@@ -138,6 +138,7 @@ pub async fn find_invite_transaction_for_cancel(&self, cancel_request: &Request)
 ```rust
 // Event subscription
 pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent>;
+pub async fn subscribe_to_transactions(&self, tx_ids: &[TransactionKey]) -> Result<mpsc::Receiver<TransactionEvent>>;
 
 // Specific event filtering helpers
 pub async fn wait_for_transaction_state(&self, tx_id: &TransactionKey, 
@@ -233,6 +234,32 @@ pub async fn transaction_count(&self) -> usize;
 - [ ] Create benchmark suite for performance validation
 - [x] Add conformance tests against RFC 3261 requirements
 
+### 7. Tokio Async Runtime Best Practices
+- [ ] Replace polling-based subscription tracking with event-driven mechanisms
+- [ ] Use task multiplication more efficiently by using shared event handling tasks
+- [ ] Replace tokio::sync::Mutex with async-aware alternatives where appropriate
+- [ ] Implement proper backpressure mechanisms in event channels
+- [ ] Optimize lock granularity to reduce contention
+- [ ] Use tokio::select! for efficient multiplexing of multiple event sources
+- [ ] Reduce the number of spawned tasks by consolidating related functionality
+- [ ] Optimize channel buffer sizes based on expected throughput
+
+## Integration with Session Layer
+
+### 1. Dialog to Transaction Integration
+- [x] Fix dialog-to-transaction mapping for proper event routing
+- [x] Implement transaction-specific subscriptions for dialogs
+- [x] Add proper handling of ACK requests in dialog manager
+- [x] Ensure transaction events are processed correctly by dialog layer
+- [ ] Optimize event propagation from transaction layer to session layer
+- [ ] Add metrics for transaction-to-dialog interactions
+
+### 2. Session Layer Event Processing
+- [x] Update session layer to use improved transaction subscription API
+- [x] Fix handling of retransmitted requests in dialog manager
+- [x] Implement proper error recovery for dialog-transaction interactions
+- [ ] Add transaction event batching for more efficient processing
+
 ## Special Notes
 
 ### CANCEL Handling
@@ -246,4 +273,10 @@ CANCEL is given special treatment with its own API method because it has unique 
 ACK for 2xx responses is a special case:
 - ACK for non-2xx is part of the original INVITE transaction
 - ACK for 2xx is a separate transaction in its own right
-- Requires special handling according to RFC 3261 
+- Requires special handling according to RFC 3261 Section 13
+
+### Process Request Method
+- [x] Implement process_request method for handling in-transaction requests
+- [x] Add special handling for ACK requests in INVITE server transactions
+- [x] Add proper validation of requests against transaction state
+- [x] Ensure retransmitted requests are properly identified and handled 

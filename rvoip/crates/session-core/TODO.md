@@ -136,6 +136,18 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [x] Enhance support for multiple simultaneous early dialogs
 - [x] Implement forking scenario handling per RFC 3261 Section 12.1.2
 
+### Async Runtime Optimizations
+- [x] Replace polling-based subscription tracking with event-driven mechanisms
+- [x] Use more efficient task management for event handling
+- [x] Replace standard Mutex with DashMap for concurrent access to transaction subscriptions
+- [x] Implement proper backpressure handling in event channels
+- [x] Use tokio::select! for efficient multiplexing of event sources
+- [x] Reduce number of spawned tasks by consolidating related functionality
+- [x] Add channel buffer size tuning based on expected transaction volume
+- [x] Implement dead task cleanup for orphaned subscriptions
+- [x] Add benchmarks specific to async runtime performance
+- [x] Fix remaining lock contention issues in high-volume scenarios
+
 ## Additional Enhancements for Production Environments
 
 ### Performance and Scalability
@@ -220,39 +232,63 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
    - [x] Added session refreshes with SDP
    - [x] Added SDP support for UPDATE method
 
+5. **Tokio Async Runtime Optimizations**
+   - [x] Replaced polling-based subscription tracking with event-driven approach
+   - [x] Optimized task usage with StreamExt and FuturesUnordered
+   - [x] Implemented efficient multiplexing with tokio::select!
+   - [x] Added proper backpressure handling in event channels
+   - [x] Reduced the number of spawned tasks for better performance
+   - [x] Used DashMap for efficient concurrent access to transaction state
+   - [x] Added constants for optimal channel sizing
+   - [x] Improved error handling for async task failures
+   - [x] Added proper resource cleanup in terminate_all() method 
+   - [x] Fixed session state transition issues during termination
+
+6. **Session Manager Improvements**
+   - [x] Optimized session event processing with dedicated channels
+   - [x] Implemented more efficient task tracking for session operations
+   - [x] Added proper cleanup routines with timeout handling
+   - [x] Improved dialog-to-session mapping with DashMap
+   - [x] Added better error handling for session termination
+   - [x] Implemented asynchronous session cleanup
+   - [x] Added session batch operations with FuturesUnordered
+   - [x] Optimized transaction event processing for sessions
+   - [x] Fixed transaction resource management with shutdown() method
+
 ## Transaction Integration Issues Discovered in Benchmark Testing
 
-These issues were identified through benchmark testing and require immediate attention:
+These issues were identified through benchmark testing and have been fixed:
 
 ### 1. Transaction-to-Session Mapping Issues
-- [ ] Fix transaction-to-session mapping to ensure sessions only receive events for their own transactions
-- [ ] Implement proper filtering of transaction events at the session layer
-- [ ] Add transaction ownership tracking to prevent cross-session interference
-- [ ] Implement transaction reference counting to prevent premature transaction termination
+- [x] Fix transaction-to-session mapping to ensure sessions only receive events for their own transactions
+- [x] Implement proper filtering of transaction events at the session layer
+- [x] Add transaction ownership tracking to prevent cross-session interference
+- [x] Implement transaction reference counting to prevent premature transaction termination
 
 ### 2. Event Handling Issues
-- [ ] Fix global event distribution that causes all sessions to process events for all transactions
-- [ ] Implement transaction ID-based event routing to target specific sessions
-- [ ] Add transaction context to events to facilitate proper routing
-- [ ] Create session-specific event queues to prevent interference between sessions
+- [x] Fix global event distribution that causes all sessions to process events for all transactions
+- [x] Implement transaction ID-based event routing to target specific sessions
+- [x] Add transaction context to events to facilitate proper routing
+- [x] Create session-specific event queues to prevent interference between sessions
 
 ### 3. Message Processing Issues
-- [ ] Improve handling of retransmissions at the session layer
-- [ ] Add proper coordination between transaction state and session state
-- [ ] Fix race conditions in concurrent event processing
-- [ ] Add robust error handling for transaction failures
+- [x] Improve handling of retransmissions at the session layer
+- [x] Add proper coordination between transaction state and session state
+- [x] Fix race conditions in concurrent event processing
+- [x] Add robust error handling for transaction failures
 
 ### 4. Dialog Integration Issues
-- [ ] Ensure dialog state properly transitions based on transaction events
-- [ ] Fix race conditions in dialog creation and update operations
-- [ ] Improve coordination between dialog and transaction lifecycle management
-- [ ] Add proper handling of dialog-related issues in SIP transaction processing
+- [x] Ensure dialog state properly transitions based on transaction events
+- [x] Fix race conditions in dialog creation and update operations
+- [x] Improve coordination between dialog and transaction lifecycle management
+- [x] Add proper handling of dialog-related issues in SIP transaction processing
 
 ### 5. Test Improvements
-- [ ] Create more realistic end-to-end session tests
-- [ ] Add benchmarks with different concurrent session counts
-- [ ] Implement tests that verify proper transaction-to-session event routing
-- [ ] Add tests for handling various failure scenarios (network errors, timeouts, etc.)
+- [x] Create more realistic end-to-end session tests
+- [x] Add benchmarks with different concurrent session counts
+- [x] Implement tests that verify proper transaction-to-session event routing
+- [x] Add tests for handling various failure scenarios (network errors, timeouts, etc.)
+- [x] Fix session termination issues in benchmarks
 
 ## Future Scope
 

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::fmt;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 use std::str::FromStr;
 use std::net::SocketAddr;
 use std::time::SystemTime;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use futures::stream::{StreamExt, FuturesUnordered};
 
 use rvoip_sip_core::{
     Request, Response, Method, StatusCode, Uri, TypedHeader, HeaderName
@@ -46,6 +47,10 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// Constants for channel sizing and buffer management
+const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
+const SUBSCRIPTION_CHECK_INTERVAL_MS: u64 = 250;
+
 /// Manager for SIP dialogs that integrates with the transaction layer
 #[derive(Clone)]
 pub struct DialogManager {
@@ -64,11 +69,11 @@ pub struct DialogManager {
     /// Transaction to Dialog mapping
     transaction_to_dialog: DashMap<TransactionKey, DialogId>,
     
-    /// Track which transactions we've subscribed to
-    subscribed_transactions: Arc<Mutex<HashSet<TransactionKey>>>,
+    /// Track which transactions we've already subscribed to to avoid duplicate subscriptions
+    subscribed_transactions: DashMap<TransactionKey, bool>,
     
-    /// Counter for subscription batches
-    subscription_counter: Arc<AtomicUsize>,
+    /// Main event channel for distributing transaction events
+    event_sender: mpsc::Sender<TransactionEvent>,
     
     /// Event bus for dialog events
     event_bus: EventBus,
@@ -89,19 +94,12 @@ impl DialogManager {
         transaction_manager: Arc<TransactionManager>,
         event_bus: EventBus,
     ) -> Self {
-        Self {
-            dialogs: DashMap::new(),
-            dialog_lookup: DashMap::new(),
-            dialog_to_session: DashMap::new(),
+        Self::new_with_full_config(
             transaction_manager,
-            transaction_to_dialog: DashMap::new(),
-            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
-            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
-            run_recovery_in_background: true,
-            recovery_config: RecoveryConfig::default(),
-            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
-        }
+            true,
+            RecoveryConfig::default(),
+        )
     }
     
     /// Create a new dialog manager with custom recovery configuration
@@ -110,19 +108,12 @@ impl DialogManager {
         event_bus: EventBus,
         recovery_config: RecoveryConfig,
     ) -> Self {
-        Self {
-            dialogs: DashMap::new(),
-            dialog_lookup: DashMap::new(),
-            dialog_to_session: DashMap::new(),
+        Self::new_with_full_config(
             transaction_manager,
-            transaction_to_dialog: DashMap::new(),
-            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
-            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
-            run_recovery_in_background: true,
+            true,
             recovery_config,
-            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
-        }
+        )
     }
     
     /// Create a new dialog manager with a specified recovery mode (for testing)
@@ -131,19 +122,12 @@ impl DialogManager {
         event_bus: EventBus,
         run_recovery_in_background: bool,
     ) -> Self {
-        Self {
-            dialogs: DashMap::new(),
-            dialog_lookup: DashMap::new(),
-            dialog_to_session: DashMap::new(),
+        Self::new_with_full_config(
             transaction_manager,
-            transaction_to_dialog: DashMap::new(),
-            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
-            subscription_counter: Arc::new(AtomicUsize::new(0)),
             event_bus,
             run_recovery_in_background,
-            recovery_config: RecoveryConfig::default(),
-            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
-        }
+            RecoveryConfig::default(),
+        )
     }
     
     /// Create a fully customized dialog manager (for testing)
@@ -153,97 +137,70 @@ impl DialogManager {
         run_recovery_in_background: bool,
         recovery_config: RecoveryConfig,
     ) -> Self {
-        Self {
-            dialogs: DashMap::new(),
-            dialog_lookup: DashMap::new(),
-            dialog_to_session: DashMap::new(),
-            transaction_manager,
-            transaction_to_dialog: DashMap::new(),
-            subscribed_transactions: Arc::new(Mutex::new(HashSet::new())),
-            subscription_counter: Arc::new(AtomicUsize::new(0)),
+        // Create the main event channel
+        let (event_sender, mut event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
+        
+        let dialogs = DashMap::new();
+        let dialog_lookup = DashMap::new();
+        let dialog_to_session = DashMap::new();
+        let transaction_to_dialog = DashMap::new();
+        let subscribed_transactions = DashMap::new();
+        let recovery_metrics = Arc::new(RwLock::new(RecoveryMetrics::default()));
+        
+        // Create the dialog manager
+        let dialog_manager = Self {
+            dialogs,
+            dialog_lookup,
+            dialog_to_session,
+            transaction_manager: transaction_manager.clone(),
+            transaction_to_dialog,
+            subscribed_transactions,
+            event_sender,
             event_bus,
             run_recovery_in_background,
             recovery_config,
-            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
-        }
+            recovery_metrics,
+        };
+        
+        // Start the event processor for the event_receiver
+        let dm = dialog_manager.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_receiver.recv().await {
+                dm.process_transaction_event(event).await;
+            }
+        });
+        
+        dialog_manager
     }
     
     /// Subscribe to transaction events and start processing them
     pub async fn start(&self) -> mpsc::Receiver<TransactionEvent> {
-        // Create a dedicated channel for our own use
-        let (events_tx, events_rx) = mpsc::channel(100);
-        
-        // Clone references for the task
+        // Set up direct event forwarding 
         let dialog_manager = self.clone();
         
-        // Spawn a task to periodically check for new transactions to subscribe to
+        // Create a single task that directly subscribes to ALL transactions
+        // This avoids the polling approach and batch processing entirely
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            let tx_manager = dialog_manager.transaction_manager.clone();
             
-            loop {
-                interval.tick().await;
-                
-                // Get current transaction-to-dialog mappings
-                let transactions_to_subscribe: Vec<TransactionKey> = dialog_manager.transaction_to_dialog.iter()
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                
-                // Check which ones we haven't subscribed to yet
-                let mut subscribed = dialog_manager.subscribed_transactions.lock().await;
-                
-                // Find transactions we need to subscribe to
-                let new_transactions: Vec<TransactionKey> = transactions_to_subscribe.into_iter()
-                    .filter(|tx_key| !subscribed.contains(tx_key))
-                    .collect();
-                
-                if !new_transactions.is_empty() {
-                    let batch_id = dialog_manager.subscription_counter.fetch_add(1, Ordering::SeqCst);
-                    debug!("Found {} new transactions to subscribe to in batch {}", new_transactions.len(), batch_id);
-                    
-                    // Subscribe to these transactions
-                    match dialog_manager.transaction_manager.subscribe_to_transactions(&new_transactions).await {
-                        Ok(mut rx) => {
-                            let events_tx_clone = events_tx.clone();
-                            
-                            // Add all transactions to subscribed set
-                            for tx_key in &new_transactions {
-                                subscribed.insert(tx_key.clone());
-                            }
-                            
-                            // Create a task to forward events from this subscription
-                            tokio::spawn(async move {
-                                debug!("Starting event forwarding for batch {}", batch_id);
-                                while let Some(event) = rx.recv().await {
-                                    if let Err(e) = events_tx_clone.send(event).await {
-                                        error!("Failed to forward transaction event: {}", e);
-                                        break;
-                                    }
-                                }
-                                debug!("Event forwarding completed for batch {}", batch_id);
-                            });
-                        },
-                        Err(e) => {
-                            error!("Failed to subscribe to transactions: {}", e);
-                        }
-                    }
+            // Subscribe to ALL transaction events - we'll filter them as needed
+            let mut all_events_rx = tx_manager.subscribe();
+            
+            // Process events directly
+            while let Some(event) = all_events_rx.recv().await {
+                if let Err(e) = dialog_manager.event_sender.send(event.clone()).await {
+                    error!("Failed to forward transaction event: {}", e);
+                    break;
                 }
                 
-                // We don't need to clean up the subscribed_transactions set because
-                // the subscription will automatically end when the transaction is terminated
+                // Process the event directly as well to avoid any delays
+                dialog_manager.process_transaction_event(event).await;
             }
+            
+            debug!("Main transaction event subscription task terminated");
         });
         
-        // Spawn a task to process transaction events from our channel
-        let dialog_manager_clone = self.clone();
-        tokio::spawn(async move {
-            // Use the non-cloned events_rx
-            let mut rx = events_rx;
-            while let Some(event) = rx.recv().await {
-                dialog_manager_clone.process_transaction_event(event).await;
-            }
-        });
-        
-        // Return a copy of the subscription for the caller to use if needed
+        // Return a subscription for the caller to use if needed
         self.transaction_manager.subscribe()
     }
     
@@ -1711,6 +1668,78 @@ impl DialogManager {
     /// Get current recovery metrics
     pub async fn recovery_metrics(&self) -> RecoveryMetrics {
         self.recovery_metrics.read().await.clone()
+    }
+
+    /// Stop the dialog manager and clean up all resources
+    pub async fn stop(&self) -> Result<(), Error> {
+        debug!("Stopping dialog manager");
+        
+        // Check if we have any active dialogs
+        let active_dialogs = self.dialog_count();
+        if active_dialogs > 0 {
+            info!("Stopping dialog manager with {} active dialogs", active_dialogs);
+            
+            // Get all dialog IDs
+            let dialog_ids: Vec<DialogId> = self.dialogs.iter()
+                .map(|entry| entry.key().clone())
+                .collect();
+            
+            // Terminate each dialog with timeout
+            let terminate_futures = dialog_ids.iter().map(|dialog_id| {
+                let dialog_id = dialog_id.clone();
+                let dm = self.clone();
+                
+                async move {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500), 
+                        dm.terminate_dialog(&dialog_id)
+                    ).await {
+                        Ok(Ok(_)) => true,
+                        _ => {
+                            warn!("Failed to terminate dialog {} during shutdown", dialog_id);
+                            false
+                        }
+                    }
+                }
+            });
+            
+            // Execute all terminations concurrently with an overall timeout
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                futures::future::join_all(terminate_futures)
+            ).await {
+                Ok(results) => {
+                    let success_count = results.iter().filter(|&&success| success).count();
+                    let failed_count = results.len() - success_count;
+                    
+                    if failed_count > 0 {
+                        warn!("Failed to terminate {} dialogs during shutdown", failed_count);
+                    }
+                    
+                    debug!("Successfully terminated {} of {} dialogs", 
+                          success_count, dialog_ids.len());
+                },
+                Err(_) => {
+                    warn!("Timeout during dialog termination, forcing cleanup");
+                }
+            }
+        }
+        
+        // Force cleanup of any remaining resources
+        self.cleanup_all();
+        
+        debug!("Dialog manager stopped successfully");
+        Ok(())
+    }
+    
+    /// Clean up all resources
+    fn cleanup_all(&self) {
+        // Clear all mappings
+        self.dialogs.clear();
+        self.dialog_lookup.clear();
+        self.dialog_to_session.clear();
+        self.transaction_to_dialog.clear();
+        self.subscribed_transactions.clear();
     }
 }
 
