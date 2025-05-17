@@ -329,6 +329,54 @@ Following the integration of transaction-core with sip-transport, these tasks wi
 - [ ] Document best practices for transport selection in session-core
 - [ ] Create advanced examples showing WebSocket-based calls
 
+## Media Integration
+
+Tasks to integrate the session-core with rtp-core and media-core for full media functionality:
+
+### 1. Media Session Management
+- [ ] Create MediaManager to coordinate between SIP dialogs and media sessions
+- [ ] Implement mapping of SIP dialogs to media sessions
+- [ ] Add lifecycle management for media sessions based on dialog events
+- [ ] Create error handling and recovery for media session failures
+- [ ] Implement proper cleanup of media resources when dialogs terminate
+- [ ] Add support for multiple media streams per dialog (audio+video)
+
+### 2. SDP and Media Negotiation
+- [ ] Enhance SDP handling to extract and utilize codec information
+- [ ] Implement mapping of SDP media descriptions to media-core codecs
+- [ ] Add support for ICE candidate negotiation in SDP
+- [ ] Implement DTLS-SRTP fingerprint exchange via SDP
+- [ ] Create helpers for RTCP feedback parameter negotiation
+- [ ] Add bandwidth and quality parameter extraction from SDP
+- [ ] Implement RTP payload type mapping and management
+
+### 3. Media Control Interface
+- [ ] Create high-level API for common media operations (mute, codec change)
+- [ ] Implement events for media state changes (active, inactive, hold)
+- [ ] Add quality metrics reporting from media-core to session layer
+- [ ] Create volume control and audio level monitoring interface
+- [ ] Implement DTMF sending via RTP events from session layer
+- [ ] Add media failure notification and recovery mechanism
+- [ ] Create diagnostic interfaces for media troubleshooting
+
+### 4. Media Feature Negotiation
+- [ ] Implement SIP feature negotiation for media capabilities
+- [ ] Add support for early media scenarios
+- [ ] Create proper handling of media direction attributes (sendonly, recvonly)
+- [ ] Implement hold/resume media state synchronization
+- [ ] Add codec renegotiation during active sessions
+- [ ] Create support for media security negotiation
+- [ ] Implement bandwidth adaptation mechanism based on network conditions
+
+### 5. Testing and Examples
+- [ ] Create comprehensive test suite for media integration
+- [ ] Add examples demonstrating basic audio call functionality
+- [ ] Create advanced examples with media feature negotiation
+- [ ] Implement interoperability tests with common SIP clients
+- [ ] Add performance benchmarks for media processing
+- [ ] Create media flow visualization tools for debugging
+- [ ] Implement test cases for various network conditions
+
 ## Future Scope
 
 ### Advanced Media Features

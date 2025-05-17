@@ -1,5 +1,4 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use bitvec::prelude::*;
 use std::fmt;
 use tracing::debug;
 
@@ -500,25 +499,26 @@ impl RtpHeader {
 
         // Extension header if present
         if self.extension {
-            if let (Some(ext_id), Some(ext_data)) = (self.extension_id, &self.extension_data) {
-                // Extension ID (16 bits)
+            if let (Some(ext_id), Some(ext_data)) = (self.extension_id, self.extension_data.as_ref()) {
+                // Put extension header ID
                 buf.put_u16(ext_id);
                 
-                // Calculate length in 32-bit words (rounded up)
-                let ext_length = (ext_data.len() + 3) / 4;
-                buf.put_u16(ext_length as u16);
+                // Calculate length in 32-bit words, rounded up
+                let ext_length_words = (ext_data.len() + 3) / 4;
+                buf.put_u16(ext_length_words as u16);
                 
-                // Extension data
+                // Put extension data
                 buf.put_slice(ext_data);
                 
-                // Padding to 32-bit boundary if needed
+                // Add padding to align to 32-bit boundary if needed
                 let padding_bytes = (4 - (ext_data.len() % 4)) % 4;
                 for _ in 0..padding_bytes {
                     buf.put_u8(0);
                 }
             } else {
+                // Extension flag is set but no data or ID
                 return Err(Error::InvalidParameter(
-                    "Extension flag is set but extension data is missing".to_string()
+                    "Extension flag is set but extension_id or extension_data is missing".to_string()
                 ));
             }
         }
@@ -527,176 +527,138 @@ impl RtpHeader {
     }
 }
 
-/// RTP packet implementation
-#[derive(Clone)]
-pub struct RtpPacket {
-    /// RTP header
-    pub header: RtpHeader,
-    
-    /// Payload data
-    pub payload: Bytes,
-}
-
-impl RtpPacket {
-    /// Create a new RTP packet
-    pub fn new(header: RtpHeader, payload: Bytes) -> Self {
-        Self { header, payload }
-    }
-
-    /// Create a new RTP packet with basic parameters
-    pub fn new_with_payload(
-        payload_type: u8,
-        sequence_number: RtpSequenceNumber,
-        timestamp: RtpTimestamp,
-        ssrc: RtpSsrc,
-        payload: Bytes,
-    ) -> Self {
-        let header = RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
-        Self { header, payload }
-    }
-
-    /// Get the total size of the packet in bytes
-    pub fn size(&self) -> usize {
-        self.header.size() + self.payload.len()
-    }
-
-    /// Parse an RTP packet from bytes
-    pub fn parse(data: &[u8]) -> Result<Self> {
-        // Check if we have enough data for the minimum header size
-        if data.len() < RTP_MIN_HEADER_SIZE {
-            return Err(Error::BufferTooSmall {
-                required: RTP_MIN_HEADER_SIZE,
-                available: data.len(),
-            });
-        }
-        
-        // Debug: log raw data for detailed troubleshooting
-        debug!("Parsing RTP packet data: [{}] ({} bytes)", hex_dump(&data[..std::cmp::min(32, data.len())]), data.len());
-        
-        // Log first 2 bytes for quick header check
-        if data.len() >= 2 {
-            let first_byte = data[0];
-            let second_byte = data[1];
-            
-            // Extract version, padding, extension and CSRC count from first byte
-            let version = (first_byte >> 6) & 0x03;
-            let padding = ((first_byte >> 2) & 0x01) == 1;
-            let extension = ((first_byte >> 3) & 0x01) == 1;
-            let cc = first_byte & 0x0F;
-            
-            // Extract marker and payload type from second byte
-            let marker = ((second_byte >> 7) & 0x01) == 1;
-            let payload_type = second_byte & 0x7F;
-            
-            debug!("Header quick check: version={}, padding={}, ext={}, cc={}, marker={}, pt={}", 
-                  version, padding, extension, cc, marker, payload_type);
-        }
-        
-        // Parse the header without consuming the buffer
-        match RtpHeader::parse_without_consuming(data) {
-            Ok((header, header_size)) => {
-                debug!("Successfully parsed RTP header: header size = {}", header_size);
-
-                // Calculate the payload size
-                let payload_len = data.len() - header_size;
-                debug!("Calculated payload length: {} bytes (data: {} - header: {})",
-                     payload_len, data.len(), header_size);
-                
-                // Extract payload
-                let payload = if payload_len > 0 {
-                    let payload_data = &data[header_size..];
-                    debug!("Extracting payload of {} bytes", payload_data.len());
-                    
-                    // Calculate padding bytes if padding flag is set
-                    let padding_bytes = if header.padding && !payload_data.is_empty() {
-                        // The last byte of the packet indicates the padding length
-                        let padding = payload_data[payload_data.len() - 1] as usize;
-                        
-                        // Validate padding value
-                        if padding == 0 {
-                            debug!("Padding flag set but padding value is 0, ignoring padding");
-                            0
-                        } else if padding > payload_data.len() {
-                            return Err(Error::InvalidPacket(format!(
-                                "Invalid padding value: {} exceeds payload length: {}",
-                                padding, payload_data.len()
-                            )));
-                        } else {
-                            debug!("Padding detected: {} bytes", padding);
-                            padding
-                        }
-                    } else {
-                        if header.padding {
-                            debug!("Padding flag set but payload is empty, ignoring padding");
-                        }
-                        0
-                    };
-                    
-                    // Extract payload without padding
-                    let actual_payload_len = payload_data.len().saturating_sub(padding_bytes);
-                    
-                    if actual_payload_len > 0 {
-                        debug!("Final payload length: {} bytes", actual_payload_len);
-                        Bytes::copy_from_slice(&payload_data[..actual_payload_len])
-                    } else {
-                        debug!("Empty payload after padding removal");
-                        Bytes::new()
-                    }
-                } else {
-                    debug!("No payload data (only header)");
-                    Bytes::new()
-                };
-                
-                Ok(Self { header, payload })
-            },
-            Err(e) => {
-                debug!("Failed to parse RTP header: {}", e);
-                Err(e)
-            }
-        }
-    }
-
-    /// Serialize the packet to bytes
-    pub fn serialize(&self) -> Result<Bytes> {
-        let total_size = self.size();
-        let mut buf = BytesMut::with_capacity(total_size);
-        
-        // Serialize header
-        self.header.serialize(&mut buf)?;
-        
-        // Add payload
-        buf.put_slice(&self.payload);
-        
-        // Add padding if needed
-        if self.header.padding {
-            let padding_bytes = *self.payload.as_ref().last().unwrap_or(&0) as usize;
-            for _ in 0..padding_bytes - 1 {
-                buf.put_u8(0);
-            }
-            buf.put_u8(padding_bytes as u8);
-        }
-        
-        Ok(buf.freeze())
-    }
-}
-
-impl fmt::Debug for RtpPacket {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RtpPacket")
-            .field("header", &self.header)
-            .field("payload_len", &self.payload.len())
-            .finish()
-    }
-}
-
-/// Utility function to generate a hex dump of data for debugging
+/// Utility function to dump binary data as hex
 pub fn hex_dump(data: &[u8]) -> String {
-    let mut output = String::new();
+    let mut result = String::new();
     for (i, byte) in data.iter().enumerate() {
         if i > 0 {
-            output.push(' ');
+            result.push(' ');
         }
-        output.push_str(&format!("{:02x}", byte));
+        result.push_str(&format!("{:02x}", byte));
     }
-    output
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing_subscriber;
+    
+    fn init_logging() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    }
+    
+    #[test]
+    fn test_header_create() {
+        let header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        assert_eq!(header.version, 2);
+        assert_eq!(header.padding, false);
+        assert_eq!(header.extension, false);
+        assert_eq!(header.cc, 0);
+        assert_eq!(header.marker, false);
+        assert_eq!(header.payload_type, 96);
+        assert_eq!(header.sequence_number, 1000);
+        assert_eq!(header.timestamp, 12345);
+        assert_eq!(header.ssrc, 0xabcdef01);
+        assert!(header.csrc.is_empty());
+        assert_eq!(header.extension_id, None);
+        assert_eq!(header.extension_data, None);
+    }
+    
+    #[test]
+    fn test_header_size() {
+        // Basic header
+        let header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        assert_eq!(header.size(), RTP_MIN_HEADER_SIZE);
+        
+        // Header with CSRC
+        let mut header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        header.csrc = vec![0x11111111, 0x22222222];
+        header.cc = 2;
+        assert_eq!(header.size(), RTP_MIN_HEADER_SIZE + 8); // 8 = 2 CSRC * 4 bytes
+        
+        // Header with extension
+        let mut header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        header.extension = true;
+        header.extension_id = Some(0x1234);
+        header.extension_data = Some(Bytes::from_static(b"test"));
+        assert_eq!(header.size(), RTP_MIN_HEADER_SIZE + 8); // 8 = 4 (ext header) + 4 (ext data)
+    }
+    
+    #[test]
+    fn test_header_serialize_parse() {
+        init_logging();
+        
+        let original = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        
+        // Serialize
+        let mut buf = BytesMut::with_capacity(12);
+        original.serialize(&mut buf).unwrap();
+        
+        // Parse
+        let mut reader = buf.freeze();
+        let parsed = RtpHeader::parse(&mut reader).unwrap();
+        
+        // Verify
+        assert_eq!(parsed.version, original.version);
+        assert_eq!(parsed.padding, original.padding);
+        assert_eq!(parsed.extension, original.extension);
+        assert_eq!(parsed.cc, original.cc);
+        assert_eq!(parsed.marker, original.marker);
+        assert_eq!(parsed.payload_type, original.payload_type);
+        assert_eq!(parsed.sequence_number, original.sequence_number);
+        assert_eq!(parsed.timestamp, original.timestamp);
+        assert_eq!(parsed.ssrc, original.ssrc);
+        assert_eq!(parsed.csrc, original.csrc);
+        assert_eq!(parsed.extension_id, original.extension_id);
+        assert_eq!(parsed.extension_data, original.extension_data);
+    }
+    
+    #[test]
+    fn test_header_with_extension() {
+        init_logging();
+        
+        let mut original = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        original.extension = true;
+        original.extension_id = Some(0x1234);
+        original.extension_data = Some(Bytes::from_static(b"test"));
+        
+        // Serialize
+        let mut buf = BytesMut::with_capacity(20);
+        original.serialize(&mut buf).unwrap();
+        
+        // Parse
+        let mut reader = buf.freeze();
+        let parsed = RtpHeader::parse(&mut reader).unwrap();
+        
+        // Verify
+        assert_eq!(parsed.extension, true);
+        assert_eq!(parsed.extension_id, Some(0x1234));
+        assert!(parsed.extension_data.is_some());
+        assert!(parsed.extension_data.unwrap().starts_with(b"test"));
+    }
+    
+    #[test]
+    fn test_parse_without_consuming() {
+        let header_bytes = [
+            0x80, 0x60, 0x03, 0xe8, // V=2, P=0, X=0, CC=0, M=0, PT=96, Seq=1000
+            0x00, 0x01, 0xe2, 0x40, // Timestamp = 123456
+            0xab, 0xcd, 0xef, 0x01, // SSRC = 0xabcdef01
+        ];
+        
+        let (header, consumed) = RtpHeader::parse_without_consuming(&header_bytes).unwrap();
+        
+        assert_eq!(consumed, 12); // RTP_MIN_HEADER_SIZE
+        assert_eq!(header.version, 2);
+        assert_eq!(header.padding, false);
+        assert_eq!(header.extension, false);
+        assert_eq!(header.cc, 0);
+        assert_eq!(header.marker, false);
+        assert_eq!(header.payload_type, 96);
+        assert_eq!(header.sequence_number, 1000);
+        assert_eq!(header.timestamp, 123456);
+        assert_eq!(header.ssrc, 0xabcdef01);
+    }
 } 

@@ -2,17 +2,41 @@
 //! 
 //! This crate provides RTP packet encoding/decoding, RTCP support,
 //! and other utilities for handling real-time media transport.
+//!
+//! The library is organized into several modules:
+//!
+//! - `packet`: RTP and RTCP packet definitions and processing
+//! - `session`: RTP session management
+//! - `transport`: Network transport for RTP/RTCP
+//! - `srtp`: Secure RTP implementation
+//! - `stats`: RTP statistics collection
+//! - `time`: Timing and clock utilities
+//! - `traits`: Public traits for integration with other crates
 
 mod error;
-mod packet;
-pub mod session;
-pub mod rtcp;
 
+// Main modules
+pub mod packet;
+pub mod session;
+pub mod transport;
+pub mod srtp;
+pub mod stats;
+pub mod time;
+pub mod traits;
+
+// Re-export core types
 pub use error::Error;
+
+// Re-export common types from packet module
 pub use packet::{RtpPacket, RtpHeader};
-pub use session::RtpSession;
-pub use session::RtpSessionConfig;
-pub use rtcp::{RtcpPacket, RtcpSenderReport, RtcpReceiverReport, RtcpReportBlock, NtpTimestamp};
+pub use packet::rtcp::{
+    RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
+    RtcpReportBlock, NtpTimestamp, RtcpSourceDescription,
+    RtcpGoodbye, RtcpApplicationDefined
+};
+
+// Re-export session types
+pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats};
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -31,6 +55,20 @@ pub type RtpCsrc = u32;
 
 /// Result type for RTP operations
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Prelude module with commonly used types
+pub mod prelude {
+    pub use crate::{
+        RtpPacket, RtpHeader, RtpSession, RtpSessionConfig,
+        RtpTimestamp, RtpSequenceNumber, RtpSsrc, RtpCsrc,
+        Error, Result,
+    };
+    
+    pub use crate::packet::rtcp::{
+        RtcpPacket, RtcpSenderReport, RtcpReceiverReport, 
+        RtcpReportBlock, NtpTimestamp
+    };
+}
 
 #[cfg(test)]
 mod tests {

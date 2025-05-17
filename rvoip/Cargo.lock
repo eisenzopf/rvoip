@@ -1991,6 +1991,8 @@ dependencies = [
 name = "rvoip-rtp-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64 0.13.1",
  "bitvec",
  "bytes",
  "rand",
