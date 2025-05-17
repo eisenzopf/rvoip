@@ -38,6 +38,9 @@ use rvoip_sip_transport::Transport;
 use rvoip_sip_transport::error::Error as TransportError;
 
 use async_trait::async_trait;
+use super::recovery::{RecoveryConfig, RecoveryMetrics};
+use serde::{Serialize, Deserialize};
+use tokio::sync::RwLock;
 
 /// Manager for SIP dialogs that integrates with the transaction layer
 #[derive(Clone)]
@@ -62,6 +65,12 @@ pub struct DialogManager {
     
     /// For testing purposes - whether to run recovery in background
     run_recovery_in_background: bool,
+    
+    /// Recovery configuration
+    recovery_config: RecoveryConfig,
+    
+    /// Recovery metrics
+    recovery_metrics: Arc<RwLock<RecoveryMetrics>>,
 }
 
 impl DialogManager {
@@ -78,11 +87,31 @@ impl DialogManager {
             transaction_to_dialog: DashMap::new(),
             event_bus,
             run_recovery_in_background: true,
+            recovery_config: RecoveryConfig::default(),
+            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
         }
     }
     
-    /// Create a new dialog manager with a specific recovery background mode
-    #[cfg(test)]
+    /// Create a new dialog manager with custom recovery configuration
+    pub fn new_with_recovery_config(
+        transaction_manager: Arc<TransactionManager>,
+        event_bus: EventBus,
+        recovery_config: RecoveryConfig,
+    ) -> Self {
+        Self {
+            dialogs: DashMap::new(),
+            dialog_lookup: DashMap::new(),
+            dialog_to_session: DashMap::new(),
+            transaction_manager,
+            transaction_to_dialog: DashMap::new(),
+            event_bus,
+            run_recovery_in_background: true,
+            recovery_config,
+            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
+        }
+    }
+    
+    /// Create a new dialog manager with a specified recovery mode (for testing)
     pub fn new_with_recovery_mode(
         transaction_manager: Arc<TransactionManager>,
         event_bus: EventBus,
@@ -96,6 +125,28 @@ impl DialogManager {
             transaction_to_dialog: DashMap::new(),
             event_bus,
             run_recovery_in_background,
+            recovery_config: RecoveryConfig::default(),
+            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
+        }
+    }
+    
+    /// Create a fully customized dialog manager (for testing)
+    pub fn new_with_full_config(
+        transaction_manager: Arc<TransactionManager>,
+        event_bus: EventBus,
+        run_recovery_in_background: bool,
+        recovery_config: RecoveryConfig,
+    ) -> Self {
+        Self {
+            dialogs: DashMap::new(),
+            dialog_lookup: DashMap::new(),
+            dialog_to_session: DashMap::new(),
+            transaction_manager,
+            transaction_to_dialog: DashMap::new(),
+            event_bus,
+            run_recovery_in_background,
+            recovery_config,
+            recovery_metrics: Arc::new(RwLock::new(RecoveryMetrics::default())),
         }
     }
     
@@ -303,22 +354,23 @@ impl DialogManager {
                 let dialog_id = self.transaction_to_dialog.get(tx_key).unwrap().clone();
                 
                 // For network errors, initiate dialog recovery
-                if self.needs_recovery(&dialog_id) {
-                    debug!("Initiating recovery for dialog {} due to transaction error", dialog_id);
-                    
-                    let reason = format!("Transaction error: {:?}", error);
-                    
-                    // Start recovery in a background task to avoid blocking the event handler
-                    let dialog_manager = self.clone();
-                    let dialog_id_clone = dialog_id.clone();
-                    let reason_clone = reason.clone();
-                    
-                    tokio::spawn(async move {
-                        if let Err(e) = dialog_manager.recover_dialog(&dialog_id_clone, &reason_clone).await {
+                let dialog_manager = self.clone();
+                let dialog_id_clone = dialog_id.clone();
+                let tx_key_clone = tx_key.clone();
+                let error_clone = error.clone();
+                
+                // Spawn a task to check for recovery needs and handle it asynchronously
+                tokio::spawn(async move {
+                    if dialog_manager.needs_recovery(&dialog_id_clone).await {
+                        debug!("Initiating recovery for dialog {} due to transaction error", dialog_id_clone);
+                        
+                        let reason = format!("Transaction error: {:?}", error_clone);
+                        
+                        if let Err(e) = dialog_manager.recover_dialog(&dialog_id_clone, &reason).await {
                             error!("Failed to initiate recovery for dialog {}: {}", dialog_id_clone, e);
                         }
-                    });
-                }
+                    }
+                });
             },
             // Catch-all for any other events
             _ => {
@@ -1006,6 +1058,7 @@ impl DialogManager {
             recovery_attempts: 0,
             recovery_reason: None,
             recovered_at: None,
+            recovery_start_time: None,
         };
         
         // Store the dialog
@@ -1078,6 +1131,43 @@ impl DialogManager {
             });
         }
         
+        // Check if circuit breaker is active
+        {
+            let metrics = self.recovery_metrics.read().await;
+            if metrics.circuit_breaker_open {
+                if let Some(reset_time) = metrics.last_circuit_breaker_reset {
+                    if let Ok(elapsed) = SystemTime::now().duration_since(reset_time) {
+                        if elapsed < self.recovery_config.circuit_breaker_reset_period {
+                            warn!("Dialog recovery circuit breaker is open, rejecting recovery for dialog {}", dialog_id);
+                            // Use NetworkUnreachable which is more appropriate for circuit breaker pattern
+                            let wait_time = self.recovery_config.circuit_breaker_reset_period.checked_sub(elapsed)
+                                .unwrap_or_default();
+                            return Err(Error::NetworkUnreachable(
+                                format!("Circuit breaker active for dialog {}", dialog_id),
+                                ErrorContext {
+                                    category: ErrorCategory::Network,
+                                    severity: ErrorSeverity::Warning,
+                                    recovery: RecoveryAction::Wait(wait_time),
+                                    retryable: true,
+                                    dialog_id: Some(dialog_id.to_string()),
+                                    timestamp: SystemTime::now(),
+                                    details: Some(format!("Circuit breaker active for {} more seconds", 
+                                        wait_time.as_secs())),
+                                    ..Default::default()
+                                }
+                            ));
+                        } else {
+                            // Reset circuit breaker if enough time has passed
+                            drop(metrics); // Release the read lock
+                            let mut metrics = self.recovery_metrics.write().await;
+                            metrics.reset_circuit_breaker();
+                            info!("Dialog recovery circuit breaker reset after timeout period");
+                        }
+                    }
+                }
+            }
+        }
+        
         // Put the dialog into recovery mode
         dialog.enter_recovery_mode(reason);
         
@@ -1085,11 +1175,15 @@ impl DialogManager {
         let session_id = self.get_session_for_dialog(dialog_id)
             .ok_or_else(|| Error::session_not_found("No session found for dialog"))?;
         
-        drop(dialog); // Release the lock before firing events
+        // Make a clone of the dialog ID before releasing the lock
+        let dialog_id_clone = dialog_id.clone();
+        
+        // Release the lock before firing events
+        drop(dialog);
         
         // Publish a specific recovery started event
         self.event_bus.publish(SessionEvent::DialogRecoveryStarted {
-            session_id,
+            session_id: session_id.clone(),
             dialog_id: dialog_id.clone(),
             reason: reason.to_string(),
         });
@@ -1097,7 +1191,6 @@ impl DialogManager {
         if self.run_recovery_in_background {
             // Start the recovery process in a background task
             let manager = self.clone();
-            let dialog_id_clone = dialog_id.clone();
             tokio::spawn(async move {
                 manager.execute_recovery_process(&dialog_id_clone).await;
             });
@@ -1113,226 +1206,176 @@ impl DialogManager {
     async fn execute_recovery_process(&self, dialog_id: &DialogId) {
         debug!("Starting recovery process for dialog {}", dialog_id);
         
-        // Configuration for recovery attempts
-        const MAX_RECOVERY_ATTEMPTS: u32 = 3;
-        const INITIAL_RETRY_DELAY_MS: u64 = 500;
-        const MAX_RETRY_DELAY_MS: u64 = 5000;
-        
-        // Force the dialog into recovery mode first - ensure state is set correctly
-        self.update_dialog_property(dialog_id, |dialog| {
-            if dialog.state == DialogState::Confirmed || dialog.state == DialogState::Early {
-                dialog.state = DialogState::Recovering;
-                debug!("Dialog {} set to Recovering state", dialog_id);
-            }
-        }).ok();
-        
-        // Get a reference to the dialog again
-        let dialog_opt = self.dialogs.get(dialog_id);
+        // Get a reference to the dialog
+        let mut dialog_opt = self.dialogs.get_mut(dialog_id);
         if dialog_opt.is_none() {
-            debug!("Dialog {} not found for recovery (after state update)", dialog_id);
+            debug!("Dialog {} not found for recovery", dialog_id);
             return;
         }
         
-        let dialog = dialog_opt.unwrap();
-        if !dialog.is_recovering() {
-            debug!("Dialog {} is not in recovery mode", dialog_id);
-            return;
-        }
-        
-        // Get the last known remote address, if available
-        let remote_addr = dialog.last_known_remote_addr.clone();
-        drop(dialog); // Release the lock
-        
-        // If we don't have a remote address, we can't recover
-        if remote_addr.is_none() {
-            debug!("No last known remote address for dialog {}, cannot recover", dialog_id);
-            self.mark_recovery_failed(dialog_id, "No known remote address").await;
-            return;
-        }
-        
-        // In synchronous mode for testing, just try once with a short timeout
-        if !self.run_recovery_in_background {
-            debug!("In testing mode - attempting single recovery with short timeout");
-            let remote_addr = remote_addr.unwrap();
-            
-            // Send the OPTIONS request to check connectivity
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(1000),
-                self.send_recovery_options(dialog_id, remote_addr)
-            ).await;
-            
-            match result {
-                Ok(Ok(_)) => {
-                    debug!("Test recovery successful for dialog {}", dialog_id);
-                    self.mark_recovery_successful(dialog_id).await;
-                    
-                    // Verify the state was actually updated
-                    if let Ok(state) = self.get_dialog_state(dialog_id) {
-                        debug!("After recovery, dialog state is now {}", state);
-                    }
-                },
-                _ => {
-                    debug!("Test recovery failed for dialog {}", dialog_id);
-                    // Give transaction layer a moment to handle response
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    self.mark_recovery_failed(dialog_id, "Recovery failed or timed out").await;
-                    
-                    // Verify the state was actually updated
-                    if let Ok(state) = self.get_dialog_state(dialog_id) {
-                        debug!("After failed recovery, dialog state is now {}", state);
-                    }
-                }
-            }
-            return;
-        }
-        
-        // Normal operation with full retry logic for background mode
-        let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-        let remote_addr = remote_addr.unwrap();
-        
-        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
-            debug!("Recovery attempt {} for dialog {}", attempt, dialog_id);
-            
-            // Try to send an OPTIONS request as a connectivity check with timeout
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(2000),
-                self.send_recovery_options(dialog_id, remote_addr)
-            ).await;
-            
-            match result {
-                Ok(Ok(_)) => {
-                    debug!("Recovery successful for dialog {}", dialog_id);
-                    self.mark_recovery_successful(dialog_id).await;
-                    return;
-                },
-                _ => {
-                    // Update the dialog with the attempt count
-                    if let Some(mut dialog) = self.dialogs.get_mut(dialog_id) {
-                        dialog.increment_recovery_attempts();
-                    }
-                    
-                    // Wait with exponential backoff before trying again
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                    delay_ms = std::cmp::min(delay_ms * 2, MAX_RETRY_DELAY_MS);
-                }
-            }
-        }
-        
-        // If we get here, all recovery attempts failed
-        debug!("All recovery attempts failed for dialog {}", dialog_id);
-        self.mark_recovery_failed(dialog_id, "Max recovery attempts reached").await;
-    }
-    
-    /// Send an OPTIONS request to check connectivity during recovery
-    async fn send_recovery_options(&self, dialog_id: &DialogId, remote_addr: std::net::SocketAddr) -> Result<(), Error> {
-        let dialog_opt = self.dialogs.get(dialog_id);
-        if dialog_opt.is_none() {
-            return Err(dialog_not_found_error(dialog_id));
-        }
-        
-        let dialog = dialog_opt.unwrap();
-        if !dialog.is_recovering() {
-            return Err(Error::InvalidDialogState {
-                current: dialog.state.to_string(),
-                expected: "Recovering".to_string(),
-                context: ErrorContext::default()
-            });
-        }
-        
-        // Use the transport associated with the transaction manager
+        // Prepare to run the recovery process
         let transport = self.transaction_manager.transport();
+        let config = &self.recovery_config;
         
-        // Send OPTIONS request using the recovery module
-        super::recovery::send_recovery_options(&dialog, transport.as_ref()).await
-    }
-    
-    /// Mark dialog recovery as successful
-    pub async fn mark_recovery_successful(&self, dialog_id: &DialogId) {
-        let mut dialog_opt = self.dialogs.get_mut(dialog_id);
-        if dialog_opt.is_none() {
-            return;
-        }
+        // We need a mutable reference to metrics, but tokio's RwLock is async
+        let metrics_arc = self.recovery_metrics.clone();
         
-        let mut dialog = dialog_opt.unwrap();
-        let previous = dialog.state.clone();
-        let recovery_completed = dialog.complete_recovery();
-        
-        // Get the session ID if available
+        // Get session ID for events
         let session_id = self.get_session_for_dialog(dialog_id);
         
-        // Release the lock before firing events
-        drop(dialog);
+        // Setup dialog and transport
+        let mut dialog = dialog_opt.unwrap();
         
-        if recovery_completed {
-            if let Some(session_id) = session_id {
-                // Emit dialog state changed event
-                self.event_bus.publish(SessionEvent::DialogStateChanged {
-                    session_id: session_id.clone(),
-                    dialog_id: dialog_id.clone(),
-                    previous,
-                    current: DialogState::Confirmed,
-                });
-                
-                // Emit specific recovery completed event
-                self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
-                    session_id,
-                    dialog_id: dialog_id.clone(),
-                    success: true,
-                });
+        // Create event callback for logging and events
+        let event_bus = self.event_bus.clone();
+        let dialog_id_clone = dialog_id.clone();
+        let session_id_clone = session_id.clone();
+        let event_callback = move |event: super::recovery::RecoveryEvent| {
+            match &event {
+                super::recovery::RecoveryEvent::AttemptStarted { attempt, max_attempts } => {
+                    info!("Starting recovery attempt {} of {} for dialog {}", 
+                        attempt, max_attempts, dialog_id_clone);
+                    
+                    // Emit event through event bus if needed
+                    if let Some(session_id) = &session_id_clone {
+                        event_bus.publish(crate::events::SessionEvent::Custom {
+                            session_id: session_id.clone(),
+                            event_type: "recovery_attempt_started".to_string(),
+                            data: serde_json::json!({
+                                "dialog_id": dialog_id_clone.to_string(),
+                                "attempt": attempt,
+                                "max_attempts": max_attempts
+                            }),
+                        });
+                    }
+                },
+                super::recovery::RecoveryEvent::AttemptSucceeded { time_ms } => {
+                    info!("Dialog {} recovery succeeded in {}ms", dialog_id_clone, time_ms);
+                },
+                super::recovery::RecoveryEvent::AttemptFailed { attempt, reason, is_timeout } => {
+                    if *is_timeout {
+                        warn!("Dialog {} recovery attempt {} timed out", dialog_id_clone, attempt);
+                    } else {
+                        warn!("Dialog {} recovery attempt {} failed: {}", 
+                            dialog_id_clone, attempt, reason);
+                    }
+                    
+                    // Emit event through event bus if needed
+                    if let Some(session_id) = &session_id_clone {
+                        event_bus.publish(crate::events::SessionEvent::Custom {
+                            session_id: session_id.clone(),
+                            event_type: "recovery_attempt_failed".to_string(),
+                            data: serde_json::json!({
+                                "dialog_id": dialog_id_clone.to_string(),
+                                "attempt": attempt,
+                                "reason": reason,
+                                "is_timeout": is_timeout
+                            }),
+                        });
+                    }
+                },
+                super::recovery::RecoveryEvent::RetryDelay { delay_ms } => {
+                    debug!("Waiting {}ms before next recovery attempt for dialog {}", 
+                        delay_ms, dialog_id_clone);
+                }
             }
-        }
-    }
-    
-    /// Mark dialog recovery as failed and terminate the dialog
-    pub async fn mark_recovery_failed(&self, dialog_id: &DialogId, reason: &str) {
-        let mut dialog_opt = self.dialogs.get_mut(dialog_id);
-        if dialog_opt.is_none() {
-            return;
-        }
+        };
         
-        let mut dialog = dialog_opt.unwrap();
-        let previous = dialog.state.clone();
-        dialog.abandon_recovery();
+        // Run the recovery process
+        // Note: We must take mutable access to metrics inside the perform_recovery_process function
+        // since tokio::RwLock requires an .await after lock()
+        let recovery_result = super::recovery::perform_recovery_process(
+            &mut dialog,
+            transport.as_ref(),
+            config,
+            &metrics_arc,
+            event_callback
+        ).await;
         
-        // Get the session ID if available
-        let session_id = self.get_session_for_dialog(dialog_id);
-        
-        // Release the lock before firing events
+        // Drop the dialog reference before handling the result
+        // to prevent deadlocks with other locks
         drop(dialog);
         
-        if let Some(session_id) = session_id {
-            // Emit dialog state changed event
-            self.event_bus.publish(SessionEvent::DialogStateChanged {
-                session_id: session_id.clone(),
-                dialog_id: dialog_id.clone(),
-                previous,
-                current: DialogState::Terminated,
-            });
-            
-            // Emit specific recovery failed event
-            self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
-                session_id: session_id.clone(),
-                dialog_id: dialog_id.clone(),
-                success: false,
-            });
-            
-            // Emit dialog/session terminated event
-            self.event_bus.publish(SessionEvent::Terminated {
-                session_id,
-                reason: format!("Recovery failed: {}", reason),
-            });
+        // Process the recovery result
+        match recovery_result {
+            super::recovery::RecoveryResult::Success { recovery_time_ms } => {
+                info!("Dialog {} successfully recovered in {}ms", dialog_id, recovery_time_ms);
+                
+                // No need to call mark_recovery_successful here as it was done inside perform_recovery_process
+                // But we still need to emit the recovery completed event
+                if let Some(session_id) = session_id {
+                    self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
+                        session_id,
+                        dialog_id: dialog_id.clone(),
+                        success: true,
+                    });
+                }
+            },
+            super::recovery::RecoveryResult::Failure { reason, activate_circuit_breaker } => {
+                warn!("Dialog {} recovery failed: {}", dialog_id, reason);
+                
+                // Activate circuit breaker if needed
+                if activate_circuit_breaker {
+                    // Need to use async lock acquire with await point
+                    let mut metrics = self.recovery_metrics.write().await;
+                    metrics.open_circuit_breaker();
+                    warn!("Dialog recovery circuit breaker opened after consecutive failures");
+                    drop(metrics); // Explicitly drop the lock
+                }
+                
+                // Emit recovery completed event
+                if let Some(session_id) = session_id {
+                    // Emit dialog state changed event
+                    self.event_bus.publish(SessionEvent::DialogStateChanged {
+                        session_id: session_id.clone(),
+                        dialog_id: dialog_id.clone(),
+                        previous: DialogState::Recovering,
+                        current: DialogState::Terminated,
+                    });
+                    
+                    // Emit specific recovery failed event
+                    self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
+                        session_id: session_id.clone(),
+                        dialog_id: dialog_id.clone(),
+                        success: false,
+                    });
+                    
+                    // Emit dialog/session terminated event
+                    self.event_bus.publish(SessionEvent::Terminated {
+                        session_id,
+                        reason: format!("Recovery failed: {}", reason),
+                    });
+                }
+            },
+            super::recovery::RecoveryResult::Aborted { reason } => {
+                warn!("Dialog {} recovery aborted: {}", dialog_id, reason);
+                
+                // Emit recovery aborted event
+                if let Some(session_id) = session_id {
+                    self.event_bus.publish(crate::events::SessionEvent::Custom {
+                        session_id,
+                        event_type: "recovery_aborted".to_string(),
+                        data: serde_json::json!({
+                            "dialog_id": dialog_id.to_string(),
+                            "reason": reason
+                        }),
+                    });
+                }
+            }
         }
     }
     
     /// Check if a dialog needs recovery based on network failure
-    pub fn needs_recovery(&self, dialog_id: &DialogId) -> bool {
+    pub async fn needs_recovery(&self, dialog_id: &DialogId) -> bool {
         let dialog_opt = self.dialogs.get(dialog_id);
         if dialog_opt.is_none() {
             return false;
         }
         
         let dialog = dialog_opt.unwrap();
-        super::recovery::needs_recovery(&dialog)
+        let config = &self.recovery_config;
+        let metrics = self.recovery_metrics.read().await;
+        super::recovery::needs_recovery(&dialog, config, &metrics)
     }
     
     /// Get the session ID associated with a dialog
@@ -1402,19 +1445,50 @@ impl DialogManager {
             
             dialog.state = DialogState::Recovering;
             dialog.recovery_reason = Some("Test simulated recovery".to_string());
+            dialog.recovery_start_time = Some(SystemTime::now());
         }
         
         // Small delay to let tasks process
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         
-        // Then mark as successful or failed based on parameter
-        if success {
-            self.mark_recovery_successful(dialog_id).await;
-        } else {
-            self.mark_recovery_failed(dialog_id, "Simulated recovery failure").await;
+        // Update dialog based on success parameter
+        self.update_dialog_property(dialog_id, |dialog| {
+            if success {
+                super::recovery::complete_recovery(dialog);
+            } else {
+                super::recovery::abandon_recovery(dialog);
+            }
+        })?;
+        
+        // Emit appropriate events
+        let session_id = self.get_session_for_dialog(dialog_id);
+        if let Some(session_id) = session_id {
+            if success {
+                self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
+                    session_id,
+                    dialog_id: dialog_id.clone(),
+                    success: true,
+                });
+            } else {
+                self.event_bus.publish(SessionEvent::DialogRecoveryCompleted {
+                    session_id: session_id.clone(),
+                    dialog_id: dialog_id.clone(),
+                    success: false,
+                });
+                
+                self.event_bus.publish(SessionEvent::Terminated {
+                    session_id,
+                    reason: "Simulated recovery failure".to_string(),
+                });
+            }
         }
         
         Ok(())
+    }
+
+    /// Get current recovery metrics
+    pub async fn recovery_metrics(&self) -> RecoveryMetrics {
+        self.recovery_metrics.read().await.clone()
     }
 }
 

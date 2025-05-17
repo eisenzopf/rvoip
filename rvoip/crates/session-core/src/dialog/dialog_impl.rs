@@ -78,6 +78,10 @@ pub struct Dialog {
     /// Time when the dialog was last successfully recovered
     #[serde(skip)] // Skip in serialization
     pub recovered_at: Option<std::time::SystemTime>,
+    
+    /// Time when recovery was started
+    #[serde(skip)] // Skip in serialization
+    pub recovery_start_time: Option<std::time::SystemTime>,
 }
 
 impl Dialog {
@@ -253,6 +257,7 @@ impl Dialog {
                             recovery_attempts: 0,
                             recovery_reason: None,
                             recovered_at: None,
+                            recovery_start_time: None,
                         });
                     } else {
                         debug!("Dialog creation failed: Empty Contact header");
@@ -425,6 +430,7 @@ impl Dialog {
                             recovery_attempts: 0,
                             recovery_reason: None,
                             recovered_at: None,
+                            recovery_start_time: None,
                         });
                     }
                 },

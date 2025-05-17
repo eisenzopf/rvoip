@@ -745,7 +745,7 @@ pub async fn attempt_dialog_recovery(
     reason: &str
 ) -> Result<(), Error> {
     // Check if dialog is in a state where it can be recovered
-    if dialog_manager.needs_recovery(dialog_id) {
+    if dialog_manager.needs_recovery(dialog_id).await {
         // Initiate recovery process
         dialog_manager.recover_dialog(dialog_id, reason).await
     } else {
@@ -1117,6 +1117,7 @@ mod tests {
             recovery_attempts: 0,
             recovery_reason: None,
             recovered_at: None,
+            recovery_start_time: None,
         };
         
         // Create an UPDATE request
