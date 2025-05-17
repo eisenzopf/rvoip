@@ -66,7 +66,7 @@ use crate::transaction::TransactionKey;
 /// According to RFC 3261 Section 9.1, a CANCEL request MUST be formatted as follows:
 /// - Must have the same Request-URI, Call-ID, To, From, and Route headers as the INVITE
 /// - The CSeq method must be CANCEL but the sequence number must be the same as the INVITE
-/// - Must have a new unique branch parameter in the Via header
+/// - Must have the same branch parameter in the Via header as the original INVITE
 ///
 /// This creates a properly formatted CANCEL request that can be used to attempt
 /// to cancel a previous INVITE transaction.
@@ -108,10 +108,10 @@ use crate::transaction::TransactionKey;
 /// // The CANCEL should have the same Call-ID as the INVITE
 /// assert_eq!(invite.call_id().unwrap(), cancel.call_id().unwrap());
 ///
-/// // But a different branch parameter
+/// // And the same branch parameter
 /// let invite_via = invite.first_via().unwrap();
 /// let cancel_via = cancel.first_via().unwrap();
-/// assert_ne!(invite_via.branch().unwrap(), cancel_via.branch().unwrap());
+/// assert_eq!(invite_via.branch().unwrap(), cancel_via.branch().unwrap());
 ///
 /// // The CSeq should have the same number but CANCEL method
 /// assert_eq!(invite.cseq().unwrap().seq, cancel.cseq().unwrap().seq);
@@ -138,10 +138,16 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         .ok_or_else(|| Error::Other("INVITE request missing CSeq header".to_string()))?
         .seq;
     
-    // Create a new request
+    // Debug the original INVITE Via headers
+    println!("Original INVITE Via headers count: {}", invite_request.via_headers().len());
+    for (i, via) in invite_request.via_headers().iter().enumerate() {
+        println!("  Via[{}]: {}", i, via);
+    }
+    
+    // Create a Request object from scratch with no headers at all
     let mut cancel_request = Request::new(Method::Cancel, request_uri);
     
-    // Add the required headers
+    // Add the required headers - each call to with_header should replace any existing header
     cancel_request = cancel_request
         .with_header(TypedHeader::From(from))
         .with_header(TypedHeader::To(to))
@@ -155,10 +161,59 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         cancel_request = cancel_request.with_header(route_header.clone());
     }
     
-    // Generate a new branch parameter for the Via header
-    let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
-    let via_header = via_header_with_branch(local_addr, &branch)?;
-    cancel_request = cancel_request.with_header(via_header);
+    // Extract the branch parameter from the original INVITE Via header
+    // According to RFC 3261 Section 9.1, the CANCEL request MUST have the same 
+    // branch parameter as the request it is canceling
+    let original_via = invite_request.first_via()
+        .ok_or_else(|| Error::Other("INVITE request missing Via header".to_string()))?;
+    
+    let original_branch = original_via.branch()
+        .ok_or_else(|| Error::Other("INVITE request Via header missing branch parameter".to_string()))?;
+    
+    // Create a new Via header with the same branch parameter but our local address
+    use rvoip_sip_core::types::via::Via;
+    
+    // Create a Via header with the original branch parameter
+    let params = vec![rvoip_sip_core::types::Param::branch(original_branch.to_string())];
+    
+    // Split the address into host and port
+    let host = local_addr.ip().to_string();
+    let port = Some(local_addr.port());
+    
+    // Create the Via header - creating a new one rather than cloning and modifying
+    // the original to avoid duplicate headers
+    let via = Via::new(
+        "SIP", "2.0", "UDP",
+        &host, port, params
+    )?;
+    
+    // Make sure we're only adding one Via header - explicitly remove any existing ones first
+    // though this should not be necessary since we're creating a new request
+    cancel_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
+    cancel_request = cancel_request.with_header(TypedHeader::Via(via));
+    
+    // Debug the CANCEL request Via headers
+    println!("CANCEL request Via headers count: {}", cancel_request.via_headers().len());
+    for (i, via) in cancel_request.via_headers().iter().enumerate() {
+        println!("  Via[{}]: {}", i, via);
+    }
+    
+    // Double-check for multiple Via headers
+    if cancel_request.via_headers().len() > 1 {
+        println!("WARNING: CANCEL request has {} Via headers, removing duplicates", cancel_request.via_headers().len());
+        let first_via = cancel_request.first_via()
+            .ok_or_else(|| Error::Other("Missing Via header in CANCEL request after creation".to_string()))?
+            .clone();
+        
+        // Remove all Via headers and add only the first one
+        cancel_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
+        cancel_request = cancel_request.with_header(TypedHeader::Via(first_via));
+        
+        println!("After cleanup - CANCEL request Via headers count: {}", cancel_request.via_headers().len());
+        for (i, via) in cancel_request.via_headers().iter().enumerate() {
+            println!("  Via[{}]: {}", i, via);
+        }
+    }
     
     Ok(cancel_request)
 }
@@ -195,15 +250,15 @@ fn via_header_with_branch(local_addr: &SocketAddr, branch: &str) -> Result<Typed
 
 /// Finds the matching INVITE transaction for a CANCEL request
 ///
-/// According to RFC 3261 Section 9.2, a CANCEL request matches an INVITE if:
-/// 1. The Request-URI matches
+/// According to RFC 3261 Section 9.1 and 9.2, a CANCEL request matches an INVITE if:
+/// 1. The branch parameter in the top Via header matches
 /// 2. The Call-ID matches
 /// 3. The From tag matches
 /// 4. The To tag matches (if present in the CANCEL)
 /// 5. The CSeq number matches (but method will be CANCEL instead of INVITE)
 ///
 /// This function searches through a collection of transaction keys to find a matching
-/// INVITE transaction for a CANCEL request.
+/// INVITE transaction for a CANCEL request, primarily using the branch parameter.
 ///
 /// # Arguments
 /// * `cancel_request` - The CANCEL request
@@ -235,7 +290,7 @@ fn via_header_with_branch(local_addr: &SocketAddr, branch: &str) -> Result<Typed
 /// #
 /// // Create a transaction key for the INVITE
 /// let invite_branch = invite.first_via().unwrap().branch().unwrap().to_string();
-/// let invite_key = TransactionKey::new(invite_branch, Method::Invite, false);
+/// let invite_key = TransactionKey::new(invite_branch.clone(), Method::Invite, false);
 /// 
 /// // Create a collection of transaction keys to search through
 /// let transactions = vec![invite_key.clone()];
@@ -252,15 +307,13 @@ where
     I: IntoIterator<Item = TransactionKey>
 {
     // Extract the key headers from the CANCEL request
-    let cancel_call_id = cancel_request.call_id()?;
-    let cancel_from = cancel_request.from()?;
-    let cancel_to = cancel_request.to()?;
+    let cancel_via = cancel_request.first_via()?;
+    let cancel_branch = cancel_via.branch()?;
     
-    // Find a matching INVITE transaction
+    // Find a matching INVITE transaction by branch parameter
     for tx_key in invite_transactions {
-        if *tx_key.method() == Method::Invite && !tx_key.is_server {
-            // This is a client INVITE transaction, potential match
-            // We'll need to match the transaction with the request later
+        if *tx_key.method() == Method::Invite && !tx_key.is_server && tx_key.branch() == cancel_branch {
+            // This is a client INVITE transaction with matching branch
             return Some(tx_key);
         }
     }
@@ -423,11 +476,24 @@ pub fn validate_cancel_request(request: &Request) -> Result<()> {
         return Err(Error::Other("CANCEL request missing CSeq header".to_string()));
     }
     
+    // Debug the Via headers
+    println!("Validating CANCEL request Via headers:");
+    println!("  Via headers count: {}", request.via_headers().len());
+    for (i, via) in request.via_headers().iter().enumerate() {
+        println!("  Via[{}]: {}", i, via);
+    }
+    
+    // Print all headers for more detailed debugging
+    println!("All headers in CANCEL request:");
+    for (i, header) in request.headers.iter().enumerate() {
+        println!("  Header[{}]: {}", i, header);
+    }
+    
     // Check that there is exactly one Via header
     match request.via_headers().len() {
         0 => return Err(Error::Other("CANCEL request missing Via header".to_string())),
         1 => {} // Exactly one Via header is correct
-        _ => return Err(Error::Other("CANCEL request has more than one Via header".to_string())),
+        _ => return Err(Error::Other(format!("CANCEL request has {} Via headers, should have exactly one", request.via_headers().len()))),
     }
     
     // Check that Max-Forwards header is present
@@ -596,10 +662,10 @@ mod tests {
         assert_eq!(cancel_cseq.seq, invite_cseq.seq);
         assert_eq!(cancel_cseq.method, Method::Cancel);
         
-        // Verify branch parameter is different
-        let cancel_via = cancel.header(&HeaderName::Via).unwrap();
-        let invite_via = invite.header(&HeaderName::Via).unwrap();
-        assert_ne!(cancel_via, invite_via);
+        // Verify branch parameter is the same (RFC 3261 Section 9.1)
+        let cancel_via = cancel.first_via().unwrap();
+        let invite_via = invite.first_via().unwrap();
+        assert_eq!(cancel_via.branch().unwrap(), invite_via.branch().unwrap());
     }
     
     #[test]
@@ -712,31 +778,17 @@ mod tests {
         // Create a completely different transaction key
         let other_key = TransactionKey::new("z9hG4bK.otherkey".to_string(), Method::Invite, false);
         
-        // Should still find an INVITE transaction (simple implementation)
+        // Should NOT find the INVITE transaction with a different branch
         let result = find_invite_transaction_for_cancel(&cancel, vec![other_key]);
-        assert!(result.is_some());
+        assert!(result.is_none());
         
-        // But a more thorough implementation would check the branch
-        // The find_matching_invite_transaction implementation expects
-        // CANCEL to have the same branch as INVITE, which isn't the case
-        // with our create_cancel_request which follows RFC 3261 by creating
-        // a new branch parameter.
+        // The CANCEL now has the same branch as INVITE
+        let cancel_via = cancel.first_via().unwrap();
+        let cancel_branch = cancel_via.branch().unwrap();
+        assert_eq!(cancel_branch, invite_branch);
         
-        // Let's create a CANCEL with the same branch parameter for testing
-        let invite_via = invite.first_via().unwrap();
-        let invite_branch = invite_via.branch().unwrap();
-        
-        // Create a CANCEL manually with the same branch
-        let mut cancel_same_branch = Request::new(Method::Cancel, invite.uri().clone());
-        cancel_same_branch = cancel_same_branch
-            .with_header(TypedHeader::From(invite.from().unwrap().clone()))
-            .with_header(TypedHeader::To(invite.to().unwrap().clone()))
-            .with_header(TypedHeader::CallId(invite.call_id().unwrap().clone()))
-            .with_header(TypedHeader::CSeq(CSeq::new(invite.cseq().unwrap().seq, Method::Cancel)))
-            .with_header(TypedHeader::Via(invite_via.clone()));
-            
-        // Now test with this modified CANCEL that has the same branch
-        let result = find_matching_invite_transaction(&cancel_same_branch, vec![invite_key.clone()]);
+        // So find_matching_invite_transaction should work correctly
+        let result = find_matching_invite_transaction(&cancel, vec![invite_key.clone()]);
         assert!(result.is_some());
         assert_eq!(result.unwrap().branch(), invite_branch);
     }

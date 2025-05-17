@@ -322,14 +322,38 @@ ACK for 2xx responses is a special case:
 The integration between sip-transport and transaction-core is now complete and working correctly. We have:
 
 1. Successfully implemented the transport layer integration through TransportManager
-2. Created a working example (integrated_transport.rs) that demonstrates the full flow:
-   - Client sending REGISTER request
-   - Server responding with 100 Trying and 200 OK
-   - Client receiving and processing responses
-   - Both client and server handling state transitions correctly
+2. Created comprehensive working examples that demonstrate the full SIP flow:
+   - `integrated_transport.rs`: Basic request-response flow with REGISTER
+   - `invite_example.rs`: Complete INVITE dialog with call setup, 180 Ringing, 200 OK, ACK, and BYE
+   - `non_invite_example.rs`: OPTIONS and MESSAGE request flows with proper response handling 
+   - `cancel_example.rs`: INVITE request cancellation with 487 Request Terminated (fixed and working)
 
 3. Fixed issues with timer management during transaction processing
 4. Ensured proper resource cleanup after transactions complete
+
+### CANCEL Request Fix (COMPLETED)
+
+We identified and fixed a major issue in the CANCEL request handling:
+
+1. ✅ Fixed `create_cancel_request` in `method/cancel.rs` to preserve the branch parameter from the original INVITE request instead of generating a new one. This is required for RFC 3261 compliance, specifically Section 9.1 that states the CANCEL must have the same branch parameter as the request it is canceling.
+
+2. ✅ Updated `find_invite_transaction_for_cancel` to match CANCEL requests to INVITE transactions using the branch parameter.
+
+3. ✅ Fixed an issue in the TransactionManager where a CANCEL request would get a duplicate Via header added during transaction creation. We now skip adding Via headers for CANCEL requests since they already have the correct Via header from create_cancel_request.
+
+4. ✅ Added extensive debug logging to help track Via headers throughout the transaction process.
+
+5. ✅ Fixed server-side CANCEL handling to properly correlate CANCEL requests with their corresponding INVITE server transactions.
+
+6. ✅ All tests now pass, including the comprehensive integration tests that validate full message flows.
+
+7. ✅ Fixed an issue in the cancel_example.rs that was causing it to hang indefinitely by adding a timeout mechanism to properly terminate the example.
+
+The CANCEL handling now fully complies with RFC 3261 Section 9.1 and 9.2 requirements. This ensures that:
+- CANCEL requests have the correct branch parameter
+- Server can properly match CANCEL requests to INVITE transactions  
+- Proper 487 Request Terminated responses are sent for the original INVITE
+- Transaction state management works correctly across both client and server sides
 
 Next priorities:
 - Complete the transport failover capabilities

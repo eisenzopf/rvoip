@@ -46,7 +46,7 @@
 - [x] Update transport interface to match transaction-core expectations
 - [x] Ensure TransportEvent propagation is reliable and efficient
 - [x] Create adapters for transaction-core compatibility
-- [ ] Handle transport-specific behaviors in transaction layer
+- [x] Handle transport-specific behaviors in transaction layer
 
 ### Transport Selection Logic
 - [x] Implement smart transport selection based on message properties
@@ -94,8 +94,8 @@
 ### Integration Tests
 - [x] Create basic integration tests with transaction-core
 - [x] Create mock transaction layer for testing
-- [ ] Test all transport types with real traffic patterns
-- [ ] Verify behavior under various network conditions
+- [x] Test all transport types with real traffic patterns
+- [x] Verify behavior under various network conditions
 - [ ] Test timeout and retry mechanisms
 
 ### Stress Testing
@@ -114,5 +114,11 @@
 
 - [x] Add integration tests with transaction-core mock environment
 - [x] Implement basic transaction layer event routing using TransportEvent system
-- [ ] Add transaction-specific connection management (e.g., correlating transactions to connections)
-- [ ] Update transaction core to handle connection failures with proper error propagation 
+- [x] Add transaction-specific connection management (e.g., correlating transactions to connections)
+- [x] Update transaction core to handle connection failures with proper error propagation 
+- [x] Successfully run all examples (REGISTER, INVITE, MESSAGE, OPTIONS, CANCEL) with the integrated layers
+- [x] Fix branch parameter handling for CANCEL requests per RFC 3261 Section 9.1
+- [x] Ensure proper matching of server transactions for incoming requests
+- [ ] Implement transport failover for when primary transport fails
+- [ ] Add reconnection logic with backoff for persistent connections
+- [ ] Create comprehensive benchmarks for measuring performance under load 

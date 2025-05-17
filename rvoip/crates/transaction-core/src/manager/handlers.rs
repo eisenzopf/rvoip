@@ -217,106 +217,166 @@ pub async fn handle_transport_message(
                     
                     // Handle CANCEL specially
                     if request.method() == Method::Cancel {
-                        // Handle CANCEL using the same lock pattern
-                        let server_txs = server_transactions.lock().await;
-                        if let Some(tx) = server_txs.get(&tx_id) {
-                            if tx.kind() == TransactionKind::InviteServer {
-                                // Make a clone of what we need
-                                let request_clone = request.clone();
-                                let tx_id_clone = tx_id.clone();
+                        // Extract the branch parameter from the CANCEL request
+                        let cancel_branch = match request.first_via() {
+                            Some(via) => match via.branch() {
+                                Some(branch) => branch.to_string(),
+                                None => {
+                                    debug!("CANCEL request has no branch parameter, can't find matching INVITE");
+                                    // Fall through to stray CANCEL handling
+                                    handle_stray_cancel(request.clone(), source, transport).await?;
+                                    
+                                    // Broadcast stray CANCEL event
+                                    TransactionManager::broadcast_event(
+                                        TransactionEvent::StrayCancel {
+                                            request,
+                                            source,
+                                        },
+                                        events_tx,
+                                        event_subscribers,
+                                        None,
+                                        None,
+                                    ).await;
+                                    return Ok(());
+                                }
+                            },
+                            None => {
+                                debug!("CANCEL request has no Via header, can't find matching INVITE");
+                                // Fall through to stray CANCEL handling
+                                handle_stray_cancel(request.clone(), source, transport).await?;
                                 
-                                // Release the lock before async operations
-                                drop(server_txs);
-                                
-                                debug!(%tx_id, "Processing CANCEL for server INVITE transaction");
-                                
-                                // Broadcast event
+                                // Broadcast stray CANCEL event
                                 TransactionManager::broadcast_event(
-                                    TransactionEvent::CancelReceived {
-                                        transaction_id: tx_id_clone,
-                                        cancel_request: request_clone.clone(),
+                                    TransactionEvent::StrayCancel {
+                                        request,
+                                        source,
                                     },
                                     events_tx,
                                     event_subscribers,
                                     None,
                                     None,
                                 ).await;
-                                
-                                // Send OK response to CANCEL
-                                let mut builder = ResponseBuilder::new(StatusCode::Ok, None);
-                                
-                                // Add necessary headers
-                                if let Some(to) = request_clone.to() {
+                                return Ok(());
+                            }
+                        };
+                        
+                        // Create a modified key for the INVITE transaction with the same branch
+                        let invite_tx_id = TransactionKey::new(cancel_branch, Method::Invite, true);
+                        
+                        debug!("Looking for INVITE transaction with key: {}", invite_tx_id);
+                        
+                        // Check if we have a matching INVITE transaction with the same branch
+                        let tx_clone_opt = {
+                            let server_txs = server_transactions.lock().await;
+                            if server_txs.contains_key(&invite_tx_id) {
+                                let tx = server_txs.get(&invite_tx_id).unwrap();
+                                if tx.kind() == TransactionKind::InviteServer {
+                                    // Clone the transaction while we have the lock
+                                    Some((tx.clone(), invite_tx_id.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                            // Lock is released at the end of this block
+                        };
+                        
+                        if let Some((tx, tx_id_clone)) = tx_clone_opt {
+                            // Now proceed with the transaction outside the lock
+                            let request_clone = request.clone();
+                            
+                            debug!(%tx_id_clone, "Processing CANCEL for server INVITE transaction");
+                            
+                            // Broadcast event
+                            TransactionManager::broadcast_event(
+                                TransactionEvent::CancelReceived {
+                                    transaction_id: tx_id_clone.clone(),
+                                    cancel_request: request_clone.clone(),
+                                },
+                                events_tx,
+                                event_subscribers,
+                                None,
+                                None,
+                            ).await;
+                            
+                            // Send OK response to CANCEL
+                            let mut builder = ResponseBuilder::new(StatusCode::Ok, None);
+                            
+                            // Add necessary headers
+                            if let Some(to) = request_clone.to() {
+                                builder = builder.header(TypedHeader::To(to.clone()));
+                            }
+                            
+                            if let Some(from) = request_clone.from() {
+                                builder = builder.header(TypedHeader::From(from.clone()));
+                            }
+                            
+                            if let Some(call_id) = request_clone.call_id() {
+                                builder = builder.header(TypedHeader::CallId(call_id.clone()));
+                            }
+                            
+                            if let Some(cseq) = request_clone.cseq() {
+                                builder = builder.header(TypedHeader::CSeq(cseq.clone()));
+                            }
+                            
+                            if let Some(via) = request_clone.header(&HeaderName::Via) {
+                                builder = builder.header(via.clone());
+                            }
+                            
+                            // Build and send response to CANCEL
+                            let cancel_response = builder.build();
+                            if let Err(e) = transport
+                                .send_message(Message::Response(cancel_response), source)
+                                .await {
+                                return Err(Error::transport_error(e, "Failed to send 200 OK response to CANCEL"));
+                            }
+                            
+                            // Now send 487 Request Terminated for the original INVITE
+                            debug!(%tx_id_clone, "Sending 487 Request Terminated for the original INVITE");
+                            
+                            let mut builder = ResponseBuilder::new(StatusCode::RequestTerminated, None);
+                            
+                            if let Some(invite_request) = tx.original_request().await {
+                                // Add necessary headers from the INVITE request
+                                if let Some(to) = invite_request.to() {
                                     builder = builder.header(TypedHeader::To(to.clone()));
                                 }
                                 
-                                if let Some(from) = request_clone.from() {
+                                if let Some(from) = invite_request.from() {
                                     builder = builder.header(TypedHeader::From(from.clone()));
                                 }
                                 
-                                if let Some(call_id) = request_clone.call_id() {
+                                if let Some(call_id) = invite_request.call_id() {
                                     builder = builder.header(TypedHeader::CallId(call_id.clone()));
                                 }
                                 
-                                if let Some(cseq) = request_clone.cseq() {
+                                if let Some(cseq) = invite_request.cseq() {
                                     builder = builder.header(TypedHeader::CSeq(cseq.clone()));
                                 }
                                 
-                                if let Some(via) = request_clone.header(&HeaderName::Via) {
+                                if let Some(via) = invite_request.header(&HeaderName::Via) {
                                     builder = builder.header(via.clone());
                                 }
                                 
-                                // Build and send response
-                                let cancel_response = builder.build();
-                                if let Err(e) = transport
-                                    .send_message(Message::Response(cancel_response), source)
-                                    .await {
-                                    return Err(Error::transport_error(e, "Failed to send 200 OK response to CANCEL"));
-                                }
+                                // Build the 487 response
+                                let invite_response = builder.build();
                                 
-                                return Ok(());
+                                // Instead of sending directly through the transport, 
+                                // send through the transaction's send_response method
+                                // This ensures proper state transition and processing
+                                if let Err(e) = tx.send_response(invite_response).await {
+                                    warn!(%tx_id_clone, error=%e, "Failed to send 487 Request Terminated through transaction");
+                                    return Err(Error::Other(format!("Failed to send 487 Request Terminated: {}", e)));
+                                }
                             }
+                            
+                            return Ok(());
                         }
                         
-                        // Drop the lock if we didn't match
-                        drop(server_txs);
-                        
-                        // Handle stray CANCEL
-                        debug!("Received CANCEL that doesn't match any server transaction");
-                        
-                        // Send 481 Transaction Does Not Exist
-                        let mut builder = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist, None);
-                        
-                        // Add necessary headers
-                        if let Some(to) = request.to() {
-                            builder = builder.header(TypedHeader::To(to.clone()));
-                        }
-                        
-                        if let Some(from) = request.from() {
-                            builder = builder.header(TypedHeader::From(from.clone()));
-                        }
-                        
-                        if let Some(call_id) = request.call_id() {
-                            builder = builder.header(TypedHeader::CallId(call_id.clone()));
-                        }
-                        
-                        if let Some(cseq) = request.cseq() {
-                            builder = builder.header(TypedHeader::CSeq(cseq.clone()));
-                        }
-                        
-                        if let Some(via) = request.header(&HeaderName::Via) {
-                            builder = builder.header(via.clone());
-                        }
-                        
-                        // Build the response
-                        let cancel_response = builder.build();
-                        
-                        // Send the response
-                        if let Err(e) = transport
-                            .send_message(Message::Response(cancel_response), source)
-                            .await {
-                            return Err(Error::transport_error(e, "Failed to send 481 response to stray CANCEL"));
-                        }
+                        // If no matching transaction was found, handle as stray CANCEL
+                        debug!("Received CANCEL that doesn't match any INVITE server transaction");
+                        handle_stray_cancel(request.clone(), source, transport).await?;
                         
                         // Broadcast stray CANCEL event
                         TransactionManager::broadcast_event(
@@ -329,7 +389,6 @@ pub async fn handle_transport_message(
                             None,
                             None,
                         ).await;
-                        
                         return Ok(());
                     }
                     
@@ -558,6 +617,29 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
             }
         }
     }
+}
+
+/// Create a Via header with a branch parameter for a local address
+pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
+    use rvoip_sip_core::types::via::Via;
+    use rvoip_sip_core::types::Param;
+    
+    // Create a new Via header with the specified branch parameter
+    let mut via_params = vec![Param::branch(branch.to_string())];
+    
+    // Add other params like rport if needed
+    // Example: via_params.push(Param::other("rport".to_string(), None));
+    
+    // Create the Via header
+    let local_host = local_addr.ip().to_string();
+    let local_port = local_addr.port();
+    
+    let via = Via::new(
+        "SIP", "2.0", "UDP",
+        &local_host, Some(local_port), via_params
+    ).map_err(Error::SipCoreError)?;
+    
+    Ok(TypedHeader::Via(via))
 }
 
 impl TransactionManager {
@@ -833,4 +915,47 @@ impl TransactionManager {
         
         Ok(())
     }
+}
+
+/// Helper function to handle stray CANCEL requests
+async fn handle_stray_cancel(
+    request: Request, 
+    source: SocketAddr,
+    transport: &Arc<dyn Transport>,
+) -> Result<()> {
+    // Send 481 Transaction Does Not Exist
+    let mut builder = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist, None);
+    
+    // Add necessary headers
+    if let Some(to) = request.to() {
+        builder = builder.header(TypedHeader::To(to.clone()));
+    }
+    
+    if let Some(from) = request.from() {
+        builder = builder.header(TypedHeader::From(from.clone()));
+    }
+    
+    if let Some(call_id) = request.call_id() {
+        builder = builder.header(TypedHeader::CallId(call_id.clone()));
+    }
+    
+    if let Some(cseq) = request.cseq() {
+        builder = builder.header(TypedHeader::CSeq(cseq.clone()));
+    }
+    
+    if let Some(via) = request.header(&HeaderName::Via) {
+        builder = builder.header(via.clone());
+    }
+    
+    // Build the response
+    let cancel_response = builder.build();
+    
+    // Send the response
+    if let Err(e) = transport
+        .send_message(Message::Response(cancel_response), source)
+        .await {
+        return Err(Error::transport_error(e, "Failed to send 481 response to stray CANCEL"));
+    }
+    
+    Ok(())
 } 

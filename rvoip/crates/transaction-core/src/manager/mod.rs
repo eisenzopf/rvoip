@@ -1581,6 +1581,13 @@ impl TransactionManager {
         });
     }
 
+    /// Helper function to get timer settings for a request
+    fn timer_settings_for_request(&self, request: &Request) -> Option<TimerSettings> {
+        // In the future, we could customize timer settings based on request properties
+        // For now, just return a clone of the default settings
+        Some(self.timer_settings.clone())
+    }
+
     /// Create a client transaction for sending a SIP request
     /// The caller is responsible for calling send_request() to initiate the transaction.
     pub async fn create_client_transaction(
@@ -1588,190 +1595,284 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
-        debug!(method = %request.method(), %destination, "Creating client transaction");
+        debug!(method=%request.method(), destination=%destination, "Creating client transaction");
         
-        // Check if we've already registered a transaction with that branch
+        // Debug the Via headers in the request
+        println!("Request Via headers before transaction creation:");
+        for (i, via) in request.via_headers().iter().enumerate() {
+            println!("  Via[{}]: {}", i, via);
+        }
+        
+        // Extract branch parameter from the top Via header or generate a new one
         let branch = match request.first_via() {
             Some(via) => {
                 match via.branch() {
-                    Some(b) if b.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => b.to_string(),
-                    _ => generate_branch(),
+                    Some(b) => b.to_string(),
+                    None => {
+                        // Generate a branch parameter if none exists
+                        format!("{}{}", RFC3261_BRANCH_MAGIC_COOKIE, uuid::Uuid::new_v4().as_simple())
+                    }
                 }
             },
-            None => generate_branch(),
+            None => {
+                // No Via header - should not happen, but we'll handle it by generating a branch
+                // and a Via header will be added by the transaction
+                format!("{}{}", RFC3261_BRANCH_MAGIC_COOKIE, uuid::Uuid::new_v4().as_simple())
+            }
         };
         
-        let local_addr = self.transport.local_addr()
-            .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
-            
-        // Create request with proper Via header
+        // We'll create the transaction key directly
+        let key = TransactionKey::new(branch.clone(), request.method().clone(), false);
+        
+        // For CANCEL method, make sure we don't add a new Via header if one already exists
+        // This is already checked in create_cancel_request, but we'll verify here as well
         let mut modified_request = request.clone();
         
-        // Now add our Via header to the top of the stack
-        let local_host = local_addr.ip().to_string();
-        let local_port = local_addr.port();
-        
-        // Create a new Via header and insert it
-        let mut via_params = vec![Param::branch(&branch)];
-        
-        // Add other params like rport if needed
-        // Example: via_params.push(Param::other("rport".to_string(), None));
-        
-        let via = Via::new("SIP", "2.0", "UDP", &local_host, Some(local_port), via_params)
-            .map_err(Error::SipCoreError)?;
-        
-        modified_request.headers.insert(0, TypedHeader::Via(via));
-        
-        // Create transaction key/ID directly with is_server: false
-        let key = TransactionKey::new(branch, modified_request.method().clone(), false);
+        // For CANCEL requests, the Via header should be preserved exactly as it was created
+        // No need to add or modify it
+        if request.method() == Method::Cancel {
+            // Since CANCEL already has a Via header with the correct branch from create_cancel_request,
+            // we don't need to modify it further
+            println!("CANCEL request detected - not adding Via header");
+        } else {
+            // For other methods, ensure the request has a Via header with our branch
+            // Create a Via header with the branch parameter
+            let local_addr = self.transport.local_addr()
+                .map_err(|e| Error::transport_error(e, "Failed to get local address for Via header"))?;
             
-        // Store the destination so it can be used for ACKs outside the transaction
+            let via_header = handlers::create_via_header(&local_addr, &branch)?;
+            
+            // Check if there's already a Via header
+            if request.first_via().is_some() {
+                // Replace it to ensure the branch is correct
+                modified_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
+                modified_request = modified_request.with_header(via_header);
+            } else {
+                // Add a new Via header
+                modified_request = modified_request.with_header(via_header);
+            }
+        }
+        
+        println!("Request Via headers after potential modification:");
+        for (i, via) in modified_request.via_headers().iter().enumerate() {
+            println!("  Via[{}]: {}", i, via);
+        }
+        
+        // Create the appropriate transaction based on the request method
+        let transaction: Box<dyn ClientTransaction + Send> = match modified_request.method() {
+            Method::Invite => {
+                println!("Creating ClientInviteTransaction: {}", key);
+                let tx = ClientInviteTransaction::new(
+                    key.clone(),
+                    modified_request.clone(),
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    self.timer_settings_for_request(&modified_request)
+                )?;
+                println!("Created ClientInviteTransaction: {}", key);
+                Box::new(tx)
+            },
+            Method::Cancel => {
+                // Validate the CANCEL request
+                if let Err(e) = cancel::validate_cancel_request(&modified_request) {
+                    warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
+                }
+                
+                let tx = ClientNonInviteTransaction::new(
+                    key.clone(),
+                    modified_request.clone(),
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    self.timer_settings_for_request(&modified_request)
+                )?;
+                Box::new(tx)
+            },
+            Method::Update => {
+                // Validate the UPDATE request
+                if let Err(e) = update::validate_update_request(&modified_request) {
+                    warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
+                }
+                
+                let tx = ClientNonInviteTransaction::new(
+                    key.clone(),
+                    modified_request.clone(),
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    self.timer_settings_for_request(&modified_request)
+                )?;
+                Box::new(tx)
+            },
+            _ => {
+                let tx = ClientNonInviteTransaction::new(
+                    key.clone(),
+                    modified_request.clone(),
+                    destination,
+                    self.transport.clone(),
+                    self.events_tx.clone(),
+                    self.timer_settings_for_request(&modified_request)
+                )?;
+                Box::new(tx)
+            }
+        };
+        
+        // Store the transaction
+        {
+            let mut client_txs = self.client_transactions.lock().await;
+            client_txs.insert(key.clone(), transaction);
+        }
+        
+        // Store the destination
         {
             let mut dest_map = self.transaction_destinations.lock().await;
             dest_map.insert(key.clone(), destination);
         }
         
-        // Create transaction based on request type
-        match modified_request.method() {
-            Method::Invite => {
-                // Create an INVITE client transaction
-                let transaction = ClientInviteTransaction::new(
-                    key.clone(),
-                    modified_request,
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                )?;
-                
-                // Store the transaction
-                let mut client_txs = self.client_transactions.lock().await;
-                client_txs.insert(key.clone(), Box::new(transaction));
-            },
-            Method::Cancel | Method::Update | _ => {
-                // For CANCEL, validate that it's properly formed using the utility
-                if modified_request.method() == Method::Cancel {
-                    // Validate but don't fail - just log a warning
-                    if let Err(e) = cancel::validate_cancel_request(&modified_request) {
-                        warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
-                    }
-                }
-                
-                // For UPDATE, validate that it's properly formed using the utility
-                if modified_request.method() == Method::Update {
-                    // Validate but don't fail - just log a warning
-                    if let Err(e) = update::validate_update_request(&modified_request) {
-                        warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
-                    }
-                }
-                
-                // Create a non-INVITE client transaction for all other methods
-                let transaction = ClientNonInviteTransaction::new(
-                    key.clone(),
-                    modified_request,
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                )?;
-                
-                // Store the transaction
-                let mut client_txs = self.client_transactions.lock().await;
-                client_txs.insert(key.clone(), Box::new(transaction));
-            }
-        }
-        
         debug!(id=%key, "Created client transaction");
+        
+        if request.method() == Method::Cancel {
+            debug!(id=%key, original_id=%branch, "Created CANCEL transaction");
+        }
         
         Ok(key)
     }
 
-    /// Send an ACK for a 2xx response
-    pub async fn send_2xx_ack(
+    /// Creates and sends an ACK request for a 2xx response to an INVITE.
+    pub async fn send_ack_for_2xx(
         &self,
-        final_response: &Response,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
     ) -> Result<()> {
-        // Get Request-URI from Contact or To
-        let request_uri = match final_response.header(&HeaderName::Contact) { 
-            Some(contact) => {
-                if let TypedHeader::Contact(contact_val) = contact {
-                    contact_val.addresses().next().map(|a| a.uri.clone())
-                } else { None }
+        // Create the ACK request
+        let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
+        
+        // Try to get a destination from the Contact header first
+        let destination = if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
+            if let Some(contact_addr) = contact.addresses().next() {
+                // Try to parse the URI as a socket address
+                if let Some(addr) = utils::socket_addr_from_uri(&contact_addr.uri) {
+                    Some(addr)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        // If we couldn't get a destination from the Contact header, use the original destination
+        let destination = if let Some(dest) = destination {
+            dest
+        } else {
+            // Fall back to the original destination
+            let dest_map = self.transaction_destinations.lock().await;
+            match dest_map.get(invite_tx_id) {
+                Some(addr) => *addr,
+                None => return Err(Error::Other(format!("Destination for transaction {:?} not found", invite_tx_id))),
+            }
+        };
+        
+        // Send the ACK directly without creating a transaction
+        self.transport.send_message(Message::Request(ack_request), destination).await
+            .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
+        
+        Ok(())
+    }
+    
+    /// Find transaction by message.
+    ///
+    /// This method tries to find a transaction that matches the given message.
+    /// For requests, it looks for server transactions.
+    /// For responses, it looks for client transactions.
+    ///
+    /// # Arguments
+    /// * `message` - The message to match
+    ///
+    /// # Returns
+    /// * `Result<Option<TransactionKey>>` - The matching transaction key if found
+    pub async fn find_transaction_by_message(&self, message: &Message) -> Result<Option<TransactionKey>> {
+        match message {
+            Message::Request(req) => {
+                // For requests, look for server transactions
+                let server_txs = self.server_transactions.lock().await;
+                for (tx_id, tx) in server_txs.iter() {
+                    if tx.matches(message) {
+                        return Ok(Some(tx_id.clone()));
+                    }
+                }
+                Ok(None)
             },
-            None => None,
-        }.or_else(|| {
-            final_response.header(&HeaderName::To)
-                .and_then(|to| if let TypedHeader::To(to_val) = to { 
-                    Some(to_val.address().uri.clone()) 
-                } else { None })
-        }).ok_or_else(|| Error::Other("Cannot determine Request-URI for ACK from response".into()))?;
-
-        let mut ack_builder = RequestBuilder::new(Method::Ack, &request_uri.to_string())?;
-
-        if let Some(via) = final_response.first_via() {
-            ack_builder = ack_builder.header(TypedHeader::Via(via.clone())); // Wrap
-        } else {
-            return Err(Error::Other("Cannot determine Via header for ACK from response".into()));
-        }
-        
-        if let Some(from) = final_response.header(&HeaderName::From) {
-            if let TypedHeader::From(from_val) = from {
-                ack_builder = ack_builder.header(TypedHeader::From(from_val.clone())); // Wrap
-            } else {
-                return Err(Error::Other("Missing or invalid From header in response for ACK".into()));
+            Message::Response(resp) => {
+                // For responses, look for client transactions
+                let client_txs = self.client_transactions.lock().await;
+                for (tx_id, tx) in client_txs.iter() {
+                    if tx.matches(message) {
+                        return Ok(Some(tx_id.clone()));
+                    }
+                }
+                Ok(None)
             }
-        } else {
-            return Err(Error::Other("Missing From header in response for ACK".into()));
+        }
+    }
+    
+    /// Find the matching INVITE transaction for a CANCEL request.
+    ///
+    /// # Arguments
+    /// * `cancel_request` - The CANCEL request
+    ///
+    /// # Returns
+    /// * `Result<Option<TransactionKey>>` - The matching INVITE transaction key if found
+    pub async fn find_invite_transaction_for_cancel(&self, cancel_request: &Request) -> Result<Option<TransactionKey>> {
+        if cancel_request.method() != Method::Cancel {
+            return Err(Error::Other("Not a CANCEL request".to_string()));
         }
         
-        if let Some(to) = final_response.header(&HeaderName::To) {
-            if let TypedHeader::To(to_val) = to {
-                ack_builder = ack_builder.header(TypedHeader::To(to_val.clone())); // Wrap
-            } else {
-                return Err(Error::Other("Missing or invalid To header in response for ACK".into()));
-            }
-        } else {
-            return Err(Error::Other("Missing To header in response for ACK".into()));
-        }
+        // Get all client transactions
+        let client_txs = self.client_transactions.lock().await;
+        let invite_tx_keys: Vec<TransactionKey> = client_txs.keys()
+            .filter(|k| *k.method() == Method::Invite && !k.is_server)
+            .cloned()
+            .collect();
+        drop(client_txs);
         
-        if let Some(call_id) = final_response.header(&HeaderName::CallId) {
-            if let TypedHeader::CallId(call_id_val) = call_id {
-                ack_builder = ack_builder.header(TypedHeader::CallId(call_id_val.clone())); // Wrap
-            } else {
-                return Err(Error::Other("Missing or invalid Call-ID header in response for ACK".into()));
-            }
-        } else {
-            return Err(Error::Other("Missing Call-ID header in response for ACK".into()));
-        }
+        // Use the utility to find the matching INVITE transaction
+        let tx_id = crate::method::cancel::find_invite_transaction_for_cancel(
+            cancel_request, 
+            invite_tx_keys
+        );
         
-        // Use utils::extract_cseq on the message
-        if let Some((seq, _)) = extract_cseq(&Message::Response(final_response.clone())) {
-            ack_builder = ack_builder.header(TypedHeader::CSeq(CSeq::new(seq, Method::Ack))); // Wrap
-        } else {
-            return Err(Error::Other("Missing or invalid CSeq header in response for ACK".into()));
-        }
-
-        ack_builder = ack_builder.header(TypedHeader::MaxForwards(MaxForwards::new(70))); // Wrap
-        ack_builder = ack_builder.header(TypedHeader::ContentLength(ContentLength::new(0))); // Wrap
-
-        let ack_request = ack_builder.build();
-
-        let destination = handlers::determine_ack_destination(final_response).await
-            .ok_or_else(|| Error::Other("Could not determine destination for ACK".into()))?;
-
-        info!(%destination, "Sending ACK for 2xx response");
-
-        self.transport.send_message(
-            Message::Request(ack_request),
-            destination
-        ).await.map_err(|e| Error::transport_error(e, "Failed to send ACK for non-2xx response"))
+        Ok(tx_id)
     }
 
-    // Test-only method to get server transactions for debugging
-    #[cfg(test)]
-    pub async fn get_server_transactions_for_test(&self) -> Vec<String> {
-        let transactions = self.server_transactions.lock().await;
-        transactions.keys().map(|k| k.to_string()).collect()
+    /// Creates an ACK request for a 2xx response to an INVITE.
+    pub async fn create_ack_for_2xx(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+    ) -> Result<Request> {
+        // Verify this is an INVITE client transaction
+        if *invite_tx_id.method() != Method::Invite || invite_tx_id.is_server {
+            return Err(Error::Other("Can only create ACK for INVITE client transactions".to_string()));
+        }
+        
+        // Get the original INVITE request
+        let invite_request = utils::get_transaction_request(
+            &self.client_transactions, 
+            invite_tx_id
+        ).await?;
+        
+        // Get the local address for the Via header
+        let local_addr = self.transport.local_addr()
+            .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
+        
+        // Create the ACK request using our utility
+        let ack_request = crate::method::ack::create_ack_for_2xx(&invite_request, response, &local_addr)?;
+        
+        Ok(ack_request)
     }
 
     /// Create a server transaction from an incoming request.
@@ -1931,46 +2032,6 @@ impl TransactionManager {
         Ok(transaction)
     }
 
-    /// Creates a client transaction for a non-INVITE request.
-    ///
-    /// # Arguments
-    /// * `request` - The non-INVITE request to send
-    /// * `destination` - The destination address to send the request to
-    ///
-    /// # Returns
-    /// * `Result<TransactionKey>` - The transaction ID on success, or an error
-    pub async fn create_non_invite_client_transaction(
-        &self,
-        request: Request,
-        destination: SocketAddr,
-    ) -> Result<TransactionKey> {
-        if request.method() == Method::Invite {
-            return Err(Error::Other("Cannot create non-INVITE transaction for INVITE request".to_string()));
-        }
-        
-        self.create_client_transaction(request, destination).await
-    }
-    
-    /// Creates a client transaction for an INVITE request.
-    ///
-    /// # Arguments
-    /// * `request` - The INVITE request to send
-    /// * `destination` - The destination address to send the request to
-    ///
-    /// # Returns
-    /// * `Result<TransactionKey>` - The transaction ID on success, or an error 
-    pub async fn create_invite_client_transaction(
-        &self,
-        request: Request,
-        destination: SocketAddr,
-    ) -> Result<TransactionKey> {
-        if request.method() != Method::Invite {
-            return Err(Error::Other("Cannot create INVITE transaction for non-INVITE request".to_string()));
-        }
-        
-        self.create_client_transaction(request, destination).await
-    }
-    
     /// Cancel an active INVITE client transaction
     ///
     /// Creates a CANCEL request based on the original INVITE and creates
@@ -2005,6 +2066,11 @@ impl TransactionManager {
         // Use the method utility to create the CANCEL request
         let cancel_request = cancel::create_cancel_request(&invite_request, &local_addr)?;
         
+        // Log and validate the CANCEL request to help with debugging
+        if let Err(e) = cancel::validate_cancel_request(&cancel_request) {
+            warn!(method = %cancel_request.method(), error = %e, "CANCEL request validation issue - proceeding anyway");
+        }
+        
         // Get the destination for the CANCEL request (same as the INVITE)
         let destination = {
             let dest_map = self.transaction_destinations.lock().await;
@@ -2029,141 +2095,45 @@ impl TransactionManager {
         
         Ok(cancel_tx_id)
     }
-    
-    /// Creates an ACK request for a 2xx response to an INVITE.
-    pub async fn create_ack_for_2xx(
-        &self,
-        invite_tx_id: &TransactionKey,
-        response: &Response,
-    ) -> Result<Request> {
-        // Verify this is an INVITE client transaction
-        if *invite_tx_id.method() != Method::Invite || invite_tx_id.is_server {
-            return Err(Error::Other("Can only create ACK for INVITE client transactions".to_string()));
-        }
-        
-        // Get the original INVITE request
-        let invite_request = utils::get_transaction_request(
-            &self.client_transactions, 
-            invite_tx_id
-        ).await?;
-        
-        // Get the local address for the Via header
-        let local_addr = self.transport.local_addr()
-            .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
-        
-        // Create the ACK request using our utility
-        let ack_request = crate::method::ack::create_ack_for_2xx(&invite_request, response, &local_addr)?;
-        
-        Ok(ack_request)
-    }
-    
-    /// Creates and sends an ACK request for a 2xx response to an INVITE.
-    pub async fn send_ack_for_2xx(
-        &self,
-        invite_tx_id: &TransactionKey,
-        response: &Response,
-    ) -> Result<()> {
-        // Create the ACK request
-        let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
-        
-        // Try to get a destination from the Contact header first
-        let destination = if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
-            if let Some(contact_addr) = contact.addresses().next() {
-                // Try to parse the URI as a socket address
-                if let Some(addr) = utils::socket_addr_from_uri(&contact_addr.uri) {
-                    Some(addr)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        
-        // If we couldn't get a destination from the Contact header, use the original destination
-        let destination = if let Some(dest) = destination {
-            dest
-        } else {
-            // Fall back to the original destination
-            let dest_map = self.transaction_destinations.lock().await;
-            match dest_map.get(invite_tx_id) {
-                Some(addr) => *addr,
-                None => return Err(Error::Other(format!("Destination for transaction {:?} not found", invite_tx_id))),
-            }
-        };
-        
-        // Send the ACK directly without creating a transaction
-        self.transport.send_message(Message::Request(ack_request), destination).await
-            .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
-        
-        Ok(())
-    }
-    
-    /// Find transaction by message.
-    ///
-    /// This method tries to find a transaction that matches the given message.
-    /// For requests, it looks for server transactions.
-    /// For responses, it looks for client transactions.
+
+    /// Creates a client transaction for a non-INVITE request.
     ///
     /// # Arguments
-    /// * `message` - The message to match
+    /// * `request` - The non-INVITE request to send
+    /// * `destination` - The destination address to send the request to
     ///
     /// # Returns
-    /// * `Result<Option<TransactionKey>>` - The matching transaction key if found
-    pub async fn find_transaction_by_message(&self, message: &Message) -> Result<Option<TransactionKey>> {
-        match message {
-            Message::Request(req) => {
-                // For requests, look for server transactions
-                let server_txs = self.server_transactions.lock().await;
-                for (tx_id, tx) in server_txs.iter() {
-                    if tx.matches(message) {
-                        return Ok(Some(tx_id.clone()));
-                    }
-                }
-                Ok(None)
-            },
-            Message::Response(resp) => {
-                // For responses, look for client transactions
-                let client_txs = self.client_transactions.lock().await;
-                for (tx_id, tx) in client_txs.iter() {
-                    if tx.matches(message) {
-                        return Ok(Some(tx_id.clone()));
-                    }
-                }
-                Ok(None)
-            }
+    /// * `Result<TransactionKey>` - The transaction ID on success, or an error
+    pub async fn create_non_invite_client_transaction(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+    ) -> Result<TransactionKey> {
+        if request.method() == Method::Invite {
+            return Err(Error::Other("Cannot create non-INVITE transaction for INVITE request".to_string()));
         }
+        
+        self.create_client_transaction(request, destination).await
     }
-    
-    /// Find the matching INVITE transaction for a CANCEL request.
+
+    /// Creates a client transaction for an INVITE request.
     ///
     /// # Arguments
-    /// * `cancel_request` - The CANCEL request
+    /// * `request` - The INVITE request to send
+    /// * `destination` - The destination address to send the request to
     ///
     /// # Returns
-    /// * `Result<Option<TransactionKey>>` - The matching INVITE transaction key if found
-    pub async fn find_invite_transaction_for_cancel(&self, cancel_request: &Request) -> Result<Option<TransactionKey>> {
-        if cancel_request.method() != Method::Cancel {
-            return Err(Error::Other("Not a CANCEL request".to_string()));
+    /// * `Result<TransactionKey>` - The transaction ID on success, or an error 
+    pub async fn create_invite_client_transaction(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+    ) -> Result<TransactionKey> {
+        if request.method() != Method::Invite {
+            return Err(Error::Other("Cannot create INVITE transaction for non-INVITE request".to_string()));
         }
         
-        // Get all client transactions
-        let client_txs = self.client_transactions.lock().await;
-        let invite_tx_keys: Vec<TransactionKey> = client_txs.keys()
-            .filter(|k| *k.method() == Method::Invite && !k.is_server)
-            .cloned()
-            .collect();
-        drop(client_txs);
-        
-        // Use the utility to find the matching INVITE transaction
-        let tx_id = crate::method::cancel::find_invite_transaction_for_cancel(
-            cancel_request, 
-            invite_tx_keys
-        );
-        
-        Ok(tx_id)
+        self.create_client_transaction(request, destination).await
     }
 }
 
@@ -2183,5 +2153,5 @@ impl fmt::Debug for TransactionManager {
             .field("timer_manager", &"Arc<TimerManager>")
             .field("timer_factory", &"TimerFactory")
             .finish()
-    }
-} 
+    } 
+}
