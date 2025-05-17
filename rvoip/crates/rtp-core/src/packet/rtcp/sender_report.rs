@@ -125,6 +125,11 @@ pub fn parse_sender_report(buf: &mut impl Buf, report_count: u8) -> Result<RtcpS
     })
 }
 
+/// Serialize a sender report
+pub fn serialize_sender_report(sr: &RtcpSenderReport) -> Result<BytesMut> {
+    sr.serialize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

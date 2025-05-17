@@ -92,6 +92,15 @@ including them in compound RTCP packets along with SR/RR and other packet types.
 cargo run --example rtcp_xr_example
 ```
 
+### 11. RFC 3551 Compatibility (`rfc3551_compatibility.rs`)
+
+Tests and validates compatibility with RFC 3551 (RTP Audio/Video Profile), which defines 
+standard payload types, clock rates, and other parameters for RTP media streams.
+
+```
+cargo run --example rfc3551_compatibility
+```
+
 ## Running with Logging
 
 You can control the log level using the `RUST_LOG` environment variable:

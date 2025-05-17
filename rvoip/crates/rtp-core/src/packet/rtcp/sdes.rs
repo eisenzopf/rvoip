@@ -1,4 +1,4 @@
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BufMut, BytesMut};
 use crate::error::Error;
 use crate::{Result, RtpSsrc};
 
@@ -155,6 +155,66 @@ impl RtcpSourceDescription {
         }
         None
     }
+    
+    /// Serialize the SDES packet to bytes
+    pub fn serialize(&self) -> Result<BytesMut> {
+        // Calculate total size
+        let mut total_size = 0;
+        
+        // Calculate size for each chunk
+        for chunk in &self.chunks {
+            // SSRC (4 bytes)
+            total_size += 4;
+            
+            // Calculate size for each item
+            for item in &chunk.items {
+                // Type (1 byte) + Length (1 byte) + Value
+                total_size += 2 + item.value.len();
+            }
+            
+            // END item (1 byte) + padding to 32-bit boundary
+            total_size += 1;
+            if total_size % 4 != 0 {
+                total_size += 4 - (total_size % 4);
+            }
+        }
+        
+        let mut buf = BytesMut::with_capacity(total_size);
+        
+        // Serialize each chunk
+        for chunk in &self.chunks {
+            // SSRC
+            buf.put_u32(chunk.ssrc);
+            
+            // Serialize items
+            for item in &chunk.items {
+                // Item type
+                buf.put_u8(item.item_type as u8);
+                
+                // Item length
+                buf.put_u8(item.value.len() as u8);
+                
+                // Item value
+                buf.put_slice(item.value.as_bytes());
+            }
+            
+            // End marker
+            buf.put_u8(RtcpSdesItemType::End as u8);
+            
+            // Pad to 32-bit boundary if needed
+            let padding_bytes = (4 - (buf.len() % 4)) % 4;
+            for _ in 0..padding_bytes {
+                buf.put_u8(0);
+            }
+        }
+        
+        Ok(buf)
+    }
+}
+
+/// Serialize an SDES packet
+pub fn serialize_sdes(sdes: &RtcpSourceDescription) -> Result<BytesMut> {
+    sdes.serialize()
 }
 
 #[cfg(test)]
