@@ -101,6 +101,16 @@ standard payload types, clock rates, and other parameters for RTP media streams.
 cargo run --example rfc3551_compatibility
 ```
 
+### 12. Header Extensions (`header_extensions.rs`)
+
+Demonstrates the use of RTP header extensions as defined in RFC 8285, including both one-byte 
+and two-byte formats. Shows how to add, parse, and manipulate extensions like audio levels 
+and video orientation information with practical real-world examples.
+
+```
+cargo run --example header_extensions
+```
+
 ## Running with Logging
 
 You can control the log level using the `RUST_LOG` environment variable:

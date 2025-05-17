@@ -6,9 +6,11 @@
 pub mod rtp;
 pub mod header;
 pub mod rtcp;
+pub mod extension;
 
 pub use rtp::*;
 pub use header::*;
+pub use extension::*;
 
 #[cfg(test)]
 mod tests {

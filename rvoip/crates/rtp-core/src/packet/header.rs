@@ -4,6 +4,7 @@ use tracing::debug;
 
 use crate::error::Error;
 use crate::{Result, RtpCsrc, RtpSequenceNumber, RtpSsrc, RtpTimestamp};
+use super::extension::{ExtensionFormat, RtpHeaderExtensions};
 
 /// RTP protocol version (always 2 in practice)
 pub const RTP_VERSION: u8 = 2;
@@ -60,11 +61,8 @@ pub struct RtpHeader {
     /// Contributing source identifiers
     pub csrc: Vec<RtpCsrc>,
     
-    /// Extension header ID
-    pub extension_id: Option<u16>,
-    
-    /// Extension data
-    pub extension_data: Option<Bytes>,
+    /// Header extensions (RFC 8285)
+    pub extensions: Option<RtpHeaderExtensions>,
 }
 
 impl Default for RtpHeader {
@@ -80,8 +78,7 @@ impl Default for RtpHeader {
             timestamp: 0,
             ssrc: 0,
             csrc: Vec::new(),
-            extension_id: None,
-            extension_data: None,
+            extensions: None,
         }
     }
 }
@@ -101,8 +98,7 @@ impl RtpHeader {
             timestamp,
             ssrc,
             csrc: Vec::new(),
-            extension_id: None,
-            extension_data: None,
+            extensions: None,
         }
     }
 
@@ -115,11 +111,11 @@ impl RtpHeader {
         
         // Add extension header size if present
         if self.extension {
-            if let Some(ext_data) = &self.extension_data {
-                // 4 bytes for extension header plus extension data
-                size += 4 + ext_data.len();
+            if let Some(extensions) = &self.extensions {
+                // 4 bytes for profile ID and length + extension data size
+                size += 4 + extensions.size();
             } else {
-                // Extension flag is set but no data
+                // Extension flag is set but no data - reserve minimal 4 bytes
                 size += 4;
             }
         }
@@ -206,10 +202,10 @@ impl RtpHeader {
         }
 
         // Parse extension header if present
-        let (extension_id, extension_data) = if extension {
+        let extensions = if extension {
             debug!("Parsing extension header");
             
-            // Extension header requires at least 4 bytes (2 for ID, 2 for length)
+            // Extension header requires at least 4 bytes (2 for profile ID, 2 for length)
             if buf.remaining() < 4 {
                 debug!("Buffer too small for extension header: need 4 but have {}", buf.remaining());
                 return Err(Error::BufferTooSmall {
@@ -218,9 +214,9 @@ impl RtpHeader {
                 });
             }
             
-            let ext_id = buf.get_u16();
+            let profile_id = buf.get_u16();
             let ext_length_words = buf.get_u16() as usize;
-            debug!("Extension ID: {}, length: {} words", ext_id, ext_length_words);
+            debug!("Extension profile ID: 0x{:04x}, length: {} words", profile_id, ext_length_words);
             
             // Extension length is in 32-bit words (4 bytes each)
             let ext_length_bytes = ext_length_words * 4;
@@ -245,15 +241,16 @@ impl RtpHeader {
                 }
                 debug!("Read {} bytes of extension data", ext_length_bytes);
                 
-                (Some(ext_id), Some(ext_data.freeze()))
+                // Parse the extension data based on the profile ID
+                Some(RtpHeaderExtensions::from_extension_data(profile_id, &ext_data)?)
             } else {
                 // Extension with zero length
                 debug!("Extension has zero length");
-                (Some(ext_id), Some(Bytes::new()))
+                Some(RtpHeaderExtensions::from_extension_data(profile_id, &[])?)
             }
         } else {
             debug!("No extension header");
-            (None, None)
+            None
         };
 
         debug!("RTP header parsing completed successfully");
@@ -268,8 +265,7 @@ impl RtpHeader {
             timestamp,
             ssrc,
             csrc,
-            extension_id,
-            extension_data,
+            extensions,
         })
     }
 
@@ -368,12 +364,12 @@ impl RtpHeader {
         }
 
         // Parse extension header if present
-        let (extension_id, extension_data) = if extension {
+        let extensions = if extension {
             debug!("Parsing extension header");
             
             let ext_offset = bytes_consumed;
             
-            // Extension header requires at least 4 bytes (2 for ID, 2 for length)
+            // Extension header requires at least 4 bytes (2 for profile ID, 2 for length)
             if data.len() < ext_offset + 4 {
                 debug!("Buffer too small for extension header: need {} but have {}", 
                      ext_offset + 4, data.len());
@@ -383,10 +379,10 @@ impl RtpHeader {
                 });
             }
             
-            // Extract extension ID and length
-            let ext_id = ((data[ext_offset] as u16) << 8) | (data[ext_offset + 1] as u16);
+            // Extract extension profile ID and length
+            let profile_id = ((data[ext_offset] as u16) << 8) | (data[ext_offset + 1] as u16);
             let ext_length_words = ((data[ext_offset + 2] as u16) << 8) | (data[ext_offset + 3] as u16);
-            debug!("Extension ID: {}, length: {} words", ext_id, ext_length_words);
+            debug!("Extension profile ID: 0x{:04x}, length: {} words", profile_id, ext_length_words);
             
             // Extension length is in 32-bit words (4 bytes each)
             let ext_length_bytes = ext_length_words as usize * 4;
@@ -405,22 +401,22 @@ impl RtpHeader {
                     });
                 }
                 
-                // Copy the extension data
-                let ext_data = Bytes::copy_from_slice(&data[bytes_consumed..bytes_consumed + ext_length_bytes]);
+                // Extract the extension data
+                let ext_data = &data[bytes_consumed..bytes_consumed + ext_length_bytes];
                 debug!("Read {} bytes of extension data", ext_length_bytes);
                 
                 bytes_consumed += ext_length_bytes;
                 
-                (Some(ext_id), Some(ext_data))
+                // Parse the extension data based on the profile ID
+                Some(RtpHeaderExtensions::from_extension_data(profile_id, ext_data)?)
             } else {
                 // Extension with zero length
                 debug!("Extension has zero length");
-                bytes_consumed += 0;
-                (Some(ext_id), Some(Bytes::new()))
+                Some(RtpHeaderExtensions::from_extension_data(profile_id, &[])?)
             }
         } else {
             debug!("No extension header");
-            (None, None)
+            None
         };
 
         debug!("RTP header parsing completed successfully, consumed {} bytes", bytes_consumed);
@@ -435,8 +431,7 @@ impl RtpHeader {
             timestamp,
             ssrc,
             csrc,
-            extension_id,
-            extension_data,
+            extensions,
         }, bytes_consumed))
     }
 
@@ -499,31 +494,124 @@ impl RtpHeader {
 
         // Extension header if present
         if self.extension {
-            if let (Some(ext_id), Some(ext_data)) = (self.extension_id, self.extension_data.as_ref()) {
-                // Put extension header ID
-                buf.put_u16(ext_id);
+            if let Some(extensions) = &self.extensions {
+                // Put extension profile ID
+                buf.put_u16(extensions.profile_id);
                 
-                // Calculate length in 32-bit words, rounded up
-                let ext_length_words = (ext_data.len() + 3) / 4;
+                // Serialize the extension data
+                let ext_data = extensions.serialize()?;
+                
+                // Calculate length in 32-bit words - already padded to 4 bytes
+                let ext_length_words = ext_data.len() / 4;
                 buf.put_u16(ext_length_words as u16);
                 
-                // Put extension data
-                buf.put_slice(ext_data);
-                
-                // Add padding to align to 32-bit boundary if needed
-                let padding_bytes = (4 - (ext_data.len() % 4)) % 4;
-                for _ in 0..padding_bytes {
-                    buf.put_u8(0);
-                }
+                // Put extension data (already padded to 32-bit boundary)
+                buf.put_slice(&ext_data);
             } else {
-                // Extension flag is set but no data or ID
-                return Err(Error::InvalidParameter(
-                    "Extension flag is set but extension_id or extension_data is missing".to_string()
-                ));
+                // Extension flag is set but no data
+                // Use a default profile ID (one-byte format)
+                buf.put_u16(super::extension::ONE_BYTE_EXTENSION_ID);
+                
+                // Zero length
+                buf.put_u16(0);
             }
         }
 
         Ok(())
+    }
+
+    /// Add a header extension element
+    /// This will automatically create and configure the extensions container if needed
+    pub fn add_extension(&mut self, id: u8, data: impl Into<Bytes>) -> Result<()> {
+        // Create extensions container if it doesn't exist
+        if self.extensions.is_none() {
+            self.extensions = Some(RtpHeaderExtensions::new_one_byte());
+        }
+        
+        // Add the extension element
+        if let Some(extensions) = &mut self.extensions {
+            extensions.add_extension(id, data)?;
+            
+            // Set the extension flag
+            self.extension = true;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get a header extension by ID
+    pub fn get_extension(&self, id: u8) -> Option<&Bytes> {
+        if let Some(extensions) = &self.extensions {
+            if let Some(element) = extensions.get_extension(id) {
+                return Some(&element.data);
+            }
+        }
+        None
+    }
+    
+    /// Remove a header extension by ID
+    pub fn remove_extension(&mut self, id: u8) -> Option<Bytes> {
+        if let Some(extensions) = &mut self.extensions {
+            if let Some(element) = extensions.remove_extension(id) {
+                // If no extensions are left, clear the extension flag
+                if extensions.is_empty() {
+                    self.extension = false;
+                }
+                return Some(element.data);
+            }
+        }
+        None
+    }
+    
+    /// Get the extension format
+    pub fn extension_format(&self) -> Option<ExtensionFormat> {
+        self.extensions.as_ref().map(|ext| ext.format)
+    }
+    
+    /// Set the extension format
+    pub fn set_extension_format(&mut self, format: ExtensionFormat) -> Result<()> {
+        if self.extensions.is_none() {
+            // Create a new extensions container with the specified format
+            self.extensions = match format {
+                ExtensionFormat::OneByte => Some(RtpHeaderExtensions::new_one_byte()),
+                ExtensionFormat::TwoByte => Some(RtpHeaderExtensions::new_two_byte()),
+                ExtensionFormat::Legacy => Some(RtpHeaderExtensions::new_legacy(0)),
+            };
+            return Ok(());
+        }
+        
+        // If we have an existing extensions container with a different format,
+        // we need to convert it
+        let extensions = self.extensions.as_mut().unwrap();
+        if extensions.format == format {
+            return Ok(());
+        }
+        
+        // Create a new extensions container with the new format
+        let mut new_extensions = match format {
+            ExtensionFormat::OneByte => RtpHeaderExtensions::new_one_byte(),
+            ExtensionFormat::TwoByte => RtpHeaderExtensions::new_two_byte(),
+            ExtensionFormat::Legacy => RtpHeaderExtensions::new_legacy(0),
+        };
+        
+        // Copy all elements to the new container
+        for element in &extensions.elements {
+            new_extensions.add_extension(element.id, element.data.clone())?;
+        }
+        
+        // Replace the old container with the new one
+        self.extensions = Some(new_extensions);
+        
+        Ok(())
+    }
+    
+    /// Clear all extensions
+    pub fn clear_extensions(&mut self) {
+        if let Some(extensions) = &mut self.extensions {
+            extensions.clear();
+            // Clear the extension flag
+            self.extension = false;
+        }
     }
 }
 
@@ -563,8 +651,7 @@ mod tests {
         assert_eq!(header.timestamp, 12345);
         assert_eq!(header.ssrc, 0xabcdef01);
         assert!(header.csrc.is_empty());
-        assert_eq!(header.extension_id, None);
-        assert_eq!(header.extension_data, None);
+        assert_eq!(header.extensions, None);
     }
     
     #[test]
@@ -582,9 +669,8 @@ mod tests {
         // Header with extension
         let mut header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
         header.extension = true;
-        header.extension_id = Some(0x1234);
-        header.extension_data = Some(Bytes::from_static(b"test"));
-        assert_eq!(header.size(), RTP_MIN_HEADER_SIZE + 8); // 8 = 4 (ext header) + 4 (ext data)
+        header.extensions = Some(RtpHeaderExtensions::new_one_byte());
+        assert_eq!(header.size(), RTP_MIN_HEADER_SIZE + 4); // 4 = 4 (ext header)
     }
     
     #[test]
@@ -612,8 +698,7 @@ mod tests {
         assert_eq!(parsed.timestamp, original.timestamp);
         assert_eq!(parsed.ssrc, original.ssrc);
         assert_eq!(parsed.csrc, original.csrc);
-        assert_eq!(parsed.extension_id, original.extension_id);
-        assert_eq!(parsed.extension_data, original.extension_data);
+        assert_eq!(parsed.extensions, original.extensions);
     }
     
     #[test]
@@ -622,11 +707,10 @@ mod tests {
         
         let mut original = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
         original.extension = true;
-        original.extension_id = Some(0x1234);
-        original.extension_data = Some(Bytes::from_static(b"test"));
+        original.extensions = Some(RtpHeaderExtensions::new_one_byte());
         
         // Serialize
-        let mut buf = BytesMut::with_capacity(20);
+        let mut buf = BytesMut::with_capacity(12);
         original.serialize(&mut buf).unwrap();
         
         // Parse
@@ -635,9 +719,7 @@ mod tests {
         
         // Verify
         assert_eq!(parsed.extension, true);
-        assert_eq!(parsed.extension_id, Some(0x1234));
-        assert!(parsed.extension_data.is_some());
-        assert!(parsed.extension_data.unwrap().starts_with(b"test"));
+        assert!(parsed.extensions.is_some());
     }
     
     #[test]

@@ -66,7 +66,7 @@ rtp-core/
 ### RTP Packet Structure
 - [x] Implement RFC 3550 compliant RTP packet parsing
 - [x] Create RtpPacket struct with all required fields
-- [ ] Implement header extension support
+- [x] Implement header extension support
 - [ ] Add CSRC list handling
 - [ ] Implement payload format identification
 - [x] Create efficient serialization/deserialization
@@ -180,6 +180,7 @@ rtp-core/
 - [x] Test RFC 3551 (RTP A/V Profile) compatibility
 - [x] Validate RFC 3611 (RTCP XR) implementation
 - [x] Verify RFC 3711 (SRTP) compliance
+- [x] Test RFC 8285 (RTP Header Extensions) support
 - [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
 
 ## Integration with Media Core
@@ -234,12 +235,13 @@ rtp-core/
 - [x] Added proper PayloadType enum variants for Opus, VP8, and VP9
 - [x] Completed RFC 3551 (RTP A/V Profile) compatibility testing
 - [x] Implemented MOS score estimation and R-factor calculation for voice quality metrics
+- [x] Implemented RFC 8285 header extensions support with one-byte and two-byte formats
+- [x] Created comprehensive example for RTP header extensions usage
 
 ## Next Priorities
 
 - [ ] Integrate DTLS for SRTP key exchange
 - [ ] Add contributing source (CSRC) management
-- [ ] Implement header extension support
 - [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
 - [ ] Add cross-platform socket validation
 - [ ] Create RTCP BYE packet generation logic
