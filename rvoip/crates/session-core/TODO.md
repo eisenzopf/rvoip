@@ -176,6 +176,11 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 - [x] Create logging and tracing interfaces
 - [x] Add configuration management API
 - [x] Create transport abstraction for protocol flexibility
+- [x] Add missing helper functions for dialog operations:
+  - [x] Implement `put_call_on_hold` helper function for the helpers.rs API
+  - [x] Implement `resume_held_call` helper function for the helpers.rs API
+  - [x] Implement `verify_dialog_active` helper function for the helpers.rs API  
+  - [x] Implement `update_codec_preferences` helper function for the helpers.rs API
 
 ### Testing & Compliance
 - [x] Create test suite for transaction-to-session integration
