@@ -30,13 +30,52 @@ cargo run --example g722_payload
 
 ### 4. Opus Payload Format (`opus_payload.rs`)
 
-Shows Opus codec configuration with different bandwidth modes, channels, and frame durations.
+Shows Opus codec configuration with different bandwidth modes, channels, and framerates.
 
 ```
 cargo run --example opus_payload
 ```
 
-### 5. RTCP BYE Packet Handling (`rtcp_bye.rs`)
+### 5. Video Payload Formats (`video_payload.rs`)
+
+Demonstrates VP8 and VP9 video payload formats with scalability and multiple resolutions.
+
+```
+cargo run --example video_payload
+```
+
+### 6. SSRC Demultiplexing (`ssrc_demultiplexing.rs`)
+
+Shows packet demultiplexing based on SSRC, handling multiple streams in a single session.
+
+```
+cargo run --example ssrc_demultiplexing
+```
+
+### 7. High-Performance Buffer Management (`high_performance_buffers.rs`)
+
+Demonstrates the high-performance buffer management system designed for large-scale 
+deployments with tens of thousands of concurrent connections. Features include:
+
+- Memory pooling to reduce allocations and GC pressure
+- Adaptive jitter buffering that responds to network conditions
+- Priority-based transmit buffering with congestion control
+- Global memory management to prevent OOM errors
+- Stream prioritization and bandwidth management
+
+```
+cargo run --example high_performance_buffers
+```
+
+## Running with Logging
+
+You can control the log level using the `RUST_LOG` environment variable:
+
+```
+RUST_LOG=debug cargo run --example high_performance_buffers
+```
+
+### 8. RTCP BYE Packet Handling (`rtcp_bye.rs`)
 
 Demonstrates RTCP BYE packet sending and receiving when RTP sessions are closed.
 
@@ -44,28 +83,12 @@ Demonstrates RTCP BYE packet sending and receiving when RTP sessions are closed.
 cargo run --example rtcp_bye
 ```
 
-### 6. RTCP APP Packet Handling (`rtcp_app.rs`)
+### 9. RTCP APP Packet Handling (`rtcp_app.rs`)
 
 Shows how RTCP Application-Defined (APP) packets can be sent and received between RTP sessions.
 
 ```
 cargo run --example rtcp_app
-```
-
-### 7. Video Payload Formats (`video_payload.rs`)
-
-Demonstrates VP8 and VP9 payload format handling for video over RTP.
-
-```
-cargo run --example video_payload
-```
-
-### 8. SSRC Demultiplexing (`ssrc_demultiplexing.rs`)
-
-Shows how multiple RTP streams with different SSRCs can be handled within a single RTP session.
-
-```
-cargo run --example ssrc_demultiplexing
 ```
 
 ## Known Issues

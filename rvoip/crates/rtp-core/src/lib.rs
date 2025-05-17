@@ -13,6 +13,21 @@
 //! - `time`: Timing and clock utilities
 //! - `traits`: Public traits for integration with other crates
 //! - `payload`: RTP payload format handlers
+//! - `buffer`: High-performance buffer management for receiving and transmitting packets
+//!
+//! ## Buffer Management
+//!
+//! The `buffer` module provides optimized memory and packet management
+//! for high-scale deployments:
+//!
+//! - Memory pooling to reduce allocations
+//! - Adaptive jitter buffer for handling network variation
+//! - Priority-based transmit buffering
+//! - Congestion control for network adaptation
+//! - Global memory limits to prevent OOM conditions
+//! - Efficient packet ordering and scheduling
+//!
+//! This is ideal for deployments handling tens of thousands of concurrent streams.
 
 mod error;
 
@@ -25,6 +40,7 @@ pub mod stats;
 pub mod time;
 pub mod traits;
 pub mod payload;
+pub mod buffer;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;

@@ -1995,6 +1995,8 @@ dependencies = [
  "base64 0.13.1",
  "bitvec",
  "bytes",
+ "futures",
+ "log",
  "rand",
  "thiserror",
  "tokio",
