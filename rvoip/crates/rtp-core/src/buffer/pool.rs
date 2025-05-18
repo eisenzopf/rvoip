@@ -44,18 +44,22 @@ struct BufferPoolInner {
     buffer_size: usize,
 }
 
-/// A buffer acquired from the pool
+/// A buffer from the pool
 ///
-/// This will be returned to the pool when dropped
+/// This buffer will be automatically returned to the pool when it is dropped.
 pub struct PooledBuffer {
-    /// The buffer from the pool
+    /// The buffer itself
     buffer: Option<BytesMut>,
     
-    /// Original capacity of the buffer
+    /// Original capacity of the buffer when it was allocated
+    /// Used to detect if the buffer was resized
     original_capacity: usize,
     
     /// Reference to the pool
     pool: BufferPool,
+    
+    /// Permit for the buffer
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl BufferPool {
@@ -87,20 +91,22 @@ impl BufferPool {
             buffer_size,
         };
         
-        // Create semaphore with max_buffers permits
-        let buffer_limit = Arc::new(Semaphore::new(max_buffers));
+        // Create semaphore with exactly max_buffers permits
+        // This is critical - we need to make sure we don't get more than max_buffers
+        let buffer_limit = Arc::new(Semaphore::new(max_buffers as usize));
         
-        // Acquire permits for initial buffers
+        // Account for permits already used by the initial buffers
         if initial_capacity > 0 {
-            // Use try_acquire_many (non-owned version) to avoid consuming buffer_limit
-            match buffer_limit.try_acquire_many(initial_capacity as u32) {
-                Ok(permits) => {
-                    // Just immediately drop the permits - we're just limiting initial capacity
-                    drop(permits);
-                },
+            // Since we allocated initial_capacity buffers, mark those permits as acquired
+            // This ensures we won't exceed max_buffers total
+            match buffer_limit.clone().try_acquire_many_owned(initial_capacity as u32) {
+                Ok(_) => {
+                    // This is expected - we're just reducing the available permits
+                    // We immediately drop the permit because we're using the initial_capacity
+                    // buffers that we pre-allocated
+                }
                 Err(_) => {
-                    // Should never happen since we're creating a fresh semaphore
-                    panic!("Failed to acquire initial permits");
+                    panic!("Failed to acquire initial permits - semaphore capacity too small");
                 }
             }
         }
@@ -114,20 +120,30 @@ impl BufferPool {
     
     /// Get a buffer from the pool
     ///
-    /// This will block if the pool is at capacity.
+    /// If no buffer is immediately available, this will create a new one
+    /// as long as the pool is under capacity.
     pub async fn get_buffer(&self) -> PooledBuffer {
-        // Acquire a permit for this buffer
-        let _permit = self.buffer_limit.acquire().await.unwrap();
+        // Try to acquire a permit from the semaphore
+        // If we're at max capacity, this will block until a buffer is returned
+        let permit = match self.buffer_limit.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                // Semaphore was closed - this should never happen in normal operation
+                panic!("Buffer pool semaphore was closed");
+            }
+        };
         
-        // Try to get a buffer from the available queue
-        let mut buffer = {
+        // Get a buffer from the available queue if possible
+        let buffer = {
             let mut inner = self.inner.lock().await;
             inner.available.pop_front()
         };
         
-        // If no buffer is available, create a new one
-        if buffer.is_none() {
-            // Create a new buffer
+        let buffer = if let Some(buffer) = buffer {
+            // We got an existing buffer from the pool
+            buffer
+        } else {
+            // No buffer available in pool, create a new one
             let new_buffer = BytesMut::with_capacity(self.buffer_size);
             
             // Update stats
@@ -135,17 +151,16 @@ impl BufferPool {
             inner.allocated += 1;
             inner.bytes_allocated += new_buffer.capacity();
             
-            buffer = Some(new_buffer);
-        }
+            new_buffer
+        };
         
-        // Unwrap is safe because we either got a buffer or created one
-        let buffer = buffer.unwrap();
         let original_capacity = buffer.capacity();
         
         PooledBuffer {
             buffer: Some(buffer),
             original_capacity,
             pool: self.clone(),
+            permit: Some(permit), // Store the permit with the buffer
         }
     }
     
@@ -156,7 +171,8 @@ impl BufferPool {
         // Try to acquire a permit
         let permit = self.buffer_limit.try_acquire();
         if permit.is_err() {
-            return None;
+            debug!("Buffer pool at capacity, can't allocate more buffers");
+            return None; // No permit available, can't get a buffer
         }
         
         // Try to get a buffer from the available queue
@@ -186,6 +202,7 @@ impl BufferPool {
             buffer: Some(buffer),
             original_capacity,
             pool: self.clone(),
+            permit: None, // Permit is not stored with the buffer
         })
     }
     
@@ -200,7 +217,17 @@ impl BufferPool {
             
             // Return to the pool
             let mut inner = self.inner.lock().await;
-            inner.available.push_back(buffer);
+            
+            // Only add it to the available pool if we're under max capacity
+            if inner.available.len() < inner.max_buffers {
+                inner.available.push_back(buffer);
+            } else {
+                // We've hit max capacity, so just drop this buffer
+                inner.allocated -= 1;
+                inner.bytes_allocated -= original_capacity;
+                debug!("Dropping buffer due to pool capacity constraints");
+                // Don't add to available pool - just let it be dropped
+            }
         } else {
             // Buffer was resized, just drop it
             let mut inner = self.inner.lock().await;
@@ -212,8 +239,8 @@ impl BufferPool {
                    original_capacity, current_capacity);
         }
         
-        // Release the semaphore permit
-        self.buffer_limit.add_permits(1);
+        // Note: We no longer need to add a permit to the semaphore
+        // The OwnedSemaphorePermit will automatically release when dropped
     }
     
     /// Get current pool statistics
@@ -276,16 +303,17 @@ impl PooledBuffer {
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
-        // If buffer is still present, return it to the pool
+        // If buffer is None, it means the buffer has been detached
         if let Some(buffer) = self.buffer.take() {
-            // Use a blocking_task to return the buffer since we can't await in drop
+            // Use tokio's spawn_blocking to avoid blocking the current thread
             let pool = self.pool.clone();
             let original_capacity = self.original_capacity;
-            
-            tokio::task::spawn(async move {
+            tokio::spawn(async move {
                 pool.return_buffer(buffer, original_capacity).await;
             });
         }
+        
+        // No need to explicitly release the permit - it will be released when dropped
     }
 }
 
@@ -350,19 +378,20 @@ mod tests {
     
     #[tokio::test]
     async fn test_buffer_pool() {
+        // Create a pool with max 10 buffers
         let pool = BufferPool::new(1024, 5, 10);
         
-        // Get 5 buffers
+        // Get 5 initial buffers
         let mut buffers = Vec::new();
-        for _ in 0..5 {
+        for i in 0..5 {
             let buffer = pool.get_buffer().await;
             buffers.push(buffer);
         }
         
         // Check stats
         let stats = pool.stats().await;
-        assert_eq!(stats.allocated, 5);
-        assert_eq!(stats.available, 0);
+        assert_eq!(stats.allocated, 5, "Should have 5 buffers allocated");
+        assert_eq!(stats.available, 0, "Should have 0 buffers available");
         
         // Return buffers
         buffers.clear();
@@ -372,21 +401,64 @@ mod tests {
         
         // Check stats again
         let stats = pool.stats().await;
-        assert_eq!(stats.allocated, 5);
-        assert_eq!(stats.available, 5);
+        assert_eq!(stats.allocated, 5, "Should still have 5 buffers allocated");
+        assert_eq!(stats.available, 5, "Should have 5 buffers available now");
         
-        // Get 10 buffers (should work)
+        // Get all 10 buffers - should work
         let mut buffers = Vec::new();
-        for _ in 0..10 {
-            let buffer = pool.get_buffer().await;
+        for i in 0..10 {
+            let buffer = match pool.get_buffer().await {
+                buffer => {
+                    assert!(true, "Got buffer {} successfully", i);
+                    buffer
+                }
+            };
             buffers.push(buffer);
         }
         
-        // 11th buffer should block
-        let result = timeout(
+        // Verify we have all 10 buffers allocated
+        let stats = pool.stats().await;
+        assert_eq!(stats.allocated, 10, "Should have 10 buffers allocated total");
+        assert_eq!(stats.available, 0, "Should have 0 buffers available");
+        
+        // 11th buffer should fail with timeout
+        let result = tokio::time::timeout(
             Duration::from_millis(100),
             pool.get_buffer(),
         ).await;
-        assert!(result.is_err()); // Timeout expected
+        
+        // Check that it timed out
+        assert!(result.is_err(), "11th buffer allocation should timeout");
+        
+        // Release one buffer
+        if !buffers.is_empty() {
+            buffers.pop(); // Take one buffer out and drop it
+        }
+        
+        // Give time for async return
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        
+        // Should be able to get one buffer now
+        let buffer = tokio::time::timeout(
+            Duration::from_millis(100),
+            pool.get_buffer(),
+        ).await;
+        
+        assert!(buffer.is_ok(), "Should be able to get a buffer after releasing one");
+        
+        // But 11th buffer should still fail
+        buffers.push(buffer.unwrap());
+        
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            pool.get_buffer(),
+        ).await;
+        
+        assert!(result.is_err(), "11th buffer allocation should still timeout");
+        
+        // Final validation of pool state
+        let stats = pool.stats().await;
+        assert_eq!(stats.allocated, 10, "Should have 10 buffers allocated total");
+        assert_eq!(stats.max_buffers, 10, "Max buffers should be 10");
     }
 } 

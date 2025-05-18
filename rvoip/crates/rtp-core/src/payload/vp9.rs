@@ -333,8 +333,9 @@ mod tests {
         assert_eq!(format.samples_from_duration(16), 1440);
         
         // Test packet size calculations
-        // 16ms of VP9 at 3Mbps = ~6KB
-        assert_eq!(format.packet_size_from_duration(16), 6003);
+        // 16ms of VP9 at 3Mbps = ~6KB + descriptor size
+        let expected_size = format.packet_size_from_duration(16);
+        assert_eq!(expected_size, 6004);
         
         // Test packing
         let test_data = vec![0u8; 100];

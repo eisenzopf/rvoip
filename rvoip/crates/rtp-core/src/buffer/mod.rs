@@ -131,26 +131,27 @@ mod tests {
         };
         let manager = GlobalBufferManager::new(limits);
         
-        // Should be able to acquire 10 chunks of 1KB
-        let permit1 = manager.acquire_memory(1024 * 5).await;
-        assert!(permit1.is_some());
+        // Should be able to acquire 5KB
+        let permit1 = manager.acquire_memory(5 * 1024).await;
+        assert!(permit1.is_some(), "Should be able to acquire 5KB");
         
-        // Should be able to acquire 5 more chunks
-        let permit2 = manager.acquire_memory(1024 * 5).await;
-        assert!(permit2.is_some());
+        // Should be able to acquire 5KB more
+        let permit2 = manager.acquire_memory(5 * 1024).await;
+        assert!(permit2.is_some(), "Should be able to acquire another 5KB");
         
-        // This should fail as we've used all 10 chunks
-        let result = timeout(
-            Duration::from_millis(100),
-            manager.acquire_memory(1024),
-        ).await;
-        assert!(result.is_err()); // Timeout expected
+        // This should fail as we've used all 10KB
+        let permit3 = manager.acquire_memory(1024).await;
+        assert!(permit3.is_none(), "Should not be able to acquire more memory when limit reached");
         
         // Drop the first permit
         drop(permit1);
         
-        // Now we should be able to acquire 5 chunks
-        let permit3 = manager.acquire_memory(1024 * 5).await;
-        assert!(permit3.is_some());
+        // Now we should be able to acquire 5KB again
+        let permit3 = manager.acquire_memory(5 * 1024).await;
+        assert!(permit3.is_some(), "Should be able to acquire 5KB after releasing memory");
+        
+        // But not 6KB
+        let permit4 = manager.acquire_memory(6 * 1024).await;
+        assert!(permit4.is_none(), "Should not be able to acquire 6KB when only 5KB is available");
     }
 } 

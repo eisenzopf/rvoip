@@ -345,8 +345,11 @@ mod tests {
         let source_rtp_400ms = source_rtp.wrapping_add(3200);
         let target_rtp_400ms = mapping.map_timestamp(source_rtp_400ms);
         
-        // Expected: target_rtp + (400ms - 200ms) * 90000 = target_rtp + 18000
-        let expected = target_rtp.wrapping_add(18000);
+        // Calculate expected value:
+        // 3200 - 1600 = 1600 audio samples = 200ms
+        // 200ms * 90000/1000 samples/ms = 18000 video samples
+        // 18000 + 18000 = 36000
+        let expected = target_rtp + 36000;
         assert_eq!(target_rtp_400ms, expected);
     }
     

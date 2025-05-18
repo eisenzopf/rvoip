@@ -623,8 +623,8 @@ mod tests {
         // Test ID = 0 (invalid)
         assert!(two_byte.add_extension(0, vec![1, 2, 3]).is_err());
         
-        // Test data too long
-        let very_long_data: Vec<u8> = (0..300).collect(); // 300 bytes > 255
+        // Test data too long - create a vector that's longer than 255 bytes
+        let very_long_data = vec![0; 256]; // Just over 255 bytes
         assert!(two_byte.add_extension(1, very_long_data).is_err());
         
         // Test valid extensions

@@ -238,11 +238,19 @@ mod tests {
         // Create header with extension
         let mut header = RtpHeader::new(96, 1000, 0x12345678, 0xabcdef01);
         header.extension = true;
-        header.extension_id = Some(0x1234);
-        header.extension_data = Some(Bytes::from_static(b"extension data"));
-        debug!("Original header with extension: ext={}, ext_id={:?}, ext_data_len={:?}", 
-              header.extension, header.extension_id, 
-              header.extension_data.as_ref().map(|d| d.len()));
+        
+        // Create extensions with legacy format (0x1234 profile ID)
+        let mut ext = RtpHeaderExtensions::new_legacy(0x1234);
+        // Add a single extension element with the extension data
+        ext.elements.push(ExtensionElement {
+            id: 1, // Any ID for legacy format
+            data: Bytes::from_static(b"extension data"),
+        });
+        header.extensions = Some(ext);
+        
+        debug!("Original header with extension: ext={}, format={:?}, data_len={:?}", 
+              header.extension, header.extensions.as_ref().map(|e| e.format), 
+              header.extensions.as_ref().map(|e| e.elements.iter().map(|el| el.data.len()).sum::<usize>()));
         
         // Serialize the header
         let mut buf = bytes::BytesMut::with_capacity(40);
@@ -276,15 +284,17 @@ mod tests {
         
         // Verify fields
         assert_eq!(parsed_header.extension, true);
-        assert_eq!(parsed_header.extension_id, Some(0x1234));
-        assert!(parsed_header.extension_data.is_some());
+        assert!(parsed_header.extensions.is_some());
         
-        // Get the parsed extension data and the original data
-        let parsed_data = parsed_header.extension_data.unwrap();
+        let parsed_extensions = parsed_header.extensions.unwrap();
+        assert_eq!(parsed_extensions.profile_id, 0x1234);
+        assert!(!parsed_extensions.elements.is_empty());
+        
+        // Get the parsed extension data
+        let parsed_data = &parsed_extensions.elements[0].data;
         let original_data = b"extension data";
         
-        // Verify that the parsed data starts with the original data
-        // (may contain padding bytes at the end)
+        // Verify that the parsed data contains the original data
         assert!(parsed_data.starts_with(original_data), 
                 "Extension data doesn't match. Expected to start with: {:?}, got: {:?}", 
                 original_data, parsed_data);
@@ -340,5 +350,105 @@ mod tests {
         // The payload should be "Test"
         assert_eq!(parsed.payload.len(), 4);
         assert_eq!(parsed.payload.as_ref(), &b"Test"[..]);
+    }
+
+    #[test]
+    fn test_serialize_rtp_packet_with_extension() {
+        // Create a header with extension
+        let mut header = RtpHeader::new(96, 1000, 12345, 0xABCDEF01);
+        header.extension = true;
+        
+        // Create extensions with legacy format (0x1234 profile ID)
+        let mut ext = RtpHeaderExtensions::new_legacy(0x1234);
+        // Add a single extension element with the extension data
+        ext.elements.push(ExtensionElement {
+            id: 1, // Any ID for legacy format
+            data: Bytes::from_static(b"extension data"),
+        });
+        header.extensions = Some(ext);
+        
+        println!("Extension: {}, profile ID: {}, Data length: {}",
+              header.extension, 
+              header.extensions.as_ref().map(|e| e.profile_id).unwrap_or(0),
+              header.extensions.as_ref().map(|e| e.elements.iter().map(|el| el.data.len()).sum::<usize>()).unwrap_or(0));
+        
+        // Create packet
+        let payload = Bytes::from_static(b"test payload");
+        let packet = RtpPacket::new(header, payload);
+        
+        // Serialize
+        let bytes = packet.serialize().unwrap();
+        
+        // Should have extension flag set in header
+        assert_eq!(bytes[0] & 0x10, 0x10);
+        
+        // Extension header offset: 12 (fixed header) + 0 (no CSRCs)
+        let ext_header_offset = 12;
+        
+        // Extension header: defined ID (16 bits) + length in 32-bit words (16 bits)
+        let ext_id = ((bytes[ext_header_offset] as u16) << 8) | (bytes[ext_header_offset + 1] as u16);
+        let ext_len_words = ((bytes[ext_header_offset + 2] as u16) << 8) | (bytes[ext_header_offset + 3] as u16);
+        
+        assert_eq!(ext_id, 0x1234);
+        
+        // Length in 32-bit words, so multiply by 4 to get bytes
+        assert_eq!(ext_len_words * 4, 16); // 16 bytes (rounded up to multiple of 4)
+        
+        // Extension data starts after extension header
+        let ext_data_offset = ext_header_offset + 4;
+        let ext_data = &bytes[ext_data_offset..ext_data_offset + 14];
+        
+        // Check that the first bytes match our extension
+        let expected_data = b"extension data";
+        for i in 0..expected_data.len() {
+            assert_eq!(ext_data[i], expected_data[i]);
+        }
+    }
+    
+    #[test]
+    fn test_parse_rtp_packet_with_extension() {
+        // Create a header with extension
+        let mut header = RtpHeader::new(96, 1000, 12345, 0xABCDEF01);
+        header.extension = true;
+        
+        // Create extensions with legacy format (0x1234 profile ID)
+        let mut ext = RtpHeaderExtensions::new_legacy(0x1234);
+        // Add a single extension element with the extension data
+        ext.elements.push(ExtensionElement {
+            id: 1, // Any ID for legacy format
+            data: Bytes::from_static(b"extension data"),
+        });
+        header.extensions = Some(ext);
+        
+        // Create packet
+        let payload = Bytes::from_static(b"test payload");
+        let packet = RtpPacket::new(header, payload);
+        
+        // Serialize
+        let bytes = packet.serialize().unwrap();
+        
+        // Parse back
+        let parsed_packet = RtpPacket::parse(&bytes).unwrap();
+        let parsed_header = parsed_packet.header;
+        
+        // Check extension fields
+        assert_eq!(parsed_header.extension, true);
+        assert!(parsed_header.extensions.is_some());
+        
+        let parsed_extensions = parsed_header.extensions.unwrap();
+        assert_eq!(parsed_extensions.profile_id, 0x1234);
+        assert!(!parsed_extensions.elements.is_empty());
+        
+        // Get the parsed extension data
+        let parsed_data = &parsed_extensions.elements[0].data;
+        
+        // Compare the content, accounting for possible padding bytes
+        let original_data = b"extension data";
+        assert!(parsed_data.starts_with(original_data), 
+               "Extension data doesn't match original. Expected to start with: {:?}, got: {:?}", 
+               original_data, parsed_data);
+        
+        // Check that the payload is correctly parsed
+        assert_eq!(parsed_packet.payload.as_ref(), b"test payload" as &[u8]);
     }
 } 

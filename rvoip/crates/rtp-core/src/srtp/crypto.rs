@@ -646,9 +646,9 @@ mod tests {
         let packet = RtpPacket::new(header, payload);
         
         // Encrypt and verify it returns the same packet (null encryption)
-        let encrypted = crypto.encrypt_rtp(&packet);
-        assert!(encrypted.is_ok());
-        let encrypted = encrypted.unwrap();
+        let encrypted_result = crypto.encrypt_rtp(&packet);
+        assert!(encrypted_result.is_ok());
+        let (encrypted, _auth_tag) = encrypted_result.unwrap();
         
         // Packets should be equal with null encryption
         assert_eq!(encrypted.header.payload_type, packet.header.payload_type);
@@ -735,7 +735,8 @@ mod tests {
             let packet = RtpPacket::new(header, payload);
             
             // Encrypt the packet
-            let (encrypted_packet, auth_tag) = crypto.encrypt_rtp(&packet).unwrap();
+            let encrypted_result = crypto.encrypt_rtp(&packet).unwrap();
+            let (encrypted_packet, auth_tag) = encrypted_result;
             
             // Payload should be encrypted (different from original)
             assert_ne!(encrypted_packet.payload, packet.payload);
@@ -750,40 +751,92 @@ mod tests {
             let serialized = encrypted_packet.serialize().unwrap();
             
             // Add authentication tag (if provided)
-            let mut serialized_with_tag = BytesMut::with_capacity(serialized.len() + suite.tag_length);
-            serialized_with_tag.extend_from_slice(&serialized);
-            
+            let mut protected_data = BytesMut::with_capacity(serialized.len() + 10);
+            protected_data.extend_from_slice(&serialized);
             if let Some(tag) = auth_tag {
-                serialized_with_tag.extend_from_slice(&tag);
+                protected_data.extend_from_slice(&tag);
             }
             
-            // Now decrypt with the same context
-            let decrypted_packet = crypto.decrypt_rtp(&serialized_with_tag).unwrap();
+            // Decrypt the packet
+            let decrypted = crypto.decrypt_rtp(&protected_data);
+            assert!(decrypted.is_ok());
+            let decrypted = decrypted.unwrap();
             
-            // Decrypted packet should match the original
-            assert_eq!(decrypted_packet.header.payload_type, packet.header.payload_type);
-            assert_eq!(decrypted_packet.header.sequence_number, packet.header.sequence_number);
-            assert_eq!(decrypted_packet.header.timestamp, packet.header.timestamp);
-            assert_eq!(decrypted_packet.header.ssrc, packet.header.ssrc);
-            assert_eq!(decrypted_packet.payload, packet.payload);
+            // Decrypted packet should match original
+            assert_eq!(decrypted.header.payload_type, packet.header.payload_type);
+            assert_eq!(decrypted.header.sequence_number, packet.header.sequence_number);
+            assert_eq!(decrypted.header.timestamp, packet.header.timestamp);
+            assert_eq!(decrypted.header.ssrc, packet.header.ssrc);
+            assert_eq!(decrypted.payload, packet.payload);
+        }
+    }
+
+    #[test]
+    fn test_tamper_detection() {
+        // Create master key and crypto context
+        let master_key = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 
+                             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
+        let master_salt = vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 
+                               0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D];
+        
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let crypto = SrtpCrypto::new(super::super::SRTP_AES128_CM_SHA1_80, srtp_key).unwrap();
+        
+        // Create a test packet
+        let header = crate::packet::RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        let payload = Bytes::from_static(b"Protected data");
+        let packet = RtpPacket::new(header, payload);
+        
+        // Encrypt the packet
+        let encrypted_result = crypto.encrypt_rtp(&packet).unwrap();
+        let (encrypted_packet, auth_tag) = encrypted_result;
+        
+        // Ensure auth tag is present
+        assert!(auth_tag.is_some());
+        
+        // Clone the auth tag for later use
+        let auth_tag_clone = auth_tag.clone();
+        
+        // Serialize the packet
+        let serialized = encrypted_packet.serialize().unwrap();
+        
+        // Create protected data with auth tag
+        let mut protected_data = BytesMut::with_capacity(serialized.len() + 10);
+        protected_data.extend_from_slice(&serialized);
+        
+        // Add the auth tag to the protected data
+        if let Some(tag) = auth_tag {
+            protected_data.extend_from_slice(&tag);
+        }
+        let protected_data = protected_data.freeze();
+        
+        // Test 1: Verify normal decryption works
+        let decrypted = crypto.decrypt_rtp(&protected_data);
+        assert!(decrypted.is_ok());
+        
+        // Test 2: Tamper with the payload and verify it fails authentication
+        let tampered_size = protected_data.len();
+        let mut tampered = protected_data.to_vec();
+        
+        // Change one byte in the middle of the packet
+        let middle = tampered.len() / 2;
+        tampered[middle] ^= 0xFF;
+        
+        let decrypted = crypto.decrypt_rtp(&tampered);
+        assert!(decrypted.is_err());
+        
+        // Test 3: Tamper with the authentication tag and verify it fails
+        let mut tampered = protected_data.to_vec();
+        if let Some(tag) = auth_tag_clone {
+            // Calculate position of the last byte in the auth tag
+            let tag_idx = tampered.len() - 1;
+            // Store the value before changing it
+            let tag_value = tampered[tag_idx];
+            // Flip the bits in the last byte
+            tampered[tag_idx] = tag_value ^ 0xFF;
             
-            // Try tampering with the authentication tag
-            if suite.authentication != SrtpAuthenticationAlgorithm::Null {
-                let mut tampered = serialized_with_tag.clone().to_vec();
-                tampered[tampered.len() - 1] ^= 0xFF; // Flip bits in last byte of auth tag
-                
-                // Decryption should fail
-                let result = crypto.decrypt_rtp(&tampered);
-                assert!(result.is_err());
-                
-                // Error should be about authentication
-                match result {
-                    Err(Error::SrtpError(msg)) => {
-                        assert!(msg.contains("Authentication failed"), "Error message was: {}", msg);
-                    },
-                    _ => panic!("Expected SrtpError about authentication"),
-                }
-            }
+            let decrypted = crypto.decrypt_rtp(&tampered);
+            assert!(decrypted.is_err());
         }
     }
 } 

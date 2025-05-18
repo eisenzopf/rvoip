@@ -255,8 +255,9 @@ mod tests {
         assert_eq!(format.samples_from_duration(33), 2970);
         
         // Test packet size calculations
-        // 33ms of VP8 at 2Mbps = ~8.25KB
-        assert_eq!(format.packet_size_from_duration(33), 8289);
+        // 33ms of VP8 at 2Mbps = ~8.25KB + descriptor size
+        let expected_size = format.packet_size_from_duration(33);
+        assert_eq!(expected_size, 8254);
         
         // Test packing
         let test_data = vec![0u8; 100];

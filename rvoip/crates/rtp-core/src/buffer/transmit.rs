@@ -361,35 +361,55 @@ impl TransmitBuffer {
         packet: RtpPacket, 
         priority: PacketPriority
     ) -> bool {
-        let now = Instant::now();
+        // Check if buffer has reached maximum capacity
+        let total_packets = self.total_queued_packets();
         
-        // Check if we have room in the queue
-        let total_queued = self.total_queued_packets();
-        
-        if total_queued >= self.config.max_packets {
-            // Buffer is full, try to drop low priority packets first
-            if !self.drop_low_priority_packets() {
-                // No low priority packets to drop
+        // Fast reject if at max capacity and priority isn't high enough to drop other packets
+        if total_packets >= self.config.max_packets {
+            // For normal or low priority packets, drop if we're at capacity
+            // High priority packets can try to make room by dropping lower priority ones
+            if priority != PacketPriority::High {
+                // Normal or low priority when buffer is full - drop immediately
+                trace!("Buffer full ({}/{}), dropping {:?} priority packet with seq={}",
+                      total_packets, self.config.max_packets,
+                      priority, packet.header.sequence_number);
                 self.stats.packets_dropped_overflow += 1;
                 return false;
+            } else {
+                // High priority packet - try to drop something to make room
+                if !self.drop_low_priority_packets() {
+                    // If there's nothing to drop, drop this packet too
+                    trace!("Buffer full, nowhere to make room for high priority packet");
+                    self.stats.packets_dropped_overflow += 1;
+                    return false;
+                }
             }
         }
         
-        // Add packet to appropriate queue
-        let queued_packet = QueuedPacket {
-            packet,
-            queue_time: now,
-            priority,
-            is_retransmission: false,
-            metadata: Some(PacketMetadata {
-                first_send_time: None,
-                transmit_count: 0,
-                acknowledged: false,
-                last_send_time: None,
-            }),
+        // At this point we have room (or made room) in the buffer
+        
+        // Create packet metadata for tracking
+        let metadata = PacketMetadata {
+            first_send_time: None,
+            transmit_count: 0,
+            acknowledged: false,
+            last_send_time: None,
         };
         
-        self.queues.get_mut(&priority).unwrap().push_back(queued_packet);
+        // Create queued packet entry
+        let queued = QueuedPacket {
+            packet,
+            queue_time: Instant::now(),
+            priority,
+            is_retransmission: false,
+            metadata: Some(metadata),
+        };
+        
+        // Get or create queue for this priority
+        let queue = self.queues.entry(priority).or_insert_with(|| VecDeque::new());
+        
+        // Add to queue
+        queue.push_back(queued);
         
         // Update stats
         self.stats.queued_packets = self.total_queued_packets();
@@ -438,63 +458,65 @@ impl TransmitBuffer {
         false
     }
     
-    /// Get the next packet to transmit
+    /// Get the next packet to send
     ///
-    /// This respects congestion control and prioritization.
+    /// This handles congestion control if enabled.
     pub async fn get_next_packet(&mut self) -> Option<RtpPacket> {
-        // If we have no packets queued, return None
+        // Nothing to send
         if self.total_queued_packets() == 0 {
             return None;
         }
         
-        // Check if we can send (congestion control)
-        if self.config.congestion_control_enabled {
-            // Wait for a permit from the congestion window
-            let permit = match self.cwnd_semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    error!("Failed to acquire congestion window permit");
-                    return None;
-                }
-            };
-            
-            // Try to get a packet to send
-            let packet_option = self.dequeue_highest_priority_packet();
-            
-            if packet_option.is_none() {
-                // No packet available, release the permit
-                drop(permit);
+        // If congestion control is not enabled, bypass window checks
+        if !self.config.congestion_control_enabled {
+            return self.get_packet_without_congestion_control().await;
+        }
+        
+        // Skip this check if we have no packets in flight yet
+        if self.congestion.in_flight > 0 {
+            // Check if window is already full
+            if self.congestion.in_flight >= self.congestion.cwnd {
+                trace!("Congestion window full ({}/{}), not sending new packets", 
+                      self.congestion.in_flight, self.congestion.cwnd);
                 return None;
             }
-            
-            // Update congestion state
+        }
+        
+        // Try to acquire a congestion window permit
+        match self.cwnd_semaphore.try_acquire() {
+            Ok(permit) => {
+                // Permit acquired, we can send
+                drop(permit);
+            }
+            Err(_) => {
+                // No permits available, congestion window is full
+                trace!("No congestion permits available, not sending");
+                return None;
+            }
+        }
+        
+        // Apply pacing if needed
+        if self.pacing_interval_us > 0 {
+            self.apply_pacing().await;
+        }
+        
+        // Get highest priority packet
+        let packet_option = self.dequeue_highest_priority_packet();
+        
+        if let Some(packet) = &packet_option {
+            // Update in-flight count
             self.congestion.in_flight += 1;
             self.congestion.total_sent += 1;
             
             // Update stats
-            self.stats.packets_sent += 1;
             self.stats.in_flight = self.congestion.in_flight;
+            self.stats.packets_sent += 1;
             
-            // Do pacing if needed
-            self.apply_pacing().await;
-            
-            // Return the packet
-            packet_option
-        } else {
-            // No congestion control, just get the highest priority packet
-            let packet_option = self.dequeue_highest_priority_packet();
-            
-            if let Some(packet) = &packet_option {
-                // Update stats
-                self.stats.packets_sent += 1;
-                
-                // Update last send time
-                self.last_send_time = Some(Instant::now());
-            }
-            
-            // Return the packet
-            packet_option
+            // Update last send time
+            self.last_send_time = Some(Instant::now());
         }
+        
+        packet_option
     }
     
     /// Wait until either a packet is available or timeout occurs
@@ -756,26 +778,35 @@ impl TransmitBuffer {
     ///
     /// Returns true if packets were dropped, false otherwise.
     fn drop_low_priority_packets(&mut self) -> bool {
-        // Start with lowest priority queue
+        let mut dropped = false;
+        
+        // Try low priority first
         if let Some(queue) = self.queues.get_mut(&PacketPriority::Low) {
             if !queue.is_empty() {
                 queue.pop_front();
                 self.stats.packets_dropped_overflow += 1;
-                return true;
+                self.stats.queued_packets = self.total_queued_packets();
+                dropped = true;
+                trace!("Dropped low priority packet to make room");
+                return dropped;
             }
         }
         
-        // Try normal priority
+        // If we couldn't drop low priority, try normal priority
         if let Some(queue) = self.queues.get_mut(&PacketPriority::Normal) {
             if !queue.is_empty() {
                 queue.pop_front();
                 self.stats.packets_dropped_overflow += 1;
-                return true;
+                self.stats.queued_packets = self.total_queued_packets();
+                dropped = true;
+                trace!("Dropped normal priority packet to make room");
+                return dropped;
             }
         }
         
         // Don't drop high priority or control packets
-        false
+        trace!("No low/normal priority packets available to drop");
+        dropped
     }
     
     /// Dequeue the highest priority packet
@@ -819,6 +850,24 @@ impl TransmitBuffer {
         }
         
         None
+    }
+    
+    /// Get a packet without congestion control
+    ///
+    /// This is used when congestion control is disabled.
+    async fn get_packet_without_congestion_control(&mut self) -> Option<RtpPacket> {
+        // Get highest priority packet
+        let packet_option = self.dequeue_highest_priority_packet();
+        
+        if packet_option.is_some() {
+            // Update stats
+            self.stats.packets_sent += 1;
+            
+            // Update last send time
+            self.last_send_time = Some(Instant::now());
+        }
+        
+        packet_option
     }
     
     /// Purge expired packets from the queue
@@ -915,45 +964,55 @@ mod tests {
         
         let mut buffer = TransmitBuffer::new(0x12345678, config);
         
-        // Queue up to capacity
+        // Queue up to capacity with normal priority
         assert!(buffer.queue_packet(
             create_test_packet(1, 0, 0x12345678),
             PacketPriority::Normal
-        ).await);
+        ).await, "First packet should be queued");
         
         assert!(buffer.queue_packet(
             create_test_packet(2, 160, 0x12345678),
             PacketPriority::Normal
-        ).await);
+        ).await, "Second packet should be queued");
         
-        // This should fail due to capacity
+        // Verify buffer state
+        let stats = buffer.get_stats();
+        assert_eq!(stats.queued_packets, 2, "Buffer should have 2 packets");
+        
+        // Third normal priority packet should be rejected as we're at capacity
         assert!(!buffer.queue_packet(
             create_test_packet(3, 320, 0x12345678),
             PacketPriority::Normal
-        ).await);
+        ).await, "Third normal packet should be rejected");
         
-        // But if we try with a higher priority, it should drop one of the normal ones
+        // High priority packet should be accepted by dropping a normal one
         assert!(buffer.queue_packet(
             create_test_packet(3, 320, 0x12345678),
             PacketPriority::High
-        ).await);
+        ).await, "High priority packet should be accepted");
         
-        // We should now have packets 2 and 3
+        // Verify we still have max 2 packets
+        let stats = buffer.get_stats();
+        assert_eq!(stats.queued_packets, 2, "Buffer should still have 2 packets");
+        
+        // We should now have packets 2 and 3 (high priority)
         let p1 = buffer.get_next_packet().await;
         let p2 = buffer.get_next_packet().await;
+        let p3 = buffer.get_next_packet().await;
         
-        assert!(p1.is_some());
-        assert!(p2.is_some());
+        assert!(p1.is_some(), "First packet (high priority) should be available");
+        assert!(p2.is_some(), "Second packet should be available");
+        assert!(p3.is_none(), "Buffer should be empty after 2 packets");
         
         // High priority should be first
-        assert_eq!(p1.unwrap().header.sequence_number, 3);
-        assert_eq!(p2.unwrap().header.sequence_number, 2);
+        assert_eq!(p1.unwrap().header.sequence_number, 3, "First packet should be the high priority one");
+        assert_eq!(p2.unwrap().header.sequence_number, 2, "Second packet should be the remaining normal one");
     }
     
     #[tokio::test]
     async fn test_congestion_control() {
         let config = TransmitBufferConfig {
-            initial_cwnd: 2, // Small window for testing
+            initial_cwnd: 2,              // Small window for testing 
             congestion_control_enabled: true,
             ..Default::default()
         };
@@ -962,26 +1021,41 @@ mod tests {
         
         // Queue several packets
         for i in 1..=5 {
-            buffer.queue_packet(
+            assert!(buffer.queue_packet(
                 create_test_packet(i, (i as u32) * 160, 0x12345678),
                 PacketPriority::Normal
-            ).await;
+            ).await, "Packet {} should be queued", i);
         }
         
-        // Should only be able to get 2 packets due to congestion window
-        let p1 = buffer.get_next_packet().await;
-        let p2 = buffer.get_next_packet().await;
-        let p3 = buffer.get_next_packet().await;
+        // Verify all 5 packets are queued
+        let stats = buffer.get_stats();
+        assert_eq!(stats.queued_packets, 5, "Buffer should have 5 queued packets");
         
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-        assert!(p3.is_none()); // Should be blocked by congestion window
+        // But congestion window should only allow sending 2
+        let p1 = buffer.get_next_packet().await;
+        assert!(p1.is_some(), "First packet should be available");
+        
+        let p2 = buffer.get_next_packet().await;
+        assert!(p2.is_some(), "Second packet should be available");
+        
+        // Verify in-flight count
+        let stats = buffer.get_stats();
+        assert_eq!(stats.in_flight, 2, "Should have 2 packets in flight");
+        
+        // Third packet should be blocked by congestion window
+        let p3 = buffer.get_next_packet().await;
+        assert!(p3.is_none(), "Third packet should be blocked by congestion window");
         
         // Acknowledge one packet to open a window slot
         buffer.acknowledge_packet(1);
         
+        // Verify in-flight count decreased
+        let stats = buffer.get_stats();
+        assert_eq!(stats.in_flight, 1, "Should have 1 packet in flight after ACK");
+        
         // Now we should be able to get another packet
         let p3 = buffer.get_next_packet().await;
-        assert!(p3.is_some());
+        assert!(p3.is_some(), "Third packet should be available after ACK");
+        assert_eq!(p3.unwrap().header.sequence_number, 3, "Third packet should have seq=3");
     }
 } 

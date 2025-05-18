@@ -179,8 +179,8 @@ mod tests {
             ssrc: 0x12345678,
             ntp_timestamp: NtpTimestamp { seconds: 0, fraction: 0 },
             rtp_timestamp: 0,
-            packet_count: 0,
-            octet_count: 0,
+            sender_packet_count: 0,
+            sender_octet_count: 0,
             report_blocks: Vec::new(),
         };
         
@@ -218,8 +218,8 @@ mod tests {
             ssrc: 0x12345678,
             ntp_timestamp: NtpTimestamp { seconds: 1234, fraction: 5678 },
             rtp_timestamp: 0x87654321,
-            packet_count: 100,
-            octet_count: 12345,
+            sender_packet_count: 100,
+            sender_octet_count: 12345,
             report_blocks: Vec::new(),
         };
         

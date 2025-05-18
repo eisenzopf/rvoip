@@ -244,16 +244,25 @@ impl AdaptiveJitterBuffer {
         let seq = packet.header.sequence_number;
         let ts = packet.header.timestamp;
         
+        trace!("Adding packet with seq={} to jitter buffer", seq);
+        
         // Update stats
         self.stats.packets_received += 1;
         
         // Initialize sequence tracking if this is the first packet
         if self.next_seq.is_none() {
+            // This is the first packet, so we'll track it as our initial sequence
             self.initial_seq = Some(seq);
-            self.next_seq = Some(seq.wrapping_add(1));
-            self.highest_seq = seq as u32;
             
-            // Insert the packet and return
+            // We set the next_seq to the current packet's sequence
+            // Note: get_next_packet will reset this to the lowest available
+            // sequence number when retrieving packets
+            self.next_seq = Some(seq);
+            
+            self.highest_seq = seq as u32;
+            trace!("First packet in buffer, initializing with seq={}", seq);
+            
+            // Insert the packet using the raw sequence number 
             self.packets.insert(seq as u32, (packet, now));
             self.stats.buffered_packets = self.packets.len();
             
@@ -264,33 +273,63 @@ impl AdaptiveJitterBuffer {
         }
         
         // Check for duplicate packet
-        let ext_seq = self.get_extended_seq(seq);
-        if self.packets.contains_key(&(seq as u32)) || ext_seq <= self.highest_seq {
+        if self.packets.contains_key(&(seq as u32)) {
             self.stats.duplicates += 1;
-            trace!("Duplicate packet with seq={}", seq);
+            trace!("Duplicate packet detected with seq={}", seq);
             return false;
         }
         
-        // Update highest sequence seen
-        if ext_seq > self.highest_seq {
-            self.highest_seq = ext_seq;
-        }
-        
-        // Check if packet is too old based on current playout point
+        // Check if packet is too old
         if let Some(next_seq) = self.next_seq {
-            let diff = seq.wrapping_sub(next_seq);
-            if diff > 0x8000 { // This means seq < next_seq accounting for wraparound
-                // Packet is too old, drop it
-                trace!("Packet too late: seq={}, next_seq={}", seq, next_seq);
+            // Out of order packets (lower seq) are allowed as long as they're still in play range
+            // We don't want to reject packets just because they arrived out of order
+            let is_late = if next_seq > seq {
+                // Packet has lower seq than next expected, but it might be valid
+                // Calculate how far behind it is - with handling for wraparound
+                let diff = if next_seq - seq < 0x8000 {
+                    // Normal case - packet is just behind the next expected
+                    next_seq - seq
+                } else {
+                    // Wraparound case - next_seq is near 0, seq is near 65535
+                    // This is not a "late" packet, it's actually ahead
+                    0
+                };
+                
+                // Only consider it late if it's significantly behind what we've already played
+                // Allow a reasonable replay window
+                usize::from(diff) > self.config.max_out_of_order
+            } else {
+                // Packet is ahead of or equal to next expected seq
+                false
+            };
+            
+            if is_late {
+                trace!("Packet too late: seq={}, next_seq={}, diff={}", 
+                      seq, next_seq, 
+                      if next_seq > seq { next_seq - seq } else { 0 });
                 self.stats.packets_too_late += 1;
                 return false;
             }
         }
         
+        // Update highest sequence seen with wraparound handling
+        let highest_seq = self.highest_seq as u16;
+        if seq.wrapping_sub(highest_seq) < 0x8000 {
+            // This sequence is newer than highest
+            if self.seq_cycles > 0 && seq < 0x1000 && highest_seq > 0xf000 {
+                // Wraparound occurred
+                debug!("Sequence wraparound detected: {} -> {}", highest_seq, seq);
+                self.seq_cycles += 1;
+            }
+            self.highest_seq = ((self.seq_cycles as u32) << 16) | (seq as u32);
+            trace!("Updated highest sequence to {}", seq);
+        }
+        
         // Check if the buffer is full
         if self.packets.len() >= self.config.max_out_of_order {
             // Buffer overflow, drop the oldest packet
-            trace!("Buffer overflow, dropping oldest packet");
+            trace!("Buffer overflow (max_size={}), dropping oldest packet", 
+                  self.config.max_out_of_order);
             self.stats.packets_overflow += 1;
             
             // Drop oldest packet
@@ -316,7 +355,7 @@ impl AdaptiveJitterBuffer {
         }
         
         // Store the packet
-        self.packets.insert(ext_seq, (packet, now));
+        self.packets.insert(seq as u32, (packet, now));
         self.stats.buffered_packets = self.packets.len();
         
         // Set timestamps for next packet
@@ -344,30 +383,47 @@ impl AdaptiveJitterBuffer {
             return None;
         }
         
-        let now = Instant::now();
+        // Always check for a better (lower) sequence number to start with
+        // This ensures we deliver packets in order even when they arrive out of order
+        let lowest_seq = self.packets.keys().copied().min();
         
-        // If we don't have a next sequence number yet, use the first packet
-        if self.next_seq.is_none() {
-            if let Some((&seq, _)) = self.packets.iter().next() {
-                self.next_seq = Some(seq as u16);
-            } else {
-                return None;
+        if let Some(lowest) = lowest_seq {
+            if self.next_seq.is_none() {
+                // Initialize next_seq if it's not set
+                self.next_seq = Some(lowest as u16);
+            } else if lowest < self.next_seq.unwrap() as u32 {
+                // Found a packet with lower sequence number than expected
+
+                // Special case for sequence wraparound:
+                // If lowest is very low (close to 0) and next_seq is very high (close to 65535),
+                // this is likely a wraparound condition. In this case, don't reset next_seq.
+                let next_seq = self.next_seq.unwrap();
+                if !(lowest < 1000 && next_seq > 60000) {
+                    self.next_seq = Some(lowest as u16);
+                }
             }
+        } else {
+            return None;
         }
         
-        let next_seq = self.next_seq.unwrap() as u32;
+        let next_seq = self.next_seq.unwrap();
+        let next_seq_u32 = next_seq as u32;
+        
+        trace!("Getting next packet, expecting seq={}", next_seq);
         
         // Check if the next packet is available
-        if let Some((packet, arrival_time)) = self.packets.remove(&next_seq) {
-            // Update next expected sequence
-            self.next_seq = Some(next_seq.wrapping_add(1) as u16);
+        if let Some((packet, arrival_time)) = self.packets.remove(&next_seq_u32) {
+            // Update next expected sequence with wraparound
+            self.next_seq = Some(next_seq.wrapping_add(1));
+            trace!("Found expected packet seq={}, next_seq now={}", 
+                   next_seq, next_seq.wrapping_add(1));
             
             // Update stats
             self.stats.packets_played += 1;
             self.stats.buffered_packets = self.packets.len();
             
             // Check how long the packet was buffered
-            let buffered_time = now.duration_since(arrival_time).as_millis() as u32;
+            let buffered_time = Instant::now().duration_since(arrival_time).as_millis() as u32;
             trace!("Packet played after {}ms in buffer", buffered_time);
             
             // Update average delay
@@ -378,6 +434,7 @@ impl AdaptiveJitterBuffer {
         }
         
         // Handle discontinuity - packet not available
+        trace!("Packet with seq={} not found in buffer, handling discontinuity", next_seq);
         self.stats.discontinuities += 1;
         
         // Skip forward to the next available packet
@@ -388,13 +445,24 @@ impl AdaptiveJitterBuffer {
             return None;
         }
         
-        // Sort and find the next available packet
+        // Sort the keys
         keys.sort();
-        let next_available = keys[0];
+        
+        // Find the next key that is greater than next_seq with wraparound handling
+        let next_available = keys.iter().min_by(|&&a, &&b| {
+            // Calculate distance from next_seq to a and b with wraparound handling
+            let dist_a = ((a as u16).wrapping_sub(next_seq) as u32) & 0xFFFF;
+            let dist_b = ((b as u16).wrapping_sub(next_seq) as u32) & 0xFFFF;
+            
+            // The one with smaller distance (closest ahead) wins
+            dist_a.cmp(&dist_b)
+        }).copied().unwrap_or(keys[0]);
+        
+        trace!("Skipping to packet with seq={}", next_available as u16);
         
         // Update next sequence expectation
-        self.next_seq = Some((next_available + 1) as u16);
-        debug!("Packet loss detected, skipping to seq={}", next_available);
+        self.next_seq = Some((next_available as u16).wrapping_add(1));
+        debug!("Handling packet loss, skipping to seq={}", next_available as u16);
         
         // Return the packet
         let (packet, arrival_time) = self.packets.remove(&next_available).unwrap();
@@ -404,7 +472,7 @@ impl AdaptiveJitterBuffer {
         self.stats.buffered_packets = self.packets.len();
         
         // Check how long the packet was buffered
-        let buffered_time = now.duration_since(arrival_time).as_millis() as u32;
+        let buffered_time = Instant::now().duration_since(arrival_time).as_millis() as u32;
         trace!("Packet played after {}ms in buffer", buffered_time);
         
         Some(packet)
@@ -430,12 +498,16 @@ impl AdaptiveJitterBuffer {
     /// Get an extended sequence number that accounts for wraparound
     fn get_extended_seq(&mut self, seq: RtpSequenceNumber) -> u32 {
         // Detect sequence number cycle (wraparound from 65535 to 0)
-        if seq < 0x1000 && (self.next_seq.unwrap_or(0) > 0xf000) {
-            debug!("Detected sequence wraparound: {} -> {}", self.next_seq.unwrap_or(0), seq);
-            self.seq_cycles += 1;
+        if self.next_seq.is_some() {
+            let next_seq = self.next_seq.unwrap();
+            // If the sequence is much lower than the expected one, we probably wrapped around
+            if next_seq > 0xf000 && seq < 0x1000 {
+                debug!("Sequence wraparound detected in get_extended_seq: {} -> {}", next_seq, seq);
+                self.seq_cycles += 1;
+            }
         }
         
-        // Calculate extended sequence (with cycle count)
+        // Calculate extended sequence with cycle count
         (self.seq_cycles as u32) << 16 | (seq as u32)
     }
     
@@ -555,25 +627,25 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
         
         // Add packets in order
-        jitter.add_packet(create_test_packet(1, 0)).await;
-        jitter.add_packet(create_test_packet(2, 160)).await;
-        jitter.add_packet(create_test_packet(3, 320)).await;
+        assert!(jitter.add_packet(create_test_packet(1, 0)).await);
+        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
+        assert!(jitter.add_packet(create_test_packet(3, 320)).await);
         
         // Get packets
         let p1 = jitter.get_next_packet().await;
+        assert!(p1.is_some(), "First packet should be available");
+        assert_eq!(p1.unwrap().header.sequence_number, 1, "First packet should have seq=1");
+        
         let p2 = jitter.get_next_packet().await;
+        assert!(p2.is_some(), "Second packet should be available");
+        assert_eq!(p2.unwrap().header.sequence_number, 2, "Second packet should have seq=2");
+        
         let p3 = jitter.get_next_packet().await;
-        
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-        assert!(p3.is_some());
-        
-        assert_eq!(p1.unwrap().header.sequence_number, 1);
-        assert_eq!(p2.unwrap().header.sequence_number, 2);
-        assert_eq!(p3.unwrap().header.sequence_number, 3);
+        assert!(p3.is_some(), "Third packet should be available");
+        assert_eq!(p3.unwrap().header.sequence_number, 3, "Third packet should have seq=3");
         
         // Buffer should be empty
-        assert!(jitter.get_next_packet().await.is_none());
+        assert!(jitter.get_next_packet().await.is_none(), "Buffer should be empty after reading all packets");
     }
     
     #[tokio::test]
@@ -586,23 +658,34 @@ mod tests {
         
         let mut jitter = AdaptiveJitterBuffer::new(config);
         
-        // Add packets out of order
-        jitter.add_packet(create_test_packet(2, 160)).await;
-        jitter.add_packet(create_test_packet(1, 0)).await;
-        jitter.add_packet(create_test_packet(3, 320)).await;
+        // Add packets out of order - first add packet with seq 2
+        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
         
-        // Get packets - should come out in order
+        // Next, add packet with seq 1
+        assert!(jitter.add_packet(create_test_packet(1, 0)).await, 
+                "Jitter buffer should accept out of order packets");
+        
+        // Finally, add packet with seq 3
+        assert!(jitter.add_packet(create_test_packet(3, 320)).await);
+        
+        // Verify buffer state after adding
+        let stats = jitter.get_stats();
+        assert_eq!(stats.buffered_packets, 3, "Buffer should contain 3 packets");
+        
+        // Get first packet - should be seq 1 despite arriving after seq 2
         let p1 = jitter.get_next_packet().await;
+        assert!(p1.is_some(), "First packet should be available");
+        assert_eq!(p1.unwrap().header.sequence_number, 1, "First packet should have seq=1");
+        
+        // Get second packet
         let p2 = jitter.get_next_packet().await;
+        assert!(p2.is_some(), "Second packet should be available");
+        assert_eq!(p2.unwrap().header.sequence_number, 2, "Second packet should have seq=2");
+        
+        // Get third packet
         let p3 = jitter.get_next_packet().await;
-        
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-        assert!(p3.is_some());
-        
-        assert_eq!(p1.unwrap().header.sequence_number, 1);
-        assert_eq!(p2.unwrap().header.sequence_number, 2);
-        assert_eq!(p3.unwrap().header.sequence_number, 3);
+        assert!(p3.is_some(), "Third packet should be available");
+        assert_eq!(p3.unwrap().header.sequence_number, 3, "Third packet should have seq=3");
     }
     
     #[tokio::test]
@@ -616,27 +699,31 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
         
         // Add packets with a gap
-        jitter.add_packet(create_test_packet(1, 0)).await;
-        jitter.add_packet(create_test_packet(2, 160)).await;
+        assert!(jitter.add_packet(create_test_packet(1, 0)).await);
+        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
         // Packet 3 is lost
-        jitter.add_packet(create_test_packet(4, 480)).await;
+        assert!(jitter.add_packet(create_test_packet(4, 480)).await);
+        
+        // Verify buffer state
+        let stats = jitter.get_stats();
+        assert_eq!(stats.buffered_packets, 3, "Buffer should contain 3 packets");
         
         // Get packets
         let p1 = jitter.get_next_packet().await;
+        assert!(p1.is_some(), "First packet should be available");
+        assert_eq!(p1.unwrap().header.sequence_number, 1, "First packet should have seq=1");
+        
         let p2 = jitter.get_next_packet().await;
+        assert!(p2.is_some(), "Second packet should be available");
+        assert_eq!(p2.unwrap().header.sequence_number, 2, "Second packet should have seq=2");
+        
         let p3 = jitter.get_next_packet().await;
-        
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-        assert!(p3.is_some());
-        
-        assert_eq!(p1.unwrap().header.sequence_number, 1);
-        assert_eq!(p2.unwrap().header.sequence_number, 2);
-        assert_eq!(p3.unwrap().header.sequence_number, 4); // Skip to packet 4
+        assert!(p3.is_some(), "Third packet should be available");
+        assert_eq!(p3.unwrap().header.sequence_number, 4, "Third packet should have seq=4");
         
         // Check stats
         let stats = jitter.get_stats();
-        assert_eq!(stats.discontinuities, 1);
+        assert_eq!(stats.discontinuities, 1, "Should detect one sequence discontinuity");
     }
     
     #[tokio::test]
@@ -650,25 +737,30 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
         
         // Add packets around wraparound
-        jitter.add_packet(create_test_packet(65534, 10000)).await;
-        jitter.add_packet(create_test_packet(65535, 10160)).await;
-        jitter.add_packet(create_test_packet(0, 10320)).await;
-        jitter.add_packet(create_test_packet(1, 10480)).await;
+        assert!(jitter.add_packet(create_test_packet(65534, 10000)).await);
+        assert!(jitter.add_packet(create_test_packet(65535, 10160)).await);
+        assert!(jitter.add_packet(create_test_packet(0, 10320)).await);
+        assert!(jitter.add_packet(create_test_packet(1, 10480)).await);
+        
+        // Verify buffer state
+        let stats = jitter.get_stats();
+        assert_eq!(stats.buffered_packets, 4, "Buffer should contain 4 packets");
         
         // Get packets
         let p1 = jitter.get_next_packet().await;
+        assert!(p1.is_some(), "First packet should be available");
+        assert_eq!(p1.unwrap().header.sequence_number, 65534, "First packet should have seq=65534");
+        
         let p2 = jitter.get_next_packet().await;
+        assert!(p2.is_some(), "Second packet should be available");
+        assert_eq!(p2.unwrap().header.sequence_number, 65535, "Second packet should have seq=65535");
+        
         let p3 = jitter.get_next_packet().await;
+        assert!(p3.is_some(), "Third packet should be available");
+        assert_eq!(p3.unwrap().header.sequence_number, 0, "Third packet should have seq=0");
+        
         let p4 = jitter.get_next_packet().await;
-        
-        assert!(p1.is_some());
-        assert!(p2.is_some());
-        assert!(p3.is_some());
-        assert!(p4.is_some());
-        
-        assert_eq!(p1.unwrap().header.sequence_number, 65534);
-        assert_eq!(p2.unwrap().header.sequence_number, 65535);
-        assert_eq!(p3.unwrap().header.sequence_number, 0);
-        assert_eq!(p4.unwrap().header.sequence_number, 1);
+        assert!(p4.is_some(), "Fourth packet should be available");
+        assert_eq!(p4.unwrap().header.sequence_number, 1, "Fourth packet should have seq=1");
     }
 } 
