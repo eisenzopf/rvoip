@@ -189,7 +189,7 @@ rtp-core/
 - [x] Validate RFC 3611 (RTCP XR) implementation
 - [x] Verify RFC 3711 (SRTP) compliance
 - [x] Test RFC 8285 (RTP Header Extensions) support
-- [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
+- [x] Implemented RFC 5761 (Multiplexing RTP and RTCP) support
 
 ## Integration with Media Core
 
@@ -257,19 +257,47 @@ rtp-core/
   - [x] SRTP key derivation from DTLS handshake
   - [x] ECDHE key exchange using P-256 curve
   - [x] TLS PRF implementation for key derivation
+- [x] Implemented RFC 5761 (Multiplexing RTP and RTCP) support:
+  - [x] Added RTCP-MUX configuration option
+  - [x] Updated transport layer to handle multiplexed packets
+  - [x] Implemented correct packet type detection per the RFC
+  - [x] Created rtcp_mux.rs example demonstrating the functionality
+  - [x] Fixed RTCP serialization in UdpRtpTransport
+  - [x] Improved detection of RTCP packets in multiplexed streams
+  - [x] Added timeouts to prevent examples from hanging
 
-## Next Priorities
+## Next Priorities (Updated)
 
-- [ ] Integrate DTLS for SRTP key exchange
-- [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
+### CRITICAL for media-core integration
+- [ ] Implement media synchronization mechanisms
+  - [ ] Add NTP to media clock conversion utilities
+  - [ ] Create timestamp synchronization between streams
+  - [ ] Implement mechanisms to handle clock drift
+- [ ] Complete RTCP implementation
+  - [ ] Create RTCP BYE packet generation logic
+  - [ ] Improve RTCP feedback mechanism for bandwidth adaptation
+  - [ ] Implement RTCP Extended Reports (XR) reception and processing
 - [ ] Add cross-platform socket validation
-- [ ] Create RTCP BYE packet generation logic
+  - [ ] Implement tests for different OS behaviors 
+  - [ ] Add fallback mechanisms for platform-specific socket issues
+
+### Important for production use
+- [ ] Enhance DTLS for full WebRTC compliance
+  - [ ] Implement message fragmentation support for certificates
+  - [ ] Expand cipher suite support for WebRTC compatibility 
+  - [ ] Enhance certificate handling for proper identity verification
+- [ ] Improve SRTP integration with DTLS
+  - [ ] Expand SRTP protection profile support
+  - [ ] Create proper profile negotiation logic
+- [ ] Add IPv4/IPv6 dual-stack support
+  - [ ] Create address family detection and selection logic
+  - [ ] Implement fallback mechanisms for transport creation
+
+### Future improvements
 - [ ] Implement concealment metrics
 - [ ] Add event-based quality alerts
 - [ ] Create quality trend analysis
 - [ ] Implement port allocation strategy
-- [ ] Add IPv4/IPv6 dual-stack support
-- [ ] Create media synchronization mechanisms 
 
 ## DTLS Implementation Plan
 

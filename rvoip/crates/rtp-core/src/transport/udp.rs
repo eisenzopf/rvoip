@@ -22,6 +22,19 @@ use crate::DEFAULT_MAX_PACKET_SIZE;
 use super::{RtpTransport, RtpTransportConfig};
 
 /// UDP transport for RTP/RTCP
+///
+/// This implementation supports RTCP multiplexing as defined in RFC 5761,
+/// allowing RTP and RTCP packets to be sent and received on the same port.
+/// 
+/// When RTCP multiplexing is enabled (via the `rtcp_mux` field in `RtpTransportConfig`),
+/// both RTP and RTCP packets are sent and received on the RTP socket. The transport
+/// automatically distinguishes between RTP and RTCP packets based on the payload type:
+/// 
+/// * RTCP packets have payload types 200-204 (as defined in RFC 5761)
+/// * RTP packets use payload types 0-127
+/// 
+/// RTCP multiplexing is recommended for WebRTC and modern VoIP applications
+/// as it simplifies NAT traversal and reduces the number of ports required.
 pub struct UdpRtpTransport {
     /// RTP socket
     rtp_socket: Arc<UdpSocket>,
@@ -55,12 +68,17 @@ impl UdpRtpTransport {
         let rtp_socket = UdpSocket::bind(config.local_rtp_addr).await
             .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
             
-        // Create RTCP socket if configured
-        let rtcp_socket = if let Some(rtcp_addr) = config.local_rtcp_addr {
-            let socket = UdpSocket::bind(rtcp_addr).await
-                .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
-            Some(Arc::new(socket))
+        // Create RTCP socket if configured and not using RTCP-MUX
+        let rtcp_socket = if !config.rtcp_mux {
+            if let Some(rtcp_addr) = config.local_rtcp_addr {
+                let socket = UdpSocket::bind(rtcp_addr).await
+                    .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
+                Some(Arc::new(socket))
+            } else {
+                None
+            }
         } else {
+            // When using RTCP-MUX, we don't need a separate RTCP socket
             None
         };
         
@@ -118,12 +136,10 @@ impl UdpRtpTransport {
                             continue;
                         }
                         
-                        // Check if it's RTCP (common for RTP and RTCP to use the same socket)
-                        let version = (buffer[0] >> 6) & 0x03;
-                        let payload_type = buffer[1];  // Use the full byte, don't mask
-                        
-                        if version == 2 && payload_type >= 200 && payload_type <= 204 {
+                        // Check if it's RTCP according to RFC 5761
+                        if is_rtcp_packet(&buffer[..size]) {
                             // This is an RTCP packet
+                            debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
                             let rtcp_data = Bytes::copy_from_slice(&buffer[0..size]);
                             let event = RtpEvent::RtcpReceived {
                                 data: rtcp_data,
@@ -169,13 +185,7 @@ impl UdpRtpTransport {
                                     }
                                 }
                                 Err(e) => {
-                                    // This could be an RTCP packet
-                                    if buffer[1] >= 200 && buffer[1] <= 204 {
-                                        debug!("Received RTCP packet type {}", buffer[1]);
-                                        // TODO: Implement RTCP packet handling
-                                    } else {
-                                        warn!("Failed to parse RTP packet: {}", e);
-                                    }
+                                    warn!("Failed to parse RTP packet: {}", e);
                                 }
                             }
                         }
@@ -312,11 +322,15 @@ impl RtpTransport for UdpRtpTransport {
     }
     
     fn local_rtcp_addr(&self) -> Result<SocketAddr> {
-        if let Some(rtcp_socket) = &self.rtcp_socket {
+        if self.config.rtcp_mux {
+            // When RTCP-MUX is enabled, RTCP address is the same as RTP address
+            self.local_rtp_addr()
+        } else if let Some(rtcp_socket) = &self.rtcp_socket {
+            // If a separate RTCP socket exists, get its address
             rtcp_socket.local_addr()
                 .map_err(|e| Error::Transport(format!("Failed to get local RTCP address: {}", e)))
         } else {
-            // If no separate RTCP socket, use the RTP socket
+            // Fallback to RTP socket if no RTCP socket is available
             self.local_rtp_addr()
         }
     }
@@ -344,9 +358,11 @@ impl RtpTransport for UdpRtpTransport {
     }
     
     async fn send_rtcp(&self, packet: &RtcpPacket, dest: SocketAddr) -> Result<()> {
-        // This is a placeholder - we'd need to implement proper serialization first
-        // Let's return an error for now
-        Err(Error::Transport("RTCP serialization not implemented yet".to_string()))
+        // Serialize the packet
+        let data = packet.serialize()?;
+        
+        // Send the serialized bytes
+        self.send_rtcp_bytes(&data, dest).await
     }
     
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
@@ -356,10 +372,15 @@ impl RtpTransport for UdpRtpTransport {
             *remote_addr = Some(dest);
         }
         
-        // Use the RTCP socket if available, otherwise use the RTP socket
-        let socket = if let Some(rtcp_socket) = &self.rtcp_socket {
+        // Use the appropriate socket for sending RTCP
+        let socket = if self.config.rtcp_mux {
+            // If RTCP-MUX is enabled, use the RTP socket for RTCP packets
+            &self.rtp_socket
+        } else if let Some(rtcp_socket) = &self.rtcp_socket {
+            // If a separate RTCP socket exists, use it
             rtcp_socket
         } else {
+            // Fallback to RTP socket if no RTCP socket is available
             &self.rtp_socket
         };
         
@@ -393,6 +414,53 @@ impl RtpTransport for UdpRtpTransport {
     }
 }
 
+/// Determine if a packet is RTCP according to RFC 5761
+///
+/// RFC 5761 specifies that RTP/RTCP multiplexing uses the following rules to 
+/// distinguish RTCP from RTP packets:
+///
+/// 1. Packets with payload types in the range 64-95 could be either RTP or RTCP.
+/// 2. For these ambiguous payload types, a packet is RTCP if:
+///    - The payload type is in the range 64-95 AND
+///    - The value corresponds to a known RTCP packet type (SR=200, RR=201, SDES=202, BYE=203, APP=204)
+/// 3. All other packets in the range 64-95 are RTP.
+/// 4. All packets with payload types in the range 0-63 and 96-127 are RTP.
+///
+/// See RFC 5761 section 4 for more details.
+fn is_rtcp_packet(buffer: &[u8]) -> bool {
+    if buffer.len() < 2 {
+        return false;
+    }
+    
+    let first_byte = buffer[0];
+    let second_byte = buffer[1];
+    
+    let version = (first_byte >> 6) & 0x03;
+    // For RTP, payload type is in the lower 7 bits of the second byte
+    // For RTCP, packet type is the full second byte value
+    
+    // First check: If the payload type is between 200-204, it's definitely RTCP
+    if version == 2 && (second_byte >= 200 && second_byte <= 204) {
+        debug!("Identified RTCP packet: version={}, PT={}", version, second_byte);
+        return true;
+    }
+    
+    // Second check: For ambiguous range (64-95), we need to do additional checks
+    let rtp_payload_type = second_byte & 0x7F;  // Strip marker bit
+    if version == 2 && (rtp_payload_type >= 64 && rtp_payload_type <= 95) {
+        // Additional checks could be implemented here
+        // For example, checking packet structure specific to RTCP
+        
+        // For now, we'll conservatively treat this as RTP
+        debug!("Ambiguous packet in PT range 64-95: {}, treating as RTP", rtp_payload_type);
+        return false;
+    }
+    
+    // If neither condition is met, it's an RTP packet
+    debug!("Identified as RTP packet: version={}, PT={}", version, rtp_payload_type);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +473,7 @@ mod tests {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
             local_rtcp_addr: Some("127.0.0.1:0".parse().unwrap()),
             symmetric_rtp: true,
+            rtcp_mux: false, // Disable RTCP-MUX for this test
         };
         
         let transport = UdpRtpTransport::new(config).await;
@@ -417,6 +486,72 @@ mod tests {
         assert_ne!(rtp_addr.port(), 0);
         assert_ne!(rtcp_addr.port(), 0);
         assert_ne!(rtp_addr.port(), rtcp_addr.port());
+    }
+    
+    #[tokio::test]
+    async fn test_udp_transport_with_rtcp_mux() {
+        let config = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: Some("127.0.0.1:0".parse().unwrap()), // This should be ignored
+            symmetric_rtp: true,
+            rtcp_mux: true, // Enable RTCP-MUX
+        };
+        
+        let transport = UdpRtpTransport::new(config).await;
+        assert!(transport.is_ok());
+        
+        let transport = transport.unwrap();
+        let rtp_addr = transport.local_rtp_addr().unwrap();
+        let rtcp_addr = transport.local_rtcp_addr().unwrap();
+        
+        assert_ne!(rtp_addr.port(), 0);
+        // With RTCP-MUX, RTCP address should be the same as RTP
+        assert_eq!(rtp_addr.port(), rtcp_addr.port());
+        // No separate RTCP socket should be created
+        assert!(transport.rtcp_socket.is_none());
+    }
+    
+    #[tokio::test]
+    async fn test_rtcp_packet_detection() {
+        // Test RTCP detection with SR packet (PT=200)
+        let mut sr_packet = vec![0x80, 200, 0, 0]; // Version=2, PT=200 (SR)
+        sr_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(is_rtcp_packet(&sr_packet));
+        
+        // Test RTCP detection with RR packet (PT=201)
+        let mut rr_packet = vec![0x80, 201, 0, 0]; // Version=2, PT=201 (RR)
+        rr_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(is_rtcp_packet(&rr_packet));
+        
+        // Test RTCP detection with SDES packet (PT=202)
+        let mut sdes_packet = vec![0x80, 202, 0, 0]; // Version=2, PT=202 (SDES)
+        sdes_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(is_rtcp_packet(&sdes_packet));
+        
+        // Test RTCP detection with BYE packet (PT=203)
+        let mut bye_packet = vec![0x80, 203, 0, 0]; // Version=2, PT=203 (BYE)
+        bye_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(is_rtcp_packet(&bye_packet));
+        
+        // Test RTCP detection with APP packet (PT=204)
+        let mut app_packet = vec![0x80, 204, 0, 0]; // Version=2, PT=204 (APP)
+        app_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(is_rtcp_packet(&app_packet));
+        
+        // Test regular RTP packet (PT=0)
+        let mut rtp_packet = vec![0x80, 0, 0, 0]; // Version=2, PT=0 (PCMU)
+        rtp_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(!is_rtcp_packet(&rtp_packet));
+        
+        // Test regular RTP packet with marker bit (PT=0, M=1)
+        let mut rtp_packet_with_marker = vec![0x80, 0x80, 0, 0]; // Version=2, PT=0, M=1
+        rtp_packet_with_marker.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(!is_rtcp_packet(&rtp_packet_with_marker));
+        
+        // Test regular RTP packet (PT=96, common for dynamic codecs)
+        let mut rtp_dynamic_packet = vec![0x80, 96, 0, 0]; // Version=2, PT=96
+        rtp_dynamic_packet.extend_from_slice(&[0; 24]); // Add some dummy data
+        assert!(!is_rtcp_packet(&rtp_dynamic_packet));
     }
     
     #[tokio::test]

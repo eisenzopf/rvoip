@@ -209,6 +209,7 @@ impl RtpSession {
             local_rtp_addr: config.local_addr,
             local_rtcp_addr: None, // RTCP on same port for now
             symmetric_rtp: true,
+            rtcp_mux: true, // Enable RTCP multiplexing by default
         };
         
         // Create UDP transport

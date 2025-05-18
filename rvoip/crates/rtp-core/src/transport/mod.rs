@@ -63,6 +63,12 @@ pub struct RtpTransportConfig {
     
     /// Enable symmetric RTP
     pub symmetric_rtp: bool,
+    
+    /// Enable RTCP multiplexing (RFC 5761)
+    /// 
+    /// When enabled, RTCP packets will be sent and received on the same port as RTP packets.
+    /// This is recommended for WebRTC and modern VoIP applications.
+    pub rtcp_mux: bool,
 }
 
 impl Default for RtpTransportConfig {
@@ -71,6 +77,7 @@ impl Default for RtpTransportConfig {
             local_rtp_addr: "0.0.0.0:0".parse().unwrap(),
             local_rtcp_addr: None,
             symmetric_rtp: true,
+            rtcp_mux: true, // Enable by default as it's the modern approach
         }
     }
 }
