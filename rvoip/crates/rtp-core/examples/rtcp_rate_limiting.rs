@@ -8,209 +8,159 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tracing::{info, debug, warn, error};
-use bytes;
+use tracing::{info, debug, warn, error, Level};
+use tracing_subscriber::FmtSubscriber;
+use bytes::Bytes;
 
 use rvoip_rtp_core::{
     RtpSession, RtpSessionConfig, RtpSessionEvent,
 };
+use rvoip_rtp_core::session::RtpSessionSender;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .init();
+    // Initialize logging with more detailed output
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
     
-    info!("=== RTCP Rate Limiting Example ===");
-    info!("This example demonstrates how RTCP packet bandwidth is limited to 5% of session bandwidth");
-    
-    // Create two RTP sessions with different bandwidths
-    let addr1 = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let addr2 = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    
+    // Create session configs with different bandwidths
     // Session 1: Low bandwidth (64 kbps)
-    let session1_config = RtpSessionConfig {
-        local_addr: addr1,
-        remote_addr: None, // Will be set after session2 is created
-        ssrc: None, // Auto-generate SSRC
-        payload_type: 0,  // PCM μ-law
-        clock_rate: 8000, // 8 kHz
-        jitter_buffer_size: Some(50),
-        max_packet_age_ms: Some(200),
-        enable_jitter_buffer: true,
+    // Session 2: High bandwidth (1000 kbps)
+    let session1_bw = 64000;
+    let session2_bw = 1000000;
+    
+    info!("Creating two RTP sessions with different bandwidths:");
+    info!("Session 1: {} bits/second", session1_bw);
+    info!("Session 2: {} bits/second", session2_bw);
+    
+    // Calculate RTCP bandwidth (5% of session bandwidth)
+    let rtcp_bw1 = (session1_bw as f64 * 0.05) as u32;
+    let rtcp_bw2 = (session2_bw as f64 * 0.05) as u32;
+    
+    info!("Session 1 RTCP bandwidth: {} bits/second (5%)", rtcp_bw1);
+    info!("Session 2 RTCP bandwidth: {} bits/second (5%)", rtcp_bw2);
+    
+    // Create first session (low bandwidth)
+    let config1 = RtpSessionConfig {
+        local_addr: "127.0.0.1:0".parse()?,
+        remote_addr: Some("127.0.0.1:40002".parse()?), // We'll send to session 2
+        ssrc: Some(0x11111111),
+        payload_type: 96,
+        clock_rate: 8000,
+        enable_jitter_buffer: false,
+        ..Default::default()
     };
     
-    // Session 2: High bandwidth (1 Mbps)
-    let session2_config = RtpSessionConfig {
-        local_addr: addr2,
-        remote_addr: None, // Will be set after session1 is created
-        ssrc: None, // Auto-generate SSRC
-        payload_type: 0,  // PCM μ-law
-        clock_rate: 8000, // 8 kHz
-        jitter_buffer_size: Some(50),
-        max_packet_age_ms: Some(200),
-        enable_jitter_buffer: true,
+    let mut session1 = RtpSession::new(config1).await?;
+    session1.set_bandwidth(session1_bw);
+    
+    // Create second session (high bandwidth)
+    let config2 = RtpSessionConfig {
+        local_addr: "127.0.0.1:40002".parse()?,
+        remote_addr: Some(session1.local_addr()?),
+        ssrc: Some(0x22222222),
+        payload_type: 96,
+        clock_rate: 8000,
+        enable_jitter_buffer: false,
+        ..Default::default()
     };
     
-    // Create the sessions
-    let mut session1 = RtpSession::new(session1_config).await?;
-    let mut session2 = RtpSession::new(session2_config).await?;
+    let mut session2 = RtpSession::new(config2).await?;
+    session2.set_bandwidth(session2_bw);
     
-    // Get the local addresses
-    let session1_addr = session1.local_addr()?;
-    let session2_addr = session2.local_addr()?;
+    // Subscribe to session events to monitor RTCP packets
+    let mut events1 = session1.subscribe();
+    let mut events2 = session2.subscribe();
     
-    info!("Session 1 (low bandwidth) bound to {}", session1_addr);
-    info!("Session 2 (high bandwidth) bound to {}", session2_addr);
+    // Set up a task to monitor RTCP events from both sessions
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = events1.recv() => {
+                    if let Ok(event) = result {
+                        match event {
+                            RtpSessionEvent::RtcpSenderReport { ssrc, packet_count, octet_count, .. } => {
+                                info!("Session 1 sent RTCP SR: ssrc={:08x}, packets={}, bytes={}",
+                                      ssrc, packet_count, octet_count);
+                            }
+                            RtpSessionEvent::RtcpReceiverReport { ssrc, .. } => {
+                                info!("Session 1 sent RTCP RR: ssrc={:08x}", ssrc);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                result = events2.recv() => {
+                    if let Ok(event) = result {
+                        match event {
+                            RtpSessionEvent::RtcpSenderReport { ssrc, packet_count, octet_count, .. } => {
+                                info!("Session 2 sent RTCP SR: ssrc={:08x}, packets={}, bytes={}",
+                                      ssrc, packet_count, octet_count);
+                            }
+                            RtpSessionEvent::RtcpReceiverReport { ssrc, .. } => {
+                                info!("Session 2 sent RTCP RR: ssrc={:08x}", ssrc);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    });
     
-    // Set remote addresses - they'll communicate with each other
-    session1.set_remote_addr(session2_addr).await;
-    session2.set_remote_addr(session1_addr).await;
-    
-    // Set bandwidths
-    let low_bandwidth = 64000; // 64 kbps
-    let high_bandwidth = 1000000; // 1 Mbps
-    
-    session1.set_bandwidth(low_bandwidth);
-    session2.set_bandwidth(high_bandwidth);
-    
-    info!("Session 1 bandwidth: {} kbps", low_bandwidth / 1000);
-    info!("Session 2 bandwidth: {} kbps", high_bandwidth / 1000);
-    
-    // RTCP bandwidth is 5% of session bandwidth
-    let rtcp_bw1 = (low_bandwidth as f64 * 0.05) as u32;
-    let rtcp_bw2 = (high_bandwidth as f64 * 0.05) as u32;
-    
-    info!("Session 1 RTCP bandwidth: {} bps (5%)", rtcp_bw1);
-    info!("Session 2 RTCP bandwidth: {} bps (5%)", rtcp_bw2);
-    
-    // Generate some RTP traffic to trigger RTCP reports
+    // Create sender handles for RTP traffic generation
     let session1_sender = session1.create_sender_handle();
     let session2_sender = session2.create_sender_handle();
     
-    // Session 1 sending task
+    // Start sending RTP packets from Session 1 (low bandwidth)
     let s1_handle = tokio::spawn(async move {
-        info!("Starting RTP traffic generation for Session 1");
+        info!("Starting RTP traffic generation for Session 1 (low bandwidth)");
         
-        // Send a packet every 20ms to generate traffic
+        // Send a packet every 20ms for G.711 audio simulation (64 kbps)
         let mut interval = tokio::time::interval(Duration::from_millis(20));
+        let payload_size = 160; // G.711 has 8 bytes/ms -> 160 bytes for 20ms
         
-        for _ in 0..750 { // 750 * 20ms = 15 seconds
+        for i in 0..750 { // 750 * 20ms = 15 seconds
             interval.tick().await;
             
             // Generate dummy payload
-            let payload = bytes::Bytes::from(vec![0; 160]); // G.711 frame size
+            let payload = Bytes::from(vec![0u8; payload_size]);
             
-            // Send the packet
-            if let Err(e) = session1_sender.send_packet(0, payload, false).await {
-                error!("Failed to send RTP packet from Session 1: {}", e);
+            // Send packet
+            let timestamp = i * 160; // 8kHz = 8 samples/ms, 20ms = 160 samples
+            if let Err(e) = session1_sender.send_packet(timestamp, payload, false).await {
+                error!("Failed to send packet from session 1: {}", e);
             }
         }
     });
     
-    // Session 2 sending task
+    // Start sending RTP packets from Session 2 (high bandwidth)
     let s2_handle = tokio::spawn(async move {
-        info!("Starting RTP traffic generation for Session 2");
+        info!("Starting RTP traffic generation for Session 2 (high bandwidth)");
         
-        // Send a packet every 20ms to generate traffic
+        // Send a packet every 20ms for video simulation (1 Mbps)
         let mut interval = tokio::time::interval(Duration::from_millis(20));
+        let payload_size = 2500; // ~1 Mbps at 50 packets/second
         
-        for _ in 0..750 { // 750 * 20ms = 15 seconds
+        for i in 0..750 { // 750 * 20ms = 15 seconds
             interval.tick().await;
             
             // Generate dummy payload
-            let payload = bytes::Bytes::from(vec![0; 160]); // G.711 frame size
+            let payload = Bytes::from(vec![0u8; payload_size]);
             
-            // Send the packet
-            if let Err(e) = session2_sender.send_packet(0, payload, false).await {
-                error!("Failed to send RTP packet from Session 2: {}", e);
+            // Send packet
+            let timestamp = i * 90; // 90kHz = 90 samples/ms, 20ms = 1800 samples
+            if let Err(e) = session2_sender.send_packet(timestamp, payload, i % 30 == 0).await {
+                error!("Failed to send packet from session 2: {}", e);
             }
         }
     });
     
-    // Subscribe to events from both sessions to monitor RTCP packets
-    let session1_events = Arc::new(Mutex::new(session1.subscribe()));
-    let session2_events = Arc::new(Mutex::new(session2.subscribe()));
-    
-    // Session 1 event handler
-    let session1_events_clone = session1_events.clone();
-    let session1_handle = tokio::spawn(async move {
-        let mut rtcp_packet_times = Vec::new();
-        let mut last_time = std::time::Instant::now();
-        
-        info!("Monitoring RTCP traffic from Session 1 (low bandwidth)...");
-        
-        loop {
-            let event = {
-                let mut events = session1_events_clone.lock().await;
-                events.recv().await
-            };
-            
-            match event {
-                Ok(RtpSessionEvent::RtcpSenderReport { ssrc, .. }) => {
-                    let now = std::time::Instant::now();
-                    let interval = now.duration_since(last_time);
-                    rtcp_packet_times.push(interval);
-                    
-                    info!("Session 1 sent RTCP SR from SSRC={:08x}, interval: {:?}", ssrc, interval);
-                    
-                    last_time = now;
-                },
-                Ok(RtpSessionEvent::Error(e)) => {
-                    error!("Session 1 error: {}", e);
-                },
-                Err(e) => {
-                    warn!("Session 1 event channel error: {}", e);
-                    break;
-                },
-                // Ignore other events
-                _ => {}
-            }
-        }
-    });
-    
-    // Session 2 event handler
-    let session2_events_clone = session2_events.clone();
-    let session2_handle = tokio::spawn(async move {
-        let mut rtcp_packet_times = Vec::new();
-        let mut last_time = std::time::Instant::now();
-        
-        info!("Monitoring RTCP traffic from Session 2 (high bandwidth)...");
-        
-        loop {
-            let event = {
-                let mut events = session2_events_clone.lock().await;
-                events.recv().await
-            };
-            
-            match event {
-                Ok(RtpSessionEvent::RtcpSenderReport { ssrc, .. }) => {
-                    let now = std::time::Instant::now();
-                    let interval = now.duration_since(last_time);
-                    rtcp_packet_times.push(interval);
-                    
-                    info!("Session 2 sent RTCP SR from SSRC={:08x}, interval: {:?}", ssrc, interval);
-                    
-                    last_time = now;
-                },
-                Ok(RtpSessionEvent::Error(e)) => {
-                    error!("Session 2 error: {}", e);
-                },
-                Err(e) => {
-                    warn!("Session 2 event channel error: {}", e);
-                    break;
-                },
-                // Ignore other events
-                _ => {}
-            }
-        }
-    });
-    
-    // Wait for 15 seconds to observe multiple RTCP packets
-    info!("Running for 15 seconds to observe RTCP rate limiting...");
+    // Calculate expected RTCP intervals
     info!("Expected theoretical RTCP intervals:");
     
     // Calculate expected intervals (simplified approximation)
@@ -225,21 +175,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Session 2 (high bandwidth): ~{:.2} seconds", expected_interval2);
     info!("Note: Actual intervals include randomization (0.5 to 1.5 of calculated interval)");
     
+    // Wait for 15 seconds to observe multiple RTCP packets
+    info!("Running for 15 seconds to observe RTCP rate limiting...");
     sleep(Duration::from_secs(15)).await;
     
-    // Stop the sessions
-    info!("Shutting down sessions...");
-    session1.close().await?;
-    session2.close().await?;
+    // Wait for the sending tasks to complete
+    let _ = tokio::join!(s1_handle, s2_handle);
     
-    // Abort the event handlers
-    session1_handle.abort();
-    session2_handle.abort();
-    s1_handle.abort();
-    s2_handle.abort();
-    
-    info!("Example completed. Compare the RTCP intervals observed in the logs.");
-    info!("Session 1 (low bandwidth) should have much larger intervals than Session 2 (high bandwidth).");
+    info!("RTCP rate limiting demonstration completed");
     
     Ok(())
 } 

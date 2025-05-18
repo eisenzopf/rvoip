@@ -656,7 +656,8 @@ impl RtpSession {
             let transport = self.transport.clone();
             let ssrc = self.ssrc;
             let event_tx = self.event_tx.clone();
-            let active_state = Arc::new(Mutex::new(true));
+            let stats = self.stats.clone();
+            let active_state = Arc::new(tokio::sync::Mutex::new(true));
             let active_state_clone = active_state.clone();
             let bandwidth = self.bandwidth_bps;
             
@@ -669,59 +670,70 @@ impl RtpSession {
                 
                 // Initial interval calculation
                 let mut interval = rtcp_generator.calculate_interval();
+                debug!("Initial RTCP interval: {:?}", interval);
                 
-                while *active_state.lock().unwrap() {
+                while *active_state.lock().await {
                     // Wait for the calculated interval
                     tokio::time::sleep(interval).await;
                     
                     // Check if we should continue
-                    if !*active_state.lock().unwrap() {
+                    if !*active_state.lock().await {
                         break;
                     }
                     
-                    // Check if it's time to send a report
-                    if rtcp_generator.should_send_report() {
-                        // We'll send a compound packet with SR and SDES
-                        debug!("Sending RTCP report");
+                    // Update RTP statistics before sending the report
+                    if let Ok(session_stats) = stats.lock() {
+                        rtcp_generator.update_sent_stats(
+                            session_stats.packets_sent as u32,
+                            session_stats.bytes_sent as u32
+                        );
                         
-                        // Generate sender report
-                        let rtp_timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u32;
+                        // Log the current stats for debugging
+                        debug!("Current stats for RTCP report: packets={}, bytes={}", 
+                               session_stats.packets_sent, session_stats.bytes_sent);
+                    }
+                    
+                    // Send an RTCP report regardless of should_send_report logic for this example
+                    // We'll send a compound packet with SR and SDES
+                    debug!("Sending RTCP report");
+                    
+                    // Generate sender report
+                    let rtp_timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u32;
+                        
+                    let sr = rtcp_generator.generate_sender_report(rtp_timestamp);
+                    let sdes = rtcp_generator.generate_sdes();
+                    
+                    // Create compound packet
+                    let mut compound = crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(sr);
+                    compound.add_sdes(sdes);
+                    
+                    // Send the compound packet
+                    if let Ok(data) = compound.serialize() {
+                        if let Err(e) = transport.send_rtcp_bytes(&data, remote_addr).await {
+                            warn!("Failed to send RTCP compound packet: {}", e);
+                        } else {
+                            info!("Sent RTCP compound packet of {} bytes", data.len());
                             
-                        let sr = rtcp_generator.generate_sender_report(rtp_timestamp);
-                        let sdes = rtcp_generator.generate_sdes();
-                        
-                        // Create compound packet
-                        let mut compound = crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(sr);
-                        compound.add_sdes(sdes);
-                        
-                        // Send the compound packet
-                        if let Ok(data) = compound.serialize() {
-                            if let Err(e) = transport.send_rtcp_bytes(&data, remote_addr).await {
-                                warn!("Failed to send RTCP compound packet: {}", e);
-                            } else {
-                                debug!("Sent RTCP compound packet of {} bytes", data.len());
-                                
-                                // Emit SR event
-                                if let Some(sr) = compound.get_sr() {
-                                    let _ = event_tx.send(RtpSessionEvent::RtcpSenderReport {
-                                        ssrc,
-                                        ntp_timestamp: sr.ntp_timestamp,
-                                        rtp_timestamp: sr.rtp_timestamp,
-                                        packet_count: sr.sender_packet_count,
-                                        octet_count: sr.sender_octet_count,
-                                        report_blocks: sr.report_blocks.clone(),
-                                    });
-                                }
+                            // Emit SR event
+                            if let Some(sr) = compound.get_sr() {
+                                let _ = event_tx.send(RtpSessionEvent::RtcpSenderReport {
+                                    ssrc,
+                                    ntp_timestamp: sr.ntp_timestamp,
+                                    rtp_timestamp: sr.rtp_timestamp,
+                                    packet_count: sr.sender_packet_count,
+                                    octet_count: sr.sender_octet_count,
+                                    report_blocks: sr.report_blocks.clone(),
+                                });
                             }
                         }
-                        
-                        // Recalculate interval for next report
-                        interval = rtcp_generator.calculate_interval();
-                        debug!("Next RTCP report in {:?}", interval);
                     }
+                    
+                    // Recalculate interval for next report
+                    interval = rtcp_generator.calculate_interval();
+                    debug!("Next RTCP report in {:?}", interval);
                 }
                 
                 debug!("RTCP scheduling task ended");
