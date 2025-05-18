@@ -63,6 +63,12 @@ pub struct RtpStream {
     
     /// Sequence cycle count (for wraparound handling)
     seq_cycles: u16,
+    
+    /// RTCP SR timestamp (middle 32 bits of NTP timestamp)
+    last_sr_timestamp: Option<u32>,
+    
+    /// Time when the last SR was received
+    last_sr_time: Option<Instant>,
 }
 
 impl RtpStream {
@@ -87,6 +93,8 @@ impl RtpStream {
             max_jitter_size: 50, // Default size
             max_packet_age: Duration::from_millis(200), // Default 200ms
             seq_cycles: 0,
+            last_sr_timestamp: None,
+            last_sr_time: None,
         }
     }
     
@@ -280,8 +288,11 @@ impl RtpStream {
             bytes_received: self.bytes_received,
             packets_lost: self.packets_lost,
             duplicates: self.duplicates,
-            jitter_ms: self.get_jitter_ms(),
-            is_active: self.last_packet_time.elapsed() < Duration::from_secs(30),
+            last_packet_time: Some(self.last_packet_time),
+            jitter: self.jitter as u32,
+            first_seq: self.base_seq as u32,
+            highest_seq: self.highest_seq,
+            received: self.packets_received as u32,
         }
     }
     
@@ -306,6 +317,28 @@ impl RtpStream {
             debug!("Initialized RTP stream with seq={}", seq);
         }
     }
+    
+    /// Update the last SR information
+    pub fn update_last_sr_info(&mut self, sr_timestamp: u32, time: Instant) {
+        self.last_sr_timestamp = Some(sr_timestamp);
+        self.last_sr_time = Some(time);
+    }
+    
+    /// Get the last SR information
+    pub fn get_last_sr_info(&self) -> (Option<u32>, Option<Instant>) {
+        (self.last_sr_timestamp, self.last_sr_time)
+    }
+    
+    /// Calculate the delay since last SR in 1/65536 seconds units
+    pub fn calculate_delay_since_last_sr(&self) -> u32 {
+        if let (Some(timestamp), Some(time)) = (self.last_sr_timestamp, self.last_sr_time) {
+            // Calculate delay in seconds, then convert to 1/65536 seconds
+            let delay_secs = Instant::now().duration_since(time).as_secs_f64();
+            (delay_secs * 65536.0) as u32
+        } else {
+            0
+        }
+    }
 }
 
 /// Determines if sequence a is newer than sequence b, accounting for wraparound
@@ -319,29 +352,38 @@ fn is_sequence_newer(a: RtpSequenceNumber, b: RtpSequenceNumber) -> bool {
     }
 }
 
-/// Statistics for an RTP stream
-#[derive(Debug, Clone)]
+/// Stats for an RTP stream
+#[derive(Debug, Clone, Default)]
 pub struct RtpStreamStats {
     /// SSRC of the stream
     pub ssrc: RtpSsrc,
     
-    /// Total packets received
+    /// Number of packets received
     pub packets_received: u64,
     
-    /// Total bytes received
+    /// Number of bytes received
     pub bytes_received: u64,
     
-    /// Packets lost
+    /// Number of packets lost (based on sequence gaps)
     pub packets_lost: u64,
     
-    /// Duplicate packets
+    /// Number of duplicate packets
     pub duplicates: u64,
     
-    /// Jitter in milliseconds
-    pub jitter_ms: f64,
+    /// Last time a packet was received
+    pub last_packet_time: Option<Instant>,
     
-    /// Whether the stream is active (received packet recently)
-    pub is_active: bool,
+    /// Interarrival jitter (RFC 3550)
+    pub jitter: u32,
+    
+    /// First sequence number received
+    pub first_seq: u32,
+    
+    /// Highest sequence number received
+    pub highest_seq: u32,
+    
+    /// Number of packets actually received (may differ from packets_received due to jitter buffer)
+    pub received: u32,
 }
 
 #[cfg(test)]

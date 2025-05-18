@@ -38,6 +38,16 @@ impl NtpTimestamp {
         (self.seconds as u64) << 32 | (self.fraction as u64)
     }
     
+    /// Convert to a 32-bit representation for RTCP reports
+    /// 
+    /// Returns the middle 32 bits of the NTP timestamp, which is used in RTCP
+    /// report blocks (last_sr field) for RTT calculations.
+    /// This is defined in RFC 3550 Section 6.4.1.
+    pub fn to_u32(&self) -> u32 {
+        // Take the middle 16 bits of seconds and the most significant 16 bits of fraction
+        ((self.seconds & 0x0000FFFF) << 16) | ((self.fraction & 0xFFFF0000) >> 16)
+    }
+    
     /// Convert from a 64-bit representation
     pub fn from_u64(value: u64) -> Self {
         Self {

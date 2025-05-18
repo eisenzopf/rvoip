@@ -130,6 +130,36 @@ pub enum RtpSessionEvent {
         /// SSRC of the new stream
         ssrc: RtpSsrc,
     },
+    
+    /// RTCP Sender Report received
+    RtcpSenderReport {
+        /// SSRC of the sender
+        ssrc: RtpSsrc,
+        
+        /// NTP timestamp
+        ntp_timestamp: crate::packet::rtcp::NtpTimestamp,
+        
+        /// RTP timestamp
+        rtp_timestamp: RtpTimestamp,
+        
+        /// Packet count
+        packet_count: u32,
+        
+        /// Octet count
+        octet_count: u32,
+        
+        /// Report blocks
+        report_blocks: Vec<crate::packet::rtcp::RtcpReportBlock>,
+    },
+    
+    /// RTCP Receiver Report received
+    RtcpReceiverReport {
+        /// SSRC of the receiver
+        ssrc: RtpSsrc,
+        
+        /// Report blocks
+        report_blocks: Vec<crate::packet::rtcp::RtcpReportBlock>,
+    },
 }
 
 /// RTP session for sending and receiving RTP packets
@@ -502,10 +532,70 @@ impl RtpSession {
                                                 
                                                 info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
                                             }
-                                        }
+                                        },
+                                        crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
+                                            // Process sender report
+                                            let report_ssrc = sr.ssrc;
+                                            
+                                            debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
+                                            
+                                            // Update stream statistics if this stream exists
+                                            if let Ok(mut streams) = streams_map.lock() {
+                                                if let Some(stream) = streams.get_mut(&report_ssrc) {
+                                                    // Update the stream's RTCP SR info
+                                                    // This will be used for calculating round-trip time
+                                                    stream.update_last_sr_info(
+                                                        sr.ntp_timestamp.to_u32(),
+                                                        std::time::Instant::now(),
+                                                    );
+                                                    
+                                                    debug!("Updated RTCP SR info for stream SSRC={:08x}", report_ssrc);
+                                                }
+                                            }
+                                            
+                                            // Emit SR event for external processing
+                                            let _ = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport { 
+                                                ssrc: report_ssrc,
+                                                ntp_timestamp: sr.ntp_timestamp,
+                                                rtp_timestamp: sr.rtp_timestamp,
+                                                packet_count: sr.sender_packet_count,
+                                                octet_count: sr.sender_octet_count,
+                                                report_blocks: sr.report_blocks,
+                                            });
+                                        },
+                                        crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
+                                            // Process receiver report
+                                            let report_ssrc = rr.ssrc;
+                                            
+                                            debug!("Received RTCP RR from SSRC={:08x} with {} report blocks", 
+                                                  report_ssrc, rr.report_blocks.len());
+                                            
+                                            // If there's a report block about our SSRC, process it
+                                            for block in &rr.report_blocks {
+                                                if block.ssrc == ssrc {
+                                                    debug!("Processing report block about our SSRC={:08x}", ssrc);
+                                                    
+                                                    // Update session stats with packet loss info
+                                                    if let Ok(mut stats) = stats_recv.lock() {
+                                                        stats.packets_lost = block.cumulative_lost as u64;
+                                                        
+                                                        // Calculate packet loss percentage
+                                                        let fraction_lost = block.fraction_lost as f64 / 256.0;
+                                                        debug!("Packet loss: {}% (fraction={})", 
+                                                               fraction_lost * 100.0, block.fraction_lost);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Emit RR event for external processing
+                                            let _ = event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport { 
+                                                ssrc: report_ssrc,
+                                                report_blocks: rr.report_blocks,
+                                            });
+                                        },
                                         // Handle other RTCP packet types as needed
                                         _ => {
-                                            // For now, we're only handling BYE packets
+                                            // For now, we're just logging other packet types
                                             trace!("Received RTCP packet: {:?}", rtcp_packet);
                                         }
                                     }
@@ -533,7 +623,7 @@ impl RtpSession {
         self.send_task = Some(send_task);
         self.active = true;
         
-        info!("Started RTP session with SSRC={:08x}", self.ssrc);
+        info!("Started RTP session with SSRC={:08x}", ssrc);
         Ok(())
     }
     
@@ -783,5 +873,179 @@ impl RtpSession {
         });
         
         true
+    }
+    
+    /// Send an RTCP BYE packet to notify that we're leaving the session
+    /// 
+    /// This can be used to notify other participants that we're leaving the session
+    /// without closing the entire RtpSession. The BYE packet includes our SSRC and 
+    /// an optional reason string.
+    /// 
+    /// Returns an error if serialization fails or if there's no remote address configured.
+    pub async fn send_bye(&self, reason: Option<String>) -> Result<()> {
+        // Check if we have a remote address
+        let remote_addr = match self.config.remote_addr {
+            Some(addr) => addr,
+            None => return Err(Error::SessionError("No remote address configured".to_string())),
+        };
+        
+        // Create BYE packet
+        let bye = crate::packet::rtcp::RtcpGoodbye::new_with_reason(
+            self.ssrc,
+            reason.unwrap_or_else(|| "Session terminated".to_string()),
+        );
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::packet::rtcp::RtcpPacket::Goodbye(bye);
+        
+        // Serialize and send
+        match rtcp_packet.serialize() {
+            Ok(data) => {
+                // Send using transport
+                self.transport.send_rtcp_bytes(&data, remote_addr).await
+            }
+            Err(e) => {
+                Err(Error::SerializationError(format!("Failed to serialize RTCP BYE: {}", e)))
+            }
+        }
+    }
+    
+    /// Send an RTCP Sender Report (SR) packet
+    /// 
+    /// A Sender Report contains:
+    /// - Our SSRC
+    /// - Current NTP and RTP timestamps
+    /// - Packet and octet counts
+    /// - Optional report blocks with reception statistics about other sources
+    /// 
+    /// This method generates an SR based on the current session statistics, which is useful
+    /// for providing quality metrics to other participants.
+    /// 
+    /// Returns an error if serialization fails or if there's no remote address configured.
+    pub async fn send_sender_report(&self) -> Result<()> {
+        // Check if we have a remote address
+        let remote_addr = match self.config.remote_addr {
+            Some(addr) => addr,
+            None => return Err(Error::SessionError("No remote address configured".to_string())),
+        };
+        
+        // Get session stats
+        let session_stats = if let Ok(stats) = self.stats.lock() {
+            stats.clone()
+        } else {
+            RtpSessionStats::default()
+        };
+        
+        // Create a new SR packet
+        let mut sr = crate::packet::rtcp::RtcpSenderReport::new(self.ssrc);
+        
+        // Set current NTP timestamp
+        sr.ntp_timestamp = crate::packet::rtcp::NtpTimestamp::now();
+        
+        // Set current RTP timestamp (convert from NTP time)
+        sr.rtp_timestamp = self.get_timestamp();
+        
+        // Set packet and octet count from session stats
+        sr.sender_packet_count = session_stats.packets_sent as u32;
+        sr.sender_octet_count = session_stats.bytes_sent as u32;
+        
+        // Add report blocks for active streams (remote SSRCs we're receiving from)
+        if let Ok(streams) = self.streams.lock() {
+            // Add report blocks for up to 31 streams (max allowed by RTCP)
+            for (ssrc, stream) in streams.iter().take(31) {
+                let stream_stats = stream.get_stats();
+                
+                // Create a report block for this source
+                let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
+                
+                // Set statistics
+                let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
+                let (fraction_lost, cumulative_lost) = 
+                    block.calculate_packet_loss(expected_packets, stream_stats.received);
+                
+                block.fraction_lost = fraction_lost;
+                block.cumulative_lost = cumulative_lost as u32;
+                block.highest_seq = stream_stats.highest_seq;
+                block.jitter = stream_stats.jitter;
+                
+                // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
+                
+                // Add the block to the SR
+                sr.add_report_block(block);
+            }
+        }
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::packet::rtcp::RtcpPacket::SenderReport(sr);
+        
+        // Serialize and send
+        match rtcp_packet.serialize() {
+            Ok(data) => {
+                self.transport.send_rtcp_bytes(&data, remote_addr).await
+            }
+            Err(e) => {
+                Err(Error::SerializationError(format!("Failed to serialize RTCP SR: {}", e)))
+            }
+        }
+    }
+    
+    /// Send an RTCP Receiver Report (RR) packet
+    /// 
+    /// A Receiver Report contains:
+    /// - Our SSRC
+    /// - Report blocks with reception statistics about other sources
+    /// 
+    /// This method generates an RR based on the current stream statistics, which is useful
+    /// for providing quality metrics to other participants when we're receiving but not sending.
+    /// 
+    /// Returns an error if serialization fails or if there's no remote address configured.
+    pub async fn send_receiver_report(&self) -> Result<()> {
+        // Check if we have a remote address
+        let remote_addr = match self.config.remote_addr {
+            Some(addr) => addr,
+            None => return Err(Error::SessionError("No remote address configured".to_string())),
+        };
+        
+        // Create a new RR packet
+        let mut rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
+        
+        // Add report blocks for active streams (remote SSRCs we're receiving from)
+        if let Ok(streams) = self.streams.lock() {
+            // Add report blocks for up to 31 streams (max allowed by RTCP)
+            for (ssrc, stream) in streams.iter().take(31) {
+                let stream_stats = stream.get_stats();
+                
+                // Create a report block for this source
+                let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
+                
+                // Set statistics
+                let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
+                let (fraction_lost, cumulative_lost) = 
+                    block.calculate_packet_loss(expected_packets, stream_stats.received);
+                
+                block.fraction_lost = fraction_lost;
+                block.cumulative_lost = cumulative_lost as u32;
+                block.highest_seq = stream_stats.highest_seq;
+                block.jitter = stream_stats.jitter;
+                
+                // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
+                
+                // Add the block to the RR
+                rr.add_report_block(block);
+            }
+        }
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::packet::rtcp::RtcpPacket::ReceiverReport(rr);
+        
+        // Serialize and send
+        match rtcp_packet.serialize() {
+            Ok(data) => {
+                self.transport.send_rtcp_bytes(&data, remote_addr).await
+            }
+            Err(e) => {
+                Err(Error::SerializationError(format!("Failed to serialize RTCP RR: {}", e)))
+            }
+        }
     }
 } 
