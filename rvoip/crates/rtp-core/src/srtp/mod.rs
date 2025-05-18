@@ -87,47 +87,82 @@ pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 0,
 };
 
-/// SRTP Context for secure RTP transmission
+/// SRTP context for a session
 pub struct SrtpContext {
-    /// Crypto implementation
+    /// Whether encryption is enabled
+    enabled: bool,
+    
+    /// SRTP crypto context
     crypto: crypto::SrtpCrypto,
     
-    /// Replay protection
-    replay_protection: SrtpReplayProtection,
-    
-    /// Roll-over counter
-    roc: u32,
-    
     /// Key rotation frequency
-    key_rotation: KeyRotationFrequency,
+    key_rotation: key_derivation::KeyRotationFrequency,
     
-    /// Packet index
+    /// Current packet index (sequence number + rollover counter)
     packet_index: u64,
+}
+
+/// Protected RTP packet with authentication tag
+pub struct ProtectedRtpPacket {
+    /// The encrypted RTP packet
+    pub packet: crate::packet::RtpPacket,
+    
+    /// Authentication tag (if used)
+    pub auth_tag: Option<Vec<u8>>,
+}
+
+impl ProtectedRtpPacket {
+    /// Serialize the protected packet with its authentication tag
+    pub fn serialize(&self) -> Result<bytes::Bytes, crate::Error> {
+        let packet_bytes = self.packet.serialize()?;
+        
+        if let Some(tag) = &self.auth_tag {
+            // Combine packet and authentication tag
+            let mut buffer = bytes::BytesMut::with_capacity(packet_bytes.len() + tag.len());
+            buffer.extend_from_slice(&packet_bytes);
+            buffer.extend_from_slice(tag);
+            Ok(buffer.freeze())
+        } else {
+            // No authentication tag
+            Ok(packet_bytes)
+        }
+    }
 }
 
 impl SrtpContext {
     /// Create a new SRTP context
-    pub fn new(
-        suite: SrtpCryptoSuite,
-        master_key: SrtpCryptoKey,
-        window_size: u64,
-    ) -> Result<Self, crate::Error> {
+    pub fn new(suite: SrtpCryptoSuite, key: crypto::SrtpCryptoKey) -> Result<Self, crate::Error> {
+        let crypto = crypto::SrtpCrypto::new(suite, key)?;
+        
         Ok(Self {
-            crypto: crypto::SrtpCrypto::new(suite, master_key)?,
-            replay_protection: SrtpReplayProtection::new(window_size),
-            roc: 0,
-            key_rotation: KeyRotationFrequency::None,
+            enabled: true,
+            crypto,
+            key_rotation: key_derivation::KeyRotationFrequency::None,
             packet_index: 0,
         })
     }
     
-    /// Set the key rotation frequency
-    pub fn set_key_rotation(&mut self, frequency: KeyRotationFrequency) {
+    /// Enable or disable SRTP
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+    
+    /// Set key rotation frequency
+    pub fn set_key_rotation(&mut self, frequency: key_derivation::KeyRotationFrequency) {
         self.key_rotation = frequency;
     }
     
-    /// Encrypt an RTP packet
-    pub fn protect(&mut self, packet: &crate::packet::RtpPacket) -> Result<crate::packet::RtpPacket, crate::Error> {
+    /// Protect an RTP packet (SRTP encryption)
+    /// Returns the encrypted packet with its authentication tag
+    pub fn protect(&mut self, packet: &crate::packet::RtpPacket) -> Result<ProtectedRtpPacket, crate::Error> {
+        // Check if SRTP is enabled
+        if !self.enabled {
+            return Ok(ProtectedRtpPacket {
+                packet: packet.clone(),
+                auth_tag: None,
+            });
+        }
+        
         // Check for key rotation
         if self.key_rotation.should_rotate(self.packet_index) {
             // In a real implementation, we would rotate keys here
@@ -136,20 +171,60 @@ impl SrtpContext {
         // Increment packet index
         self.packet_index += 1;
         
-        // Encrypt
-        self.crypto.encrypt_rtp(packet)
+        // Encrypt the packet using SRTP
+        let (encrypted, auth_tag) = self.crypto.encrypt_rtp(packet)?;
+        
+        // Return the encrypted packet with its authentication tag
+        Ok(ProtectedRtpPacket {
+            packet: encrypted,
+            auth_tag,
+        })
     }
     
-    /// Decrypt and verify an SRTP packet
+    /// Unprotect an RTP packet (SRTP decryption)
+    /// The input data should include the authentication tag if used
     pub fn unprotect(&mut self, data: &[u8]) -> Result<crate::packet::RtpPacket, crate::Error> {
-        // Check replay protection
-        let seq = 0; // In a real implementation, we would extract the sequence number
-        if !self.replay_protection.check(seq as u64)? {
-            return Err(crate::Error::SrtpError("Replay protection failed".to_string()));
+        // Check if SRTP is enabled
+        if !self.enabled {
+            return crate::packet::RtpPacket::parse(data);
         }
         
-        // Decrypt
+        // Decrypt using SRTP (which handles authentication verification internally)
         self.crypto.decrypt_rtp(data)
+    }
+    
+    /// Protect an RTCP packet (SRTCP encryption)
+    /// Returns the encrypted data with the authentication tag appended
+    pub fn protect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
+        // Check if SRTP is enabled
+        if !self.enabled {
+            return Ok(bytes::Bytes::copy_from_slice(data));
+        }
+        
+        // Encrypt using SRTCP
+        let (encrypted, auth_tag) = self.crypto.encrypt_rtcp(data)?;
+        
+        // If authentication is used, append the tag
+        if let Some(tag) = auth_tag {
+            let mut buffer = bytes::BytesMut::with_capacity(encrypted.len() + tag.len());
+            buffer.extend_from_slice(&encrypted);
+            buffer.extend_from_slice(&tag);
+            Ok(buffer.freeze())
+        } else {
+            Ok(encrypted)
+        }
+    }
+    
+    /// Unprotect an RTCP packet (SRTCP decryption)
+    /// The input data should include the authentication tag if used
+    pub fn unprotect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
+        // Check if SRTP is enabled
+        if !self.enabled {
+            return Ok(bytes::Bytes::copy_from_slice(data));
+        }
+        
+        // Decrypt using SRTCP (which handles authentication verification internally)
+        self.crypto.decrypt_rtcp(data)
     }
 }
 
@@ -168,7 +243,6 @@ mod tests {
         let context = SrtpContext::new(
             SRTP_NULL_NULL,
             key,
-            64
         );
         
         assert!(context.is_ok());

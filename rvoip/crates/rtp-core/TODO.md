@@ -201,7 +201,7 @@ rtp-core/
   - [x] Implement G.722 payload format
   - [x] Implement Opus payload format
   - [x] Implement VP8/VP9 payload formats
-- [ ] Implement media synchronization mechanisms
+- [x] Implement media synchronization mechanisms
 - [x] Add RTP session management for media-core use
 
 ## Immediate Fixes Needed
