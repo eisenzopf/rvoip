@@ -11,6 +11,7 @@
 //! - `srtp`: Secure RTP implementation
 //! - `stats`: RTP statistics collection
 //! - `time`: Timing and clock utilities
+//! - `sync`: Media synchronization for multiple streams
 //! - `traits`: Public traits for integration with other crates
 //! - `payload`: RTP payload format handlers
 //! - `buffer`: High-performance buffer management for receiving and transmitting packets
@@ -48,6 +49,7 @@ pub mod buffer;
 pub mod csrc;
 pub mod rtcp;
 pub mod dtls;
+pub mod sync;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -106,6 +108,11 @@ pub use payload::{
 };
 
 pub use csrc::{CsrcMapping, CsrcManager, MAX_CSRC_COUNT};
+
+// Re-export sync utilities
+pub use sync::{MediaSync};
+pub use sync::mapping::TimestampMapper;
+pub use sync::clock::MediaClock;
 
 /// Prelude module with commonly used types
 pub mod prelude {

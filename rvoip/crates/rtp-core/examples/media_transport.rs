@@ -88,7 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 RtpSessionEvent::Error(e) => {
                     error!("Receiver error: {}", e);
-                }
+                },
+                // Catch all other events
+                _ => {}
             }
         }
     });

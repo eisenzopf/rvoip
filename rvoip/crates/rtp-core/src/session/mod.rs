@@ -221,6 +221,9 @@ pub struct RtpSession {
     /// Session statistics
     stats: Arc<Mutex<RtpSessionStats>>,
     
+    /// Media synchronization context
+    media_sync: Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>>,
+    
     /// Whether the session is active
     active: bool,
 }
@@ -269,6 +272,7 @@ impl RtpSession {
             recv_task: None,
             send_task: None,
             stats: Arc::new(Mutex::new(RtpSessionStats::default())),
+            media_sync: None,
             active: false,
         };
         
@@ -301,6 +305,8 @@ impl RtpSession {
         let jitter_buffer_enabled = self.config.enable_jitter_buffer;
         let jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
         let max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
+        
+        let media_sync = self.media_sync.clone();
         
         // If we have a remote address, set it on the transport
         if let Some(addr) = remote_addr {
@@ -550,6 +556,14 @@ impl RtpSession {
                                                     );
                                                     
                                                     debug!("Updated RTCP SR info for stream SSRC={:08x}", report_ssrc);
+                                                }
+                                            }
+                                            
+                                            // If media sync is enabled, update it
+                                            if let Some(sync) = &media_sync {
+                                                if let Ok(mut media_sync) = sync.write() {
+                                                    // Update synchronization data
+                                                    media_sync.update_from_sr(report_ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
                                                 }
                                             }
                                             
@@ -1047,5 +1061,23 @@ impl RtpSession {
                 Err(Error::SerializationError(format!("Failed to serialize RTCP RR: {}", e)))
             }
         }
+    }
+    
+    /// Enable media synchronization
+    pub fn enable_media_sync(&mut self) -> Arc<std::sync::RwLock<crate::sync::MediaSync>> {
+        let sync = Arc::new(std::sync::RwLock::new(crate::sync::MediaSync::new()));
+        self.media_sync = Some(sync.clone());
+        
+        // Register our stream
+        if let Ok(mut media_sync) = sync.write() {
+            media_sync.register_stream(self.ssrc, self.config.clock_rate);
+        }
+        
+        sync
+    }
+    
+    /// Get the media synchronization context
+    pub fn media_sync(&self) -> Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>> {
+        self.media_sync.clone()
     }
 } 

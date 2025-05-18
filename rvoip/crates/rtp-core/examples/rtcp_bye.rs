@@ -104,6 +104,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RtpSessionEvent::Bye { ssrc, reason } => {
                     info!("Receiver got BYE event from SSRC={:08x}, reason: {:?}", ssrc, reason);
                     return true; // Signal that we got a BYE event
+                },
+                RtpSessionEvent::NewStreamDetected { ssrc } => {
+                    debug!("Receiver detected new stream with SSRC={:08x}", ssrc);
+                },
+                RtpSessionEvent::RtcpSenderReport { ssrc, ntp_timestamp, rtp_timestamp, packet_count, octet_count, report_blocks } => {
+                    debug!("Receiver got RTCP SR from SSRC={:08x}", ssrc);
+                },
+                RtpSessionEvent::RtcpReceiverReport { ssrc, report_blocks } => {
+                    debug!("Receiver got RTCP RR from SSRC={:08x}", ssrc);
                 }
             }
         }
@@ -165,6 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 RtpSessionEvent::Bye { ssrc, reason } => {
                     info!("Sender got BYE from SSRC={:08x}, reason: {:?}", ssrc, reason);
+                },
+                RtpSessionEvent::NewStreamDetected { ssrc } => {
+                    debug!("Sender detected new stream with SSRC={:08x}", ssrc);
+                },
+                RtpSessionEvent::RtcpSenderReport { ssrc, ntp_timestamp, rtp_timestamp, packet_count, octet_count, report_blocks } => {
+                    debug!("Sender got RTCP SR from SSRC={:08x}", ssrc);
+                },
+                RtpSessionEvent::RtcpReceiverReport { ssrc, report_blocks } => {
+                    debug!("Sender got RTCP RR from SSRC={:08x}", ssrc);
                 }
             }
         }

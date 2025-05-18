@@ -85,8 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ssrc: 0x12345678,
         ntp_timestamp: ntp,
         rtp_timestamp: 0x87654321,
-        packet_count: 1000,
-        octet_count: 128000,
+        sender_packet_count: 1000,
+        sender_octet_count: 128000,
         report_blocks: Vec::new(),
     };
     

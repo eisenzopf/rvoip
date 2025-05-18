@@ -151,6 +151,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(RtpSessionEvent::Bye { ssrc, reason }) => {
                             info!("Received BYE from SSRC={:08x}, reason: {:?}", ssrc, reason);
                         },
+                        Ok(RtpSessionEvent::RtcpSenderReport { ssrc, .. }) => {
+                            debug!("Received RTCP SR from SSRC={:08x}", ssrc);
+                        },
+                        Ok(RtpSessionEvent::RtcpReceiverReport { ssrc, .. }) => {
+                            debug!("Received RTCP RR from SSRC={:08x}", ssrc);
+                        },
                         Err(e) => {
                             info!("Event channel error: {}", e);
                             break;
@@ -182,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let all_streams = receiver_guard.get_all_streams().await;
                     for stream in all_streams {
                         info!("Stream SSRC={:08x}: packets={}, lost={}, jitter={}ms",
-                             stream.ssrc, stream.packets_received, stream.packets_lost, stream.jitter_ms);
+                             stream.ssrc, stream.packets_received, stream.packets_lost, stream.jitter);
                     }
                 }
             }
@@ -292,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let all_streams = receiver_guard.get_all_streams().await;
     for stream in all_streams {
         info!("Stream SSRC={:08x}: packets={}, lost={}, jitter={}ms",
-             stream.ssrc, stream.packets_received, stream.packets_lost, stream.jitter_ms);
+             stream.ssrc, stream.packets_received, stream.packets_lost, stream.jitter);
     }
     
     // Report success or failure

@@ -54,7 +54,7 @@ async fn run_example() {
     println!("Endpoint 2 bound to: {}", addr2);
     
     println!("Notice that with RTCP-MUX, the RTP and RTCP addresses are the same:");
-    println!("Endpoint 1 RTP: {}, RTCP: {}", 
+    println!("Endpoint 1 RTP: {}, RTCP: {:?}", 
              transport1.local_rtp_addr().unwrap(),
              transport1.local_rtcp_addr().unwrap());
              

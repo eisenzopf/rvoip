@@ -20,6 +20,7 @@ use crate::packet::rtcp::RtcpPacket;
 use crate::traits::RtpEvent;
 use crate::DEFAULT_MAX_PACKET_SIZE;
 use super::{RtpTransport, RtpTransportConfig};
+use super::validation::{PlatformSocketStrategy, RtpSocketValidator};
 
 /// UDP transport for RTP/RTCP
 ///
@@ -62,32 +63,62 @@ pub struct UdpRtpTransport {
 }
 
 impl UdpRtpTransport {
-    /// Create a new UDP transport
+    /// Create a new UDP transport for RTP
     pub async fn new(config: RtpTransportConfig) -> Result<Self> {
+        // Use platform-specific socket strategy
+        let socket_strategy = PlatformSocketStrategy::for_current_platform();
+        
         // Create RTP socket
-        let rtp_socket = UdpSocket::bind(config.local_rtp_addr).await
+        let socket_rtp = UdpSocket::bind(config.local_rtp_addr).await
             .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
+        
+        // Apply platform-specific settings to the socket
+        socket_strategy.apply_to_socket(&socket_rtp).await
+            .map_err(|e| Error::Transport(format!("Failed to configure RTP socket: {}", e)))?;
             
-        // Create RTCP socket if configured and not using RTCP-MUX
-        let rtcp_socket = if !config.rtcp_mux {
-            if let Some(rtcp_addr) = config.local_rtcp_addr {
-                let socket = UdpSocket::bind(rtcp_addr).await
-                    .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
-                Some(Arc::new(socket))
-            } else {
-                None
-            }
+        // Get bound address
+        let local_rtp_addr = socket_rtp.local_addr()
+            .map_err(|e| Error::Transport(format!("Failed to get local RTP address: {}", e)))?;
+        
+        debug!("Bound RTP socket to {}", local_rtp_addr);
+        
+        // Create RTCP socket if not using RTCP-MUX
+        let (socket_rtcp, local_rtcp_addr) = if !config.rtcp_mux {
+            // Use the next port for RTCP (per convention)
+            let local_rtcp_addr = match config.local_rtcp_addr {
+                Some(addr) => addr,
+                None => {
+                    let rtcp_port = local_rtp_addr.port() + 1;
+                    SocketAddr::new(local_rtp_addr.ip(), rtcp_port)
+                }
+            };
+            
+            // Create RTCP socket
+            let socket_rtcp = UdpSocket::bind(local_rtcp_addr).await
+                .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
+                
+            // Apply platform-specific settings to the socket
+            socket_strategy.apply_to_socket(&socket_rtcp).await
+                .map_err(|e| Error::Transport(format!("Failed to configure RTCP socket: {}", e)))?;
+                
+            // Get bound address
+            let local_rtcp_addr = socket_rtcp.local_addr()
+                .map_err(|e| Error::Transport(format!("Failed to get local RTCP address: {}", e)))?;
+                
+            debug!("Bound RTCP socket to {}", local_rtcp_addr);
+            
+            (Some(socket_rtcp), Some(local_rtcp_addr))
         } else {
-            // When using RTCP-MUX, we don't need a separate RTCP socket
-            None
+            debug!("Using RTCP-MUX - no separate RTCP socket");
+            (None, None)
         };
         
         // Create broadcaster
         let (event_tx, _) = broadcast::channel(100);
         
         let transport = Self {
-            rtp_socket: Arc::new(rtp_socket),
-            rtcp_socket,
+            rtp_socket: Arc::new(socket_rtp),
+            rtcp_socket: socket_rtcp.map(Arc::new),
             config,
             remote_rtp_addr: Arc::new(Mutex::new(None)),
             remote_rtcp_addr: Arc::new(Mutex::new(None)),
@@ -321,18 +352,9 @@ impl RtpTransport for UdpRtpTransport {
             .map_err(|e| Error::Transport(format!("Failed to get local RTP address: {}", e)))
     }
     
-    fn local_rtcp_addr(&self) -> Result<SocketAddr> {
-        if self.config.rtcp_mux {
-            // When RTCP-MUX is enabled, RTCP address is the same as RTP address
-            self.local_rtp_addr()
-        } else if let Some(rtcp_socket) = &self.rtcp_socket {
-            // If a separate RTCP socket exists, get its address
-            rtcp_socket.local_addr()
-                .map_err(|e| Error::Transport(format!("Failed to get local RTCP address: {}", e)))
-        } else {
-            // Fallback to RTP socket if no RTCP socket is available
-            self.local_rtp_addr()
-        }
+    /// Get the local RTCP address
+    fn local_rtcp_addr(&self) -> Result<Option<SocketAddr>> {
+        Ok(self.config.local_rtcp_addr)
     }
     
     async fn send_rtp(&self, packet: &RtpPacket, dest: SocketAddr) -> Result<()> {

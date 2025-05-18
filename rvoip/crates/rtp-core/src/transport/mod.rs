@@ -20,8 +20,8 @@ pub trait RtpTransport: Send + Sync {
     /// Get the local address for RTP
     fn local_rtp_addr(&self) -> Result<SocketAddr>;
     
-    /// Get the local address for RTCP
-    fn local_rtcp_addr(&self) -> Result<SocketAddr>;
+    /// Get the local RTCP address (if available)
+    fn local_rtcp_addr(&self) -> Result<Option<SocketAddr>>;
     
     /// Send an RTP packet
     async fn send_rtp(&self, packet: &RtpPacket, dest: SocketAddr) -> Result<()>;
@@ -83,8 +83,11 @@ impl Default for RtpTransportConfig {
 }
 
 // Re-export submodules
-pub mod udp;
-// pub mod tcp;
+mod udp;
+mod tcp;
+mod validation;
 
 // Re-export transport implementations
-pub use udp::UdpRtpTransport; 
+pub use udp::UdpRtpTransport;
+pub use tcp::TcpRtpTransport;
+pub use validation::{PlatformType, PlatformSocketStrategy, RtpSocketValidator}; 
