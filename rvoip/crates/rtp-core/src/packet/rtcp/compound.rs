@@ -47,6 +47,24 @@ impl RtcpCompoundPacket {
         Self { packets }
     }
     
+    /// Get the Sender Report if the first packet is an SR
+    pub fn get_sr(&self) -> Option<&RtcpSenderReport> {
+        if let Some(RtcpPacket::SenderReport(sr)) = self.packets.first() {
+            Some(sr)
+        } else {
+            None
+        }
+    }
+    
+    /// Get the Receiver Report if the first packet is an RR
+    pub fn get_rr(&self) -> Option<&RtcpReceiverReport> {
+        if let Some(RtcpPacket::ReceiverReport(rr)) = self.packets.first() {
+            Some(rr)
+        } else {
+            None
+        }
+    }
+    
     /// Add an SDES packet
     pub fn add_sdes(&mut self, sdes: RtcpSourceDescription) {
         self.packets.push(RtcpPacket::SourceDescription(sdes));

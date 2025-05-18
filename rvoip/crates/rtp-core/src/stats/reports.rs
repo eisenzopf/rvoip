@@ -9,7 +9,7 @@ use crate::{RtpSsrc, RtpTimestamp};
 use crate::stats::loss::PacketLossTracker;
 
 /// RTCP interval constants (RFC 3550)
-pub const RTCP_MIN_INTERVAL: Duration = Duration::from_millis(5000); // 5 seconds
+pub const RTCP_MIN_INTERVAL: Duration = Duration::from_millis(1000); // 1 second to demonstrate rate limiting in our example
 pub const RTCP_BANDWIDTH_FRACTION: f64 = 0.05; // 5% of session bandwidth
 pub const RTCP_SENDER_BANDWIDTH_FRACTION: f64 = 0.25; // 25% of RTCP bandwidth to senders
 

@@ -226,6 +226,15 @@ pub struct RtpSession {
     
     /// Whether the session is active
     active: bool,
+    
+    /// RTCP report generator
+    rtcp_generator: Option<crate::stats::reports::RtcpReportGenerator>,
+    
+    /// RTCP sender task
+    rtcp_task: Option<JoinHandle<()>>,
+    
+    /// Session bandwidth (bits per second)
+    bandwidth_bps: u32,
 }
 
 impl RtpSession {
@@ -237,7 +246,7 @@ impl RtpSession {
             rng.gen::<u32>()
         });
         
-        // Create transport
+        // Create transport config
         let transport_config = RtpTransportConfig {
             local_rtp_addr: config.local_addr,
             local_rtcp_addr: None, // RTCP on same port for now
@@ -260,6 +269,12 @@ impl RtpSession {
             rand::thread_rng().gen::<u32>(), // Random starting timestamp
         ));
         
+        // Create RTCP report generator
+        let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
+        let hostname_str = hostname.to_string_lossy();
+        let cname = format!("{}@{}", std::env::var("USER").unwrap_or_else(|_| "user".to_string()), hostname_str);
+        let rtcp_generator = crate::stats::reports::RtcpReportGenerator::new(ssrc, cname);
+        
         let mut session = Self {
             config,
             ssrc,
@@ -274,6 +289,9 @@ impl RtpSession {
             stats: Arc::new(Mutex::new(RtpSessionStats::default())),
             media_sync: None,
             active: false,
+            rtcp_generator: Some(rtcp_generator),
+            rtcp_task: None,
+            bandwidth_bps: 64000, // Default bandwidth: 64 kbps
         };
         
         // Start the session
@@ -633,6 +651,85 @@ impl RtpSession {
             }
         });
         
+        // Start RTCP sending task if we have a remote address and report generator
+        if let (Some(remote_addr), Some(mut rtcp_generator)) = (self.config.remote_addr, self.rtcp_generator.take()) {
+            let transport = self.transport.clone();
+            let ssrc = self.ssrc;
+            let event_tx = self.event_tx.clone();
+            let active_state = Arc::new(Mutex::new(true));
+            let active_state_clone = active_state.clone();
+            let bandwidth = self.bandwidth_bps;
+            
+            // Set bandwidth in the generator
+            rtcp_generator.set_bandwidth(bandwidth);
+            
+            // Start the RTCP task
+            let rtcp_task = tokio::spawn(async move {
+                debug!("RTCP scheduling task started");
+                
+                // Initial interval calculation
+                let mut interval = rtcp_generator.calculate_interval();
+                
+                while *active_state.lock().unwrap() {
+                    // Wait for the calculated interval
+                    tokio::time::sleep(interval).await;
+                    
+                    // Check if we should continue
+                    if !*active_state.lock().unwrap() {
+                        break;
+                    }
+                    
+                    // Check if it's time to send a report
+                    if rtcp_generator.should_send_report() {
+                        // We'll send a compound packet with SR and SDES
+                        debug!("Sending RTCP report");
+                        
+                        // Generate sender report
+                        let rtp_timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u32;
+                            
+                        let sr = rtcp_generator.generate_sender_report(rtp_timestamp);
+                        let sdes = rtcp_generator.generate_sdes();
+                        
+                        // Create compound packet
+                        let mut compound = crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(sr);
+                        compound.add_sdes(sdes);
+                        
+                        // Send the compound packet
+                        if let Ok(data) = compound.serialize() {
+                            if let Err(e) = transport.send_rtcp_bytes(&data, remote_addr).await {
+                                warn!("Failed to send RTCP compound packet: {}", e);
+                            } else {
+                                debug!("Sent RTCP compound packet of {} bytes", data.len());
+                                
+                                // Emit SR event
+                                if let Some(sr) = compound.get_sr() {
+                                    let _ = event_tx.send(RtpSessionEvent::RtcpSenderReport {
+                                        ssrc,
+                                        ntp_timestamp: sr.ntp_timestamp,
+                                        rtp_timestamp: sr.rtp_timestamp,
+                                        packet_count: sr.sender_packet_count,
+                                        octet_count: sr.sender_octet_count,
+                                        report_blocks: sr.report_blocks.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        
+                        // Recalculate interval for next report
+                        interval = rtcp_generator.calculate_interval();
+                        debug!("Next RTCP report in {:?}", interval);
+                    }
+                }
+                
+                debug!("RTCP scheduling task ended");
+            });
+            
+            self.rtcp_task = Some(rtcp_task);
+        }
+        
         self.recv_task = Some(recv_task);
         self.send_task = Some(send_task);
         self.active = true;
@@ -748,6 +845,11 @@ impl RtpSession {
         
         // Stop the send task
         if let Some(handle) = self.send_task.take() {
+            handle.abort();
+        }
+        
+        // Stop the RTCP task
+        if let Some(handle) = self.rtcp_task.take() {
             handle.abort();
         }
         
@@ -1079,5 +1181,70 @@ impl RtpSession {
     /// Get the media synchronization context
     pub fn media_sync(&self) -> Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>> {
         self.media_sync.clone()
+    }
+    
+    /// Set the session bandwidth in bits per second
+    ///
+    /// This affects the RTCP report interval calculation.
+    /// Higher bandwidth means more frequent RTCP packets.
+    pub fn set_bandwidth(&mut self, bandwidth_bps: u32) {
+        self.bandwidth_bps = bandwidth_bps;
+    }
+    
+    /// Create a sender handle for this session
+    /// 
+    /// This creates a lightweight handle that can be used to send RTP packets
+    /// from another thread. This is useful when you need to send packets
+    /// but don't want to clone the entire session.
+    pub fn create_sender_handle(&self) -> RtpSessionSender {
+        RtpSessionSender {
+            sender: self.sender.clone(),
+            ssrc: self.ssrc,
+            payload_type: self.config.payload_type,
+            clock_rate: self.config.clock_rate,
+        }
+    }
+}
+
+/// A lightweight sender handle for an RTP session
+///
+/// This handle can be used to send RTP packets to the session
+/// from another thread without having to clone the entire session.
+#[derive(Clone)]
+pub struct RtpSessionSender {
+    /// Channel for sending packets
+    sender: mpsc::Sender<RtpPacket>,
+    
+    /// SSRC for this session
+    ssrc: RtpSsrc,
+    
+    /// Payload type
+    payload_type: u8,
+    
+    /// Clock rate for the payload type
+    clock_rate: u32,
+}
+
+impl RtpSessionSender {
+    /// Send an RTP packet with payload
+    pub async fn send_packet(&self, timestamp: RtpTimestamp, payload: Bytes, marker: bool) -> Result<()> {
+        // Create RTP header
+        let mut header = RtpHeader::new(
+            self.payload_type,
+            0, // Sequence number will be set by scheduler
+            timestamp,
+            self.ssrc,
+        );
+        
+        // Set marker bit if needed
+        header.marker = marker;
+        
+        // Create packet
+        let packet = RtpPacket::new(header, payload);
+        
+        // Send the packet
+        self.sender.send(packet)
+            .await
+            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
 } 

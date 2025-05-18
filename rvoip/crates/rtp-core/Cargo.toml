@@ -21,6 +21,7 @@ async-trait = "0.1"
 base64 = "0.13"
 log = "0.4"
 futures = "0.3.30"
+hostname = "0.3"
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"
 sha1 = "0.10"

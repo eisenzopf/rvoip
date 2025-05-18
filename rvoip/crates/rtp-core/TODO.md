@@ -113,8 +113,8 @@ rtp-core/
 
 ### Packet Transmission
 - [x] Implement RTP packet sender
-- [ ] Create RTCP packet transmission logic
-- [ ] Add rate limiting for RTCP (5% bandwidth rule)
+- [x] Create RTCP packet transmission logic
+- [x] Add rate limiting for RTCP (5% bandwidth rule)
 - [x] Implement packet scheduling
 - [x] Add transmission buffer management
 - [x] Create burst mitigation logic
@@ -448,7 +448,6 @@ Following a review of the current implementation, several weaknesses were identi
   - [ ] Create proper profile negotiation logic
 - [ ] Test RFC 5761 (Multiplexing RTP and RTCP) support
 - [ ] Add cross-platform socket validation
-- [ ] Create RTCP BYE packet generation logic
 - [ ] Implement concealment metrics
 - [ ] Add event-based quality alerts
 - [ ] Create quality trend analysis
