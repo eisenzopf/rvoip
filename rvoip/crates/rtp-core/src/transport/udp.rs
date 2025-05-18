@@ -21,6 +21,7 @@ use crate::traits::RtpEvent;
 use crate::DEFAULT_MAX_PACKET_SIZE;
 use super::{RtpTransport, RtpTransportConfig};
 use super::validation::{PlatformSocketStrategy, RtpSocketValidator};
+use super::allocator::{GlobalPortAllocator, PairingStrategy};
 
 /// UDP transport for RTP/RTCP
 ///
@@ -67,52 +68,98 @@ impl UdpRtpTransport {
     pub async fn new(config: RtpTransportConfig) -> Result<Self> {
         // Use platform-specific socket strategy
         let socket_strategy = PlatformSocketStrategy::for_current_platform();
-        
-        // Create RTP socket
-        let socket_rtp = UdpSocket::bind(config.local_rtp_addr).await
-            .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
-        
-        // Apply platform-specific settings to the socket
-        socket_strategy.apply_to_socket(&socket_rtp).await
-            .map_err(|e| Error::Transport(format!("Failed to configure RTP socket: {}", e)))?;
+
+        // Determine how to create the sockets based on config
+        let (socket_rtp, socket_rtcp, local_rtp_addr, local_rtcp_addr) = if config.use_port_allocator {
+            // Generate a session ID if not provided
+            let session_id = config.session_id.clone().unwrap_or_else(|| {
+                use rand::Rng;
+                let random_suffix: u32 = rand::thread_rng().gen();
+                format!("rtp-session-{}", random_suffix)
+            });
+
+            // Get the global port allocator
+            let allocator = GlobalPortAllocator::instance().await;
             
-        // Get bound address
-        let local_rtp_addr = socket_rtp.local_addr()
-            .map_err(|e| Error::Transport(format!("Failed to get local RTP address: {}", e)))?;
-        
-        debug!("Bound RTP socket to {}", local_rtp_addr);
-        
-        // Create RTCP socket if not using RTCP-MUX
-        let (socket_rtcp, local_rtcp_addr) = if !config.rtcp_mux {
-            // Use the next port for RTCP (per convention)
-            let local_rtcp_addr = match config.local_rtcp_addr {
-                Some(addr) => addr,
-                None => {
-                    let rtcp_port = local_rtp_addr.port() + 1;
-                    SocketAddr::new(local_rtp_addr.ip(), rtcp_port)
-                }
+            // Configure the pairing strategy based on rtcp_mux
+            let pairing_strategy = if config.rtcp_mux {
+                PairingStrategy::Muxed
+            } else {
+                PairingStrategy::Adjacent
             };
             
-            // Create RTCP socket
-            let socket_rtcp = UdpSocket::bind(local_rtcp_addr).await
-                .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
-                
+            // Determine IP from the provided address (keep the same IP, ignore port)
+            let ip = config.local_rtp_addr.ip();
+            
+            // Allocate port(s)
+            debug!("Allocating port(s) with strategy: {:?}", pairing_strategy);
+            let (rtp_addr, rtcp_addr_opt) = allocator.allocate_port_pair(&session_id, Some(ip)).await?;
+            
+            debug!("Allocated RTP port: {}", rtp_addr);
+            if let Some(rtcp_addr) = rtcp_addr_opt {
+                debug!("Allocated RTCP port: {}", rtcp_addr);
+            }
+            
+            // Create sockets with the allocated ports
+            let socket_rtp = allocator.create_validated_socket(rtp_addr).await?;
+            
+            let socket_rtcp = if let Some(rtcp_addr) = rtcp_addr_opt {
+                Some(allocator.create_validated_socket(rtcp_addr).await?)
+            } else {
+                None
+            };
+            
+            (socket_rtp, socket_rtcp, rtp_addr, rtcp_addr_opt)
+        } else {
+            // Traditional socket binding without the allocator
+            // Create RTP socket
+            let socket_rtp = UdpSocket::bind(config.local_rtp_addr).await
+                .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
+            
             // Apply platform-specific settings to the socket
-            socket_strategy.apply_to_socket(&socket_rtcp).await
-                .map_err(|e| Error::Transport(format!("Failed to configure RTCP socket: {}", e)))?;
+            socket_strategy.apply_to_socket(&socket_rtp).await
+                .map_err(|e| Error::Transport(format!("Failed to configure RTP socket: {}", e)))?;
                 
             // Get bound address
-            let local_rtcp_addr = socket_rtcp.local_addr()
-                .map_err(|e| Error::Transport(format!("Failed to get local RTCP address: {}", e)))?;
-                
-            debug!("Bound RTCP socket to {}", local_rtcp_addr);
+            let local_rtp_addr = socket_rtp.local_addr()
+                .map_err(|e| Error::Transport(format!("Failed to get local RTP address: {}", e)))?;
             
-            (Some(socket_rtcp), Some(local_rtcp_addr))
-        } else {
-            debug!("Using RTCP-MUX - no separate RTCP socket");
-            (None, None)
+            debug!("Bound RTP socket to {}", local_rtp_addr);
+            
+            // Create RTCP socket if not using RTCP-MUX
+            let (socket_rtcp, local_rtcp_addr) = if !config.rtcp_mux {
+                // Use the next port for RTCP (per convention)
+                let local_rtcp_addr = match config.local_rtcp_addr {
+                    Some(addr) => addr,
+                    None => {
+                        let rtcp_port = local_rtp_addr.port() + 1;
+                        SocketAddr::new(local_rtp_addr.ip(), rtcp_port)
+                    }
+                };
+                
+                // Create RTCP socket
+                let socket_rtcp = UdpSocket::bind(local_rtcp_addr).await
+                    .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
+                    
+                // Apply platform-specific settings to the socket
+                socket_strategy.apply_to_socket(&socket_rtcp).await
+                    .map_err(|e| Error::Transport(format!("Failed to configure RTCP socket: {}", e)))?;
+                    
+                // Get bound address
+                let local_rtcp_addr = socket_rtcp.local_addr()
+                    .map_err(|e| Error::Transport(format!("Failed to get local RTCP address: {}", e)))?;
+                    
+                debug!("Bound RTCP socket to {}", local_rtcp_addr);
+                
+                (Some(socket_rtcp), Some(local_rtcp_addr))
+            } else {
+                debug!("Using RTCP-MUX - no separate RTCP socket");
+                (None, None)
+            };
+            
+            (socket_rtp, socket_rtcp, local_rtp_addr, local_rtcp_addr)
         };
-        
+
         // Create broadcaster
         let (event_tx, _) = broadcast::channel(100);
         
@@ -430,6 +477,21 @@ impl RtpTransport for UdpRtpTransport {
     async fn close(&self) -> Result<()> {
         // Stop the receiver task
         self.stop_receiver().await?;
+        
+        // If we used the port allocator, release the ports
+        if self.config.use_port_allocator {
+            if let Some(session_id) = &self.config.session_id {
+                // Get the global allocator
+                let allocator = GlobalPortAllocator::instance().await;
+                
+                // Release all ports associated with this session
+                if let Err(e) = allocator.release_session(session_id).await {
+                    warn!("Failed to release ports for session {}: {}", session_id, e);
+                } else {
+                    debug!("Released all ports for session {}", session_id);
+                }
+            }
+        }
         
         // UDP sockets don't need explicit closing
         Ok(())

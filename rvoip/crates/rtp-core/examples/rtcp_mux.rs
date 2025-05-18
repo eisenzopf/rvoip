@@ -34,6 +34,8 @@ async fn run_example() {
         local_rtcp_addr: None, // Not needed with RTCP-MUX
         symmetric_rtp: true,
         rtcp_mux: true, // Enable RTCP multiplexing
+        session_id: Some("endpoint-1".to_string()),
+        use_port_allocator: true,
     };
     
     println!("Setting up endpoint 2 with RTCP-MUX enabled...");
@@ -42,6 +44,8 @@ async fn run_example() {
         local_rtcp_addr: None, // Not needed with RTCP-MUX
         symmetric_rtp: true,
         rtcp_mux: true, // Enable RTCP multiplexing
+        session_id: Some("endpoint-2".to_string()),
+        use_port_allocator: true,
     };
     
     // Create the transports

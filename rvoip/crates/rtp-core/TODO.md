@@ -68,7 +68,7 @@ rtp-core/
 - [x] Create RtpPacket struct with all required fields
 - [x] Implement header extension support
 - [x] Add CSRC list handling
-- [ ] Implement payload format identification
+- [x] Implement payload format identification
 - [x] Create efficient serialization/deserialization
 - [x] Add verification for RTP header validity
 
@@ -97,7 +97,7 @@ rtp-core/
 - [x] Create RtpSocket abstraction
 - [x] Implement separate RTP/RTCP sockets
 - [x] Add support for symmetric RTP
-- [ ] Implement port allocation strategy
+- [x] Implement port allocation strategy
 - [x] Create socket binding with appropriate options
 - [ ] Add IPv4/IPv6 dual-stack support
 - [ ] Implement connection-oriented RTP (if needed)
@@ -305,7 +305,7 @@ rtp-core/
 - [ ] Implement concealment metrics
 - [ ] Add event-based quality alerts
 - [ ] Create quality trend analysis
-- [ ] Implement port allocation strategy
+- [x] Implement port allocation strategy
 
 ## DTLS Implementation Plan
 

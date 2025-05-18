@@ -252,6 +252,8 @@ impl RtpSession {
             local_rtcp_addr: None, // RTCP on same port for now
             symmetric_rtp: true,
             rtcp_mux: true, // Enable RTCP multiplexing by default
+            session_id: Some(format!("rtp-session-{}", ssrc)),
+            use_port_allocator: true,
         };
         
         // Create UDP transport

@@ -69,6 +69,12 @@ pub struct RtpTransportConfig {
     /// When enabled, RTCP packets will be sent and received on the same port as RTP packets.
     /// This is recommended for WebRTC and modern VoIP applications.
     pub rtcp_mux: bool,
+    
+    /// Session ID for port allocation tracking (optional)
+    pub session_id: Option<String>,
+    
+    /// Use the global port allocator 
+    pub use_port_allocator: bool,
 }
 
 impl Default for RtpTransportConfig {
@@ -78,6 +84,8 @@ impl Default for RtpTransportConfig {
             local_rtcp_addr: None,
             symmetric_rtp: true,
             rtcp_mux: true, // Enable by default as it's the modern approach
+            session_id: None,
+            use_port_allocator: true,
         }
     }
 }
@@ -86,8 +94,10 @@ impl Default for RtpTransportConfig {
 mod udp;
 mod tcp;
 mod validation;
+mod allocator;
 
 // Re-export transport implementations
 pub use udp::UdpRtpTransport;
 pub use tcp::TcpRtpTransport;
 pub use validation::{PlatformType, PlatformSocketStrategy, RtpSocketValidator}; 
+pub use allocator::{PortAllocator, GlobalPortAllocator, PortAllocatorConfig, AllocationStrategy, PairingStrategy}; 
