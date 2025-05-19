@@ -262,7 +262,7 @@ impl MediaTransportSession for DefaultMediaTransportSession {
                 if let Some(remote_addr) = *self.remote_addr.read().await {
                     // Use the trait method directly
                     debug!("Setting remote address {} in security context during start", remote_addr);
-                    if let Err(e) = context.set_remote_address(remote_addr) {
+                    if let Err(e) = context.set_remote_address(remote_addr).await {
                         return Err(MediaTransportError::ConnectionError(
                             format!("Failed to set remote address in security context: {}", e)
                         ));
@@ -398,9 +398,9 @@ impl MediaTransportSession for DefaultMediaTransportSession {
         
         // Update the security context if it exists
         if let Some(context) = &self.security_context {
-            // Use the trait method directly instead of downcasting
+            // Use the async trait method
             debug!("Setting remote address {} in security context", addr);
-            if let Err(e) = context.set_remote_address(addr) {
+            if let Err(e) = context.set_remote_address(addr).await {
                 return Err(MediaTransportError::ConnectionError(
                     format!("Failed to set remote address in security context: {}", e)
                 ));
@@ -473,7 +473,6 @@ impl MediaTransportSession for DefaultMediaTransportSession {
     
     async fn set_remote_fingerprint(&self, fingerprint: &str, algorithm: &str) -> Result<(), MediaTransportError> {
         if let Some(context) = &self.security_context {
-            // We need to safely convert the Arc<dyn SecureMediaContext> to a mutable reference
             // Get a pointer to the context
             let ctx_ptr = Arc::as_ptr(context);
             
@@ -481,8 +480,8 @@ impl MediaTransportSession for DefaultMediaTransportSession {
             // the usage carefully to ensure no actual mutation of shared state happens across threads
             let ctx_mut = unsafe { &mut *(ctx_ptr as *mut dyn SecureMediaContext) };
             
-            // Set the remote fingerprint
-            return ctx_mut.set_remote_fingerprint(fingerprint, algorithm)
+            // Use the async method
+            return ctx_mut.set_remote_fingerprint(fingerprint, algorithm).await
                 .map_err(|e| MediaTransportError::ConnectionError(
                     format!("Failed to set remote fingerprint: {}", e)
                 ));

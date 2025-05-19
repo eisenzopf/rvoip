@@ -203,13 +203,13 @@ pub trait SecureMediaContext: Send + Sync {
     fn is_secure(&self) -> bool;
     
     /// Set remote fingerprint from SDP
-    fn set_remote_fingerprint(&mut self, fingerprint: &str, algorithm: &str) 
+    async fn set_remote_fingerprint(&mut self, fingerprint: &str, algorithm: &str) 
         -> Result<(), SecurityError>;
     
     /// Set the remote address for DTLS communications
     ///
     /// This must be called before start_handshake.
-    fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError>;
+    async fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError>;
     
     /// Start the DTLS handshake
     ///

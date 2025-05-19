@@ -329,44 +329,36 @@ impl SecureMediaContext for DefaultSecureMediaContext {
         }
     }
     
-    fn set_remote_fingerprint(&mut self, fingerprint: &str, algorithm: &str) 
+    async fn set_remote_fingerprint(&mut self, fingerprint: &str, algorithm: &str) 
         -> Result<(), SecurityError> 
     {
         if self.config.mode != SecurityMode::DtlsSrtp {
             return Ok(());  // Ignore when not using DTLS
         }
         
-        // Store the fingerprint
-        match self.remote_fingerprint.try_write() {
-            Ok(mut remote) => {
-                *remote = Some((fingerprint.to_string(), algorithm.to_string()));
-                
-                // If we have a DTLS connection, set up the fingerprint verifier
-                if let Some(dtls_arc) = &self.dtls {
-                    if let Ok(mut dtls) = dtls_arc.try_write() {
-                        // Create a fingerprint verifier
-                        info!("Setting up remote fingerprint verifier: {} ({})", fingerprint, algorithm);
-                        
-                        // In a real implementation, we would set up the verifier here
-                        // For now, just log that we received it
-                    }
-                }
-                
-                Ok(())
-            },
-            Err(_) => Err(SecurityError::HandshakeError("Failed to acquire lock".to_string())),
+        // Store the fingerprint using async-safe methods
+        let mut remote = self.remote_fingerprint.write().await;
+        *remote = Some((fingerprint.to_string(), algorithm.to_string()));
+        
+        // If we have a DTLS connection, set up the fingerprint verifier
+        if let Some(dtls_arc) = &self.dtls {
+            let mut dtls = dtls_arc.write().await;
+            // Create a fingerprint verifier
+            info!("Setting up remote fingerprint verifier: {} ({})", fingerprint, algorithm);
+            
+            // In a real implementation, we would set up the verifier here
+            // For now, just log that we received it
         }
+        
+        Ok(())
     }
     
-    fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError> {
-        match self.remote_addr.try_write() {
-            Ok(mut remote_addr) => {
-                info!("Setting remote address {} for DTLS", addr);
-                *remote_addr = Some(addr);
-                Ok(())
-            },
-            Err(_) => Err(SecurityError::HandshakeError("Failed to acquire lock".to_string())),
-        }
+    async fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError> {
+        // Use a proper async lock instead of try_write
+        let mut remote_addr = self.remote_addr.write().await;
+        info!("Setting remote address {} for DTLS", addr);
+        *remote_addr = Some(addr);
+        Ok(())
     }
     
     async fn start_handshake(&self) -> Result<(), SecurityError> {
