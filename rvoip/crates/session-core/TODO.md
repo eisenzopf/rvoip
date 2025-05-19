@@ -333,49 +333,346 @@ Following the integration of transaction-core with sip-transport, these tasks wi
 
 Tasks to integrate the session-core with rtp-core and media-core for full media functionality:
 
-### 1. Media Session Management
+### 1. Media Session Coordination
 - [ ] Create MediaManager to coordinate between SIP dialogs and media sessions
-- [ ] Implement mapping of SIP dialogs to media sessions
-- [ ] Add lifecycle management for media sessions based on dialog events
-- [ ] Create error handling and recovery for media session failures
-- [ ] Implement proper cleanup of media resources when dialogs terminate
-- [ ] Add support for multiple media streams per dialog (audio+video)
+  - [ ] Implement dialog-to-media session mapping
+  - [ ] Create lifecycle management based on dialog state machine
+  - [ ] Add resource cleanup on dialog termination
+  - [ ] Implement error handling and recovery for media failures
+  - [ ] Add support for multiple media streams per dialog (audio+video)
+- [ ] Create interfaces to control media-core operations
+  - [ ] Implement start/stop/pause invocation based on dialog events
+  - [ ] Add media event subscription for session state updates
+  - [ ] Implement media-to-signaling status propagation
 
-### 2. SDP and Media Negotiation
-- [ ] Enhance SDP handling to extract and utilize codec information
-- [ ] Implement mapping of SDP media descriptions to media-core codecs
-- [ ] Add support for ICE candidate negotiation in SDP
-- [ ] Implement DTLS-SRTP fingerprint exchange via SDP
-- [ ] Create helpers for RTCP feedback parameter negotiation
-- [ ] Add bandwidth and quality parameter extraction from SDP
-- [ ] Implement RTP payload type mapping and management
+### 2. SDP Handling and Ownership
+- [ ] Enhance SDP generation and parsing (owned by session-core)
+  - [ ] Generate SDP offers based on media-core capabilities
+  - [ ] Process SDP answers and extract negotiated parameters
+  - [ ] Create offer/answer state machine compliant with RFC 3264
+  - [ ] Implement handling of new m-lines and format updates
+  - [ ] Add support for RTP extensions and transport attributes
+- [ ] Create codec capability interface from media-core
+  - [ ] Query media-core for available codecs and capabilities
+  - [ ] Translate codec parameters to/from SDP format
+  - [ ] Process and apply negotiated codec constraints
+  - [ ] Support dynamic payload type mapping
 
-### 3. Media Control Interface
-- [ ] Create high-level API for common media operations (mute, codec change)
-- [ ] Implement events for media state changes (active, inactive, hold)
-- [ ] Add quality metrics reporting from media-core to session layer
-- [ ] Create volume control and audio level monitoring interface
-- [ ] Implement DTMF sending via RTP events from session layer
-- [ ] Add media failure notification and recovery mechanism
-- [ ] Create diagnostic interfaces for media troubleshooting
+### 3. Transport and Security Coordination
+- [ ] Implement transport address management
+  - [ ] Extract addresses from SDP and provide to media-core
+  - [ ] Obtain local ports from media-core for SDP generation
+  - [ ] Coordinate RTP/RTCP port pairs and multiplexing
+  - [ ] Implement transport protocol selection (AVP, SAVP)
+- [ ] Implement security parameter exchange
+  - [ ] Extract DTLS fingerprints from media-core for SDP
+  - [ ] Validate received fingerprints against media-core certificates
+  - [ ] Handle SRTP parameters when not using DTLS
+  - [ ] Coordinate SDES key exchange when applicable
 
-### 4. Media Feature Negotiation
-- [ ] Implement SIP feature negotiation for media capabilities
-- [ ] Add support for early media scenarios
-- [ ] Create proper handling of media direction attributes (sendonly, recvonly)
-- [ ] Implement hold/resume media state synchronization
-- [ ] Add codec renegotiation during active sessions
-- [ ] Create support for media security negotiation
-- [ ] Implement bandwidth adaptation mechanism based on network conditions
+### 4. Media Feature Orchestration
+- [ ] Implement SIP-to-media feature coordination
+  - [ ] Handle media direction changes (sendrecv, sendonly, recvonly, inactive)
+  - [ ] Process hold/resume operations through SIP re-INVITEs
+  - [ ] Coordinate early media scenarios
+  - [ ] Manage codec changes during session updates
+  - [ ] Process ICE candidates and connectivity checks
+- [ ] Create advanced media control API
+  - [ ] Implement DTMF signaling via SIP INFO or RFC 4733
+  - [ ] Add voice activity detection integration
+  - [ ] Create media quality feedback mechanisms
+  - [ ] Support mid-call audio/video additions and removals
 
-### 5. Testing and Examples
-- [ ] Create comprehensive test suite for media integration
-- [ ] Add examples demonstrating basic audio call functionality
-- [ ] Create advanced examples with media feature negotiation
-- [ ] Implement interoperability tests with common SIP clients
-- [ ] Add performance benchmarks for media processing
-- [ ] Create media flow visualization tools for debugging
-- [ ] Implement test cases for various network conditions
+### 5. Event Propagation Framework
+- [ ] Create bidirectional event system between layers
+  - [ ] Propagate session state events to media-core
+  - [ ] Process media state events in session layer
+  - [ ] Add quality alert handling from media to session
+  - [ ] Implement end-to-end diagnostics flow
+- [ ] Implement synchronized state transitions
+  - [ ] Create state mapping between dialog and media states
+  - [ ] Add transaction-based media state synchronization
+  - [ ] Implement media recovery triggered by session layer
+  - [ ] Create session recovery triggered by media failures
+
+### 6. Testing and Integration Verification
+- [ ] Create comprehensive test suite for layer integration
+  - [ ] Test SDP generation and media parameter extraction
+  - [ ] Verify correct media setup from session directives
+  - [ ] Test event propagation through all layers
+  - [ ] Validate error handling across layer boundaries
+- [ ] Implement end-to-end call flow validation
+  - [ ] Create test cases for common scenarios (basic call, hold/resume)
+  - [ ] Test edge cases (call rejection, early termination)
+  - [ ] Verify media operations are correctly triggered by session events
+  - [ ] Validate correct media termination on call end
+
+## Component Lifecycle Management
+
+### Initialization and Dependency Management
+- [ ] Create comprehensive initialization sequence
+  - [ ] Implement prerequisite checking before startup
+  - [ ] Add dependency resolution for component ordering
+  - [ ] Create phased initialization for complex setups
+- [ ] Add resource allocation tracking
+  - [ ] Implement memory usage monitoring
+  - [ ] Create network resource allocation tracking
+  - [ ] Add file descriptor and handle management
+- [ ] Implement proper shutdown sequence
+  - [ ] Create graceful termination of active sessions
+  - [ ] Add resource cleanup verification
+  - [ ] Implement pending operation completion
+
+### Recovery and Resilience
+- [ ] Add component health monitoring
+  - [ ] Implement periodic self-tests
+  - [ ] Create dependency health checking
+  - [ ] Add performance degradation detection
+- [ ] Create automatic recovery mechanisms
+  - [ ] Implement component restart procedures
+  - [ ] Add session recovery after failures
+  - [ ] Create resource reallocation strategies
+- [ ] Add failure isolation
+  - [ ] Implement session isolation to prevent cascade failures
+  - [ ] Create resource partitioning for reliability
+  - [ ] Add fault containment strategies
+
+## Cross-Component Configuration
+
+### Configuration Validation
+- [ ] Implement cross-component configuration validation
+  - [ ] Add dependency-aware configuration checking
+  - [ ] Create compatibility validation with media-core settings
+  - [ ] Implement network configuration validation
+- [ ] Create configuration documentation system
+  - [ ] Add schema documentation generation
+  - [ ] Implement configuration relationship visualization
+  - [ ] Create configuration examples for common scenarios
+
+### Runtime Configuration Management
+- [ ] Add dynamic configuration updates
+  - [ ] Implement safe update procedures for runtime changes
+  - [ ] Create change propagation to dependent components
+  - [ ] Add configuration versioning and tracking
+- [ ] Implement configuration persistence
+  - [ ] Add configuration serialization/deserialization
+  - [ ] Create configuration backup mechanisms
+  - [ ] Implement configuration comparison tools
+
+## Standardized Event System
+
+### Event Architecture
+- [ ] Design comprehensive event model
+  - [ ] Create event type hierarchy for session events
+  - [ ] Add event metadata and correlation information
+  - [ ] Implement event priority and categorization
+- [ ] Create event serialization formats
+  - [ ] Add JSON serialization for external consumers
+  - [ ] Implement binary serialization for efficient internal use
+  - [ ] Create schema definitions for event validation
+
+### Event Distribution
+- [ ] Implement event bus integration
+  - [ ] Add support for component-spanning event distribution
+  - [ ] Create subscription management for event consumers
+  - [ ] Implement backpressure handling and overflow protection
+- [ ] Add event filtering and routing
+  - [ ] Create attribute-based event filtering
+  - [ ] Implement event routing based on content
+  - [ ] Add conditional event propagation
+
+### Event Processing
+- [ ] Create consistent event handling framework
+  - [ ] Implement asynchronous event processing
+  - [ ] Add event batching for efficiency
+  - [ ] Create ordered event processing guarantees
+- [ ] Add event history and replay
+  - [ ] Implement event persistence for diagnostics
+  - [ ] Create event replay capabilities for testing
+  - [ ] Add event chain analysis tools
+
+## Call Engine Integration
+
+### Session Management Interface
+- [ ] Create Call Engine Session Adapter
+  - [ ] Implement high-level session control API
+  - [ ] Add dialog management abstractions
+  - [ ] Create simplified transaction handling
+- [ ] Add session orchestration
+  - [ ] Implement call setup coordination
+  - [ ] Create call termination sequences
+  - [ ] Add complex call flow handling
+
+### Call Feature Support
+- [ ] Implement call control features
+  - [ ] Add hold/resume management
+  - [ ] Create call transfer coordination
+  - [ ] Implement conference control
+- [ ] Create advanced signaling features
+  - [ ] Add event notification support
+  - [ ] Implement presence integration
+  - [ ] Create message waiting indication
+
+### Event Integration
+- [ ] Design Call Engine event system
+  - [ ] Implement event translation to Call Engine formats
+  - [ ] Add bi-directional event propagation
+  - [ ] Create event correlation across components
+- [ ] Add call state synchronization
+  - [ ] Implement state change notification
+  - [ ] Create state validation and consistency checks
+  - [ ] Add state history tracking
+
+### Diagnostics and Monitoring
+- [ ] Create detailed diagnostics interface
+  - [ ] Add session-level troubleshooting tools
+  - [ ] Implement signaling flow analysis
+  - [ ] Create protocol compliance verification
+- [ ] Add monitoring integration
+  - [ ] Implement health checks for Call Engine
+  - [ ] Add performance metrics collection
+  - [ ] Create alerting for critical issues
+
+## Future Scope
+
+### Advanced Media Features
+- [ ] Support for video sessions
+- [ ] Implementation of WebRTC integration
+- [ ] Advanced audio processing capabilities
+- [ ] Multi-party conferencing support
+
+### Standards Extensions
+- [ ] Support for SIP extensions (INFO, MESSAGE, etc.)
+- [ ] Implementation of presence and events framework (RFC 3856, RFC 3265)
+- [ ] Support for advanced SIP routing features
+- [ ] Integration with IMS/VoLTE standards
+
+## Standardized Event Bus Implementation
+
+Integrate with the infra-common high-performance event bus for session and dialog management:
+
+### Session Events Architecture
+
+1. **Critical Session Events (Highest Priority)**
+   - [ ] Implement high-priority session state change events
+     - [ ] Define `SessionStateEvent` with StaticEvent optimization
+     - [ ] Create `DialogStateEvent` for dialog state transitions
+     - [ ] Implement `CallTerminationEvent` for critical termination events
+   - [ ] Add critical error and failure events
+     - [ ] Define `SessionFailureEvent` with detailed error information
+     - [ ] Create `AuthenticationEvent` for auth challenges/failures
+     - [ ] Implement `NetworkFailureEvent` for connectivity issues
+
+2. **Session Management (Priority-Based Processing)**
+   - [ ] Use `EventPriority::Critical` for core session operations
+     - [ ] Session creation/termination
+     - [ ] Dialog establishment 
+     - [ ] SIP 4xx-6xx responses
+   - [ ] Use `EventPriority::High` for important mid-session events
+     - [ ] Re-INVITE operations
+     - [ ] Media renegotiation
+     - [ ] Hold/resume operations  
+   - [ ] Use `EventPriority::Normal` for regular session activities
+     - [ ] Non-essential message processing
+     - [ ] Session refresh operations
+     - [ ] Subscription updates
+   - [ ] Use `EventPriority::Low` for monitoring and statistics
+     - [ ] Session metrics
+     - [ ] Periodic state reporting
+     - [ ] Non-critical notifications
+
+3. **SIP Dialog Event Implementation**
+   - [ ] Create optimized StaticEvent implementations for:
+     - [ ] `DialogCreatedEvent`
+     - [ ] `DialogConfirmedEvent`
+     - [ ] `DialogTerminatedEvent`
+     - [ ] `DialogUpdateEvent`
+   - [ ] Implement efficient early dialog handling
+     - [ ] Use StaticEvent for early media events
+     - [ ] Optimize provisional response handling
+
+### Implementation Components
+
+1. **Dialog Manager Integration**
+   - [ ] Implement `DialogEventPublisher` using StaticEvent fast path
+   - [ ] Create typed event subscriptions for dialog events
+   - [ ] Add event bus integration in DialogManager
+   - [ ] Optimize dialog lookup with broadcast subscribers
+
+2. **Session Manager Integration**
+   - [ ] Implement `SessionEventPublisher` for session events
+   - [ ] Create efficient event routing from dialogs to sessions
+   - [ ] Add priority-based event handling for critical session operations
+   - [ ] Implement batch processing for non-critical session events
+
+3. **Transaction Integration**
+   - [ ] Implement efficient event translation from transaction events
+   - [ ] Create StaticEvent fast paths for transaction state changes
+   - [ ] Add priority handling based on transaction importance
+   - [ ] Optimize transaction-to-dialog event propagation
+
+4. **Event Bus Configuration**
+   - [ ] Configure event bus for optimal session handling performance:
+     ```rust
+     EventBusConfig {
+         max_concurrent_dispatches: 20000,
+         broadcast_capacity: 16384,
+         enable_priority: true,
+         enable_zero_copy: true,
+         batch_size: 50,  // Optimized for session events
+         shard_count: 32,
+     }
+     ```
+   - [ ] Tune event channels for high-throughput session processing
+   - [ ] Implement monitoring for event bus performance
+
+5. **High-Scale Testing**
+   - [ ] Create benchmarks for 100,000+ concurrent sessions
+   - [ ] Measure event propagation latency under load
+   - [ ] Test priority system effectiveness with mixed workloads
+   - [ ] Profile memory usage with large session counts
+
+## Call Engine Integration
+
+### Session Management Interface
+- [ ] Create Call Engine Session Adapter
+  - [ ] Implement high-level session control API
+  - [ ] Add dialog management abstractions
+  - [ ] Create simplified transaction handling
+- [ ] Add session orchestration
+  - [ ] Implement call setup coordination
+  - [ ] Create call termination sequences
+  - [ ] Add complex call flow handling
+
+### Call Feature Support
+- [ ] Implement call control features
+  - [ ] Add hold/resume management
+  - [ ] Create call transfer coordination
+  - [ ] Implement conference control
+- [ ] Create advanced signaling features
+  - [ ] Add event notification support
+  - [ ] Implement presence integration
+  - [ ] Create message waiting indication
+
+### Event Integration
+- [ ] Design Call Engine event system
+  - [ ] Implement event translation to Call Engine formats
+  - [ ] Add bi-directional event propagation
+  - [ ] Create event correlation across components
+- [ ] Add call state synchronization
+  - [ ] Implement state change notification
+  - [ ] Create state validation and consistency checks
+  - [ ] Add state history tracking
+
+### Diagnostics and Monitoring
+- [ ] Create detailed diagnostics interface
+  - [ ] Add session-level troubleshooting tools
+  - [ ] Implement signaling flow analysis
+  - [ ] Create protocol compliance verification
+- [ ] Add monitoring integration
+  - [ ] Implement health checks for Call Engine
+  - [ ] Add performance metrics collection
+  - [ ] Create alerting for critical issues
 
 ## Future Scope
 

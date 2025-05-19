@@ -110,7 +110,70 @@
 - [ ] Document any implementation-specific behaviors
 - [ ] Test with different SIP message variations 
 
-## 6. Next Steps for Integration with Transaction Core
+## 6. Standardized Event Bus Implementation
+
+Integrate with the infra-common high-performance event bus for network transport events:
+
+### Transport Events Architecture
+
+1. **Network Layer Events (High-Throughput)**
+   - [ ] Implement `StaticEvent` for all transport-level events
+     - [ ] Create `TransportConnectedEvent` with StaticEvent optimization
+     - [ ] Implement `TransportDisconnectedEvent` for connection failures
+     - [ ] Add `MessageReceivedEvent` for incoming messages
+     - [ ] Create `MessageSentEvent` for outgoing message confirmation
+   - [ ] Optimize for maximum throughput with zero serialization
+
+2. **Priority-Based Transport Processing**
+   - [ ] Use `EventPriority::Critical` for connectivity issues
+     - [ ] Connection failures and errors
+     - [ ] Security alerts and TLS issues
+     - [ ] Fatal transport problems
+   - [ ] Use `EventPriority::High` for important transport operations
+     - [ ] Connection establishment
+     - [ ] First message on a new connection
+     - [ ] TLS handshake events
+   - [ ] Use `EventPriority::Normal` for routine operations
+     - [ ] Regular message transmission
+     - [ ] Standard connection management
+     - [ ] Normal keepalive activities
+   - [ ] Use `EventPriority::Low` for monitoring and diagnostics
+     - [ ] Connection statistics
+     - [ ] Message throughput metrics
+     - [ ] Transport health reports
+
+3. **Implementation Components**
+   - [ ] Create `TransportEventPublisher` for all transport-related events
+     - [ ] Implement specialized publishers per transport type (UDP/TCP/TLS/WebSocket)
+     - [ ] Add manager-level publishers for routing decisions
+   - [ ] Add event subscribers for transport-level actions
+     - [ ] Create subscription system for connection events
+     - [ ] Implement message event subscriptions
+     - [ ] Add error event handling
+
+4. **Performance Optimizations**
+   - [ ] Configure event bus for transport-specific performance:
+     ```rust
+     EventBusConfig {
+         max_concurrent_dispatches: 15000,
+         broadcast_capacity: 16384,
+         enable_priority: true,
+         enable_zero_copy: true,
+         batch_size: 50,
+         shard_count: 32,
+     }
+     ```
+   - [ ] Use batch processing for busy servers handling many connections
+   - [ ] Implement efficient message batching for high-volume scenarios
+   - [ ] Create transport-specific event optimizations based on transport type
+
+5. **Scale Testing**
+   - [ ] Create benchmarks for 100,000+ concurrent connection scenarios
+   - [ ] Test event propagation under heavy load
+   - [ ] Measure memory impact of transport event system
+   - [ ] Optimize critical paths based on profiling results
+
+## 7. Next Steps for Integration with Transaction Core
 
 - [x] Add integration tests with transaction-core mock environment
 - [x] Implement basic transaction layer event routing using TransportEvent system

@@ -9,6 +9,82 @@ This document outlines the plan to redesign the transaction-core library to bett
 3. Improve handling of special cases like CANCEL and ACK for 2xx responses
 4. Simplify the developer experience 
 
+## Standardized Event Bus Implementation
+
+Integrate with the infra-common high-performance event bus for transaction processing:
+
+### Transaction Events Architecture
+
+1. **Static Event Implementation (High-Throughput Protocol Events)**
+   - [ ] Implement `StaticEvent` trait for all transaction state events
+     - [ ] Create `TransactionStateEvent` with StaticEvent fast path
+     - [ ] Implement `MessageEvent` for transaction message processing
+     - [ ] Optimize critical transaction event types like timeout events
+   - [ ] Add specialized event types for transaction types
+     - [ ] `InviteClientTransactionEvent`
+     - [ ] `InviteServerTransactionEvent`
+     - [ ] `NonInviteClientTransactionEvent`
+     - [ ] `NonInviteServerTransactionEvent`
+
+2. **Priority-Based Processing**
+   - [ ] Use `EventPriority::Critical` for critical transaction operations
+     - [ ] Transaction terminations
+     - [ ] Error conditions affecting call state
+     - [ ] INVITE transaction completion events
+   - [ ] Use `EventPriority::High` for important transaction events
+     - [ ] Final response processing
+     - [ ] Transaction timeouts
+     - [ ] Retransmission handling
+   - [ ] Use `EventPriority::Normal` for regular transaction processing
+     - [ ] Provisional responses
+     - [ ] Standard message flow
+     - [ ] Normal transaction progression
+   - [ ] Use `EventPriority::Low` for monitoring and diagnostics
+     - [ ] Transaction metrics
+     - [ ] Performance statistics
+     - [ ] Debug information
+
+3. **Implementation Components**
+   - [ ] Create `TransactionEventPublisher` for common transaction events
+     - [ ] Implement per-transaction type publishers
+     - [ ] Add specialized publishers for transaction management events
+   - [ ] Implement efficient transaction event subscription model
+     - [ ] Create typed subscribers for different transaction events
+     - [ ] Add filtering capabilities for specific transaction types
+     - [ ] Implement correlation between related transaction events
+
+4. **Performance Optimizations**
+   - [ ] Configure event bus for optimal transaction performance:
+     ```rust
+     EventBusConfig {
+         max_concurrent_dispatches: 20000,
+         broadcast_capacity: 16384,
+         enable_priority: true,
+         enable_zero_copy: true,
+         batch_size: 50,  // Transaction events have moderate batch value
+         shard_count: 32,
+     }
+     ```
+   - [ ] Implement event batching for high-throughput scenarios
+   - [ ] Optimize memory usage for transaction event propagation
+   - [ ] Create efficient memory pools for common event types
+
+5. **Integration with Session Layer**
+   - [ ] Create seamless event propagation to session-core
+     - [ ] Implement transaction-to-session event mapping
+     - [ ] Add event correlation IDs across layers
+     - [ ] Create consistent event taxonomies between layers
+   - [ ] Create compatibility with transport layer events
+     - [ ] Add transport-to-transaction event mapping
+     - [ ] Implement transaction event extraction from transport events
+     - [ ] Create unified event model across all three layers
+
+6. **Scaling Optimizations**
+   - [ ] Test transaction event bus with 100,000+ concurrent transactions
+   - [ ] Optimize transaction event memory footprint
+   - [ ] Implement adaptive event propagation based on system load
+   - [ ] Create automated performance monitoring framework
+
 ## Critical Issues Discovered in Benchmark Testing
 
 These issues were identified through benchmark testing and require immediate attention:

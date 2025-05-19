@@ -39,6 +39,10 @@ rvoip follows a layered architecture inspired by established SIP stacks, with cl
 │          SIP Transport     │     Media Transport        │
 │      (UDP, TCP, TLS)       │   (Socket Management)      │
 └────────────────────────────┴───────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    infra-common                          │
+│ (Events, Configuration, Logging, Lifecycle Management)   │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Library Structure
@@ -54,6 +58,7 @@ The project is organized into these primary crates:
 - **call-engine**: Call routing, policy enforcement, application logic
 - **sip-client**: High-level client library for SIP applications
 - **api-server**: External control API (REST/gRPC/WebSocket)
+- **infra-common**: Shared infrastructure for cross-cutting concerns (events, configuration, logging, lifecycle management)
 - **examples**: Reference implementations and demos
 
 ## State Management Architecture
@@ -122,7 +127,7 @@ rvoip implements explicit state machines at multiple layers:
 
 ## Implementation Roadmap
 
-### Current Focus: Improving State Management
+### Current Focus: Improving Architecture and Component Integration
 
 1. **Dialog Integration**
    - Fully integrate session-core Dialog implementation with sip-client
@@ -138,6 +143,11 @@ rvoip implements explicit state machines at multiple layers:
    - Improve transaction-to-dialog routing
    - Enhance session-to-call coordination
    - Establish consistent event propagation model
+   
+4. **Common Infrastructure**
+   - Implement shared event system across components
+   - Standardize configuration and lifecycle management
+   - Create common logging and metrics infrastructure
 
 ## Getting Started
 

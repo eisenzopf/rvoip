@@ -10,6 +10,7 @@ members = [
     "crates/session-core",
     "crates/call-engine",
     "crates/sip-client",
+    "crates/infra-common",
     "examples/simple-softswitch",
     "examples/sip-message-test",
     "examples/rtp-loopback",
