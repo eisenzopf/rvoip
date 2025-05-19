@@ -4,7 +4,13 @@
 //! using DTLS-SRTP with sensible defaults and presets.
 
 use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
 use thiserror::Error;
+use async_trait::async_trait;
+
+// Implementation module
+pub mod secure_context_impl;
 
 /// Error types for security operations
 #[derive(Error, Debug)]
@@ -185,15 +191,13 @@ pub struct SecurityInfo {
     pub srtp_profile: Option<SrtpProfile>,
 }
 
-/// Secure media context for DTLS-SRTP
+/// Base trait for secure media context operations
 ///
-/// This trait provides an interface for securing media transport with DTLS-SRTP.
+/// This trait provides the interface for security operations.
+#[async_trait]
 pub trait SecureMediaContext: Send + Sync {
     /// Get security information for SDP
     fn get_security_info(&self) -> SecurityInfo;
-    
-    /// Start the DTLS handshake
-    async fn start_handshake(&self) -> Result<(), SecurityError>;
     
     /// Check if the context is secure (handshake completed)
     fn is_secure(&self) -> bool;
@@ -201,6 +205,22 @@ pub trait SecureMediaContext: Send + Sync {
     /// Set remote fingerprint from SDP
     fn set_remote_fingerprint(&mut self, fingerprint: &str, algorithm: &str) 
         -> Result<(), SecurityError>;
+    
+    /// Set the remote address for DTLS communications
+    ///
+    /// This must be called before start_handshake.
+    fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError>;
+    
+    /// Start the DTLS handshake
+    ///
+    /// This is an async method that initiates the DTLS handshake.
+    async fn start_handshake(&self) -> Result<(), SecurityError>;
+    
+    /// Set the transport socket for DTLS
+    ///
+    /// This should be called after creation and before starting the handshake.
+    /// It provides the UDP socket that will be used for DTLS communication.
+    async fn set_transport_socket(&self, socket: std::sync::Arc<tokio::net::UdpSocket>) -> Result<(), SecurityError>;
 }
 
 /// Factory for creating SecureMediaContext instances
@@ -211,8 +231,7 @@ impl SecurityFactory {
     pub async fn create_context(
         config: SecurityConfig,
     ) -> Result<Arc<dyn SecureMediaContext>, SecurityError> {
-        // This is a placeholder that will be implemented to create the actual security context
-        // based on the internal DTLS/SRTP implementation
-        todo!("Implement context creation using internal components")
+        let context = secure_context_impl::DefaultSecureMediaContext::new(config).await?;
+        Ok(context as Arc<dyn SecureMediaContext>)
     }
 } 

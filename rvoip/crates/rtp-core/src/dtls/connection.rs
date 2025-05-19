@@ -877,6 +877,11 @@ impl DtlsConnection {
         self.transport = Some(transport);
     }
     
+    /// Check if a transport is set
+    pub fn has_transport(&self) -> bool {
+        self.transport.is_some()
+    }
+    
     /// Get the remote address for the connection
     pub fn remote_addr(&self) -> Option<SocketAddr> {
         self.remote_addr

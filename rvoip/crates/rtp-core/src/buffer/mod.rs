@@ -4,8 +4,8 @@
 //! RTP packets, optimized for high-scale deployments with tens of thousands of connections.
 
 mod pool;
-mod jitter;
-mod transmit;
+pub mod jitter;
+pub mod transmit;
 
 pub use pool::*;
 pub use jitter::*;

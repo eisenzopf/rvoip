@@ -6,8 +6,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use async_trait::async_trait;
 
 use crate::api::transport::MediaFrame;
+
+// Implementation module
+mod media_buffer_impl;
 
 /// Error types for buffer operations
 #[derive(Error, Debug)]
@@ -235,24 +239,25 @@ pub struct BufferStats {
 }
 
 /// Media buffer interface for jitter buffering and transmit buffering
+#[async_trait]
 pub trait MediaBuffer: Send + Sync {
     /// Put a media frame into the buffer
-    fn put_frame(&self, frame: MediaFrame) -> Result<(), BufferError>;
+    async fn put_frame(&self, frame: MediaFrame) -> Result<(), BufferError>;
     
     /// Get the next media frame from the buffer, waiting up to the specified timeout
-    fn get_frame(&self, timeout: Duration) -> Result<MediaFrame, BufferError>;
+    async fn get_frame(&self, timeout: Duration) -> Result<MediaFrame, BufferError>;
     
     /// Get current buffer statistics
-    fn get_stats(&self) -> BufferStats;
+    async fn get_stats(&self) -> BufferStats;
     
     /// Reset the buffer, discarding all frames
-    fn reset(&self) -> Result<(), BufferError>;
+    async fn reset(&self) -> Result<(), BufferError>;
     
     /// Flush the buffer, returning all frames in order
-    fn flush(&self) -> Result<Vec<MediaFrame>, BufferError>;
+    async fn flush(&self) -> Result<Vec<MediaFrame>, BufferError>;
     
     /// Update buffer configuration
-    fn update_config(&self, config: MediaBufferConfig) -> Result<(), BufferError>;
+    async fn update_config(&self, config: MediaBufferConfig) -> Result<(), BufferError>;
 }
 
 /// Factory for creating MediaBuffer instances
@@ -263,8 +268,7 @@ impl MediaBufferFactory {
     pub fn create_buffer(
         config: MediaBufferConfig,
     ) -> Result<Arc<dyn MediaBuffer>, BufferError> {
-        // This is a placeholder that will be implemented to create the actual buffer
-        // based on the internal buffer implementation
-        todo!("Implement buffer creation using internal components")
+        let buffer = media_buffer_impl::DefaultMediaBuffer::new(config)?;
+        Ok(buffer as Arc<dyn MediaBuffer>)
     }
 } 

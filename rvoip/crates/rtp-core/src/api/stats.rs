@@ -8,6 +8,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
+use async_trait::async_trait;
+
+// Implementation module
+mod stats_collector_impl;
 
 /// Error types for statistics operations
 #[derive(Error, Debug)]
@@ -135,21 +139,22 @@ pub struct MediaStats {
 }
 
 /// Media statistics collector interface
+#[async_trait]
 pub trait MediaStatsCollector: Send + Sync {
     /// Get current media statistics
-    fn get_stats(&self) -> Result<MediaStats, StatsError>;
+    async fn get_stats(&self) -> Result<MediaStats, StatsError>;
     
     /// Get statistics for a specific stream by SSRC
-    fn get_stream_stats(&self, ssrc: u32) -> Result<StreamStats, StatsError>;
+    async fn get_stream_stats(&self, ssrc: u32) -> Result<StreamStats, StatsError>;
     
     /// Reset statistics
-    fn reset(&self);
+    async fn reset(&self);
     
     /// Register a callback for quality changes
-    fn on_quality_change(&self, callback: Box<dyn Fn(QualityLevel) + Send + Sync>);
+    async fn on_quality_change(&self, callback: Box<dyn Fn(QualityLevel) + Send + Sync>);
     
     /// Register a callback for bandwidth estimation changes
-    fn on_bandwidth_update(&self, callback: Box<dyn Fn(u32) + Send + Sync>);
+    async fn on_bandwidth_update(&self, callback: Box<dyn Fn(u32) + Send + Sync>);
 }
 
 /// Factory for creating MediaStatsCollector instances
@@ -158,9 +163,7 @@ pub struct StatsFactory;
 impl StatsFactory {
     /// Create a new MediaStatsCollector
     pub fn create_collector() -> Arc<dyn MediaStatsCollector> {
-        // This is a placeholder that will be implemented to create the actual stats collector
-        // based on the internal stats implementation
-        todo!("Implement stats collector creation using internal components")
+        stats_collector_impl::DefaultMediaStatsCollector::new()
     }
 }
 

@@ -23,6 +23,7 @@ log = "0.4"
 futures = "0.3.30"
 hostname = "0.3"
 once_cell = "1.10"
+parking_lot = "0.12.1"
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"
 sha1 = "0.10"
@@ -50,4 +51,8 @@ tokio-test = "0.4"
 
 [[example]]
 name = "dtls_test"
-path = "examples/dtls_test.rs" 
+path = "examples/dtls_test.rs"
+
+[[example]]
+name = "media_api_usage"
+path = "examples/media_api_usage.rs" 

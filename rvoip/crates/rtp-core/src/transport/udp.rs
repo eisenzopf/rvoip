@@ -390,6 +390,12 @@ impl UdpRtpTransport {
     pub fn subscribe(&self) -> broadcast::Receiver<RtpEvent> {
         self.event_tx.subscribe()
     }
+    
+    /// Get a clone of the RTP socket
+    /// This is used when sharing the same socket with other protocols (e.g., DTLS)
+    pub fn get_socket(&self) -> Arc<UdpSocket> {
+        self.rtp_socket.clone()
+    }
 }
 
 #[async_trait]

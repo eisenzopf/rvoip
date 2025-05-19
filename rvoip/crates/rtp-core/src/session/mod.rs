@@ -1218,6 +1218,22 @@ impl RtpSession {
             clock_rate: self.config.clock_rate,
         }
     }
+    
+    /// Get the UDP socket handle from the transport
+    /// 
+    /// This method is used to access the underlying UDP socket when needed for
+    /// other protocols that need to share the same socket (e.g., DTLS).
+    pub async fn get_socket_handle(&self) -> Result<Arc<UdpSocket>> {
+        // Try to get the socket from the UdpRtpTransport
+        if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
+            // Clone and return the RTP socket using the public method
+            let socket = t.get_socket();
+            return Ok(socket);
+        }
+        
+        // If we get here, the transport is not UdpRtpTransport
+        Err(Error::Transport("Transport is not a UDP transport".to_string()))
+    }
 }
 
 /// A lightweight sender handle for an RTP session

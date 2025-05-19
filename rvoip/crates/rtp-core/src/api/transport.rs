@@ -15,6 +15,9 @@ use crate::packet::rtp::RtpPacket;
 use crate::session::RtpSession;
 use crate::transport::RtpTransport;
 
+// Implementation module
+mod media_transport_impl;
+
 /// Error types specific to media transport operations
 #[derive(Error, Debug)]
 pub enum MediaTransportError {
@@ -47,7 +50,7 @@ pub enum MediaFrameType {
 }
 
 /// A media frame containing encoded media data
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MediaFrame {
     /// The type of media frame
     pub frame_type: MediaFrameType,
@@ -204,6 +207,18 @@ pub trait MediaTransportSession: Send + Sync {
     
     /// Get current transport statistics
     async fn get_stats(&self) -> Result<crate::api::stats::MediaStats, MediaTransportError>;
+    
+    /// Get security information for SDP exchange
+    ///
+    /// This returns security information like DTLS fingerprint that can be
+    /// included in SDP for secure media negotiation.
+    async fn get_security_info(&self) -> Result<crate::api::security::SecurityInfo, MediaTransportError>;
+    
+    /// Set the remote fingerprint for DTLS-SRTP
+    ///
+    /// This should be called with the fingerprint received from the remote peer's SDP
+    /// before starting the transport session when using DTLS-SRTP.
+    async fn set_remote_fingerprint(&self, fingerprint: &str, algorithm: &str) -> Result<(), MediaTransportError>;
 }
 
 /// Factory for creating MediaTransportSession instances
@@ -216,8 +231,22 @@ impl MediaTransportFactory {
         security_config: Option<crate::api::security::SecurityConfig>,
         buffer_config: Option<crate::api::buffer::MediaBufferConfig>,
     ) -> Result<Arc<dyn MediaTransportSession>, MediaTransportError> {
-        // This is a placeholder that will be implemented to create the actual transport session
-        // based on the internal RtpSession and other components
-        todo!("Implement session creation using internal components")
+        // Create security context if security config is provided
+        let security_context = if let Some(sec_config) = security_config {
+            Some(crate::api::security::SecurityFactory::create_context(sec_config).await
+                .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to create security context: {}", e)))?)
+        } else {
+            None
+        };
+        
+        // Create the media transport session implementation
+        let session = media_transport_impl::DefaultMediaTransportSession::new(
+            config,
+            security_context,
+            buffer_config
+        ).await?;
+        
+        // Return the session as a trait object
+        Ok(session as Arc<dyn MediaTransportSession>)
     }
 } 
