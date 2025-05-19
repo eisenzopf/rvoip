@@ -90,8 +90,8 @@ impl DefaultMediaTransportClient {
                 config.security_config.clone(),
             ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create security context: {}", e)))?;
             
-            // Store security context directly as Arc<dyn ClientSecurityContext>
-            Some(security_ctx)
+            // Store security context with explicit cast to trait object
+            Some(security_ctx as Arc<dyn ClientSecurityContext>)
         } else {
             None
         };
