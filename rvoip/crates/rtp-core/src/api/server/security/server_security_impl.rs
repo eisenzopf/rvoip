@@ -201,9 +201,7 @@ impl DefaultServerSecurityContext {
             version: crate::dtls::DtlsVersion::Dtls12,
             mtu: 1200,
             max_retransmissions: 5,
-            srtp_profiles: conn_config.srtp_profiles.iter()
-                .map(|p| Self::convert_profile(*p))
-                .collect(),
+            srtp_profiles: Self::convert_profiles(&conn_config.srtp_profiles),
         };
 
         // Create DTLS connection template
@@ -228,12 +226,12 @@ impl DefaultServerSecurityContext {
     }
     
     /// Convert external SRTP profile to internal format
-    fn convert_profile(profile: SrtpProfile) -> u16 {
+    fn convert_profile(profile: SrtpProfile) -> crate::srtp::SrtpCryptoSuite {
         match profile {
-            SrtpProfile::AesGcm128 => 0x0007, // AEAD_AES_128_GCM
-            SrtpProfile::AesGcm256 => 0x0008, // AEAD_AES_256_GCM
-            SrtpProfile::AesCm128HmacSha1_80 => 0x0001, // AES_CM_128_HMAC_SHA1_80
-            SrtpProfile::AesCm128HmacSha1_32 => 0x0002, // AES_CM_128_HMAC_SHA1_32
+            SrtpProfile::AesGcm128 => crate::srtp::SRTP_AEAD_AES_128_GCM,
+            SrtpProfile::AesGcm256 => crate::srtp::SRTP_AEAD_AES_256_GCM,
+            SrtpProfile::AesCm128HmacSha1_80 => crate::srtp::SRTP_AES128_CM_SHA1_80,
+            SrtpProfile::AesCm128HmacSha1_32 => crate::srtp::SRTP_AES128_CM_SHA1_32,
         }
     }
     
@@ -278,6 +276,11 @@ impl DefaultServerSecurityContext {
         } else {
             Err(SecurityError::Configuration("DTLS connection template not initialized".to_string()))
         }
+    }
+
+    /// Convert SrtpProfile vector to SrtpCryptoSuite vector
+    fn convert_profiles(profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
+        profiles.iter().map(|p| Self::convert_profile(*p)).collect()
     }
 }
 
@@ -345,14 +348,11 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             version: crate::dtls::DtlsVersion::Dtls12,
             mtu: 1200,
             max_retransmissions: 5,
-            srtp_profiles: conn_config.srtp_profiles.iter()
-                .map(|p| Self::convert_profile(*p))
-                .collect(),
+            srtp_profiles: Self::convert_profiles(&conn_config.srtp_profiles),
         };
 
-        let connection = DtlsConnection::new(dtls_config)
-            .map_err(|e| SecurityError::Configuration(format!("Failed to create DTLS connection for client: {}", e)))?;
-            
+        let connection = DtlsConnection::new(dtls_config);
+
         // Set remote address
         connection.set_remote_address(addr)
             .map_err(|e| SecurityError::Configuration(format!("Failed to set client address: {}", e)))?;
@@ -420,7 +420,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
                                 let server_key = srtp_context.get_key_for_role(false);
                                 
                                 // Create SRTP context with the server key
-                                let srtp_ctx = match SrtpContext::new(profile, server_key) {
+                                let srtp_ctx = match SrtpContext::new(profile, server_key.clone()) {
                                     Ok(context) => context,
                                     Err(e) => {
                                         error!("Failed to create SRTP context for client {}: {}", addr, e);
@@ -452,6 +452,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
                     }
                 }
             }
+            Ok(())
         });
         
         Ok(client_arc as Arc<dyn ClientSecurityContext>)

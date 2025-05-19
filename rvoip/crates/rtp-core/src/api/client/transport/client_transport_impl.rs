@@ -90,8 +90,8 @@ impl DefaultMediaTransportClient {
                 config.security_config.clone(),
             ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create security context: {}", e)))?;
             
-            // Store security context
-            Some(Arc::new(security_ctx))
+            // Store security context directly as Arc<dyn ClientSecurityContext>
+            Some(security_ctx)
         } else {
             None
         };
@@ -319,7 +319,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     
     async fn send_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
         // Check if connected
-        if !self.is_connected() {
+        if !self.is_connected().await? {
             return Err(MediaTransportError::NotConnected);
         }
         

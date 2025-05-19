@@ -128,4 +128,10 @@ pub trait ClientSecurityContext: Send + Sync {
     /// Get basic security information synchronously 
     /// (for use during initialization when async isn't available)
     fn get_security_info_sync(&self) -> SecurityInfo;
+    
+    /// Get the local fingerprint (client's fingerprint)
+    async fn get_fingerprint(&self) -> Result<String, SecurityError>;
+    
+    /// Get the local fingerprint algorithm (client's algorithm)
+    async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError>;
 } 
