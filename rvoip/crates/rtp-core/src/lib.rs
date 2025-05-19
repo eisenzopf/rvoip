@@ -19,6 +19,7 @@
 //! - `error`: Error handling
 //! - `rtcp`: RTCP packet definitions and processing
 //! - `dtls`: DTLS support
+//! - `api`: New API module
 //!
 //! ## Buffer Management
 //!
@@ -50,6 +51,7 @@ pub mod csrc;
 pub mod rtcp;
 pub mod dtls;
 pub mod sync;
+pub mod api;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
