@@ -364,9 +364,9 @@ impl RtpSession {
                         match t.remote_rtp_addr().await {
                             Some(addr) => addr,
                             None => {
-                                // No destination address, can't send
-                                warn!("No destination address for RTP packet, dropping");
-                                continue;
+                    // No destination address, can't send
+                    warn!("No destination address for RTP packet, dropping");
+                    continue;
                             }
                         }
                     } else {
@@ -411,29 +411,29 @@ impl RtpSession {
                 tokio::select! {
                     // Handle direct packet reception from the transport
                     result = recv_transport.receive_packet(&mut buffer) => {
-                        match result {
-                            Ok((size, addr)) => {
+                match result {
+                    Ok((size, addr)) => {
                                 // Process RTP packet
-                                if size < RTP_MIN_HEADER_SIZE {
-                                    warn!("Received packet too small to be RTP: {} bytes", size);
-                                    continue;
-                                }
-                                
-                                // Parse RTP packet
-                                match RtpPacket::parse(&buffer[..size]) {
-                                    Ok(packet) => {
+                        if size < RTP_MIN_HEADER_SIZE {
+                            warn!("Received packet too small to be RTP: {} bytes", size);
+                            continue;
+                        }
+                        
+                        // Parse RTP packet
+                        match RtpPacket::parse(&buffer[..size]) {
+                            Ok(packet) => {
                                         // Extract the SSRC from the packet
                                         let packet_ssrc = packet.header.ssrc;
                                         debug!("Received packet with SSRC={:08x}, seq={}, timestamp={}",
                                                packet_ssrc, packet.header.sequence_number, packet.header.timestamp);
                                         
-                                        // Update stats
-                                        if let Ok(mut session_stats) = stats_recv.lock() {
-                                            session_stats.packets_received += 1;
-                                            session_stats.bytes_received += size as u64;
-                                            session_stats.remote_addr = Some(addr);
-                                        }
-                                        
+                                // Update stats
+                                if let Ok(mut session_stats) = stats_recv.lock() {
+                                    session_stats.packets_received += 1;
+                                    session_stats.bytes_received += size as u64;
+                                    session_stats.remote_addr = Some(addr);
+                                }
+                                
                                         // Get or create the stream for this SSRC
                                         let (is_new_stream, output_packet) = {
                                             let mut streams = match streams_map.lock() {
@@ -448,7 +448,7 @@ impl RtpSession {
                                             let is_new = !streams.contains_key(&packet_ssrc);
                                             if is_new {
                                                 debug!("Creating new stream for SSRC={:08x}", packet_ssrc);
-                                            } else {
+                                    } else {
                                                 debug!("Found existing stream for SSRC={:08x}", packet_ssrc);
                                             }
                                             
@@ -477,8 +477,8 @@ impl RtpSession {
                                                 debug!("Initialized new stream for SSRC={:08x} with seq={}", 
                                                        packet_ssrc, packet.header.sequence_number);
                                             }
-                                            
-                                            // Process the packet and get the output packet (if any)
+                                
+                                // Process the packet and get the output packet (if any)
                                             let output = stream.process_packet(packet.clone());
                                             if output.is_some() {
                                                 debug!("Stream {:08x} returned a packet for delivery", packet_ssrc);
@@ -503,34 +503,34 @@ impl RtpSession {
                                             // Update jitter stats - get the stream again
                                             if let Ok(streams) = streams_map.lock() {
                                                 if let Some(stream) = streams.get(&packet_ssrc) {
-                                                    if let Ok(mut session_stats) = stats_recv.lock() {
-                                                        session_stats.jitter_ms = stream.get_jitter_ms();
-                                                        
-                                                        // Update other stream-specific stats
-                                                        let stream_stats = stream.get_stats();
+                                    if let Ok(mut session_stats) = stats_recv.lock() {
+                                        session_stats.jitter_ms = stream.get_jitter_ms();
+                                        
+                                        // Update other stream-specific stats
+                                        let stream_stats = stream.get_stats();
                                                         session_stats.packets_lost = stream_stats.packets_lost;
                                                         session_stats.packets_duplicated = stream_stats.duplicates;
                                                         session_stats.packets_out_of_order = 0; // TODO: Track this
                                                     }
                                                 }
-                                            }
-                                            
-                                            // Forward the packet to the receiver channel
+                                    }
+                                    
+                                    // Forward the packet to the receiver channel
                                             if let Err(e) = receiver_tx.send(output.clone()).await {
-                                                error!("Failed to forward RTP packet to receiver: {}", e);
-                                            }
-                                            
-                                            // Broadcast packet received event
+                                        error!("Failed to forward RTP packet to receiver: {}", e);
+                                    }
+                                    
+                                    // Broadcast packet received event
                                             debug!("Emitting PacketReceived event for SSRC={:08x}", packet_ssrc);
                                             let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to parse RTP packet: {}", e);
-                                    }
                                 }
                             }
                             Err(e) => {
+                                warn!("Failed to parse RTP packet: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
                                 error!("Error receiving from transport: {}", e);
                                 continue;
                             }

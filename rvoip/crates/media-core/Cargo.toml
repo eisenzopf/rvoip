@@ -33,13 +33,6 @@ clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# SRTP support
-webrtc-srtp = "0.10"
-
-# DTLS support
-webrtc-dtls = "0.8"
-webrtc-util = "0.7"
-
 # Random generation
 rand = "0.8"
 

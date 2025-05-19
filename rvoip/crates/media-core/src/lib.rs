@@ -1,17 +1,58 @@
-//! Media Core library for the RVOIP project
+//! # Media Core library for the RVOIP project
 //! 
-//! This crate provides codec implementations, media processing utilities,
-//! and other media handling functionality.
+//! `media-core` is the media processing engine for the rvoip stack. It handles audio/video codec
+//! management, media session coordination, and acts as the bridge between signaling (`session-core`)
+//! and media transport (`rtp-core`).
+//!
+//! This crate provides:
+//! 
+//! - Media session management
+//! - Codec implementations (Opus, G.711, G.722, etc.)
+//! - Audio processing (echo cancellation, noise suppression, etc.)
+//! - RTP integration (packetization, depacketization)
+//! - Media quality monitoring and adaptation
+//! - SDP media negotiation support
+//!
+//! ## Architecture
+//!
+//! The library is organized into several modules:
+//!
+//! - `session`: Media session management
+//! - `codec`: Codec framework and implementations
+//! - `engine`: Audio/video processing engines
+//! - `processing`: Media signal processing
+//! - `buffer`: Media buffer management
+//! - `quality`: Media quality monitoring
+//! - `rtp`: RTP integration
+//! - `security`: Media security (SRTP, DTLS)
+//! - `sync`: Media synchronization
+//! - `integration`: Integration with other components
 
+// Error handling
 pub mod error;
-pub mod codec;
-pub mod srtp;
-pub mod dtls;
 
+// Core modules for media handling
+pub mod session;
+pub mod codec;
+pub mod engine;
+pub mod processing;
+pub mod buffer;
+pub mod quality;
+pub mod rtp;
+pub mod security;
+pub mod sync;
+pub mod integration;
+
+// Re-export common types
 pub use error::{Error, Result};
 pub use codec::Codec;
-pub use srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-pub use dtls::{DtlsConnection, DtlsConfig, DtlsEvent, TransportConn};
+pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
+// Re-export rtp-core types for convenience
+pub use security::{
+    SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
+    SrtpCryptoSuite, DtlsVersion
+};
 
 use std::net::SocketAddr;
 use std::io;
@@ -133,4 +174,32 @@ impl AudioBuffer {
         let bytes_per_sample = (self.format.bit_depth / 8) as usize;
         self.data.len() / bytes_per_sample / (self.format.channels as usize)
     }
+}
+
+/// Prelude module with commonly used types
+pub mod prelude {
+    pub use crate::{
+        Error, 
+        Result,
+        Sample,
+        SampleRate,
+        AudioFormat,
+        AudioBuffer,
+    };
+    
+    pub use crate::codec::Codec;
+    pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+    pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
+    pub use crate::security::{
+        SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
+        SrtpCryptoSuite, DtlsVersion
+    };
+    
+    // These will be available once the modules are implemented
+    // pub use crate::session::{
+    //     MediaSession,
+    //     MediaDirection,
+    //     MediaType,
+    //     MediaState,
+    // };
 } 

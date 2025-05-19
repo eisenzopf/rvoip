@@ -2095,9 +2095,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "webrtc-dtls 0.8.0",
- "webrtc-srtp",
- "webrtc-util 0.7.0",
 ]
 
 [[package]]
