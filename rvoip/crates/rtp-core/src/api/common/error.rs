@@ -5,11 +5,19 @@
 use thiserror::Error;
 
 /// Error types for media transport
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum MediaTransportError {
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
+    
+    /// Transport error
+    #[error("Transport error: {0}")]
+    Transport(String),
+    
+    /// Security error
+    #[error("Security error: {0}")]
+    Security(String),
     
     /// Initialization error
     #[error("Initialization error: {0}")]
@@ -30,6 +38,14 @@ pub enum MediaTransportError {
     /// Packet receive error
     #[error("Receive error: {0}")]
     ReceiveError(String),
+    
+    /// Not connected error
+    #[error("Transport not connected")]
+    NotConnected,
+    
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    Configuration(String),
 }
 
 /// Error types for security operations
@@ -39,9 +55,21 @@ pub enum SecurityError {
     #[error("Failed to initialize security: {0}")]
     InitError(String),
     
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    
     /// Error during DTLS handshake
     #[error("DTLS handshake error: {0}")]
+    Handshake(String),
+    
+    /// Handshake error (specific to handshake process)
+    #[error("Handshake error: {0}")]
     HandshakeError(String),
+    
+    /// Internal error
+    #[error("Internal security error: {0}")]
+    Internal(String),
     
     /// Error during SRTP operations
     #[error("SRTP error: {0}")]
@@ -51,9 +79,9 @@ pub enum SecurityError {
     #[error("Certificate error: {0}")]
     CertificateError(String),
     
-    /// Configuration error
-    #[error("Configuration error: {0}")]
-    ConfigurationError(String),
+    /// Not initialized error
+    #[error("Component not initialized: {0}")]
+    NotInitialized(String),
 }
 
 /// Error types for buffer operations

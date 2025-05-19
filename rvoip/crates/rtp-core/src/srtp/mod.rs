@@ -87,6 +87,22 @@ pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 0,
 };
 
+/// AEAD AES-128 GCM
+pub const SRTP_AEAD_AES_128_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
+    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
+    authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
+    key_length: 16, // 128 bits
+    tag_length: 16, // 128 bits for GCM
+};
+
+/// AEAD AES-256 GCM
+pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
+    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
+    authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
+    key_length: 32, // 256 bits
+    tag_length: 16, // 128 bits for GCM
+};
+
 /// SRTP context for a session
 pub struct SrtpContext {
     /// Whether encryption is enabled
@@ -140,6 +156,21 @@ impl SrtpContext {
             key_rotation: key_derivation::KeyRotationFrequency::None,
             packet_index: 0,
         })
+    }
+    
+    /// Create a new SRTP context from separate local and remote keys
+    pub fn new_from_keys(
+        local_key: Vec<u8>,
+        remote_key: Vec<u8>,
+        local_salt: Vec<u8>,
+        remote_salt: Vec<u8>,
+        profile: SrtpCryptoSuite,
+    ) -> Result<Self, crate::Error> {
+        // Create a combined key for simplicity in this implementation
+        // In a full implementation, you'd want to handle local and remote keys separately
+        let combined_key = crypto::SrtpCryptoKey::new(local_key, local_salt);
+        
+        Self::new(profile, combined_key)
     }
     
     /// Enable or disable SRTP

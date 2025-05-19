@@ -3,7 +3,7 @@
 //! This module defines common event types used by both client and server APIs.
 
 use std::net::SocketAddr;
-use crate::api::stats::QualityLevel;
+use crate::api::common::stats::QualityLevel;
 
 /// Media transport event types for notifications
 #[derive(Debug, Clone)]
@@ -26,6 +26,24 @@ pub enum MediaTransportEvent {
     RemoteAddressChanged {
         /// The new remote address
         address: SocketAddr,
+    },
+    /// Media frame received (only used when not using receive_frame directly)
+    FrameReceived(crate::api::common::frame::MediaFrame),
+    /// Error occurred
+    Error(crate::api::common::error::MediaTransportError),
+    /// Transport state changed
+    StateChanged(String),
+    /// Stream ended
+    StreamEnded {
+        /// Stream SSRC
+        ssrc: u32,
+        /// Reason for ending
+        reason: String,
+    },
+    /// New stream detected
+    NewStream {
+        /// Stream SSRC
+        ssrc: u32,
     },
 }
 

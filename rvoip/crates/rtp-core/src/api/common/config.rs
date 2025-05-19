@@ -1,6 +1,6 @@
 //! Common configuration types
 //!
-//! This module defines configuration types shared between client and server components.
+//! This module defines configuration types shared between client and server APIs.
 
 use std::net::SocketAddr;
 use crate::api::common::frame::MediaFrameType;
@@ -8,29 +8,55 @@ use crate::api::common::frame::MediaFrameType;
 /// Security mode for media transport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityMode {
-    /// No security (plain RTP)
+    /// No security
     None,
-    
-    /// DTLS-SRTP (recommended)
+    /// DTLS-SRTP (WebRTC standard)
     DtlsSrtp,
-    
-    /// SRTP with pre-shared keys
-    SrtpWithPsk,
+    /// Pre-shared key SRTP (for SIP)
+    SrtpPsk,
+    /// Custom security mode
+    Custom,
 }
 
-/// SRTP protection profile
+impl SecurityMode {
+    /// Check if security is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            SecurityMode::None => false,
+            _ => true,
+        }
+    }
+}
+
+impl Default for SecurityMode {
+    fn default() -> Self {
+        SecurityMode::DtlsSrtp
+    }
+}
+
+/// Identity validation mechanism
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityValidation {
+    /// No validation (use with caution)
+    None,
+    /// Fingerprint validation (DTLS)
+    Fingerprint,
+    /// Certificate validation (DTLS)
+    Certificate,
+    /// Custom validation
+    Custom,
+}
+
+/// SRTP profiles for negotiation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpProfile {
-    /// AES-CM with 128-bit keys and HMAC-SHA1 authentication (80-bit tag)
+    /// AES_CM_128_HMAC_SHA1_80 (most common)
     AesCm128HmacSha1_80,
-    
-    /// AES-CM with 128-bit keys and HMAC-SHA1 authentication (32-bit tag)
+    /// AES_CM_128_HMAC_SHA1_32 (reduced auth tag for bandwidth savings)
     AesCm128HmacSha1_32,
-    
-    /// AES-GCM with 128-bit keys
+    /// AEAD_AES_128_GCM (more secure, less overhead)
     AesGcm128,
-    
-    /// AES-GCM with 256-bit keys
+    /// AEAD_AES_256_GCM (highest security)
     AesGcm256,
 }
 
@@ -63,18 +89,32 @@ pub struct BaseTransportConfig {
     pub mtu: usize,
 }
 
-/// Information about the secure context for SDP
+/// Security information for SDP exchange
 #[derive(Debug, Clone)]
 pub struct SecurityInfo {
-    /// DTLS fingerprint (e.g., for SDP a=fingerprint)
+    /// Security mode
+    pub mode: SecurityMode,
+    /// DTLS fingerprint (for DtlsSrtp)
     pub fingerprint: Option<String>,
-    
-    /// Fingerprint hash algorithm (e.g., "sha-256")
+    /// Fingerprint algorithm (for DtlsSrtp)
     pub fingerprint_algorithm: Option<String>,
-    
-    /// DTLS setup role as string (e.g., "active", "passive")
-    pub setup_role: String,
-    
-    /// Negotiated SRTP profile
-    pub srtp_profile: Option<SrtpProfile>,
+    /// Crypto suites (string representations for SDP)
+    pub crypto_suites: Vec<String>,
+    /// Key parameters (for SrtpPsk)
+    pub key_params: Option<String>,
+    /// Selected SRTP profile
+    pub srtp_profile: Option<String>,
+}
+
+impl Default for SecurityInfo {
+    fn default() -> Self {
+        Self {
+            mode: SecurityMode::None,
+            fingerprint: None,
+            fingerprint_algorithm: None,
+            crypto_suites: Vec::new(),
+            key_params: None,
+            srtp_profile: None,
+        }
+    }
 } 

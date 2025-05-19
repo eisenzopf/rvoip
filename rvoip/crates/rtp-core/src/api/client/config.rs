@@ -1,214 +1,119 @@
 //! Client configuration
 //!
-//! This module contains client-specific configuration types and builders.
+//! This module defines client-specific configuration types.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use crate::api::common::frame::MediaFrameType;
-use crate::api::common::error::MediaTransportError;
-use crate::api::common::config::{BaseTransportConfig, SecurityMode, SrtpProfile};
-use crate::transport::{PortAllocator, GlobalPortAllocator};
+use std::net::SocketAddr;
+use crate::api::client::security::ClientSecurityConfig;
 
-/// Client transport configuration
+/// Client configuration
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Base transport configuration
-    pub base: BaseTransportConfig,
-    /// Remote address to send to
-    pub remote_address: Option<SocketAddr>,
-    /// RTCP address to send to
-    pub rtcp_address: Option<SocketAddr>,
-    /// Security mode
-    pub security_mode: SecurityMode,
-    /// SRTP protection profiles in order of preference
-    pub srtp_profiles: Vec<SrtpProfile>,
-    /// Whether DTLS should take client role (true = client, false = server)
-    pub dtls_client: bool,
-    /// Pre-shared SRTP key material (only used in SrtpWithPsk mode)
-    pub psk_material: Option<Vec<u8>>,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            base: BaseTransportConfig {
-                local_address: None,
-                rtcp_mux: true,
-                media_types: vec![MediaFrameType::Audio],
-                mtu: 1200,
-            },
-            remote_address: None,
-            rtcp_address: None,
-            security_mode: SecurityMode::DtlsSrtp,
-            srtp_profiles: vec![
-                SrtpProfile::AesGcm128,
-                SrtpProfile::AesCm128HmacSha1_80,
-            ],
-            dtls_client: true,
-            psk_material: None,
-        }
-    }
+    /// Remote address to connect to
+    pub remote_address: SocketAddr,
+    /// Default payload type
+    pub default_payload_type: u8,
+    /// Clock rate in Hz
+    pub clock_rate: u32,
+    /// Security configuration
+    pub security_config: ClientSecurityConfig,
+    /// Jitter buffer size in packets
+    pub jitter_buffer_size: u32,
+    /// Maximum packet age in milliseconds
+    pub jitter_max_packet_age_ms: u32,
+    /// Enable jitter buffer
+    pub enable_jitter_buffer: bool,
+    /// Local SSRC
+    pub ssrc: Option<u32>,
 }
 
 /// Builder for ClientConfig
+#[derive(Debug, Clone)]
 pub struct ClientConfigBuilder {
-    /// Config being built
-    pub config: ClientConfig,
+    /// Client configuration being built
+    config: ClientConfig,
 }
 
 impl ClientConfigBuilder {
-    /// Create a new builder with default configuration
+    /// Create a new client config builder with default values
     pub fn new() -> Self {
         Self {
-            config: ClientConfig::default(),
+            config: ClientConfig {
+                remote_address: "127.0.0.1:0".parse().unwrap(),
+                default_payload_type: 0,
+                clock_rate: 8000,
+                security_config: ClientSecurityConfig::default(),
+                jitter_buffer_size: 100,
+                jitter_max_packet_age_ms: 500,
+                enable_jitter_buffer: true,
+                ssrc: Some(rand::random()),
+            },
         }
     }
     
-    /// Create the WebRTC profile (optimized for WebRTC compatibility)
+    /// Create a builder with WebRTC-optimized defaults
     pub fn webrtc() -> Self {
         let mut builder = Self::new();
-        builder.config.srtp_profiles = vec![
-            SrtpProfile::AesGcm128, 
-            SrtpProfile::AesCm128HmacSha1_80,
-        ];
+        builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::DtlsSrtp;
         builder
     }
     
-    /// Create the SIP profile (optimized for SIP compatibility)
+    /// Create a builder with SIP-optimized defaults
     pub fn sip() -> Self {
         let mut builder = Self::new();
-        builder.config.srtp_profiles = vec![
-            SrtpProfile::AesCm128HmacSha1_80,
-            SrtpProfile::AesCm128HmacSha1_32,
-        ];
+        builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::SrtpPsk;
         builder
     }
     
-    /// Set local address
-    pub fn local_address(mut self, addr: SocketAddr) -> Self {
-        self.config.base.local_address = Some(addr);
-        self
-    }
-    
-    /// Set remote address
+    /// Set the remote address
     pub fn remote_address(mut self, addr: SocketAddr) -> Self {
-        self.config.remote_address = Some(addr);
+        self.config.remote_address = addr;
         self
     }
     
-    /// Set RTCP address
-    pub fn rtcp_address(mut self, addr: SocketAddr) -> Self {
-        self.config.rtcp_address = Some(addr);
+    /// Set the default payload type
+    pub fn default_payload_type(mut self, pt: u8) -> Self {
+        self.config.default_payload_type = pt;
         self
     }
     
-    /// Set RTCP multiplexing (RTP and RTCP on same socket)
-    pub fn rtcp_mux(mut self, enabled: bool) -> Self {
-        self.config.base.rtcp_mux = enabled;
+    /// Set the clock rate
+    pub fn clock_rate(mut self, rate: u32) -> Self {
+        self.config.clock_rate = rate;
         self
     }
     
-    /// Set media types supported by this transport
-    pub fn media_types(mut self, types: Vec<MediaFrameType>) -> Self {
-        self.config.base.media_types = types;
+    /// Set the security configuration
+    pub fn security_config(mut self, config: ClientSecurityConfig) -> Self {
+        self.config.security_config = config;
         self
     }
     
-    /// Set maximum transmission unit (MTU)
-    pub fn mtu(mut self, mtu: usize) -> Self {
-        self.config.base.mtu = mtu;
+    /// Set the jitter buffer size
+    pub fn jitter_buffer_size(mut self, size: u32) -> Self {
+        self.config.jitter_buffer_size = size;
         self
     }
     
-    /// Set the security mode
-    pub fn security_mode(mut self, mode: SecurityMode) -> Self {
-        self.config.security_mode = mode;
+    /// Set the maximum packet age
+    pub fn jitter_max_packet_age_ms(mut self, age: u32) -> Self {
+        self.config.jitter_max_packet_age_ms = age;
         self
     }
     
-    /// Set the SRTP protection profiles in order of preference
-    pub fn srtp_profiles(mut self, profiles: Vec<SrtpProfile>) -> Self {
-        self.config.srtp_profiles = profiles;
+    /// Enable or disable the jitter buffer
+    pub fn enable_jitter_buffer(mut self, enable: bool) -> Self {
+        self.config.enable_jitter_buffer = enable;
         self
     }
     
-    /// Set the DTLS setup role (true = client, false = server)
-    pub fn dtls_client(mut self, client: bool) -> Self {
-        self.config.dtls_client = client;
+    /// Set the SSRC
+    pub fn ssrc(mut self, ssrc: u32) -> Self {
+        self.config.ssrc = Some(ssrc);
         self
     }
     
-    /// Set pre-shared key material for SRTP (only used in SrtpWithPsk mode)
-    pub fn psk_material(mut self, material: Vec<u8>) -> Self {
-        self.config.psk_material = Some(material);
-        self
-    }
-    
-    /// Use the port allocator to dynamically allocate ports
-    pub async fn with_dynamic_ports(mut self, session_id: &str, ip: Option<IpAddr>) -> Result<Self, MediaTransportError> {
-        // Get the global port allocator instance
-        let allocator = GlobalPortAllocator::instance().await;
-        
-        // Allocate a pair of ports
-        let (rtp_addr, rtcp_addr) = allocator.allocate_port_pair(session_id, ip)
-            .await
-            .map_err(|e| MediaTransportError::ConfigError(format!("Failed to allocate ports: {}", e)))?;
-        
-        // Update the configuration with the allocated ports
-        self = self.local_address(rtp_addr);
-        
-        // If RTCP multiplexing is not enabled, ensure we have a separate RTCP port
-        if !self.config.base.rtcp_mux && rtcp_addr.is_some() {
-            self = self.rtcp_address(rtcp_addr.unwrap());
-        }
-        
-        Ok(self)
-    }
-    
-    /// Use a specific port allocator instance to allocate ports
-    pub async fn with_port_allocator(
-        mut self, 
-        allocator: Arc<PortAllocator>, 
-        session_id: &str, 
-        ip: Option<IpAddr>
-    ) -> Result<Self, MediaTransportError> {
-        // Allocate a pair of ports
-        let (rtp_addr, rtcp_addr) = allocator.allocate_port_pair(session_id, ip)
-            .await
-            .map_err(|e| MediaTransportError::ConfigError(format!("Failed to allocate ports: {}", e)))?;
-        
-        // Update the configuration with the allocated ports
-        self = self.local_address(rtp_addr);
-        
-        // If RTCP multiplexing is not enabled, ensure we have a separate RTCP port
-        if !self.config.base.rtcp_mux && rtcp_addr.is_some() {
-            self = self.rtcp_address(rtcp_addr.unwrap());
-        }
-        
-        Ok(self)
-    }
-    
-    /// Build the configuration
-    pub fn build(self) -> Result<ClientConfig, MediaTransportError> {
-        // Validate the configuration
-        if self.config.base.local_address.is_none() {
-            return Err(MediaTransportError::ConfigError(
-                "Local address is required".to_string(),
-            ));
-        }
-        
-        if self.config.remote_address.is_none() {
-            return Err(MediaTransportError::ConfigError(
-                "Remote address is required for client configuration".to_string(),
-            ));
-        }
-        
-        if self.config.security_mode == SecurityMode::SrtpWithPsk && self.config.psk_material.is_none() {
-            return Err(MediaTransportError::ConfigError(
-                "PSK material must be provided when using SrtpWithPsk mode".to_string(),
-            ));
-        }
-        
-        Ok(self.config)
+    /// Build the client configuration
+    pub fn build(self) -> ClientConfig {
+        self.config
     }
 } 

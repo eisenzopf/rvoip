@@ -19,7 +19,17 @@
 //! - `error`: Error handling
 //! - `rtcp`: RTCP packet definitions and processing
 //! - `dtls`: DTLS support
-//! - `api`: New API module
+//! - `api`: New API module with client/server separation
+//!
+//! ## New API Structure
+//!
+//! The `api` module provides a higher-level interface with clear client/server separation:
+//!
+//! - `api::client`: Client-side media transport for sending/receiving media frames
+//! - `api::server`: Server-side media transport for handling multiple clients
+//! - `api::common`: Shared types and utilities used by both client and server
+//!
+//! This structure makes the library easier to use for higher-level components like media-core.
 //!
 //! ## Buffer Management
 //!
@@ -116,6 +126,16 @@ pub use sync::{MediaSync};
 pub use sync::mapping::TimestampMapper;
 pub use sync::clock::MediaClock;
 
+// Re-export the new API components for easier access
+pub use api::client::{MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder};
+pub use api::server::{MediaTransportServer, ServerFactory, ServerConfig, ServerConfigBuilder, ClientInfo};
+pub use api::common::frame::{MediaFrame, MediaFrameType};
+pub use api::common::events::{MediaTransportEvent, MediaEventCallback};
+pub use api::common::stats::{MediaStats, QualityLevel};
+pub use api::common::config::{SecurityMode, SrtpProfile, SecurityInfo, NetworkPreset, BaseTransportConfig};
+pub use api::common::error::{MediaTransportError, SecurityError, BufferError, StatsError};
+pub use api::common::buffer::{MediaBuffer, MediaBufferConfig, BufferStats};
+
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
@@ -130,6 +150,12 @@ pub mod prelude {
     };
     
     pub use crate::traits::{MediaTransport, RtpMediaTransport};
+    
+    // Add new API types to prelude for easy access
+    pub use crate::api::client::{MediaTransportClient, ClientFactory, ClientConfig};
+    pub use crate::api::server::{MediaTransportServer, ServerFactory, ServerConfig, ClientInfo};
+    pub use crate::api::common::frame::{MediaFrame, MediaFrameType};
+    pub use crate::api::common::events::{MediaTransportEvent, MediaEventCallback};
 }
 
 #[cfg(test)]

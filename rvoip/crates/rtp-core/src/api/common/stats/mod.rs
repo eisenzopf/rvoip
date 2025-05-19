@@ -35,6 +35,12 @@ pub enum QualityLevel {
     Unknown,
 }
 
+impl Default for QualityLevel {
+    fn default() -> Self {
+        QualityLevel::Unknown
+    }
+}
+
 /// Direction of media flow
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -120,6 +126,21 @@ pub struct MediaStats {
     
     /// Current network round-trip time in milliseconds
     pub network_rtt_ms: Option<f32>,
+}
+
+impl Default for MediaStats {
+    fn default() -> Self {
+        Self {
+            timestamp: SystemTime::now(),
+            session_duration: Duration::from_secs(0),
+            streams: HashMap::new(),
+            quality: QualityLevel::default(),
+            upstream_bandwidth_bps: 0,
+            downstream_bandwidth_bps: 0,
+            available_bandwidth_bps: None,
+            network_rtt_ms: None,
+        }
+    }
 }
 
 /// Media statistics collector interface
