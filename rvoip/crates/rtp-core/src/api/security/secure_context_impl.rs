@@ -44,6 +44,12 @@ pub struct DefaultSecureMediaContext {
     
     /// Remote address for DTLS
     remote_addr: Arc<RwLock<Option<std::net::SocketAddr>>>,
+    
+    /// Handshake status notification
+    handshake_status: Arc<tokio::sync::Notify>,
+    
+    /// Handshake error (if any)
+    handshake_error: Arc<RwLock<Option<String>>>,
 }
 
 impl DefaultSecureMediaContext {
@@ -107,6 +113,8 @@ impl DefaultSecureMediaContext {
             srtp_keys: Arc::new(RwLock::new(None)),
             secure: Arc::new(RwLock::new(false)),
             remote_addr: Arc::new(RwLock::new(None)),
+            handshake_status: Arc::new(tokio::sync::Notify::new()),
+            handshake_error: Arc::new(RwLock::new(None)),
         });
         
         // If using PSK for SRTP, initialize SRTP directly
@@ -146,13 +154,21 @@ impl DefaultSecureMediaContext {
     /// This must be called before starting the handshake
     pub async fn set_transport_socket(&self, socket: Arc<UdpSocket>) -> Result<(), SecurityError> {
         // Create a DTLS transport from the socket
-        debug!("Creating DTLS transport from RTP socket");
-        let dtls_transport = UdpTransport::new(socket, 1500).await
+        debug!("Creating DTLS transport from RTP socket: local_addr={:?}", socket.local_addr());
+        
+        // Check that the socket is bound to an address
+        let local_addr = socket.local_addr()
+            .map_err(|e| SecurityError::InitError(format!("Socket not bound to an address: {}", e)))?;
+        
+        debug!("Socket is bound to local address: {}", local_addr);
+        
+        let dtls_transport = UdpTransport::new(socket.clone(), 1500).await
             .map_err(|e| SecurityError::InitError(format!("Failed to create DTLS transport: {:?}", e)))?;
         
         // Store the transport
         {
             let mut transport = self.transport.write().await;
+            debug!("Storing transport in context and setting initial buffer capacity");
             *transport = Some(Arc::new(tokio::sync::Mutex::new(dtls_transport)));
         }
         
@@ -163,18 +179,23 @@ impl DefaultSecureMediaContext {
             // Get the transport
             if let Some(transport) = &*self.transport.read().await {
                 // Set the transport
+                debug!("Setting transport on DTLS connection");
                 dtls_guard.set_transport(transport.clone());
-                debug!("Set transport on DTLS connection");
             }
         }
         
         // Start the transport
         if let Some(transport) = &*self.transport.read().await {
             let mut transport_guard = transport.lock().await;
+            debug!("Starting DTLS transport");
             transport_guard.start().await
                 .map_err(|e| SecurityError::InitError(format!("Failed to start DTLS transport: {:?}", e)))?;
             
-            debug!("Started DTLS transport");
+            // Test that the transport can receive packets by checking if the socket is properly set up
+            match socket.local_addr() {
+                Ok(addr) => debug!("Transport started successfully, listening on {}", addr),
+                Err(e) => return Err(SecurityError::InitError(format!("Transport socket error: {}", e))),
+            }
         }
         
         Ok(())
@@ -244,15 +265,19 @@ impl DefaultSecureMediaContext {
     }
     
     /// Set the remote IP address for DTLS
-    pub fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError> {
-        match self.remote_addr.try_write() {
-            Ok(mut remote_addr) => {
-                info!("Setting remote address {} for DTLS", addr);
-                *remote_addr = Some(addr);
-                Ok(())
-            },
-            Err(_) => Err(SecurityError::HandshakeError("Failed to acquire lock".to_string())),
+    pub async fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError> {
+        info!("Setting remote address {} for DTLS", addr);
+        let mut remote_addr = self.remote_addr.write().await;
+        *remote_addr = Some(addr);
+        
+        // Log current state
+        if let Some(dtls) = &self.dtls {
+            if let Ok(dtls_guard) = dtls.try_read() {
+                debug!("DTLS connection state: {:?}", dtls_guard.state());
+            }
         }
+        
+        Ok(())
     }
 }
 
@@ -354,15 +379,20 @@ impl SecureMediaContext for DefaultSecureMediaContext {
     }
     
     async fn set_remote_address(&self, addr: std::net::SocketAddr) -> Result<(), SecurityError> {
-        // Use a proper async lock instead of try_write
-        let mut remote_addr = self.remote_addr.write().await;
-        info!("Setting remote address {} for DTLS", addr);
-        *remote_addr = Some(addr);
-        Ok(())
+        // Use the properly async method we defined above
+        self.set_remote_address(addr).await
     }
     
     async fn start_handshake(&self) -> Result<(), SecurityError> {
+        debug!("Starting handshake with mode: {:?}", self.config.mode);
+        
         if let Some(dtls) = &self.dtls {
+            // Clear any previous error state
+            {
+                let mut error = self.handshake_error.write().await;
+                *error = None;
+            }
+            
             // Verify that remote fingerprint is set
             let remote_fingerprint = {
                 let fp = self.remote_fingerprint.read().await;
@@ -370,6 +400,7 @@ impl SecureMediaContext for DefaultSecureMediaContext {
             };
             
             if remote_fingerprint.is_none() {
+                debug!("Remote fingerprint not set, handshake cannot proceed");
                 return Err(SecurityError::HandshakeError(
                     "Remote fingerprint not set. Set it before starting handshake.".to_string()
                 ));
@@ -379,19 +410,28 @@ impl SecureMediaContext for DefaultSecureMediaContext {
             let remote_addr = {
                 let addr = self.remote_addr.read().await;
                 match *addr {
-                    Some(addr) => addr,
-                    None => return Err(SecurityError::HandshakeError(
-                        "Remote address not set. Set it before starting handshake.".to_string()
-                    )),
+                    Some(addr) => {
+                        debug!("Using remote address: {}", addr);
+                        addr
+                    },
+                    None => {
+                        debug!("Remote address not set, handshake cannot proceed");
+                        return Err(SecurityError::HandshakeError(
+                            "Remote address not set. Set it before starting handshake.".to_string()
+                        ));
+                    }
                 }
             };
             
             // Check if we have a transport
             if self.transport.read().await.is_none() {
+                debug!("DTLS transport not set, handshake cannot proceed");
                 return Err(SecurityError::HandshakeError(
                     "DTLS transport not set. Call set_transport_socket before starting handshake.".to_string()
                 ));
             }
+            
+            debug!("DTLS configuration check passed, preparing connection");
             
             // Ensure the transport is set on the DTLS connection
             {
@@ -400,76 +440,346 @@ impl SecureMediaContext for DefaultSecureMediaContext {
                     if !dtls_guard.has_transport() {
                         debug!("Setting transport on DTLS connection before handshake");
                         dtls_guard.set_transport(transport.clone());
+                    } else {
+                        debug!("Transport already set on DTLS connection");
                     }
                 }
             }
             
-            // Get a mutable reference to the DTLS connection
-            let mut dtls = dtls.write().await;
-            
-            // Create a fingerprint verifier from the remote fingerprint
-            let (fp, alg) = remote_fingerprint.unwrap();
-            info!("Starting DTLS handshake with remote fingerprint: {} ({})", fp, alg);
-            
-            // Start DTLS handshake
-            match dtls.start_handshake(remote_addr).await {
-                Ok(_) => {
-                    info!("DTLS handshake started");
-                    
-                    // Start a background task to wait for the handshake to complete
-                    let dtls_arc = self.dtls.as_ref().unwrap().clone();
-                    
-                    // To avoid the Send issues with raw pointers, we'll extract the keys
-                    // directly in this task and update the secure state
-                    let srtp_lock = self.srtp.clone();
-                    let secure_lock = self.secure.clone();
-                    let is_client = self.config.dtls_client;
-                    
-                    tokio::spawn(async move {
-                        // Wait for the handshake to complete
-                        let mut dtls_guard = dtls_arc.write().await;
-                        match dtls_guard.wait_handshake().await {
-                            Ok(_) => {
-                                info!("DTLS handshake completed successfully");
-                                
-                                // Extract SRTP keys directly
-                                match dtls_guard.extract_srtp_keys() {
-                                    Ok(srtp_context) => {
-                                        // Get the key for our role
-                                        let key = srtp_context.get_key_for_role(is_client).clone();
-                                        
-                                        // Create a new SRTP context with the key and crypto suite
-                                        match SrtpContext::new(srtp_context.profile.clone(), key) {
-                                            Ok(srtp_ctx) => {
-                                                // Store the context - tokio RwLock.write() doesn't return a Result
-                                                let mut srtp_result = srtp_lock.write().await;
-                                                *srtp_result = Some(srtp_ctx);
-                                                
-                                                // Mark as secure
-                                                let mut secure_result = secure_lock.write().await;
-                                                *secure_result = true;
-                                                info!("SRTP context created from DTLS-SRTP");
-                                            },
-                                            Err(e) => {
-                                                error!("Failed to create SRTP context: {}", e);
-                                            }
+            // Handle client/server roles differently, following the pattern in dtls_test.rs
+            if self.config.dtls_client {
+                // Client role: initiate handshake immediately
+                debug!("Client role: initiating DTLS handshake to {}", remote_addr);
+                
+                // Get a mutable reference to the DTLS connection
+                let mut dtls = dtls.write().await;
+                
+                // Create a fingerprint verifier from the remote fingerprint
+                let (fp, alg) = remote_fingerprint.unwrap();
+                info!("Client starting DTLS handshake with remote fingerprint: {} ({})", fp, alg);
+                
+                // Start DTLS handshake - this will send the ClientHello
+                match dtls.start_handshake(remote_addr).await {
+                    Ok(_) => {
+                        info!("Client DTLS handshake initiated successfully");
+                        
+                        // For client role, always send an explicit ClientHello trigger packet
+                        // to ensure connectivity is established
+                        debug!("Client explicitly ensuring ClientHello is sent");
+                        let transport = self.transport.read().await;
+                        if let Some(transport) = &*transport {
+                            debug!("Client triggering DTLS handshake message exchange");
+                            let connection_state = dtls.state();
+                            debug!("DTLS connection state after client start_handshake: {:?}", connection_state);
+                            
+                            // Send multiple trigger packets to increase reliability
+                            let mut transport_guard = transport.lock().await;
+                            debug!("Client sending trigger packets to server at {}", remote_addr);
+                            
+                            // Send a series of trigger packets with increasing delays
+                            for i in 0..5 {
+                                // Process any packets that might be waiting
+                                // Create a timeout future to avoid blocking
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(10),
+                                    transport_guard.recv()
+                                ).await {
+                                    Ok(Some((packet, addr))) => {
+                                        debug!("Client received packet ({}b) from {} during handshake initiation", packet.len(), addr);
+                                        if let Err(e) = dtls.process_packet(&packet).await {
+                                            warn!("Error processing received packet during client handshake initiation: {:?}", e);
                                         }
                                     },
-                                    Err(e) => {
-                                        error!("Failed to extract SRTP keys: {}", e);
+                                    Ok(None) => {}, // No packet
+                                    Err(_) => {}, // Timeout, which is expected
+                                }
+                                
+                                // Send a trigger packet
+                                if let Err(e) = transport_guard.send(&[i + 1, 3, 3, 7], remote_addr).await {
+                                    warn!("Failed to send trigger packet {}: {:?}", i, e);
+                                } else {
+                                    debug!("Sent trigger packet {} to initiate DTLS exchange", i);
+                                }
+                                
+                                // Increasing delay between packets
+                                let delay_ms = 50u64 * (i as u64 + 1);
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            }
+                        } else {
+                            warn!("Client has no transport to send initial DTLS handshake packet");
+                        }
+                        
+                        // Start a background task to wait for the handshake to complete
+                        let dtls_arc = self.dtls.as_ref().unwrap().clone();
+                        let srtp_lock = self.srtp.clone();
+                        let secure_lock = self.secure.clone();
+                        let is_client = self.config.dtls_client;
+                        let handshake_status = self.handshake_status.clone();
+                        let handshake_error = self.handshake_error.clone();
+                        
+                        tokio::spawn(async move {
+                            debug!("Client handshake background task started");
+                            let mut dtls_guard = dtls_arc.write().await;
+                            
+                            debug!("Client waiting for DTLS handshake completion");
+                            match dtls_guard.wait_handshake().await {
+                                Ok(_) => {
+                                    info!("Client DTLS handshake completed successfully");
+                                    
+                                    // Extract SRTP keys
+                                    match dtls_guard.extract_srtp_keys() {
+                                        Ok(srtp_context) => {
+                                            debug!("Client extracted SRTP keys successfully");
+                                            
+                                            // Get the key for client role
+                                            let key = srtp_context.get_key_for_role(is_client).clone();
+                                            
+                                            // Create SRTP context
+                                            match SrtpContext::new(srtp_context.profile.clone(), key) {
+                                                Ok(srtp_ctx) => {
+                                                    // Store the context
+                                                    let mut srtp_result = srtp_lock.write().await;
+                                                    *srtp_result = Some(srtp_ctx);
+                                                    
+                                                    // Mark as secure
+                                                    let mut secure_result = secure_lock.write().await;
+                                                    *secure_result = true;
+                                                    
+                                                    handshake_status.notify_waiters();
+                                                },
+                                                Err(e) => {
+                                                    error!("Client failed to create SRTP context: {}", e);
+                                                    let mut error = handshake_error.write().await;
+                                                    *error = Some(format!("Failed to create SRTP context: {}", e));
+                                                    handshake_status.notify_waiters();
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Client failed to extract SRTP keys: {}", e);
+                                            let mut error = handshake_error.write().await;
+                                            *error = Some(format!("Failed to extract SRTP keys: {}", e));
+                                            handshake_status.notify_waiters();
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Client DTLS handshake failed: {}", e);
+                                    let mut error = handshake_error.write().await;
+                                    *error = Some(format!("DTLS handshake failed: {}", e));
+                                    handshake_status.notify_waiters();
+                                }
+                            }
+                        });
+                        
+                        Ok(())
+                    },
+                    Err(e) => {
+                        error!("Failed to start client DTLS handshake: {}", e);
+                        Err(SecurityError::HandshakeError(format!("DTLS error: {}", e)))
+                    }
+                }
+            } else {
+                // Server role: wait for initial packet like in dtls_test.rs
+                debug!("Server role: waiting for initial ClientHello packet");
+                
+                // Get the transport
+                let transport_opt = self.transport.read().await;
+                let transport = transport_opt.as_ref().ok_or_else(|| 
+                    SecurityError::HandshakeError("No transport available".to_string())
+                )?;
+                
+                // Wait for the initial packet with a timeout
+                let mut transport_guard = transport.lock().await;
+                
+                // Print some diagnostic info
+                debug!("Server preparing to receive initial packet from: {}", remote_addr);
+                
+                // Get the current DTLS state
+                let dtls_state = {
+                    if let Ok(dtls_guard) = dtls.try_read() {
+                        dtls_guard.state()
+                    } else {
+                        debug!("Could not get DTLS state due to lock contention");
+                        ConnectionState::New // Default to New if we can't get the lock
+                    }
+                };
+                debug!("Server DTLS state before waiting: {:?}", dtls_state);
+                
+                // Try more aggressively to receive packets
+                let mut initial_packet: Option<Vec<u8>> = None;
+                
+                // Try multiple times to receive the initial packet
+                for attempt in 0..5 {
+                    debug!("Server waiting for initial packet (attempt {})", attempt + 1);
+                    
+                    let timeout_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(2), // 2 second timeout per attempt
+                        transport_guard.recv()
+                    ).await;
+                    
+                    match timeout_result {
+                        Ok(Some((packet, addr))) => {
+                            debug!("Server received packet: {} bytes from {}", packet.len(), addr);
+                            
+                            // Check if it's from the expected remote address
+                            if addr != remote_addr {
+                                warn!("Received packet from unexpected address: {} (expected {})", addr, remote_addr);
+                            }
+                            
+                            // Try to parse the packet as a DTLS record for logging
+                            if let Ok(records) = crate::dtls::record::Record::parse_multiple(&packet) {
+                                for record in records {
+                                    debug!("Received record of type: {:?}", record.header.content_type);
+                                    
+                                    if record.header.content_type == crate::dtls::record::ContentType::Handshake {
+                                        if let Ok((header, _)) = crate::dtls::message::handshake::HandshakeHeader::parse(&record.data) {
+                                            debug!("Handshake message type: {:?}", header.msg_type);
+                                        }
                                     }
                                 }
-                            },
-                            Err(e) => {
-                                error!("DTLS handshake failed: {}", e);
+                            }
+                            
+                            initial_packet = Some(packet.to_vec());
+                            break;
+                        },
+                        Ok(None) => {
+                            debug!("Server received no packet from transport (attempt {})", attempt + 1);
+                        },
+                        Err(_) => {
+                            debug!("Server timed out waiting for initial packet (attempt {})", attempt + 1);
+                            
+                            // Send a probe packet to help stimulate the connection
+                            if let Err(e) = transport_guard.send(&[88, 77, 66, 55], remote_addr).await {
+                                warn!("Failed to send server probe packet: {:?}", e);
+                            } else {
+                                debug!("Server sent probe packet to client at {}", remote_addr);
                             }
                         }
-                    });
+                    }
                     
-                    Ok(())
-                },
-                Err(e) => {
-                    Err(SecurityError::HandshakeError(format!("DTLS error: {}", e)))
+                    // Small delay between attempts
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                
+                // Log failure if we didn't get a packet
+                if initial_packet.is_none() {
+                    warn!("Server timed out waiting for initial packet after multiple attempts");
+                }
+                
+                // Drop the transport guard to avoid deadlock
+                drop(transport_guard);
+                
+                // Get a mutable reference to the DTLS connection
+                let mut dtls = dtls.write().await;
+                
+                // Create a fingerprint verifier from the remote fingerprint
+                let (fp, alg) = remote_fingerprint.unwrap();
+                info!("Server starting DTLS handshake with remote fingerprint: {} ({})", fp, alg);
+                
+                // Start DTLS handshake
+                match dtls.start_handshake(remote_addr).await {
+                    Ok(_) => {
+                        info!("Server DTLS handshake initiated successfully");
+                        
+                        // If we received an initial packet, process it now - THIS IS CRITICAL
+                        if let Some(packet_data) = initial_packet {
+                            debug!("Server processing initial ClientHello packet");
+                            if let Err(e) = dtls.process_packet(&packet_data).await {
+                                warn!("Server error processing initial packet: {:?}", e);
+                                // Continue anyway, as it might not be fatal
+                            }
+                        }
+                        
+                        // Even if we didn't get an initial packet, try to proactively send a server hello
+                        // This can help in STUN-based connectivity or when the initial ClientHello was lost
+                        let transport = self.transport.read().await;
+                        if let Some(transport) = &*transport {
+                            let mut transport_guard = transport.lock().await;
+                            
+                            // Send a few trigger packets to help stimulate the connection
+                            debug!("Server sending response trigger packets to client at {}", remote_addr);
+                            for i in 0..3 {
+                                if let Err(e) = transport_guard.send(&[44, 33, 22, 11], remote_addr).await {
+                                    warn!("Failed to send server response packet {}: {:?}", i, e);
+                                } else {
+                                    debug!("Server sent response packet {}", i);
+                                }
+                                
+                                // Small delay between packets
+                                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            }
+                        }
+                        
+                        // Start a background task to wait for the handshake to complete
+                        let dtls_arc = self.dtls.as_ref().unwrap().clone();
+                        let srtp_lock = self.srtp.clone();
+                        let secure_lock = self.secure.clone();
+                        let is_client = self.config.dtls_client;
+                        let handshake_status = self.handshake_status.clone();
+                        let handshake_error = self.handshake_error.clone();
+                        
+                        tokio::spawn(async move {
+                            debug!("Server handshake background task started");
+                            let mut dtls_guard = dtls_arc.write().await;
+                            
+                            debug!("Server waiting for DTLS handshake completion");
+                            match dtls_guard.wait_handshake().await {
+                                Ok(_) => {
+                                    info!("Server DTLS handshake completed successfully");
+                                    
+                                    // Extract SRTP keys
+                                    match dtls_guard.extract_srtp_keys() {
+                                        Ok(srtp_context) => {
+                                            debug!("Server extracted SRTP keys successfully");
+                                            
+                                            // Get the key for server role
+                                            let key = srtp_context.get_key_for_role(is_client).clone();
+                                            
+                                            // Create SRTP context
+                                            match SrtpContext::new(srtp_context.profile.clone(), key) {
+                                                Ok(srtp_ctx) => {
+                                                    // Store the context
+                                                    let mut srtp_result = srtp_lock.write().await;
+                                                    *srtp_result = Some(srtp_ctx);
+                                                    
+                                                    // Mark as secure
+                                                    let mut secure_result = secure_lock.write().await;
+                                                    *secure_result = true;
+                                                    
+                                                    handshake_status.notify_waiters();
+                                                },
+                                                Err(e) => {
+                                                    error!("Server failed to create SRTP context: {}", e);
+                                                    let mut error = handshake_error.write().await;
+                                                    *error = Some(format!("Failed to create SRTP context: {}", e));
+                                                    handshake_status.notify_waiters();
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Server failed to extract SRTP keys: {}", e);
+                                            let mut error = handshake_error.write().await;
+                                            *error = Some(format!("Failed to extract SRTP keys: {}", e));
+                                            handshake_status.notify_waiters();
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Server DTLS handshake failed: {}", e);
+                                    let mut error = handshake_error.write().await;
+                                    *error = Some(format!("DTLS handshake failed: {}", e));
+                                    handshake_status.notify_waiters();
+                                }
+                            }
+                        });
+                        
+                        Ok(())
+                    },
+                    Err(e) => {
+                        error!("Failed to start server DTLS handshake: {}", e);
+                        Err(SecurityError::HandshakeError(format!("DTLS error: {}", e)))
+                    }
                 }
             }
         } else if self.config.mode == SecurityMode::SrtpWithPsk {
@@ -481,12 +791,107 @@ impl SecureMediaContext for DefaultSecureMediaContext {
             
             // PSK is already set up in constructor, nothing to do here
             info!("Using pre-shared keys for SRTP, no handshake needed");
+            
+            // Set secure flag since PSK is ready
+            let mut secure = self.secure.write().await;
+            *secure = true;
+            
+            // Notify anyone waiting for handshake completion
+            self.handshake_status.notify_waiters();
+            
             Ok(())
         } else {
             // No security, nothing to do
             info!("Security disabled, no handshake needed");
+            
+            // Set secure flag since no security is needed
+            let mut secure = self.secure.write().await;
+            *secure = true;
+            
+            // Notify anyone waiting for handshake completion
+            self.handshake_status.notify_waiters();
+            
             Ok(())
         }
+    }
+    
+    async fn wait_handshake(&self) -> Result<(), SecurityError> {
+        debug!("Waiting for DTLS handshake to complete...");
+        
+        // For PSK or None security modes, return immediately
+        if self.config.mode != SecurityMode::DtlsSrtp {
+            debug!("Not using DTLS-SRTP, no need to wait for handshake");
+            return Ok(());
+        }
+        
+        // Wait for the handshake to complete with a timeout
+        let timeout_duration = std::time::Duration::from_secs(30); // Increase timeout to 30 seconds
+        let timeout = tokio::time::sleep(timeout_duration);
+        
+        tokio::select! {
+            _ = timeout => {
+                error!("DTLS handshake timed out after {:?}", timeout_duration);
+                
+                // Get more detailed information about the state
+                if let Some(dtls_arc) = &self.dtls {
+                    if let Ok(dtls) = dtls_arc.try_read() {
+                        let state = dtls.state();
+                        error!("DTLS connection state at timeout: {:?}", state);
+                    }
+                }
+                
+                // Try to get transport information
+                if let Ok(guard) = self.transport.try_read() {
+                    if let Some(transport) = &*guard {
+                        debug!("Transport is initialized but handshake timed out");
+                    }
+                }
+                
+                return Err(SecurityError::HandshakeError(
+                    format!("DTLS handshake timed out after {:?}", timeout_duration)
+                ));
+            },
+            _ = self.handshake_status.notified() => {
+                // Continue with normal processing
+                debug!("Received handshake status notification");
+            }
+        }
+        
+        // Check if there was an error
+        let error_msg = {
+            let error = self.handshake_error.read().await;
+            error.clone()
+        };
+        
+        if let Some(msg) = error_msg {
+            error!("DTLS handshake failed with error: {}", msg);
+            return Err(SecurityError::HandshakeError(msg));
+        }
+        
+        // Check if secure flag is set
+        let is_secure = {
+            let secure = self.secure.read().await;
+            *secure
+        };
+        
+        if !is_secure {
+            error!("DTLS handshake completed but secure flag not set");
+            
+            // Get more information about the state
+            if let Some(dtls_arc) = &self.dtls {
+                if let Ok(dtls) = dtls_arc.try_read() {
+                    let state = dtls.state();
+                    error!("DTLS connection state: {:?}", state);
+                }
+            }
+            
+            return Err(SecurityError::HandshakeError(
+                "Handshake completed but secure flag not set".to_string()
+            ));
+        }
+        
+        debug!("DTLS handshake completed successfully");
+        Ok(())
     }
     
     async fn set_transport_socket(&self, socket: std::sync::Arc<tokio::net::UdpSocket>) -> Result<(), SecurityError> {

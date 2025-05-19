@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use futures::TryFutureExt;
+use tokio::net::UdpSocket;
+use tracing::{debug, warn, info, error};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tracing::{debug, warn, info, error};
-
+use crate::transport::GlobalPortAllocator;
 use crate::api::transport::{
     MediaFrame, MediaFrameType, MediaTransportSession, MediaTransportError,
     MediaTransportEvent, MediaEventCallback, MediaTransportConfig,
@@ -20,7 +21,10 @@ use crate::packet::header::RtpHeader;
 use crate::packet::rtcp::RtcpPacket;
 use crate::api::stats::MediaStats;
 use crate::api::security::{SecureMediaContext, SecurityConfig};
-use crate::api::buffer::MediaBufferConfig;
+use crate::api::buffer::{MediaBufferConfig, MediaBuffer};
+use crate::api::security::secure_context_impl::DefaultSecureMediaContext;
+use crate::api::buffer::media_buffer_impl::DefaultMediaBuffer;
+use crate::api::transport::MediaTransportFactory;
 
 /// Default MediaTransportSession implementation that wraps an internal RtpSession
 pub struct DefaultMediaTransportSession {
@@ -58,10 +62,12 @@ impl DefaultMediaTransportSession {
         config: MediaTransportConfig,
         security_context: Option<Arc<dyn SecureMediaContext + 'static>>,
         buffer_config: Option<MediaBufferConfig>,
-    ) -> Result<Arc<Self>, MediaTransportError> {
+    ) -> Result<DefaultMediaTransportSession, MediaTransportError> {
         // Create transport configuration
         let transport_config = RtpTransportConfig {
-            local_rtp_addr: config.local_address,
+            local_rtp_addr: config.local_address.unwrap_or_else(|| {
+                SocketAddr::new("0.0.0.0".parse().unwrap(), 0)
+            }),
             local_rtcp_addr: None, // We'll use RTP address for RTCP when rtcp_mux is true
             symmetric_rtp: true,
             rtcp_mux: config.rtcp_mux,
@@ -75,7 +81,9 @@ impl DefaultMediaTransportSession {
         
         // Create RTP session configuration
         let rtp_config = RtpSessionConfig {
-            local_addr: config.local_address,
+            local_addr: config.local_address.unwrap_or_else(|| {
+                SocketAddr::new("0.0.0.0".parse().unwrap(), 0)
+            }),
             remote_addr: config.remote_address,
             ssrc: Some(rand::random::<u32>()),
             payload_type: 0, // Will be set per packet
@@ -92,7 +100,7 @@ impl DefaultMediaTransportSession {
         // Create frame channel
         let (frame_tx, frame_rx) = mpsc::channel(100);
         
-        let session = Arc::new(Self {
+        Ok(Self {
             rtp_session: Arc::new(RwLock::new(rtp_session)),
             security_context,
             remote_addr: RwLock::new(config.remote_address),
@@ -102,12 +110,7 @@ impl DefaultMediaTransportSession {
             frame_tx,
             config,
             running: RwLock::new(false),
-        });
-        
-        // Set up event subscription to RtpSession
-        // This is handled in the start method since we need the session to be running
-        
-        Ok(session)
+        })
     }
     
     /// Handle RTP session events
@@ -215,6 +218,61 @@ impl DefaultMediaTransportSession {
         let mut map = self.media_type_map.write().await;
         map.insert(ssrc, media_type);
     }
+    
+    /// Create UDP sockets for media transport
+    async fn create_sockets(&self) -> Result<(Arc<UdpSocket>, Option<Arc<UdpSocket>>), MediaTransportError> {
+        let config = &self.config;
+        
+        // Get allocator for validated socket creation
+        let allocator = GlobalPortAllocator::instance().await;
+        
+        // Get required addresses
+        let local_addr = if let Some(addr) = config.local_address {
+            addr
+        } else {
+            return Err(MediaTransportError::InitializationError(
+                "Local address not specified".to_string()
+            ));
+        };
+        
+        // Create RTP socket with platform-specific optimizations
+        debug!("Creating RTP socket with allocator: {}", local_addr);
+        let rtp_socket = allocator.create_validated_socket(local_addr).await
+            .map_err(|e| MediaTransportError::InitializationError(
+                format!("Failed to create RTP socket: {}", e)
+            ))?;
+        
+        // Wrap in Arc
+        let rtp_socket = Arc::new(rtp_socket);
+        
+        // If RTCP multiplexing is enabled, we'll use the same socket
+        if config.rtcp_mux {
+            debug!("RTCP multiplexing enabled, using same socket for RTP and RTCP");
+            return Ok((rtp_socket.clone(), None));
+        }
+        
+        // Otherwise, create RTCP socket
+        let rtcp_addr = if let Some(configured_rtcp_addr) = config.rtcp_address {
+            configured_rtcp_addr
+        } else {
+            // Derive RTCP address from RTP address (port + 1)
+            SocketAddr::new(
+                local_addr.ip(),
+                local_addr.port() + 1
+            )
+        };
+        
+        debug!("Creating RTCP socket with allocator: {}", rtcp_addr);
+        let rtcp_socket = allocator.create_validated_socket(rtcp_addr).await
+            .map_err(|e| MediaTransportError::InitializationError(
+                format!("Failed to create RTCP socket: {}", e)
+            ))?;
+        
+        // Wrap in Arc
+        let rtcp_socket = Arc::new(rtcp_socket);
+        
+        Ok((rtp_socket, Some(rtcp_socket)))
+    }
 }
 
 #[async_trait]
@@ -293,13 +351,57 @@ impl MediaTransportSession for DefaultMediaTransportSession {
                     })?;
                 debug!("Successfully set transport socket for DTLS");
                 
+                // Get security info for logging
+                let is_client = context.get_security_info().setup_role == "active";
+                let role_str = if is_client { "client" } else { "server" };
+                
                 // Now that the remote address is set, start the handshake
-                debug!("Starting security handshake");
-                context.start_handshake().await
-                    .map_err(|e| {
-                        MediaTransportError::ConnectionError(format!("Failed to start DTLS handshake: {}", e))
-                    })?;
-                debug!("Security handshake started successfully");
+                debug!("Starting security handshake with context: is_client={} ({})", is_client, role_str);
+                match context.start_handshake().await {
+                    Ok(_) => {
+                        debug!("Security handshake started successfully");
+                        
+                        // Wait for the handshake to complete
+                        debug!("Waiting for security handshake to complete - this might take a moment");
+                        
+                        // For the server side, log some extra information
+                        if !is_client {
+                            let remote_addr = self.remote_addr.read().await.unwrap_or_else(|| {
+                                self.config.remote_address.expect("Remote address must be set")
+                            });
+                            debug!("Server is waiting for initial ClientHello from {}", remote_addr);
+                        } else {
+                            let remote_addr = self.remote_addr.read().await.unwrap_or_else(|| {
+                                self.config.remote_address.expect("Remote address must be set")
+                            });
+                            debug!("Client is initiating handshake to {}", remote_addr);
+                        }
+                        
+                        match context.wait_handshake().await {
+                            Ok(_) => {
+                                info!("Security handshake completed successfully - secure media transport is now available");
+                                debug!("Security context: is_secure={}", context.is_secure());
+                                debug!("SRTP profile: {:?}", context.get_security_info().srtp_profile);
+                            },
+                            Err(e) => {
+                                error!("DTLS handshake failed: {}", e);
+                                
+                                // Provide more diagnostic information in case of failure
+                                if let Some(remote_addr) = *self.remote_addr.read().await {
+                                    debug!("Diagnostic information: local_addr={:?}, remote_addr={:?}, role={}",
+                                        self.config.local_address, remote_addr, is_client);
+                                }
+                                
+                                error!("Security handshake failed - the media session will NOT be secure!");
+                                return Err(MediaTransportError::ConnectionError(format!("DTLS handshake failed: {}", e)));
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to start security handshake: {}", e);
+                        return Err(MediaTransportError::ConnectionError(format!("Failed to start security handshake: {}", e)));
+                    }
+                }
             }
             
             info!("Media transport session started");
@@ -489,5 +591,86 @@ impl MediaTransportSession for DefaultMediaTransportSession {
         
         // If no security context exists, ignore the call
         Ok(())
+    }
+}
+
+impl MediaTransportFactory {
+    /// Create a new MediaTransportSession
+    pub async fn create_session(
+        config: MediaTransportConfig,
+        security_config: Option<SecurityConfig>,
+        buffer_config: Option<MediaBufferConfig>,
+    ) -> Result<Arc<dyn MediaTransportSession>, MediaTransportError> {
+        // First create a session instance with the basic configuration
+        let mut session = DefaultMediaTransportSession::new(
+            config.clone(),
+            None, // Security context will be set later
+            buffer_config.clone()
+        ).await?;
+        
+        // Create sockets using the port allocator
+        debug!("Creating UDP sockets for media transport with port allocator");
+        let (rtp_socket, rtcp_socket) = session.create_sockets().await?;
+        
+        // Create RTP session configuration
+        let rtp_config = RtpSessionConfig {
+            local_addr: if let Some(addr) = config.local_address {
+                addr
+            } else {
+                SocketAddr::new(
+                    "0.0.0.0".parse().unwrap(),
+                    0 // Port will be determined by binding
+                )
+            },
+            remote_addr: config.remote_address,
+            ssrc: Some(rand::random::<u32>()),
+            payload_type: 0, // Will be set per packet
+            clock_rate: 8000, // Default audio clock rate
+            jitter_buffer_size: buffer_config.as_ref().map(|c| c.max_packet_count),
+            max_packet_age_ms: buffer_config.as_ref().map(|c| c.max_delay_ms),
+            enable_jitter_buffer: buffer_config.is_some(),
+        };
+        
+        // Create RTP session with the sockets
+        let rtp_session = RtpSession::new(rtp_config).await
+            .map_err(|e| MediaTransportError::ConnectionError(
+                format!("Failed to create RTP session: {}", e)
+            ))?;
+        
+        // Update session with the created RTP session
+        {
+            let mut session_rtp = session.rtp_session.write().await;
+            *session_rtp = rtp_session;
+        }
+        
+        // Create and set security context if needed
+        if let Some(security_config) = security_config {
+            debug!("Creating security context with mode: {:?}", security_config.mode);
+            let security_context = DefaultSecureMediaContext::new(security_config).await
+                .map_err(|e| MediaTransportError::InitializationError(
+                    format!("Failed to create security context: {}", e)
+                ))?;
+            
+            // Set up the DTLS transport with our socket
+            security_context.set_transport_socket(rtp_socket.clone()).await
+                .map_err(|e| MediaTransportError::InitializationError(
+                    format!("Failed to set transport socket: {}", e)
+                ))?;
+            
+            // Store the security context in the session
+            session.security_context = Some(security_context);
+        }
+        
+        // Create and set buffer if needed
+        if let Some(buffer_config) = buffer_config {
+            debug!("Creating media buffer with configuration");
+            let buffer = DefaultMediaBuffer::new(buffer_config);
+            
+            // No need to store buffer here - it's already passed to the RTP session
+        }
+        
+        // Return the session as a trait object
+        let boxed_session: Box<dyn MediaTransportSession> = Box::new(session);
+        Ok(Arc::from(boxed_session))
     }
 } 

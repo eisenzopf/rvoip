@@ -216,6 +216,12 @@ pub trait SecureMediaContext: Send + Sync {
     /// This is an async method that initiates the DTLS handshake.
     async fn start_handshake(&self) -> Result<(), SecurityError>;
     
+    /// Wait for the DTLS handshake to complete
+    ///
+    /// This method blocks until the handshake has completed, either successfully or with an error.
+    /// It should be called after start_handshake().
+    async fn wait_handshake(&self) -> Result<(), SecurityError>;
+    
     /// Set the transport socket for DTLS
     ///
     /// This should be called after creation and before starting the handshake.

@@ -3,7 +3,7 @@
 //! This module provides an abstraction layer for media transport,
 //! simplifying RTP/RTCP interactions for media-core integration.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,28 +14,40 @@ use thiserror::Error;
 use crate::packet::rtp::RtpPacket;
 use crate::session::RtpSession;
 use crate::transport::RtpTransport;
+use crate::transport::{PortAllocator, PortAllocatorConfig, GlobalPortAllocator, AllocationStrategy, PairingStrategy};
 
 // Implementation module
 mod media_transport_impl;
 
-/// Error types specific to media transport operations
-#[derive(Error, Debug)]
+// Re-export implementation
+pub use media_transport_impl::DefaultMediaTransportSession;
+
+/// Error types for media transport
+#[derive(Debug, thiserror::Error)]
 pub enum MediaTransportError {
-    /// Failed to send media frame
-    #[error("Failed to send media frame: {0}")]
-    SendError(String),
-    
-    /// Failed to receive media frame
-    #[error("Failed to receive media frame: {0}")]
-    ReceiveError(String),
-    
-    /// Transport connection error
-    #[error("Transport connection error: {0}")]
-    ConnectionError(String),
-    
     /// Configuration error
     #[error("Configuration error: {0}")]
-    ConfigurationError(String),
+    ConfigError(String),
+    
+    /// Initialization error
+    #[error("Initialization error: {0}")]
+    InitializationError(String),
+    
+    /// Connection error
+    #[error("Connection error: {0}")]
+    ConnectionError(String),
+    
+    /// Authentication error
+    #[error("Authentication error: {0}")]
+    AuthenticationError(String),
+    
+    /// Packet send error
+    #[error("Send error: {0}")]
+    SendError(String),
+    
+    /// Packet receive error
+    #[error("Receive error: {0}")]
+    ReceiveError(String),
 }
 
 /// Media frame types that can be transported
@@ -99,9 +111,11 @@ pub type MediaEventCallback = Box<dyn Fn(MediaTransportEvent) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct MediaTransportConfig {
     /// Local address to bind to
-    pub local_address: SocketAddr,
+    pub local_address: Option<SocketAddr>,
     /// Remote address to send to
     pub remote_address: Option<SocketAddr>,
+    /// RTCP address to send to
+    pub rtcp_address: Option<SocketAddr>,
     /// Whether to use RTCP multiplexing (RTP and RTCP on same port)
     pub rtcp_mux: bool,
     /// Media types enabled for this transport
@@ -111,67 +125,116 @@ pub struct MediaTransportConfig {
 }
 
 /// Builder for MediaTransportConfig
-#[derive(Default)]
 pub struct MediaTransportConfigBuilder {
-    config: Option<MediaTransportConfig>,
+    /// Configuration being built
+    pub config: MediaTransportConfig,
 }
 
 impl MediaTransportConfigBuilder {
-    /// Create a new builder
+    /// Create a new MediaTransportConfigBuilder
     pub fn new() -> Self {
-        Self { config: None }
+        Self {
+            config: MediaTransportConfig {
+                local_address: None,
+                remote_address: None,
+                rtcp_address: None,
+                rtcp_mux: true,
+                media_types: vec![MediaFrameType::Audio],
+                mtu: 1200,
+            },
+        }
     }
     
-    /// Set the local address
+    /// Set local address
     pub fn local_address(mut self, addr: SocketAddr) -> Self {
-        let config = self.config.get_or_insert(MediaTransportConfig {
-            local_address: addr,
-            remote_address: None,
-            rtcp_mux: true,
-            media_types: vec![MediaFrameType::Audio],
-            mtu: 1200,
-        });
-        config.local_address = addr;
+        self.config.local_address = Some(addr);
         self
     }
     
-    /// Set the remote address
+    /// Set remote address
     pub fn remote_address(mut self, addr: SocketAddr) -> Self {
-        if let Some(config) = self.config.as_mut() {
-            config.remote_address = Some(addr);
-        }
+        self.config.remote_address = Some(addr);
         self
     }
     
-    /// Enable or disable RTCP multiplexing
+    /// Set RTCP address
+    pub fn rtcp_address(mut self, addr: SocketAddr) -> Self {
+        self.config.rtcp_address = Some(addr);
+        self
+    }
+    
+    /// Set RTCP multiplexing (RTP and RTCP on same socket)
     pub fn rtcp_mux(mut self, enabled: bool) -> Self {
-        if let Some(config) = self.config.as_mut() {
-            config.rtcp_mux = enabled;
-        }
+        self.config.rtcp_mux = enabled;
         self
     }
     
-    /// Set the media types enabled for this transport
+    /// Set media types supported by this transport
     pub fn media_types(mut self, types: Vec<MediaFrameType>) -> Self {
-        if let Some(config) = self.config.as_mut() {
-            config.media_types = types;
-        }
+        self.config.media_types = types;
         self
     }
     
-    /// Set the MTU size
+    /// Set maximum transmission unit (MTU)
     pub fn mtu(mut self, mtu: usize) -> Self {
-        if let Some(config) = self.config.as_mut() {
-            config.mtu = mtu;
-        }
+        self.config.mtu = mtu;
         self
+    }
+    
+    /// Use the port allocator to dynamically allocate ports
+    pub async fn with_dynamic_ports(mut self, session_id: &str, ip: Option<IpAddr>) -> Result<Self, MediaTransportError> {
+        // Get the global port allocator instance
+        let allocator = GlobalPortAllocator::instance().await;
+        
+        // Allocate a pair of ports
+        let (rtp_addr, rtcp_addr) = allocator.allocate_port_pair(session_id, ip)
+            .await
+            .map_err(|e| MediaTransportError::ConfigError(format!("Failed to allocate ports: {}", e)))?;
+        
+        // Update the configuration with the allocated ports
+        self = self.local_address(rtp_addr);
+        
+        // If RTCP multiplexing is not enabled, ensure we have a separate RTCP port
+        if !self.config.rtcp_mux && rtcp_addr.is_some() {
+            self = self.rtcp_address(rtcp_addr.unwrap());
+        }
+        
+        Ok(self)
+    }
+    
+    /// Use a specific port allocator instance to allocate ports
+    pub async fn with_port_allocator(
+        mut self, 
+        allocator: Arc<PortAllocator>, 
+        session_id: &str, 
+        ip: Option<IpAddr>
+    ) -> Result<Self, MediaTransportError> {
+        // Allocate a pair of ports
+        let (rtp_addr, rtcp_addr) = allocator.allocate_port_pair(session_id, ip)
+            .await
+            .map_err(|e| MediaTransportError::ConfigError(format!("Failed to allocate ports: {}", e)))?;
+        
+        // Update the configuration with the allocated ports
+        self = self.local_address(rtp_addr);
+        
+        // If RTCP multiplexing is not enabled, ensure we have a separate RTCP port
+        if !self.config.rtcp_mux && rtcp_addr.is_some() {
+            self = self.rtcp_address(rtcp_addr.unwrap());
+        }
+        
+        Ok(self)
     }
     
     /// Build the configuration
     pub fn build(self) -> Result<MediaTransportConfig, MediaTransportError> {
-        self.config.ok_or_else(|| MediaTransportError::ConfigurationError(
-            "Local address must be specified".to_string()
-        ))
+        // Validate the configuration
+        if self.config.local_address.is_none() {
+            return Err(MediaTransportError::ConfigError(
+                "Local address is required".to_string(),
+            ));
+        }
+        
+        Ok(self.config)
     }
 }
 
@@ -221,32 +284,5 @@ pub trait MediaTransportSession: Send + Sync {
     async fn set_remote_fingerprint(&self, fingerprint: &str, algorithm: &str) -> Result<(), MediaTransportError>;
 }
 
-/// Factory for creating MediaTransportSession instances
-pub struct MediaTransportFactory;
-
-impl MediaTransportFactory {
-    /// Create a new MediaTransportSession
-    pub async fn create_session(
-        config: MediaTransportConfig,
-        security_config: Option<crate::api::security::SecurityConfig>,
-        buffer_config: Option<crate::api::buffer::MediaBufferConfig>,
-    ) -> Result<Arc<dyn MediaTransportSession>, MediaTransportError> {
-        // Create security context if security config is provided
-        let security_context = if let Some(sec_config) = security_config {
-            Some(crate::api::security::SecurityFactory::create_context(sec_config).await
-                .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to create security context: {}", e)))?)
-        } else {
-            None
-        };
-        
-        // Create the media transport session implementation
-        let session = media_transport_impl::DefaultMediaTransportSession::new(
-            config,
-            security_context,
-            buffer_config
-        ).await?;
-        
-        // Return the session as a trait object
-        Ok(session as Arc<dyn MediaTransportSession>)
-    }
-} 
+/// Factory for creating media transport sessions
+pub struct MediaTransportFactory; 

@@ -1,54 +1,16 @@
-//! Buffer API
+//! Common buffer functionality
 //!
-//! This module provides a simplified interface for buffer management,
-//! including jitter buffer and transmit buffer configuration.
+//! This module contains buffer management functionality shared between client and server.
 
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
 use async_trait::async_trait;
 
-use crate::api::transport::MediaFrame;
+use crate::api::common::frame::MediaFrame;
+use crate::api::common::error::BufferError;
 
-// Implementation module
-pub mod media_buffer_impl;
+mod media_buffer_impl;
 pub use media_buffer_impl::DefaultMediaBuffer;
-
-/// Error types for buffer operations
-#[derive(Error, Debug)]
-pub enum BufferError {
-    /// Buffer is full
-    #[error("Buffer is full")]
-    BufferFull,
-    
-    /// Buffer is empty
-    #[error("Buffer is empty")]
-    BufferEmpty,
-    
-    /// Configuration error
-    #[error("Configuration error: {0}")]
-    ConfigurationError(String),
-    
-    /// Other buffer operation error
-    #[error("Buffer operation error: {0}")]
-    OperationError(String),
-}
-
-/// Network condition preset for buffer configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkPreset {
-    /// Minimal latency, good for LAN
-    LowLatency,
-    
-    /// Balanced preset, good for stable broadband
-    Balanced,
-    
-    /// Resilient preset, good for mobile or unstable networks
-    Resilient,
-    
-    /// Maximum protection, for very unstable networks
-    HighProtection,
-}
 
 /// Media buffer configuration
 #[derive(Debug, Clone)]
@@ -89,6 +51,56 @@ impl Default for MediaBufferConfig {
     }
 }
 
+/// Buffer statistics
+#[derive(Debug, Clone)]
+pub struct BufferStats {
+    /// Current buffer delay in milliseconds
+    pub current_delay_ms: u32,
+    
+    /// Current number of packets in buffer
+    pub packet_count: usize,
+    
+    /// Maximum delay seen in the current session
+    pub max_delay_seen_ms: u32,
+    
+    /// Minimum delay seen in the current session
+    pub min_delay_seen_ms: u32,
+    
+    /// Number of late packets (arrived too late to be used)
+    pub late_packet_count: u64,
+    
+    /// Number of packets discarded due to buffer overflow
+    pub overflow_discard_count: u64,
+    
+    /// Average occupancy percentage
+    pub average_occupancy: f32,
+    
+    /// Number of buffer underruns
+    pub underrun_count: u64,
+}
+
+/// Media buffer interface for jitter buffering and transmit buffering
+#[async_trait]
+pub trait MediaBuffer: Send + Sync {
+    /// Put a media frame into the buffer
+    async fn put_frame(&self, frame: MediaFrame) -> Result<(), BufferError>;
+    
+    /// Get the next media frame from the buffer, waiting up to the specified timeout
+    async fn get_frame(&self, timeout: Duration) -> Result<MediaFrame, BufferError>;
+    
+    /// Get current buffer statistics
+    async fn get_stats(&self) -> BufferStats;
+    
+    /// Reset the buffer, discarding all frames
+    async fn reset(&self) -> Result<(), BufferError>;
+    
+    /// Flush the buffer, returning all frames in order
+    async fn flush(&self) -> Result<Vec<MediaFrame>, BufferError>;
+    
+    /// Update buffer configuration
+    async fn update_config(&self, config: MediaBufferConfig) -> Result<(), BufferError>;
+}
+
 /// Builder for MediaBufferConfig
 pub struct MediaBufferConfigBuilder {
     config: MediaBufferConfig,
@@ -103,7 +115,8 @@ impl MediaBufferConfigBuilder {
     }
     
     /// Apply a network preset
-    pub fn preset(mut self, preset: NetworkPreset) -> Self {
+    pub fn preset(mut self, preset: crate::api::common::config::NetworkPreset) -> Self {
+        use crate::api::common::config::NetworkPreset;
         match preset {
             NetworkPreset::LowLatency => {
                 self.config.min_delay_ms = 10;
@@ -209,56 +222,6 @@ impl MediaBufferConfigBuilder {
         
         Ok(self.config)
     }
-}
-
-/// Buffer statistics
-#[derive(Debug, Clone)]
-pub struct BufferStats {
-    /// Current buffer delay in milliseconds
-    pub current_delay_ms: u32,
-    
-    /// Current number of packets in buffer
-    pub packet_count: usize,
-    
-    /// Maximum delay seen in the current session
-    pub max_delay_seen_ms: u32,
-    
-    /// Minimum delay seen in the current session
-    pub min_delay_seen_ms: u32,
-    
-    /// Number of late packets (arrived too late to be used)
-    pub late_packet_count: u64,
-    
-    /// Number of packets discarded due to buffer overflow
-    pub overflow_discard_count: u64,
-    
-    /// Average occupancy percentage
-    pub average_occupancy: f32,
-    
-    /// Number of buffer underruns
-    pub underrun_count: u64,
-}
-
-/// Media buffer interface for jitter buffering and transmit buffering
-#[async_trait]
-pub trait MediaBuffer: Send + Sync {
-    /// Put a media frame into the buffer
-    async fn put_frame(&self, frame: MediaFrame) -> Result<(), BufferError>;
-    
-    /// Get the next media frame from the buffer, waiting up to the specified timeout
-    async fn get_frame(&self, timeout: Duration) -> Result<MediaFrame, BufferError>;
-    
-    /// Get current buffer statistics
-    async fn get_stats(&self) -> BufferStats;
-    
-    /// Reset the buffer, discarding all frames
-    async fn reset(&self) -> Result<(), BufferError>;
-    
-    /// Flush the buffer, returning all frames in order
-    async fn flush(&self) -> Result<Vec<MediaFrame>, BufferError>;
-    
-    /// Update buffer configuration
-    async fn update_config(&self, config: MediaBufferConfig) -> Result<(), BufferError>;
 }
 
 /// Factory for creating MediaBuffer instances

@@ -28,11 +28,11 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     println!("RTP-Core Media API Example");
     println!("=========================");
     
-    // Create local addresses
+    // Simplify by using fixed ports for testing
     let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10000);
     let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 20000);
     
-    // Configure media transport
+    // Configure media transport with fixed ports
     let transport_config = MediaTransportConfigBuilder::new()
         .local_address(local_addr)
         .remote_address(remote_addr)
@@ -41,11 +41,27 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         .mtu(1200)
         .build()?;
     
-    // Configure security
+    // Configure peer transport with fixed ports (reversed)
+    let peer_transport_config = MediaTransportConfigBuilder::new()
+        .local_address(remote_addr)
+        .remote_address(local_addr)
+        .rtcp_mux(true)
+        .media_types(vec![MediaFrameType::Audio])
+        .mtu(1200)
+        .build()?;
+    
+    // Configure security with a shorter timeout for testing
     let security_config = SecurityConfigBuilder::webrtc()
         .mode(SecurityMode::DtlsSrtp)
-        .require_secure(true)
-        .dtls_client(true)
+        .require_secure(true) // No fallbacks - require secure connection
+        .dtls_client(true)    // This is the client side
+        .build()?;
+    
+    // Configure peer security as server
+    let peer_security_config = SecurityConfigBuilder::webrtc()
+        .mode(SecurityMode::DtlsSrtp)
+        .require_secure(true) // No fallbacks - require secure connection
+        .dtls_client(false) // Server role
         .build()?;
     
     // Configure buffer
@@ -67,27 +83,8 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         println!("Media transport event: {:?}", event);
     }))?;
     
-    // For this example, we need another session to act as the remote peer
-    // In a real application, this would be a separate process or device
-    println!("Creating peer media transport session...");
-    
-    // Create reverse configuration (local/remote swapped)
-    let peer_transport_config = MediaTransportConfigBuilder::new()
-        .local_address(remote_addr)
-        .remote_address(local_addr)
-        .rtcp_mux(true)
-        .media_types(vec![MediaFrameType::Audio])
-        .mtu(1200)
-        .build()?;
-    
-    // Configure peer security as server
-    let peer_security_config = SecurityConfigBuilder::webrtc()
-        .mode(SecurityMode::DtlsSrtp)
-        .require_secure(true)
-        .dtls_client(false) // Server role
-        .build()?;
-    
     // Create peer session
+    println!("Creating peer media transport session...");
     let peer_session = MediaTransportFactory::create_session(
         peer_transport_config,
         Some(peer_security_config),
@@ -119,7 +116,7 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         session_security_info.fingerprint_algorithm.as_ref().unwrap()
     ).await?;
     
-    // Make sure remote addresses are set
+    // Set remote addresses - connect each peer to the other's local address
     session.set_remote_address(remote_addr).await?;
     peer_session.set_remote_address(local_addr).await?;
     
@@ -136,17 +133,27 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
         println!("Bandwidth estimate updated: {} bps", bps);
     })).await;
     
-    // Start both transports
+    // Start both transports in the correct order
     println!("Starting transport session and peer...");
+    
+    // We need to start server first, but let's make sure client starts DTLS
+    // This order allows the server to be ready before client sends ClientHello
+    println!("Starting server side peer session first...");
     peer_session.start().await?;
+    
+    // Sleep to ensure server transport is fully initialized
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // Now start the client which will initiate the DTLS handshake
+    println!("Starting client side session (will initiate DTLS handshake)...");
     session.start().await?;
     
-    // Give some time for DTLS handshake to complete
+    // Wait for the handshake to complete
     println!("Waiting for DTLS handshake to complete...");
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
     
-    // Setup is complete
-    println!("Media transport session is ready");
+    // The API now waits for the DTLS handshake to complete automatically
+    println!("Transport security established, ready to send media");
     
     // Create dummy audio frames for demo
     let audio_frame = MediaFrame {

@@ -115,6 +115,79 @@ The current API exposes too many implementation details, making it hard for `med
 - Create builder patterns for complex configurations
 - Use strongly typed interfaces to prevent misuse
 
+### API Client/Server Separation
+
+The current API intermingles client and server responsibilities, causing confusion and complexity. We'll separate these concerns into dedicated client and server modules, similar to the successful approach used in transaction-core.
+
+#### Directory Structure
+```
+src/api/
+├── common/               # Shared types and utilities
+│   ├── mod.rs            # Exports shared types
+│   ├── frame.rs          # MediaFrame, MediaFrameType
+│   ├── error.rs          # MediaTransportError
+│   ├── events.rs         # MediaTransportEvent
+│   └── config.rs         # Shared configuration types
+├── client/               # Client-specific code
+│   ├── mod.rs            # Client trait definitions
+│   ├── transport.rs      # Client transport implementation
+│   ├── security.rs       # Client security implementation
+│   └── config.rs         # Client-specific configs
+├── server/               # Server-specific code
+│   ├── mod.rs            # Server trait definitions
+│   ├── transport.rs      # Server transport implementation 
+│   ├── security.rs       # Server security implementation
+│   └── config.rs         # Server-specific configs
+├── mod.rs                # Re-exports
+├── buffer.rs             # Unchanged - shared
+└── stats.rs              # Unchanged - shared
+```
+
+#### Key Tasks
+- [ ] Create `MediaTransportClient` trait for client-side operations
+  - [ ] Define connect/disconnect methods
+  - [ ] Implement client-specific security handling
+  - [ ] Add client-side media frame transmission/reception
+  - [ ] Create client event system
+- [ ] Create `MediaTransportServer` trait for server-side operations
+  - [ ] Define start/stop methods
+  - [ ] Implement server-specific security handling
+  - [ ] Add multi-client management
+  - [ ] Create server event system
+- [ ] Move shared types to common module
+  - [ ] Extract MediaFrame, MediaFrameType
+  - [ ] Move error types
+  - [ ] Create shared security info types
+- [ ] Create separate implementation factories
+  - [ ] Implement ClientFactory
+  - [ ] Implement ServerFactory
+- [ ] Create examples demonstrating proper usage
+  - [ ] Client-only example
+  - [ ] Server-only example
+  - [ ] Client-server communication example
+  - [ ] Create focused DTLS-SRTP handshake test example
+    - [ ] Implement with clear client/server separation
+    - [ ] Add detailed logging of handshake stages
+    - [ ] Include connection diagnostics
+    - [ ] Test with various network conditions (delay, loss)
+    - [ ] Compare with previous implementation to verify improvements
+
+#### DTLS-SRTP Handshake Improvements
+
+The current implementation has significant challenges with DTLS-SRTP handshakes due to intermingled client/server logic:
+
+- Currently: Single `SecureMediaContext` tries to handle both client and server roles, leading to complex conditional logic and timing issues.
+
+- Improved approach:
+  - `ClientSecurityContext` will focus solely on initiating handshakes, sending ClientHello, and handling client-specific verification.
+  - `ServerSecurityContext` will focus on listening for ClientHello messages, responding appropriately, and managing server-side security.
+  - Clear separation of handshake state machines without branching logic.
+  - Specific timeouts and retry mechanisms tailored to each role.
+  - Simpler notification mechanisms for handshake completion.
+  - Dedicated packet handling optimized for each role's requirements.
+
+This separation will resolve the current DTLS handshake issues by eliminating role confusion and allowing each implementation to focus on its specific responsibilities in the security negotiation process.
+
 ### Media Transport API (api/transport.rs)
 - [ ] Create `MediaTransportConfig` with builder pattern
 - [ ] Implement `MediaTransportSession` as main integration point
@@ -203,19 +276,43 @@ The current API exposes too many implementation details, making it hard for `med
 - [ ] Implement minimal working versions of each API
 - [ ] Add comprehensive tests for the new API layer
 
-### Phase 2: Transport and Security API (2 weeks)
+### Phase 2: Client/Server API Separation (2 weeks)
+- [ ] Create directory structure for client/server separation
+  - [ ] Set up common, client, and server modules
+  - [ ] Move shared types to common module
+  - [ ] Create placeholder traits for client and server
+- [ ] Implement client transport
+  - [ ] Create MediaTransportClient trait
+  - [ ] Develop DefaultMediaClient implementation
+  - [ ] Add client security integration
+  - [ ] Create ClientFactory for instantiation
+- [ ] Implement server transport
+  - [ ] Create MediaTransportServer trait
+  - [ ] Develop DefaultMediaServer implementation
+  - [ ] Add server security and multi-client handling
+  - [ ] Create ServerFactory for instantiation
+- [ ] Develop migration path
+  - [ ] Create adapters for backward compatibility
+  - [ ] Add deprecation warnings for old API
+  - [ ] Create migration documentation
+- [ ] Add examples demonstrating new architecture
+  - [ ] Develop client-only example application
+  - [ ] Create server-only example
+  - [ ] Implement client-server communication example
+
+### Phase 3: Transport and Security API (2 weeks)
 - [ ] Refactor transport layer to work with the new API
 - [ ] Upgrade security module to expose simplified interface
 - [ ] Create adapter methods for existing functionality
 - [ ] Implement examples demonstrating the new API
 
-### Phase 3: Buffer and Stats API (2 weeks)
+### Phase 4: Buffer and Stats API (2 weeks)
 - [ ] Refactor buffer system to expose simplified interface
 - [ ] Upgrade statistics module to work with the new API
 - [ ] Add high-level quality monitoring features
 - [ ] Create comprehensive examples for the new functionality
 
-### Phase 4: Integration and Testing (2 weeks)
+### Phase 5: Integration and Testing (2 weeks)
 - [ ] Create integration tests with media-core
 - [ ] Add example applications using the new API
 - [ ] Benchmark performance compared to direct usage
@@ -224,6 +321,11 @@ The current API exposes too many implementation details, making it hard for `med
 ## Next Priorities (Updated)
 
 ### CRITICAL for media-core integration
+- [ ] Separate client and server API layers
+  - [ ] Create dedicated MediaTransportClient trait
+  - [ ] Create dedicated MediaTransportServer trait 
+  - [ ] Move shared types to common module
+  - [ ] Update examples to use new separation
 - [ ] Design and implement the new developer API layer
   - [ ] Create MediaTransportSession abstraction
   - [ ] Implement SecureMediaContext for security
