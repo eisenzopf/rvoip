@@ -88,8 +88,8 @@ impl Default for ServerSecurityConfig {
             certificate_path: None,
             private_key_path: None,
             srtp_profiles: vec![
-                SrtpProfile::AesGcm128,
                 SrtpProfile::AesCm128HmacSha1_80,
+                SrtpProfile::AesGcm128,
             ],
             require_client_certificate: false,
         }
@@ -127,6 +127,9 @@ pub trait ClientSecurityContext: Send + Sync {
     
     /// Verify if the handshake is complete
     async fn is_handshake_complete(&self) -> Result<bool, SecurityError>;
+    
+    /// Process a DTLS packet received from the client
+    async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
 }
 
 /// Server security context
@@ -169,6 +172,9 @@ pub trait ServerSecurityContext: Send + Sync {
     
     /// Get security information about the server
     fn get_security_info(&self) -> SecurityInfo;
+    
+    /// Process a packet from a specific client for DTLS handshake
+    async fn process_client_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<(), SecurityError>;
 }
 
 /// Create a new server security context

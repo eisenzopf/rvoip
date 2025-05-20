@@ -7,12 +7,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use std::time::Duration;
 use std::time::SystemTime;
+use std::any::Any;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
@@ -38,15 +39,15 @@ struct ClientConnection {
     address: SocketAddr,
     /// RTP session for this client
     session: Arc<Mutex<RtpSession>>,
-    /// Security context for this client
-    security: Option<Arc<Mutex<dyn ClientSecurityContext>>>,
+    /// Security context for this client - using Any to avoid casting issues
+    security: Option<Arc<Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
     /// Task handle for packet forwarding
     task: Option<JoinHandle<()>>,
     /// Is connected
     connected: bool,
-    /// Time when the client was created
+    /// Creation time
     created_at: SystemTime,
-    /// Time of the last activity
+    /// Last activity time
     last_activity: Arc<Mutex<SystemTime>>,
 }
 
@@ -54,22 +55,20 @@ struct ClientConnection {
 pub struct DefaultMediaTransportServer {
     /// Server configuration
     config: ServerConfig,
-    /// Server security context for DTLS
-    security_context: Option<Arc<Mutex<dyn ServerSecurityContext>>>,
+    /// Server security context for DTLS - using Any to avoid casting issues
+    security_context: Arc<RwLock<Option<Arc<Mutex<Box<dyn std::any::Any + Send + Sync>>>>>>,
     /// Connected clients
     clients: Arc<RwLock<HashMap<String, ClientConnection>>>,
-    /// Receiver for frames from clients
-    frame_receiver: mpsc::Receiver<(String, MediaFrame)>,
-    /// Sender for frames from clients
-    frame_sender: mpsc::Sender<(String, MediaFrame)>,
+    /// Sender for frames from clients (broadcast channel)
+    frame_sender: broadcast::Sender<(String, MediaFrame)>,
     /// Event callbacks
     event_callbacks: Arc<Mutex<Vec<MediaEventCallback>>>,
     /// Client connected callbacks
     client_connected_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
     /// Client disconnected callbacks
     client_disconnected_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-    /// Main socket for receiving connections
-    main_socket: Option<Arc<UdpRtpTransport>>,
+    /// Main socket for receiving connections (wrapped in RwLock for thread-safe interior mutability)
+    main_socket: Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
     /// Event handling task
     event_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Server is running flag
@@ -79,19 +78,11 @@ pub struct DefaultMediaTransportServer {
 // Custom implementation of Clone for DefaultMediaTransportServer
 impl Clone for DefaultMediaTransportServer {
     fn clone(&self) -> Self {
-        // Create a new channel pair for the clone
-        let (sender, receiver) = mpsc::channel(100);
-        
-        // The receiver is not clonable, so we just create a new one
-        // For a real application, you would need a proper broker pattern
-        // This is a simplified implementation
-        
         Self {
             config: self.config.clone(),
             security_context: self.security_context.clone(),
             clients: self.clients.clone(),
-            frame_receiver: receiver, // New receiver
-            frame_sender: self.frame_sender.clone(), // Shared sender
+            frame_sender: self.frame_sender.clone(),
             event_callbacks: self.event_callbacks.clone(),
             client_connected_callbacks: self.client_connected_callbacks.clone(),
             client_disconnected_callbacks: self.client_disconnected_callbacks.clone(),
@@ -105,34 +96,21 @@ impl Clone for DefaultMediaTransportServer {
 impl DefaultMediaTransportServer {
     /// Create a new DefaultMediaTransportServer
     pub async fn new(config: ServerConfig) -> Result<Self, MediaTransportError> {
-        // Create transport config for the main socket
-        let transport_config = RtpTransportConfig {
-            local_rtp_addr: config.local_address,
-            local_rtcp_addr: None, // We'll use RTCP multiplexing
-            symmetric_rtp: true,
-            rtcp_mux: true,
-            session_id: Some(format!("media-server-{}", Uuid::new_v4())),
-            use_port_allocator: true,
-        };
+        // Create broadcast channel for frames from clients with capacity for 100 frames
+        let (tx, _rx) = broadcast::channel(100);
         
-        // Create channels for frames from clients
-        let (frame_tx, frame_rx) = mpsc::channel(100);
-        
-        let server = Self {
+        Ok(Self {
             config,
-            security_context: None,
+            security_context: Arc::new(RwLock::new(None)),
             clients: Arc::new(RwLock::new(HashMap::new())),
-            frame_receiver: frame_rx,
-            frame_sender: frame_tx,
+            frame_sender: tx,
             event_callbacks: Arc::new(Mutex::new(Vec::new())),
             client_connected_callbacks: Arc::new(Mutex::new(Vec::new())),
             client_disconnected_callbacks: Arc::new(Mutex::new(Vec::new())),
-            main_socket: None,
+            main_socket: Arc::new(RwLock::new(None)),
             event_task: Arc::new(Mutex::new(None)),
             running: Arc::new(RwLock::new(false)),
-        };
-        
-        Ok(server)
+        })
     }
     
     /// Handle an incoming client connection
@@ -162,12 +140,16 @@ impl DefaultMediaTransportServer {
         
         // Create security context if needed
         let security_ctx = if self.config.security_config.security_mode.is_enabled() {
-            // Create client-specific security context from the server security context
-            let server_ctx = self.security_context.as_ref()
-                .ok_or_else(|| MediaTransportError::Security("Server security context not initialized".to_string()))?;
-                
+            // Check if we have a server security context
+            let server_ctx_option = self.security_context.read().await;
+            
+            if let Some(server_ctx) = server_ctx_option.as_ref() {
                 // Lock the server context
                 let server_ctx = server_ctx.lock().await;
+                
+                // Downcast to ServerSecurityContext trait
+                let server_ctx = server_ctx.downcast_ref::<Arc<dyn crate::api::server::security::ServerSecurityContext>>()
+                    .ok_or_else(|| MediaTransportError::Security("Failed to downcast server security context".to_string()))?;
                 
                 // Create client context from server context
                 let client_ctx = server_ctx.create_client_context(addr).await
@@ -190,6 +172,9 @@ impl DefaultMediaTransportServer {
                     .map_err(|e| MediaTransportError::Security(format!("Failed to set socket on client security context: {}", e)))?;
                 
                 Some(client_ctx)
+            } else {
+                return Err(MediaTransportError::Security("Server security context not initialized".to_string()));
+            }
         } else {
             None
         };
@@ -226,10 +211,11 @@ impl DefaultMediaTransportServer {
                         ssrc: packet.header.ssrc,
                     };
                     
-                    // Forward to server
-                    if let Err(e) = frame_sender.send((client_id_clone.clone(), frame)).await {
-                        error!("Failed to forward frame from client {}: {}", client_id_clone, e);
-                        break;
+                    // Forward to server via broadcast channel
+                    // We can ignore send errors since they just mean no receivers are listening
+                    if let Err(e) = frame_sender.send((client_id_clone.clone(), frame)) {
+                        // Only log this as a warning, not an error - it's expected if no subscribers
+                        debug!("No receivers for frame from client {}: {}", client_id_clone, e);
                     }
                 }
             }
@@ -240,7 +226,7 @@ impl DefaultMediaTransportServer {
             id: client_id.clone(),
             address: addr,
             session: rtp_session,
-            security: security_ctx,
+            security: security_ctx.map(|ctx| Arc::new(Mutex::new(Box::new(ctx) as Box<dyn std::any::Any + Send + Sync>))),
             task: Some(forward_task),
             connected: true,
             created_at: SystemTime::now(),
@@ -271,14 +257,24 @@ impl DefaultMediaTransportServer {
     
     /// Initialize security context if needed
     async fn init_security_if_needed(&self) -> Result<(), MediaTransportError> {
-        if self.config.security_config.security_mode.is_enabled() && self.security_context.is_none() {
-            // Create server security context
-            let security_context = DefaultServerSecurityContext::new(
-                self.config.security_config.clone(),
-            ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create server security context: {}", e)))?;
-            
-            // Store context
-            self.security_context = Some(Arc::new(Mutex::new(security_context)));
+        if self.config.security_config.security_mode.is_enabled() {
+            // Check if we already have a security context
+            let security_exists = {
+                let context = self.security_context.read().await;
+                context.is_some()
+            };
+
+            if !security_exists {
+                // We need to create a new security context
+                // Create server security context
+                let security_context = DefaultServerSecurityContext::new(
+                    self.config.security_config.clone(),
+                ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create server security context: {}", e)))?;
+                
+                // Store context
+                let mut context_write = self.security_context.write().await;
+                *context_write = Some(Arc::new(Mutex::new(Box::new(security_context) as Box<dyn std::any::Any + Send + Sync>)));
+            }
         }
         
         Ok(())
@@ -305,16 +301,16 @@ impl DefaultMediaTransportServer {
 async fn handle_client_static(
     addr: SocketAddr,
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    frame_sender: &mpsc::Sender<(String, MediaFrame)>
+    frame_sender: &broadcast::Sender<(String, MediaFrame)>
 ) -> Result<String, MediaTransportError> {
     info!("Handling new client from {}", addr);
     
     let client_id = format!("client-{}", Uuid::new_v4());
     debug!("Assigned client ID: {}", client_id);
     
-    // Create RTP session config for this client
+    // Create RTP session config for this client - bind to 0.0.0.0:0 to let OS choose a port
     let session_config = RtpSessionConfig {
-        local_addr: "0.0.0.0:0".parse().unwrap(), // This needs to be fixed
+        local_addr: "0.0.0.0:0".parse().unwrap(),
         remote_addr: Some(addr),
         ssrc: Some(rand::random()),
         payload_type: 8, // Default payload type
@@ -325,6 +321,7 @@ async fn handle_client_static(
     };
     
     // Create RTP session
+    debug!("Creating RTP session for client {}", client_id);
     let rtp_session = RtpSession::new(session_config).await
         .map_err(|e| MediaTransportError::Transport(format!("Failed to create client RTP session: {}", e)))?;
         
@@ -347,40 +344,70 @@ async fn handle_client_static(
     let client_id_clone = client_id.clone();
     let session_clone = client.session.clone();
     
+    debug!("Starting packet forwarding task for client {}", client_id);
     let forward_task = tokio::spawn(async move {
         let session = session_clone.lock().await;
+        
+        // Get session details for debugging
+        debug!("Session details - SSRC: {}, Target: {}", 
+               session.get_ssrc(), addr);
+        
         let mut event_rx = session.subscribe();
         drop(session);
         
+        debug!("Starting packet receive loop for client {}", client_id_clone);
+        let mut packets_received = 0;
+        
         while let Ok(event) = event_rx.recv().await {
-            if let RtpSessionEvent::PacketReceived(packet) = event {
-                // Determine frame type from payload type
-                let frame_type = if packet.header.payload_type <= 34 {
-                    crate::api::common::frame::MediaFrameType::Audio
-                } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                    crate::api::common::frame::MediaFrameType::Video
-                } else {
-                    crate::api::common::frame::MediaFrameType::Data
-                };
-                
-                // Convert to MediaFrame
-                let frame = MediaFrame {
-                    frame_type,
-                    data: packet.payload.to_vec(),
-                    timestamp: packet.header.timestamp,
-                    sequence: packet.header.sequence_number,
-                    marker: packet.header.marker,
-                    payload_type: packet.header.payload_type,
-                    ssrc: packet.header.ssrc,
-                };
-                
-                // Forward to server
-                if let Err(e) = frame_sender_clone.send((client_id_clone.clone(), frame)).await {
-                    error!("Failed to forward frame from client {}: {}", client_id_clone, e);
-                    break;
+            match event {
+                RtpSessionEvent::PacketReceived(packet) => {
+                    packets_received += 1;
+                    
+                    // Determine frame type from payload type
+                    let frame_type = if packet.header.payload_type <= 34 {
+                        crate::api::common::frame::MediaFrameType::Audio
+                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                        crate::api::common::frame::MediaFrameType::Video
+                    } else {
+                        crate::api::common::frame::MediaFrameType::Data
+                    };
+                    
+                    // Log packet details
+                    debug!("Client {}: Received packet #{} - PT: {}, Seq: {}, TS: {}, Size: {} bytes",
+                          client_id_clone, packets_received, 
+                          packet.header.payload_type, packet.header.sequence_number,
+                          packet.header.timestamp, packet.payload.len());
+                    
+                    // Convert to MediaFrame
+                    let frame = MediaFrame {
+                        frame_type,
+                        data: packet.payload.to_vec(),
+                        timestamp: packet.header.timestamp,
+                        sequence: packet.header.sequence_number,
+                        marker: packet.header.marker,
+                        payload_type: packet.header.payload_type,
+                        ssrc: packet.header.ssrc,
+                    };
+                    
+                    // Forward to server via broadcast channel
+                    match frame_sender_clone.send((client_id_clone.clone(), frame)) {
+                        Ok(receiver_count) => {
+                            debug!("Broadcast packet to {} receivers - Client: {}, Seq: {}", 
+                                  receiver_count, client_id_clone, packet.header.sequence_number);
+                        },
+                        Err(e) => {
+                            // This is expected if no subscribers are listening
+                            debug!("No receivers for frame from client {}: {}", client_id_clone, e);
+                        }
+                    }
+                },
+                other_event => {
+                    debug!("Client {}: Received non-packet event: {:?}", client_id_clone, other_event);
                 }
             }
         }
+        
+        debug!("Packet forwarding task ended for client {}", client_id_clone);
     });
     
     // Update the client with the task
@@ -388,9 +415,11 @@ async fn handle_client_static(
     client_with_task.task = Some(forward_task);
     
     // Add to clients
+    debug!("Adding client {} to clients map", client_id);
     let mut clients_write = clients.write().await;
     clients_write.insert(client_id.clone(), client_with_task);
     
+    info!("Successfully added client {}", client_id);
     Ok(client_id)
 }
 
@@ -425,23 +454,26 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             symmetric_rtp: true,
             rtcp_mux: true,
             session_id: Some(format!("media-server-main-{}", Uuid::new_v4())),
-            use_port_allocator: true,
+            use_port_allocator: false, // Changed from true to false to use exact specified port
         };
+        
+        debug!("Creating main transport with config: {:?}", transport_config);
         
         let transport = UdpRtpTransport::new(transport_config).await
             .map_err(|e| MediaTransportError::Transport(format!("Failed to create main transport: {}", e)))?;
+        
+        // Log the actual bound address
+        let actual_addr = transport.local_rtp_addr()
+            .map_err(|e| MediaTransportError::Transport(format!("Failed to get local RTP address: {}", e)))?;
+            
+        info!("Server actually bound to: {}", actual_addr);
             
         let transport_arc = Arc::new(transport);
         
-        // Store main socket in a mutable way using interior mutability
+        // Store the socket in a thread-safe way using RwLock
         {
-            // Need to find a way to update main_socket while only having an immutable reference
-            // This is a hack, but we're going to create a new instance and share state
-            let clients_clone = self.clients.clone();
-            let sender_clone = self.frame_sender.clone();
-            
-            // The task will manage the clients and frame receiving independently
-            // Getting a mutable reference to main_socket is too difficult with the current structure
+            let mut main_socket = self.main_socket.write().await;
+            *main_socket = Some(transport_arc.clone());
         }
         
         // Subscribe to transport events
@@ -450,35 +482,95 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let sender_clone = self.frame_sender.clone();
         
         let task = tokio::spawn(async move {
+            debug!("Started transport event task");
             while let Ok(event) = transport_events.recv().await {
                 match event {
-                    crate::traits::RtpEvent::MediaReceived { source, .. } => {
+                    crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker } => {
+                        // Debug output to help diagnose issues
+                        debug!("RtpEvent::MediaReceived from {}", source);
+                        
+                        // Direct handling of received frames:
+                        // 1. Convert to MediaFrame
+                        let frame_type = if payload_type <= 34 {
+                            crate::api::common::frame::MediaFrameType::Audio
+                        } else if payload_type >= 35 && payload_type <= 50 {
+                            crate::api::common::frame::MediaFrameType::Video
+                        } else {
+                            crate::api::common::frame::MediaFrameType::Data
+                        };
+                        
+                        // Generate a random sequence number since it's not provided in the event
+                        // In a production scenario, we would track these per source
+                        let sequence_number = rand::random::<u16>();
+                        
+                        // Use a random SSRC if not available from the event
+                        // In a production scenario, we would track these per source
+                        let ssrc = rand::random::<u32>();
+                        
+                        let frame = crate::api::common::frame::MediaFrame {
+                            frame_type,
+                            data: payload.to_vec(),
+                            timestamp,
+                            sequence: sequence_number,
+                            marker,
+                            payload_type,
+                            ssrc,
+                        };
+                        
                         // Check if we already have a client for this address
                         let clients = clients_clone.read().await;
                         let client_exists = clients.values().any(|c| c.address == source);
+                        let client_id = if client_exists {
+                            // Find the client ID for this address
+                            clients.values()
+                                .find(|c| c.address == source)
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| format!("unknown-{}", source))
+                        } else {
+                            // No client ID yet
+                            format!("pending-{}", source)
+                        };
                         drop(clients);
                         
+                        // 2. Forward directly to broadcast channel
+                        // This ensures frames are available immediately via the receive_frame method
+                        match sender_clone.send((client_id.clone(), frame)) {
+                            Ok(receivers) => {
+                                debug!("Directly forwarded frame to {} receivers for client {} (seq={})", 
+                                        receivers, client_id, sequence_number);
+                            },
+                            Err(e) => {
+                                debug!("No receivers for direct frame forwarding: {}", e);
+                            }
+                        }
+                        
+                        // 3. Handle client creation if new
                         if !client_exists {
                             // New client - handle it
+                            debug!("New client detected at {}, handling...", source);
                             let client_result = handle_client_static(
                                 source, 
                                 &clients_clone, 
                                 &sender_clone
                             ).await;
                             
-                            if let Err(e) = client_result {
-                                error!("Failed to handle new client from {}: {}", source, e);
+                            match client_result {
+                                Ok(client_id) => debug!("Successfully handled new client {} from {}", client_id, source),
+                                Err(e) => error!("Failed to handle new client from {}: {}", source, e),
                             }
+                        } else {
+                            debug!("Existing client from {}, no new client creation needed", source);
                         }
                     },
                     crate::traits::RtpEvent::RtcpReceived { source, .. } => {
-                        // Similar logic for RTCP
+                        debug!("RtpEvent::RtcpReceived from {}", source);
                     },
                     crate::traits::RtpEvent::Error(e) => {
                         error!("Transport error: {}", e);
                     },
                 }
             }
+            debug!("Transport event task ended");
         });
         
         // Store task handle
@@ -493,39 +585,78 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     /// This stops listening for new connections and disconnects all
     /// existing clients.
     async fn stop(&self) -> Result<(), MediaTransportError> {
+        // Check if we're running
+        {
+            let running = self.running.read().await;
+            if !*running {
+                debug!("Server already stopped, no action needed");
+                return Ok(());
+            }
+        }
+
         // Set not running
         {
             let mut running = self.running.write().await;
             *running = false;
         }
         
-        // Stop event task
+        debug!("Stopping server - aborting event task");
+        
+        // Stop event task first to prevent new client connections
         {
             let mut event_task = self.event_task.lock().await;
             if let Some(task) = event_task.take() {
+                debug!("Aborting main event task");
                 task.abort();
+                // Try to wait for the task to finish (with timeout)
+                match tokio::time::timeout(Duration::from_millis(100), task).await {
+                    Ok(_) => debug!("Event task terminated gracefully"),
+                    Err(_) => debug!("Event task termination timed out"),
+                }
+            } else {
+                debug!("No event task to abort");
             }
         }
         
+        debug!("Disconnecting all clients");
+        
         // Disconnect all clients
         let mut clients = self.clients.write().await;
+        debug!("Disconnecting {} clients", clients.len());
+        
         for (id, client) in clients.iter_mut() {
+            debug!("Disconnecting client {}", id);
+            
             // Abort task
             if let Some(task) = client.task.take() {
+                debug!("Aborting client task for {}", id);
                 task.abort();
+                // Try to wait for the task to finish (with timeout)
+                match tokio::time::timeout(Duration::from_millis(100), task).await {
+                    Ok(_) => debug!("Client task for {} terminated gracefully", id),
+                    Err(_) => debug!("Client task termination for {} timed out", id),
+                }
             }
             
             // Close session
+            debug!("Closing session for client {}", id);
             let mut session = client.session.lock().await;
             if let Err(e) = session.close().await {
                 warn!("Error closing client session {}: {}", id, e);
             }
+            drop(session);
             
             // Close security
             if let Some(security) = &client.security {
+                debug!("Closing security for client {}", id);
                 let security = security.lock().await;
-                if let Err(e) = security.close().await {
-                    warn!("Error closing client security {}: {}", id, e);
+                // Downcast to ClientSecurityContext trait
+                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
+                    if let Err(e) = security_ctx.close().await {
+                        warn!("Error closing client security {}: {}", id, e);
+                    }
+                } else {
+                    warn!("Failed to downcast client security context for {}", id);
                 }
             }
             
@@ -533,6 +664,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             client.connected = false;
             
             // Notify callbacks
+            debug!("Notifying disconnection callbacks for client {}", id);
             let callbacks = self.client_disconnected_callbacks.lock().await;
             let client_info = ClientInfo {
                 id: client.id.clone(),
@@ -548,50 +680,78 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         }
         
         // Clear clients
+        debug!("Clearing client list");
         clients.clear();
+        drop(clients);
         
         // Close main socket if available
-        if let Some(socket) = &self.main_socket {
+        debug!("Closing main socket");
+        let mut main_socket = self.main_socket.write().await;
+        if let Some(socket) = main_socket.take() {
+            debug!("Closing main transport socket");
             if let Err(e) = socket.close().await {
                 warn!("Error closing main socket: {}", e);
             }
+        } else {
+            debug!("No main socket to close");
         }
         
+        // Ensure we release broadcast channel resources
+        debug!("Ensuring broadcast channel resources are released");
+        // Create a temporary receiver and then immediately drop it to avoid any lingering receivers
+        {
+            let _temp_receiver = self.frame_sender.subscribe();
+            // Immediately drop the receiver
+        }
+        
+        debug!("Server stopped successfully");
         Ok(())
     }
     
     /// Receive a media frame from any client
     ///
     /// This returns the client ID and the frame received.
+    /// If no frame is available within timeout duration, returns a timeout error.
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError> {
-        // Since we can't mutate the receiver in an immutable method,
-        // we'll need to temporarily create a new channel and forward the next message
+        // Create a new receiver from the broadcast channel
+        let mut receiver = self.frame_sender.subscribe();
         
-        // Create a temporary one-shot channel
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        
-        // Spawn a task that gets one message and sends it to our temporary channel
-        let frame_sender = self.frame_sender.clone();
-        tokio::spawn(async move {
-            // Create a new temporary receiver
-            let (new_tx, mut new_rx) = mpsc::channel(1);
-            
-            // Register this temporary receiver to receive the next message
-            // In a real implementation we would have a proper abstraction for this
-            if let Some(msg) = new_rx.recv().await {
-                let _ = tx.send(Ok(msg));
-            } else {
-                let _ = tx.send(Err(MediaTransportError::Transport("Failed to receive message".to_string())));
+        // Wait for a frame with a shorter timeout (500ms instead of 2s)
+        match tokio::time::timeout(Duration::from_millis(500), receiver.recv()).await {
+            Ok(Ok(frame)) => {
+                // Successfully received frame
+                Ok(frame)
+            },
+            Ok(Err(e)) => {
+                // Error receiving from the broadcast channel
+                Err(MediaTransportError::Transport(format!("Broadcast channel error: {}", e)))
+            },
+            Err(_) => {
+                // Timeout occurred
+                Err(MediaTransportError::Timeout("No frame received within timeout period".to_string()))
             }
-        });
-        
-        // Wait for the task to complete and return the result
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(MediaTransportError::Transport("Failed to receive frame - channel closed".to_string())),
         }
     }
     
+    /// Get the local address currently bound to
+    /// 
+    /// This returns the actual bound address of the transport, which may be different
+    /// from the configured address if dynamic port allocation is used.
+    async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
+        let main_socket = self.main_socket.read().await;
+        if let Some(socket) = main_socket.as_ref() {
+            match socket.local_rtp_addr() {
+                Ok(addr) => Ok(addr),
+                Err(e) => Err(MediaTransportError::Transport(format!("Failed to get local address: {}", e))),
+            }
+        } else {
+            Err(MediaTransportError::Transport("No socket bound yet. Start server first.".to_string()))
+        }
+    }
+    
+    /// Send a media frame to a specific client
+    ///
+    /// If the client is not connected, this will return an error.
     async fn send_frame_to(&self, client_id: &str, frame: MediaFrame) -> Result<(), MediaTransportError> {
         // Find client
         let clients = self.clients.read().await;
@@ -635,17 +795,23 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             // Get security info if available
             let security_info = if let Some(security) = &client.security {
                 let security = security.lock().await;
-                let fingerprint = security.get_remote_fingerprint().await.ok().flatten();
                 
-                if let Some(fingerprint) = fingerprint {
-                    Some(SecurityInfo {
-                        mode: self.config.security_config.security_mode,
-                        fingerprint: Some(fingerprint),
-                        fingerprint_algorithm: Some(self.config.security_config.fingerprint_algorithm.clone()),
-                        crypto_suites: security.get_security_info().crypto_suites.clone(),
-                        key_params: None,
-                        srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
-                    })
+                // Downcast to ClientSecurityContext trait
+                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
+                    let fingerprint = security_ctx.get_remote_fingerprint().await.ok().flatten();
+                    
+                    if let Some(fingerprint) = fingerprint {
+                        Some(SecurityInfo {
+                            mode: self.config.security_config.security_mode,
+                            fingerprint: Some(fingerprint),
+                            fingerprint_algorithm: Some(self.config.security_config.fingerprint_algorithm.clone()),
+                            crypto_suites: security_ctx.get_security_info().crypto_suites.clone(),
+                            key_params: None,
+                            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+                        })
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -684,8 +850,13 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             // Close security
             if let Some(security) = &client.security {
                 let security = security.lock().await;
-                if let Err(e) = security.close().await {
-                    warn!("Error closing client security {}: {}", client_id, e);
+                // Downcast to ClientSecurityContext trait
+                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
+                    if let Err(e) = security_ctx.close().await {
+                        warn!("Error closing client security {}: {}", client_id, e);
+                    }
+                } else {
+                    warn!("Failed to downcast client security context for {}", client_id);
                 }
             }
             
@@ -830,39 +1001,49 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         // Initialize security if needed
         self.init_security_if_needed().await?;
         
-        // Get security info from context
-        if let Some(security) = &self.security_context {
-            let security = security.lock().await;
+        // Get security context
+        let security_context = self.security_context.read().await;
+        
+        if let Some(security_ctx) = security_context.as_ref() {
+            // Lock the security context
+            let security = security_ctx.lock().await;
             
-            let fingerprint = security.get_fingerprint().await
+            // Downcast to ServerSecurityContext trait
+            let security_ctx = security.downcast_ref::<Arc<dyn crate::api::server::security::ServerSecurityContext>>()
+                .ok_or_else(|| MediaTransportError::Security("Failed to downcast server security context".to_string()))?;
+                
+            // Get the fingerprint and algorithm
+            let fingerprint = security_ctx.get_fingerprint().await
                 .map_err(|e| MediaTransportError::Security(format!("Failed to get fingerprint: {}", e)))?;
                 
-            let algorithm = security.get_fingerprint_algorithm().await
+            let algorithm = security_ctx.get_fingerprint_algorithm().await
                 .map_err(|e| MediaTransportError::Security(format!("Failed to get fingerprint algorithm: {}", e)))?;
                 
-            let security_info = SecurityInfo {
+            // Get supported SRTP profiles
+            let profiles = security_ctx.get_supported_srtp_profiles().await;
+            
+            // Create crypto suites list from profiles
+            let crypto_suites = profiles.iter()
+                .map(|p| match p {
+                    crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+                    crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
+                    crate::api::common::config::SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
+                    crate::api::common::config::SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
+                })
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+                
+            // Create security info
+            Ok(SecurityInfo {
+                mode: self.config.security_config.security_mode,
                 fingerprint: Some(fingerprint),
                 fingerprint_algorithm: Some(algorithm),
-                mode: self.config.security_config.security_mode,
-                crypto_suites: security.get_supported_srtp_profiles().await
-                    .iter()
-                    .map(|p| format!("{:?}", p))
-                    .collect(),
+                crypto_suites,
                 key_params: None,
                 srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
-            };
-            
-            Ok(security_info)
-        } else {
-            // Return empty security info if security is not enabled
-            Ok(SecurityInfo {
-                mode: crate::api::common::config::SecurityMode::None,
-                fingerprint: None,
-                fingerprint_algorithm: None,
-                crypto_suites: Vec::new(),
-                key_params: None,
-                srtp_profile: None,
             })
+        } else {
+            Err(MediaTransportError::Security("Security context not initialized".to_string()))
         }
     }
 }

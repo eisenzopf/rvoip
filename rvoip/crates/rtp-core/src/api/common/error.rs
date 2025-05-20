@@ -46,6 +46,10 @@ pub enum MediaTransportError {
     /// Configuration error
     #[error("Configuration error: {0}")]
     Configuration(String),
+    
+    /// Timeout error
+    #[error("Timeout error: {0}")]
+    Timeout(String),
 }
 
 /// Error types for security operations

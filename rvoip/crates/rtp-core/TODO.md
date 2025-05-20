@@ -326,13 +326,18 @@ This separation will resolve the current DTLS handshake issues by eliminating ro
   - [ ] Create dedicated MediaTransportServer trait 
   - [ ] Move shared types to common module
   - [ ] Update examples to use new separation
-- [ ] Design and implement the new developer API layer
-  - [ ] Create MediaTransportSession abstraction
-  - [ ] Implement SecureMediaContext for security
-  - [ ] Add higher-level buffer management
-  - [ ] Develop quality monitoring interface
-- [ ] Refactor existing code to use the new API internally
-- [ ] Create comprehensive examples and tests for integration
+- [x] Fix server transport's receive_frame() method to use broadcast channel pattern instead of MPSC
+  - [x] Replace implementation that created a new empty channel
+  - [x] Implement proper broadcast channel to allow multiple consumers
+  - [x] Ensure frame data is properly shared without requiring mutability
+  - [x] Add appropriate timeouts to prevent indefinite blocking
+  - [x] Fixed thread-safety issues by using RwLock for main_socket rather than unsafe code
+  - [x] Fix UdpRtpTransport layer to properly handle non-RTP packets
+  - [x] Add direct frame forwarding from MediaReceived events to broadcast channel
+- [x] Add get_local_address() methods to client and server APIs to expose actual dynamic port allocation
+  - [x] Implement method for client API
+  - [x] Implement method for server API 
+  - [x] Create port_allocation_demo example
 
 ### Important for production use
 - [ ] Enhance DTLS for full WebRTC compliance

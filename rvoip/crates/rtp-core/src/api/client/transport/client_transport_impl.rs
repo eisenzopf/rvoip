@@ -11,6 +11,7 @@ use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid;
 use bytes;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::frame::MediaFrameType;
@@ -41,7 +42,7 @@ pub struct DefaultMediaTransportClient {
     transport: Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
     
     /// Connected flag
-    connected: Arc<Mutex<bool>>,
+    connected: Arc<AtomicBool>,
     
     /// Frame sender for passing received frames to the application
     frame_sender: mpsc::Sender<MediaFrame>,
@@ -101,13 +102,27 @@ impl DefaultMediaTransportClient {
             session: Arc::new(Mutex::new(session)),
             security: security_context,
             transport: Arc::new(Mutex::new(None)),
-            connected: Arc::new(Mutex::new(false)),
+            connected: Arc::new(AtomicBool::new(false)),
             frame_sender,
             frame_receiver: Arc::new(Mutex::new(frame_receiver)),
             event_callbacks: Arc::new(Mutex::new(Vec::new())),
             connect_callbacks: Arc::new(Mutex::new(Vec::new())),
             disconnect_callbacks: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+    
+    /// Get the local address currently bound to
+    /// 
+    /// This returns the actual bound address of the transport, which may be different
+    /// from the configured address if dynamic port allocation is used.
+    pub async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
+        let transport_guard = self.transport.lock().await;
+        if let Some(transport) = transport_guard.as_ref() {
+            transport.local_rtp_addr()
+                .map_err(|e| MediaTransportError::Transport(format!("Failed to get local address: {}", e)))
+        } else {
+            Err(MediaTransportError::Transport("Transport not initialized. Connect first to bind to a port.".to_string()))
+        }
     }
     
     /// Process an incoming RTP packet
@@ -182,8 +197,7 @@ impl DefaultMediaTransportClient {
 #[async_trait]
 impl MediaTransportClient for DefaultMediaTransportClient {
     async fn connect(&self) -> Result<(), MediaTransportError> {
-        let mut connected = self.connected.lock().await;
-        if *connected {
+        if self.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
         
@@ -208,8 +222,13 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         drop(transport_guard);
         
         // Get socket handle
-        let socket_handle = transport.get_socket_handle().await
-            .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to get socket handle: {}", e)))?;
+        let socket_arc = transport.get_socket();
+
+        // Create a proper SocketHandle
+        let socket_handle = SocketHandle {
+            socket: socket_arc,
+            remote_addr: None,
+        };
         
         // If security is enabled, set up the security context
         if let Some(security) = &self.security {
@@ -239,7 +258,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         }
         
         // Set connected flag
-        *connected = true;
+        self.connected.store(true, Ordering::SeqCst);
         
         // Notify callbacks
         let callbacks = self.connect_callbacks.lock().await;
@@ -247,46 +266,82 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             callback();
         }
         
-        // Start packet reception loop
-        let transport_clone = transport.clone();
-        let self_clone = Arc::new(self.clone());
-        
+        // Prepare data for the background task
+        let transport_clone = self.transport.clone();
+        let connected = self.connected.clone();
+        let frame_sender_clone = self.frame_sender.clone();
+
+        // Spawn task to receive packets in the background
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 2048];
             
-            loop {
-                // Receive packet
-                match transport_clone.receive_packet(&mut buffer).await {
-                    Ok((size, addr)) => {
-                        // Process packet
-                        if let Err(e) = self_clone.process_packet(&buffer[..size]).await {
-                            warn!("Error processing packet: {}", e);
+            while connected.load(Ordering::SeqCst) {
+                // Get the transport
+                let transport_guard = transport_clone.lock().await;
+                if let Some(transport) = transport_guard.as_ref() {
+                    // Receive packet from transport
+                    match transport.receive_packet(&mut buffer).await {
+                        Ok((size, addr)) => {
+                            if size == 0 {
+                                // Empty packet, ignore
+                                continue;
+                            }
+                            
+                            drop(transport_guard); // Drop the lock before lengthy processing
+                            
+                            // Parse as RTP packet
+                            match crate::packet::RtpPacket::parse(&buffer[..size]) {
+                                Ok(rtp_packet) => {
+                                    // Process the packet by creating a MediaFrame
+                                    let frame = MediaFrame {
+                                        frame_type: match rtp_packet.header.payload_type {
+                                            // Audio payload types (common)
+                                            0..=34 => MediaFrameType::Audio,
+                                            // Video payload types (common)
+                                            35..=50 => MediaFrameType::Video,
+                                            // Dynamic payload types - use config to determine
+                                            96..=127 => MediaFrameType::Audio, // Default for now
+                                            // All other types
+                                            _ => MediaFrameType::Data,
+                                        },
+                                        data: rtp_packet.payload.to_vec(),
+                                        timestamp: rtp_packet.header.timestamp,
+                                        sequence: rtp_packet.header.sequence_number,
+                                        marker: rtp_packet.header.marker,
+                                        payload_type: rtp_packet.header.payload_type,
+                                        ssrc: rtp_packet.header.ssrc,
+                                    };
+                                    
+                                    // Send frame to application
+                                    if let Err(e) = frame_sender_clone.send(frame).await {
+                                        warn!("Failed to send frame to application: {}", e);
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Failed to parse RTP packet: {}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            if connected.load(Ordering::SeqCst) {
+                                warn!("Failed to receive packet: {}", e);
+                            }
                         }
-                    },
-                    Err(e) => {
-                        warn!("Error receiving packet: {}", e);
-                        break;
                     }
+                } else {
+                    // No transport available, sleep a bit
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
             
-            // Disconnected
-            let mut connected = self_clone.connected.lock().await;
-            *connected = false;
-            
-            // Notify callbacks
-            let callbacks = self_clone.disconnect_callbacks.lock().await;
-            for callback in &*callbacks {
-                callback();
-            }
+            debug!("Receive task ended");
         });
         
         Ok(())
     }
     
     async fn disconnect(&self) -> Result<(), MediaTransportError> {
-        let mut connected = self.connected.lock().await;
-        if !*connected {
+        if !self.connected.load(Ordering::SeqCst) {
             return Ok(());
         }
         
@@ -306,7 +361,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         *transport_guard = None;
         
         // Update connected flag
-        *connected = false;
+        self.connected.store(false, Ordering::SeqCst);
         
         // Notify callbacks
         let callbacks = self.disconnect_callbacks.lock().await;
@@ -315,6 +370,16 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         }
         
         Ok(())
+    }
+    
+    async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
+        let transport_guard = self.transport.lock().await;
+        if let Some(transport) = transport_guard.as_ref() {
+            transport.local_rtp_addr()
+                .map_err(|e| MediaTransportError::Transport(format!("Failed to get local address: {}", e)))
+        } else {
+            Err(MediaTransportError::Transport("Transport not initialized. Connect first to bind to a port.".to_string()))
+        }
     }
     
     async fn send_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
@@ -350,8 +415,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     }
     
     async fn is_connected(&self) -> Result<bool, MediaTransportError> {
-        let connected = *self.connected.lock().await;
-        Ok(connected)
+        Ok(self.connected.load(Ordering::SeqCst))
     }
     
     async fn on_connect(&self, callback: Box<dyn Fn() + Send + Sync>) -> Result<(), MediaTransportError> {

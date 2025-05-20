@@ -32,6 +32,10 @@ pub struct ClientSecurityConfig {
     pub validate_fingerprint: bool,
     /// SRTP profiles supported (in order of preference)
     pub srtp_profiles: Vec<SrtpProfile>,
+    /// Path to certificate file (PEM format)
+    pub certificate_path: Option<String>,
+    /// Path to private key file (PEM format)
+    pub private_key_path: Option<String>,
 }
 
 impl Default for ClientSecurityConfig {
@@ -46,6 +50,8 @@ impl Default for ClientSecurityConfig {
                 SrtpProfile::AesCm128HmacSha1_80,
                 SrtpProfile::AesGcm128,
             ],
+            certificate_path: None,
+            private_key_path: None,
         }
     }
 }
@@ -62,6 +68,11 @@ pub(crate) fn convert_to_dtls_profile(profile: SrtpProfile) -> crate::dtls::mess
 
 /// Create a DtlsConfig from API ClientSecurityConfig
 pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
+    // Verify that SRTP profiles are specified
+    if config.srtp_profiles.is_empty() {
+        panic!("No SRTP profiles specified in client security config");
+    }
+
     // Convert our API profiles to DTLS profiles
     let dtls_profiles: Vec<crate::dtls::message::extension::SrtpProtectionProfile> = config.srtp_profiles.iter()
         .map(|p| convert_to_dtls_profile(*p))
@@ -72,7 +83,7 @@ pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
     dtls_config.role = DtlsRole::Client;
     
     // We need to convert the SrtpProtectionProfile values to SrtpCryptoSuite values
-    let crypto_suites = dtls_profiles.iter()
+    let crypto_suites: Vec<crate::srtp::SrtpCryptoSuite> = dtls_profiles.iter()
         .map(|profile| match profile {
             &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80 => 
                 crate::srtp::SRTP_AES128_CM_SHA1_80,
@@ -83,11 +94,21 @@ pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
             &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm => 
                 crate::srtp::SRTP_AEAD_AES_256_GCM,
             &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(_) => 
-                crate::srtp::SRTP_AES128_CM_SHA1_80, // Default to a known profile
+                panic!("Unknown SRTP protection profile specified"), // Don't silently default
         })
         .collect();
     
+    // Never use a default - if no crypto suites were mapped, that's an error
+    if crypto_suites.is_empty() {
+        panic!("Failed to map any SRTP profiles to crypto suites");
+    }
+    
+    // Set the mapped crypto suites
     dtls_config.srtp_profiles = crypto_suites;
+    
+    // Set appropriate mtu and timeout values
+    dtls_config.mtu = 1200;
+    dtls_config.max_retransmissions = 5;
     
     dtls_config
 }
@@ -134,4 +155,7 @@ pub trait ClientSecurityContext: Send + Sync {
     
     /// Get the local fingerprint algorithm (client's algorithm)
     async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError>;
+    
+    /// Check if transport is set
+    async fn has_transport(&self) -> Result<bool, SecurityError>;
 } 

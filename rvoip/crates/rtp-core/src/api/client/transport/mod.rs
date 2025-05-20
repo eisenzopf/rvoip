@@ -31,6 +31,16 @@ pub trait MediaTransportClient: Send + Sync {
     /// releasing resources.
     async fn disconnect(&self) -> Result<(), MediaTransportError>;
     
+    /// Get the local address currently bound to
+    /// 
+    /// This returns the actual bound address of the transport, which may be different
+    /// from the configured address if dynamic port allocation is used. When using
+    /// dynamic port allocation, this method should be called after connect() to
+    /// get the allocated port.
+    /// 
+    /// This information is needed for SDP exchange in signaling protocols.
+    async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError>;
+    
     /// Send a media frame to the server
     ///
     /// This sends a media frame to the remote peer. The frame will be encrypted

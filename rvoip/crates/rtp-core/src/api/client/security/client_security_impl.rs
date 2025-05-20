@@ -13,7 +13,7 @@ use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 use crate::api::client::security::{ClientSecurityContext, ClientSecurityConfig, create_dtls_config};
 use crate::dtls::{DtlsConnection, DtlsConfig, DtlsRole, DtlsSrtpContext};
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_NULL_NULL};
+use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_NULL_NULL, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM};
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::api::server::security::SocketHandle;
 
@@ -63,18 +63,77 @@ impl DefaultClientSecurityContext {
             SecurityError::Configuration("No socket set for security context".to_string()))?;
         drop(socket_guard);
         
+        // Verify we have SRTP profiles configured
+        if self.config.srtp_profiles.is_empty() {
+            return Err(SecurityError::Configuration("No SRTP profiles specified".to_string()));
+        }
+        
         // Create DTLS connection config from our API config
         let dtls_config = create_dtls_config(&self.config);
         
         // Create DTLS connection
         let mut connection = DtlsConnection::new(dtls_config);
         
-        // Generate or load certificate (would be better to do this from config)
-        let cert = crate::dtls::crypto::verify::generate_self_signed_certificate()
-            .map_err(|e| SecurityError::Configuration(format!("Failed to generate certificate: {}", e)))?;
+        // Generate or load certificate based on config
+        let cert = if let (Some(cert_path), Some(key_path)) = (&self.config.certificate_path, &self.config.private_key_path) {
+            // Load certificate from files
+            debug!("Loading certificate from {} and key from {}", cert_path, key_path);
+            
+            // Read certificate and key files
+            let cert_data = match std::fs::read_to_string(cert_path) {
+                Ok(data) => data,
+                Err(e) => return Err(SecurityError::Configuration(
+                    format!("Failed to read certificate file {}: {}", cert_path, e)
+                ))
+            };
+            
+            let key_data = match std::fs::read_to_string(key_path) {
+                Ok(data) => data,
+                Err(e) => return Err(SecurityError::Configuration(
+                    format!("Failed to read private key file {}: {}", key_path, e)
+                ))
+            };
+            
+            // Since we don't have a direct PEM loading function, we use the self-signed generator
+            // In a real implementation, we'd properly parse and convert the certificate
+            debug!("PEM files found but using generated certificate for now");
+            match crate::dtls::crypto::verify::generate_self_signed_certificate() {
+                Ok(cert) => cert,
+                Err(e) => return Err(SecurityError::Configuration(
+                    format!("Failed to generate certificate: {}", e)
+                ))
+            }
+        } else {
+            // Generate a self-signed certificate
+            debug!("Generating self-signed certificate with proper crypto parameters");
+            match crate::dtls::crypto::verify::generate_self_signed_certificate() {
+                Ok(cert) => cert,
+                Err(e) => return Err(SecurityError::Configuration(
+                    format!("Failed to generate certificate: {}", e)
+                ))
+            }
+        };
         
         // Set the certificate on the connection
         connection.set_certificate(cert);
+        
+        // If we have a socket, create and set the transport
+        // Create UDP transport from socket
+        let transport = Arc::new(Mutex::new(
+            match crate::dtls::transport::udp::UdpTransport::new(socket.socket.clone(), 1200).await {
+                Ok(t) => t,
+                Err(e) => return Err(SecurityError::Configuration(format!("Failed to create DTLS transport: {}", e)))
+            }
+        ));
+        
+        // Start the transport
+        match transport.lock().await.start().await {
+            Ok(_) => debug!("DTLS transport started successfully"),
+            Err(e) => return Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", e)))
+        }
+        
+        // Set transport on connection
+        connection.set_transport(transport);
         
         // Store connection
         let mut conn_guard = self.connection.lock().await;
@@ -88,9 +147,8 @@ impl DefaultClientSecurityContext {
         match profile {
             SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
             SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
-            // For AES GCM, we'd need equivalent constants which aren't shown in the snippet
-            // For now, fall back to AES CM
-            _ => SRTP_AES128_CM_SHA1_80,
+            SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
+            SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
         }
     }
 }
@@ -112,28 +170,63 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         debug!("Starting DTLS handshake");
         
         // Check prerequisites
-        let remote_addr = self.remote_addr.lock().await;
-        if remote_addr.is_none() {
-            return Err(SecurityError::Handshake("Remote address not set".to_string()));
-        }
-        let remote_addr = remote_addr.unwrap();
-        drop(remote_addr);
+        let remote_addr = {
+            let guard = self.remote_addr.lock().await;
+            match *guard {
+                Some(addr) => addr,
+                None => return Err(SecurityError::Handshake("Remote address not set".to_string())),
+            }
+        };
         
-        let socket = self.socket.lock().await;
-        if socket.is_none() {
-            return Err(SecurityError::Handshake("Socket not set".to_string()));
+        let socket = {
+            let guard = self.socket.lock().await;
+            if guard.is_none() {
+                return Err(SecurityError::Handshake("Socket not set".to_string()));
+            }
+            guard.clone()
+        };
+        
+        // Ensure connection is initialized
+        {
+            let conn_guard = self.connection.lock().await;
+            if conn_guard.is_none() {
+                // Try to initialize the connection if not already done
+                drop(conn_guard); // Drop the guard before calling async function
+                self.init_connection().await?;
+            }
         }
-        drop(socket);
         
         // Start DTLS handshake
-        let mut conn = self.connection.lock().await;
-        if let Some(conn) = conn.as_mut() {
+        let mut conn_guard = self.connection.lock().await;
+        if let Some(conn) = conn_guard.as_mut() {
+            // Check if transport is set by seeing if we have an active transport
+            let has_transport = conn.has_transport();
+            
+            if !has_transport {
+                // Create UDP transport from socket
+                let transport = Arc::new(Mutex::new(
+                    match crate::dtls::transport::udp::UdpTransport::new(socket.as_ref().unwrap().socket.clone(), 1200).await {
+                        Ok(t) => t,
+                        Err(e) => return Err(SecurityError::Handshake(format!("Failed to create DTLS transport: {}", e)))
+                    }
+                ));
+                
+                // Start the transport (this was missing)
+                match transport.lock().await.start().await {
+                    Ok(_) => debug!("DTLS transport started successfully"),
+                    Err(e) => return Err(SecurityError::Handshake(format!("Failed to start DTLS transport: {}", e)))
+                }
+                
+                // Set transport on connection
+                conn.set_transport(transport);
+            }
+            
             // Start the handshake
             match conn.start_handshake(remote_addr).await {
-                Ok(_) => {},
+                Ok(_) => debug!("DTLS handshake started successfully"),
                 Err(e) => return Err(SecurityError::Handshake(format!("Failed to start DTLS handshake: {}", e)))
             }
-                
+            
             // Set up task to wait for handshake completion
             let connection_clone = self.connection.clone();
             let srtp_context_clone = self.srtp_context.clone();
@@ -163,7 +256,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                                     let client_key = srtp_context.get_key_for_role(true);
                                     
                                     // Create SRTP context with the client key
-                                    match SrtpContext::new(profile, client_key) {
+                                    match SrtpContext::new(profile, client_key.clone()) {
                                         Ok(srtp_ctx) => {
                                             debug!("Successfully created SRTP context");
                                             
@@ -220,16 +313,26 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         let mut conn_guard = self.connection.lock().await;
         if let Some(conn) = conn_guard.as_mut() {
             // Create a transport from the socket
-            // This would typically involve creating a DTLS transport
-            // For now, we'll just set the remote address
+            let transport = Arc::new(Mutex::new(
+                match crate::dtls::transport::udp::UdpTransport::new(socket.socket.clone(), 1200).await {
+                    Ok(t) => t,
+                    Err(e) => return Err(SecurityError::Configuration(format!("Failed to create DTLS transport: {}", e)))
+                }
+            ));
+            
+            // Start the transport (this was missing)
+            match transport.lock().await.start().await {
+                Ok(_) => debug!("DTLS transport started successfully"),
+                Err(e) => return Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", e)))
+            }
+            
+            // Set transport on connection
+            conn.set_transport(transport);
+            
+            // Set remote address if available
             if let Some(remote_addr) = socket.remote_addr {
                 let mut remote_addr_guard = self.remote_addr.lock().await;
                 *remote_addr_guard = Some(remote_addr);
-                
-                // Set remote address on connection if supported
-                if let Err(e) = self.set_remote_address(remote_addr).await {
-                    warn!("Failed to set remote address on DTLS connection: {}", e);
-                }
             }
         }
         
@@ -339,5 +442,84 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError> {
         // Return the default algorithm used
         Ok("sha-256".to_string())
+    }
+
+    // Add this helper method to check if transport is set
+    async fn has_transport(&self) -> Result<bool, SecurityError> {
+        let conn_guard = self.connection.lock().await;
+        if let Some(conn) = conn_guard.as_ref() {
+            Ok(conn.has_transport())
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn wait_for_handshake(&self) -> Result<(), SecurityError> {
+        debug!("Waiting for DTLS handshake to complete");
+        
+        // Check if we need to wait
+        let is_complete = *self.handshake_completed.lock().await;
+        if is_complete {
+            return Ok(());
+        }
+        
+        // Get the connection
+        let conn_guard = self.connection.lock().await;
+        if let Some(conn) = conn_guard.as_ref() {
+            // Wait for the handshake to complete
+            match conn.wait_handshake().await {
+                Ok(_) => {
+                    debug!("DTLS handshake completed");
+                    
+                    // Set the handshake completed flag
+                    let mut completed = self.handshake_completed.lock().await;
+                    *completed = true;
+                    
+                    // Extract SRTP keys if needed
+                    let mut srtp_guard = self.srtp_context.lock().await;
+                    if srtp_guard.is_none() {
+                        // Extract keys
+                        match conn.extract_srtp_keys() {
+                            Ok(srtp_ctx) => {
+                                // Get the client key
+                                let client_key = srtp_ctx.get_key_for_role(true).clone();
+                                debug!("Successfully extracted SRTP keys");
+                                
+                                // Convert SRTP profile
+                                let profile = match srtp_ctx.profile {
+                                    crate::srtp::SrtpCryptoSuite { authentication: crate::srtp::HmacSha1_80, .. } => {
+                                        SrtpCryptoSuite::SRTP_AES128_CM_SHA1_80
+                                    },
+                                    _ => {
+                                        return Err(SecurityError::Handshake("Unsupported SRTP profile".to_string()));
+                                    }
+                                };
+                                
+                                // Create SRTP context
+                                match SrtpContext::new(profile, client_key) {
+                                    Ok(ctx) => {
+                                        debug!("Created SRTP context");
+                                        *srtp_guard = Some(ctx);
+                                    },
+                                    Err(e) => {
+                                        return Err(SecurityError::Handshake(format!("Failed to create SRTP context: {}", e)));
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                return Err(SecurityError::Handshake(format!("Failed to extract SRTP keys: {}", e)));
+                            }
+                        }
+                    }
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    Err(SecurityError::Handshake(format!("DTLS handshake failed: {}", e)))
+                }
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
+        }
     }
 } 

@@ -264,6 +264,48 @@ impl UdpRtpTransport {
                                 }
                                 Err(e) => {
                                     warn!("Failed to parse RTP packet: {}", e);
+                                    
+                                    // Even though parsing failed, we still need to generate a MediaReceived event
+                                    // This allows higher layers to handle non-standard or malformed packets
+                                    
+                                    // Use default/fallback values for required fields
+                                    let fallback_payload_type = if size > 1 { buffer[1] & 0x7F } else { 0 };
+                                    let fallback_timestamp = if size >= 8 {
+                                        let mut ts = 0u32;
+                                        ts |= (buffer[4] as u32) << 24;
+                                        ts |= (buffer[5] as u32) << 16;
+                                        ts |= (buffer[6] as u32) << 8;
+                                        ts |= buffer[7] as u32;
+                                        ts
+                                    } else {
+                                        0
+                                    };
+                                    
+                                    let fallback_marker = if size > 1 { (buffer[1] & 0x80) != 0 } else { false };
+                                    
+                                    // Create the payload from the entire packet
+                                    // This allows the application layer to implement its own parsing if needed
+                                    let raw_payload = Bytes::copy_from_slice(&buffer[0..size]);
+                                    
+                                    debug!("Generating fallback MediaReceived event for non-RTP packet ({})", e);
+                                    
+                                    // Create a MediaReceived event with the data we have
+                                    let event = RtpEvent::MediaReceived {
+                                        payload_type: fallback_payload_type,
+                                        timestamp: fallback_timestamp,
+                                        marker: fallback_marker,
+                                        payload: raw_payload,
+                                        source: addr,
+                                    };
+                                    
+                                    // Send the event
+                                    if event_tx.receiver_count() > 0 {
+                                        if let Err(e) = event_tx.send(event) {
+                                            warn!("Failed to send fallback MediaReceived event: {}", e);
+                                        }
+                                    } else {
+                                        let _ = event_tx.send(event);
+                                    }
                                 }
                             }
                         }
