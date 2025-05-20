@@ -368,7 +368,7 @@ The following features are implemented in the underlying library but not yet ful
 
 #### Advanced Security
 - [ ] More detailed DTLS configuration options (see `dtls_test.rs`, `direct_dtls_media_streaming.rs`)
-- [ ] SRTP Profile configuration (see `srtp_crypto.rs`, `srtp_protected.rs`)
+- [x] SRTP Profile configuration (see `srtp_crypto.rs`, `srtp_protected.rs`)
 - [ ] Security key rotation options
 - [ ] Custom certificate generation options (see `generate_certificates.rs`)
 
