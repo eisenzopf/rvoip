@@ -6,12 +6,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use std::time::Duration;
+use std::collections::HashMap;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::MediaEventCallback;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::stats::MediaStats;
+use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::config::ServerConfig;
 use crate::api::client::transport::RtcpStats;
 use crate::api::client::transport::VoipMetrics;
@@ -35,6 +37,19 @@ pub struct ClientInfo {
     pub security_info: Option<SecurityInfo>,
     /// Is the client connected
     pub connected: bool,
+}
+
+/// RTP Header Extension Data
+#[derive(Debug, Clone)]
+pub struct HeaderExtension {
+    /// The ID of the extension (1-14 for one-byte header, 1-255 for two-byte header)
+    pub id: u8,
+    
+    /// The URI that identifies this extension type
+    pub uri: String,
+    
+    /// The data of the extension
+    pub data: Vec<u8>,
 }
 
 /// Server implementation of the media transport interface
@@ -262,4 +277,126 @@ pub trait MediaTransportServer: Send + Sync {
     /// - `active_ssrcs`: The list of active SSRCs to get CSRCs for
     async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc])
         -> Result<Vec<RtpCsrc>, MediaTransportError>;
+        
+    // Header Extensions API Methods
+    
+    /// Check if header extensions are enabled
+    ///
+    /// Returns true if header extensions are enabled for this server.
+    async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Enable header extensions with the specified format
+    ///
+    /// This enables the header extensions feature if it was not enabled
+    /// in the configuration. Returns true if successfully enabled.
+    ///
+    /// - `format`: The header extension format to use (One-byte or Two-byte)
+    async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError>;
+    
+    /// Configure a header extension mapping
+    ///
+    /// Maps an extension ID to a URI that identifies its type.
+    ///
+    /// - `id`: The extension ID to map (1-14 for one-byte, 1-255 for two-byte)
+    /// - `uri`: The URI that identifies this extension type
+    async fn configure_header_extension(&self, id: u8, uri: String) 
+        -> Result<(), MediaTransportError>;
+        
+    /// Configure multiple header extension mappings
+    ///
+    /// Maps extension IDs to URIs that identify their types.
+    ///
+    /// - `mappings`: A HashMap of extension IDs to URIs
+    async fn configure_header_extensions(&self, mappings: HashMap<u8, String>)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add a header extension to the next outgoing packet for a specific client
+    ///
+    /// - `client_id`: The ID of the client to add the extension for
+    /// - `extension`: The header extension to add
+    async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add a header extension to the next outgoing packet for all clients
+    ///
+    /// - `extension`: The header extension to add
+    async fn add_header_extension_for_all_clients(&self, extension: HeaderExtension)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add audio level header extension for a specific client
+    ///
+    /// - `client_id`: The ID of the client to add the extension for
+    /// - `voice_activity`: true if voice activity is detected, false otherwise
+    /// - `level`: audio level in dB below full scale (0-127)
+    async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add audio level header extension for all clients
+    ///
+    /// - `voice_activity`: true if voice activity is detected, false otherwise
+    /// - `level`: audio level in dB below full scale (0-127)
+    async fn add_audio_level_extension_for_all_clients(&self, voice_activity: bool, level: u8)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add video orientation header extension for a specific client
+    ///
+    /// - `client_id`: The ID of the client to add the extension for
+    /// - `camera_front_facing`: true if camera is front-facing, false otherwise
+    /// - `camera_flipped`: true if camera is flipped, false otherwise
+    /// - `rotation`: rotation in degrees (0, 90, 180, or 270)
+    async fn add_video_orientation_extension_for_client(&self, client_id: &str, 
+        camera_front_facing: bool, camera_flipped: bool, rotation: u16)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add video orientation header extension for all clients
+    ///
+    /// - `camera_front_facing`: true if camera is front-facing, false otherwise
+    /// - `camera_flipped`: true if camera is flipped, false otherwise
+    /// - `rotation`: rotation in degrees (0, 90, 180, or 270)
+    async fn add_video_orientation_extension_for_all_clients(&self, 
+        camera_front_facing: bool, camera_flipped: bool, rotation: u16)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add transport-cc header extension for a specific client
+    ///
+    /// - `client_id`: The ID of the client to add the extension for
+    /// - `sequence_number`: transport-wide sequence number
+    async fn add_transport_cc_extension_for_client(&self, client_id: &str, sequence_number: u16)
+        -> Result<(), MediaTransportError>;
+    
+    /// Add transport-cc header extension for all clients
+    ///
+    /// - `sequence_number`: transport-wide sequence number
+    async fn add_transport_cc_extension_for_all_clients(&self, sequence_number: u16)
+        -> Result<(), MediaTransportError>;
+    
+    /// Get all header extensions received from a specific client
+    ///
+    /// - `client_id`: The ID of the client to get extensions from
+    async fn get_received_header_extensions(&self, client_id: &str)
+        -> Result<Vec<HeaderExtension>, MediaTransportError>;
+    
+    /// Get audio level header extension from a specific client
+    ///
+    /// - `client_id`: The ID of the client to get the extension from
+    ///
+    /// Returns a tuple of (voice_activity, level) if the extension is found
+    async fn get_received_audio_level(&self, client_id: &str)
+        -> Result<Option<(bool, u8)>, MediaTransportError>;
+    
+    /// Get video orientation header extension from a specific client
+    ///
+    /// - `client_id`: The ID of the client to get the extension from
+    ///
+    /// Returns a tuple of (camera_front_facing, camera_flipped, rotation) if the extension is found
+    async fn get_received_video_orientation(&self, client_id: &str)
+        -> Result<Option<(bool, bool, u16)>, MediaTransportError>;
+    
+    /// Get transport-cc header extension from a specific client
+    ///
+    /// - `client_id`: The ID of the client to get the extension from
+    ///
+    /// Returns the transport-wide sequence number if the extension is found
+    async fn get_received_transport_cc(&self, client_id: &str)
+        -> Result<Option<u16>, MediaTransportError>;
 } 

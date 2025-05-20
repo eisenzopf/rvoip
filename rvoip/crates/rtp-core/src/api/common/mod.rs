@@ -10,6 +10,7 @@ pub mod frame;
 pub mod buffer;
 pub mod stats;
 pub mod security;
+pub mod extension;
 
 // Re-export common types for convenience
 pub use self::frame::{MediaFrame, MediaFrameType};
@@ -17,4 +18,5 @@ pub use self::error::{MediaTransportError, SecurityError, BufferError, StatsErro
 pub use self::events::{MediaTransportEvent, MediaEventCallback};
 pub use self::config::{SecurityMode, SrtpProfile, SecurityInfo, BaseTransportConfig, NetworkPreset, SecurityConfig, SecurityProfile};
 pub use self::buffer::{MediaBuffer, MediaBufferConfig, BufferStats};
-pub use self::stats::{MediaStats, StreamStats, QualityLevel, Direction, MediaStatsCollector}; 
+pub use self::stats::{MediaStats, StreamStats, QualityLevel, Direction, MediaStatsCollector};
+pub use self::extension::ExtensionFormat; 

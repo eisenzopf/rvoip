@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use crate::api::server::security::ServerSecurityConfig;
+use crate::api::common::extension::ExtensionFormat;
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -31,7 +32,11 @@ pub struct ServerConfig {
     /// Enable SSRC demultiplexing for handling multiple streams
     pub ssrc_demultiplexing_enabled: Option<bool>,
     /// Enable CSRC management for conferencing scenarios
-    pub csrc_management_enabled: Option<bool>,
+    pub csrc_management_enabled: bool,
+    /// Enable header extensions support (RFC 8285)
+    pub header_extensions_enabled: bool,
+    /// Header extension format (One-byte or Two-byte)
+    pub header_extension_format: ExtensionFormat,
 }
 
 /// Builder for ServerConfig
@@ -57,7 +62,9 @@ impl ServerConfigBuilder {
                 rtcp_mux: false, // Disabled by default
                 media_sync_enabled: None, // Optional, defaults to None
                 ssrc_demultiplexing_enabled: None, // Optional, defaults to None
-                csrc_management_enabled: None, // Optional, defaults to None
+                csrc_management_enabled: false, // Disabled by default
+                header_extensions_enabled: false, // Disabled by default
+                header_extension_format: ExtensionFormat::OneByte, // One-byte header is standard
             },
         }
     }
@@ -67,6 +74,7 @@ impl ServerConfigBuilder {
         let mut builder = Self::new();
         builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::DtlsSrtp;
         builder.config.rtcp_mux = true; // WebRTC typically uses RTCP-MUX
+        builder.config.header_extensions_enabled = true; // WebRTC makes extensive use of header extensions
         builder
     }
     
@@ -146,7 +154,19 @@ impl ServerConfigBuilder {
     
     /// Enable or disable CSRC management for conferencing scenarios
     pub fn csrc_management_enabled(mut self, enable: bool) -> Self {
-        self.config.csrc_management_enabled = Some(enable);
+        self.config.csrc_management_enabled = enable;
+        self
+    }
+    
+    /// Enable or disable header extensions support (RFC 8285)
+    pub fn header_extensions_enabled(mut self, enable: bool) -> Self {
+        self.config.header_extensions_enabled = enable;
+        self
+    }
+    
+    /// Set the header extension format (One-byte or Two-byte)
+    pub fn header_extension_format(mut self, format: ExtensionFormat) -> Self {
+        self.config.header_extension_format = format;
         self
     }
     

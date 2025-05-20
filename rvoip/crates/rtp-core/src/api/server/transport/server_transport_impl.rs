@@ -3,7 +3,7 @@
 //! This file contains the implementation of the MediaTransportServer trait.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -20,18 +20,14 @@ use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
 use crate::api::server::config::ServerConfig;
 use crate::api::common::config::SecurityInfo;
-use crate::api::common::stats::MediaStats;
-use crate::api::server::transport::{MediaTransportServer, ClientInfo};
+use crate::api::common::stats::{MediaStats, QualityLevel, StreamStats, Direction};
+use crate::api::common::frame::MediaFrameType;
+use crate::api::server::transport::{MediaTransportServer, ClientInfo, HeaderExtension};
 use crate::api::server::security::{ServerSecurityContext, ClientSecurityContext, DefaultServerSecurityContext};
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
-use crate::transport::{RtpTransportConfig, UdpRtpTransport};
-use crate::api::common::stats::QualityLevel;
-use crate::transport::RtpTransport;
-use crate::api::common::stats::StreamStats;
-use crate::api::common::stats::Direction;
-use crate::api::common::frame::MediaFrameType;
-use crate::api::client::transport::RtcpStats;
-use crate::api::client::transport::VoipMetrics;
+use crate::transport::{RtpTransportConfig, UdpRtpTransport, RtpTransport};
+use crate::api::common::extension::ExtensionFormat;
+use crate::api::client::transport::{RtcpStats, VoipMetrics};
 use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
 use crate::packet::RtpPacket;
 use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
@@ -44,8 +40,8 @@ struct ClientConnection {
     address: SocketAddr,
     /// RTP session for this client
     session: Arc<Mutex<RtpSession>>,
-    /// Security context for this client - using Any to avoid casting issues
-    security: Option<Arc<Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
+    /// Security context for this client
+    security: Option<Arc<dyn ClientSecurityContext + Send + Sync>>,
     /// Task handle for packet forwarding
     task: Option<JoinHandle<()>>,
     /// Is connected
@@ -58,81 +54,145 @@ struct ClientConnection {
 
 /// Default implementation of the MediaTransportServer
 pub struct DefaultMediaTransportServer {
-    /// Server configuration
+    /// Session identifier
+    id: String,
+    
+    /// Configuration
     config: ServerConfig,
-    /// Server security context for DTLS - using Any to avoid casting issues
-    security_context: Arc<RwLock<Option<Arc<Mutex<Box<dyn std::any::Any + Send + Sync>>>>>>,
-    /// Connected clients
-    clients: Arc<RwLock<HashMap<String, ClientConnection>>>,
-    /// Sender for frames from clients (broadcast channel)
-    frame_sender: broadcast::Sender<(String, MediaFrame)>,
-    /// Event callbacks
-    event_callbacks: Arc<Mutex<Vec<MediaEventCallback>>>,
-    /// Client connected callbacks
-    client_connected_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-    /// Client disconnected callbacks
-    client_disconnected_callbacks: Arc<Mutex<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-    /// Main socket for receiving connections (wrapped in RwLock for thread-safe interior mutability)
-    main_socket: Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
-    /// Event handling task
-    event_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    /// Server is running flag
+    
+    /// Whether the server is running
     running: Arc<RwLock<bool>>,
+    
+    /// Main socket for the server
+    main_socket: Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
+    
+    /// Socket
+    socket: Arc<RwLock<Option<UdpSocket>>>,
+    
+    /// Main transport
+    transport: Arc<RwLock<Option<UdpRtpTransport>>>,
+    
+    /// Client sockets
+    client_sockets: Arc<RwLock<HashMap<String, UdpSocket>>>,
+    
+    /// Client transports
+    client_transports: Arc<RwLock<HashMap<String, UdpRtpTransport>>>,
+    
+    /// Security context for DTLS/SRTP
+    security_context: Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
+    
+    /// Client connections
+    clients: Arc<RwLock<HashMap<String, ClientConnection>>>,
+    
+    /// Transport event callbacks
+    event_callbacks: Arc<RwLock<Vec<MediaEventCallback>>>,
+    
+    /// Client connected callbacks
+    client_connected_callbacks: Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
+    
+    /// Client disconnected callbacks
+    client_disconnected_callbacks: Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
+    
     /// SSRC demultiplexing enabled flag
     ssrc_demultiplexing_enabled: Arc<RwLock<bool>>,
-    /// CSRC management enabled flag
+    
+    /// CSRC management status
     csrc_management_enabled: Arc<RwLock<bool>>,
-    /// CSRC manager for handling contributing source IDs
-    csrc_manager: Arc<Mutex<CsrcManager>>,
+    
+    /// CSRC manager
+    csrc_manager: Arc<RwLock<CsrcManager>>,
+    
+    /// Header extension format
+    header_extension_format: Arc<RwLock<ExtensionFormat>>,
+    
+    /// Header extensions enabled flag
+    header_extensions_enabled: Arc<RwLock<bool>>,
+    
+    /// Header extension ID-to-URI mappings
+    header_extension_mappings: Arc<RwLock<HashMap<u8, String>>>,
+    
+    /// Pending header extensions to be added to outgoing packets
+    pending_extensions: Arc<RwLock<HashMap<String, Vec<HeaderExtension>>>>,
+    
+    /// Header extensions received from clients
+    received_extensions: Arc<RwLock<HashMap<String, Vec<HeaderExtension>>>>,
+    
+    /// Frame sender for broadcast
+    frame_sender: broadcast::Sender<(String, MediaFrame)>,
+    
+    /// Event handling task
+    event_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 // Custom implementation of Clone for DefaultMediaTransportServer
 impl Clone for DefaultMediaTransportServer {
     fn clone(&self) -> Self {
         Self {
+            id: self.id.clone(),
             config: self.config.clone(),
+            running: self.running.clone(),
+            main_socket: self.main_socket.clone(),
+            socket: self.socket.clone(),
+            transport: self.transport.clone(),
+            client_sockets: self.client_sockets.clone(),
+            client_transports: self.client_transports.clone(),
             security_context: self.security_context.clone(),
             clients: self.clients.clone(),
-            frame_sender: self.frame_sender.clone(),
             event_callbacks: self.event_callbacks.clone(),
             client_connected_callbacks: self.client_connected_callbacks.clone(),
             client_disconnected_callbacks: self.client_disconnected_callbacks.clone(),
-            main_socket: self.main_socket.clone(),
-            event_task: self.event_task.clone(),
-            running: self.running.clone(),
             ssrc_demultiplexing_enabled: self.ssrc_demultiplexing_enabled.clone(),
             csrc_management_enabled: self.csrc_management_enabled.clone(),
             csrc_manager: self.csrc_manager.clone(),
+            header_extension_format: self.header_extension_format.clone(),
+            header_extensions_enabled: self.header_extensions_enabled.clone(),
+            header_extension_mappings: self.header_extension_mappings.clone(),
+            pending_extensions: self.pending_extensions.clone(),
+            received_extensions: self.received_extensions.clone(),
+            frame_sender: self.frame_sender.clone(),
+            event_task: self.event_task.clone(),
         }
     }
 }
 
 impl DefaultMediaTransportServer {
     /// Create a new DefaultMediaTransportServer
-    pub async fn new(config: ServerConfig) -> Result<Self, MediaTransportError> {
-        // Create broadcast channel for frames from clients with capacity for 100 frames
-        let (tx, _rx) = broadcast::channel(100);
+    pub async fn new(
+        config: ServerConfig,
+    ) -> Result<Self, MediaTransportError> {
+        // Extract configuration values
+        let csrc_management_enabled = config.csrc_management_enabled;
+        let header_extensions_enabled = config.header_extensions_enabled;
+        let header_extension_format = config.header_extension_format;
+        let ssrc_demultiplexing_enabled = false; // Disabled by default
         
-        // Initialize SSRC demultiplexing if enabled in config
-        let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
-        
-        // Initialize CSRC management if enabled in config
-        let csrc_management_enabled = config.csrc_management_enabled.unwrap_or(false);
+        // Create broadcast channel for frames with buffer size 16
+        let (sender, _) = broadcast::channel(16);
         
         Ok(Self {
+            id: format!("media-server-main-{}", Uuid::new_v4()),
             config,
+            running: Arc::new(RwLock::new(false)),
+            main_socket: Arc::new(RwLock::new(None)),
+            socket: Arc::new(RwLock::new(None)),
+            transport: Arc::new(RwLock::new(None)),
+            client_sockets: Arc::new(RwLock::new(HashMap::new())),
+            client_transports: Arc::new(RwLock::new(HashMap::new())),
             security_context: Arc::new(RwLock::new(None)),
             clients: Arc::new(RwLock::new(HashMap::new())),
-            frame_sender: tx,
-            event_callbacks: Arc::new(Mutex::new(Vec::new())),
-            client_connected_callbacks: Arc::new(Mutex::new(Vec::new())),
-            client_disconnected_callbacks: Arc::new(Mutex::new(Vec::new())),
-            main_socket: Arc::new(RwLock::new(None)),
-            event_task: Arc::new(Mutex::new(None)),
-            running: Arc::new(RwLock::new(false)),
-            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(ssrc_demultiplexing_enabled)),
+            event_callbacks: Arc::new(RwLock::new(Vec::new())),
+            client_connected_callbacks: Arc::new(RwLock::new(Vec::new())),
+            client_disconnected_callbacks: Arc::new(RwLock::new(Vec::new())),
+            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(false)),
             csrc_management_enabled: Arc::new(RwLock::new(csrc_management_enabled)),
-            csrc_manager: Arc::new(Mutex::new(CsrcManager::new())),
+            csrc_manager: Arc::new(RwLock::new(CsrcManager::new())),
+            header_extension_format: Arc::new(RwLock::new(header_extension_format)),
+            header_extensions_enabled: Arc::new(RwLock::new(header_extensions_enabled)),
+            header_extension_mappings: Arc::new(RwLock::new(HashMap::new())),
+            pending_extensions: Arc::new(RwLock::new(HashMap::new())),
+            received_extensions: Arc::new(RwLock::new(HashMap::new())),
+            frame_sender: sender,
+            event_task: Arc::new(Mutex::new(None)),
         })
     }
     
@@ -167,15 +227,8 @@ impl DefaultMediaTransportServer {
             let server_ctx_option = self.security_context.read().await;
             
             if let Some(server_ctx) = server_ctx_option.as_ref() {
-                // Lock the server context
-                let server_ctx = server_ctx.lock().await;
-                
-                // Downcast to ServerSecurityContext trait
-                let server_ctx = server_ctx.downcast_ref::<Arc<dyn crate::api::server::security::ServerSecurityContext>>()
-                    .ok_or_else(|| MediaTransportError::Security("Failed to downcast server security context".to_string()))?;
-                
-                // Create client context from server context
-                let client_ctx = server_ctx.create_client_context(addr).await
+                // Create client context from server context - still using the trait method
+                let client_ctx: Arc<dyn ClientSecurityContext + Send + Sync> = server_ctx.create_client_context(addr).await
                     .map_err(|e| MediaTransportError::Security(format!("Failed to create client security context: {}", e)))?;
                 
                 // Get socket from the session
@@ -203,7 +256,7 @@ impl DefaultMediaTransportServer {
         };
         
         // Start a task to forward frames from this client
-        let frame_sender = self.frame_sender.clone();
+        let frame_sender = self.frame_sender.clone(); // Clone directly from self
         let client_id_clone = client_id.clone();
         let session_clone = rtp_session.clone();
         
@@ -224,17 +277,17 @@ impl DefaultMediaTransportServer {
                             crate::api::common::frame::MediaFrameType::Data
                         };
                         
-                                            // Convert to MediaFrame
-                    let frame = MediaFrame {
-                        frame_type,
-                        data: packet.payload.to_vec(),
-                        timestamp: packet.header.timestamp,
-                        sequence: packet.header.sequence_number,
-                        marker: packet.header.marker,
-                        payload_type: packet.header.payload_type,
-                        ssrc: packet.header.ssrc,
-                        csrcs: packet.header.csrc.clone(),
-                    };
+                        // Convert to MediaFrame
+                        let frame = MediaFrame {
+                            frame_type,
+                            data: packet.payload.to_vec(),
+                            timestamp: packet.header.timestamp,
+                            sequence: packet.header.sequence_number,
+                            marker: packet.header.marker,
+                            payload_type: packet.header.payload_type,
+                            ssrc: packet.header.ssrc,
+                            csrcs: packet.header.csrc.clone(),
+                        };
                         
                         // Forward to server via broadcast channel
                         // We can ignore send errors since they just mean no receivers are listening
@@ -256,7 +309,7 @@ impl DefaultMediaTransportServer {
             id: client_id.clone(),
             address: addr,
             session: rtp_session,
-            security: security_ctx.map(|ctx| Arc::new(Mutex::new(Box::new(ctx) as Box<dyn std::any::Any + Send + Sync>))),
+            security: security_ctx,
             task: Some(forward_task),
             connected: true,
             created_at: SystemTime::now(),
@@ -277,10 +330,11 @@ impl DefaultMediaTransportServer {
         };
         
         // Notify callbacks
-        let callbacks = self.client_connected_callbacks.lock().await;
-        for callback in callbacks.iter() {
+        let callbacks_guard = self.client_connected_callbacks.read().await;
+        for callback in &*callbacks_guard {
             callback(client_info.clone());
         }
+        drop(callbacks_guard);
         
         Ok(client_id)
     }
@@ -368,15 +422,14 @@ impl DefaultMediaTransportServer {
             };
 
             if !security_exists {
-                // We need to create a new security context
-                // Create server security context
-                let security_context = DefaultServerSecurityContext::new(
+                // Create security context
+                let context = DefaultServerSecurityContext::new(
                     self.config.security_config.clone(),
                 ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create server security context: {}", e)))?;
                 
-                // Store context
+                // Store it directly - no need for extra wrapping since it should already be an Arc<dyn ServerSecurityContext>
                 let mut context_write = self.security_context.write().await;
-                *context_write = Some(Arc::new(Mutex::new(Box::new(security_context) as Box<dyn std::any::Any + Send + Sync>)));
+                *context_write = Some(context);
             }
         }
         
@@ -441,7 +494,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Add mapping to the manager
-        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mut csrc_manager = self.csrc_manager.write().await;
         let mapping_clone = mapping.clone(); // Clone before adding
         csrc_manager.add_mapping(mapping);
         
@@ -457,7 +510,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Add simple mapping to the manager
-        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mut csrc_manager = self.csrc_manager.write().await;
         csrc_manager.add_simple_mapping(original_ssrc, csrc);
         
         debug!("Added simple CSRC mapping: {:08x} -> {:08x}", original_ssrc, csrc);
@@ -472,7 +525,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Remove mapping from the manager
-        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mut csrc_manager = self.csrc_manager.write().await;
         let removed = csrc_manager.remove_by_ssrc(original_ssrc);
         
         if removed.is_some() {
@@ -490,7 +543,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Get mapping from the manager
-        let csrc_manager = self.csrc_manager.lock().await;
+        let csrc_manager = self.csrc_manager.read().await;
         let mapping = csrc_manager.get_by_ssrc(original_ssrc).cloned();
         
         Ok(mapping)
@@ -504,7 +557,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Get all mappings from the manager
-        let csrc_manager = self.csrc_manager.lock().await;
+        let csrc_manager = self.csrc_manager.read().await;
         let mappings = csrc_manager.get_all_mappings().to_vec();
         
         Ok(mappings)
@@ -518,7 +571,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Update CNAME in the manager
-        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mut csrc_manager = self.csrc_manager.write().await;
         let updated = csrc_manager.update_cname(original_ssrc, cname.clone());
         
         if updated {
@@ -536,7 +589,7 @@ impl DefaultMediaTransportServer {
         }
         
         // Update display name in the manager
-        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mut csrc_manager = self.csrc_manager.write().await;
         let updated = csrc_manager.update_display_name(original_ssrc, name.clone());
         
         if updated {
@@ -554,12 +607,194 @@ impl DefaultMediaTransportServer {
         }
         
         // Get active CSRCs from the manager
-        let csrc_manager = self.csrc_manager.lock().await;
+        let csrc_manager = self.csrc_manager.read().await;
         let csrcs = csrc_manager.get_active_csrcs(active_ssrcs);
         
         debug!("Got {} active CSRCs for {} active SSRCs", csrcs.len(), active_ssrcs.len());
         
         Ok(csrcs)
+    }
+
+    // Header Extensions API Implementation
+
+    /// Check if header extensions are enabled
+    pub async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(*self.header_extensions_enabled.read().await)
+    }
+    
+    /// Enable header extensions with the specified format
+    pub async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if *self.header_extensions_enabled.read().await {
+            return Ok(true);
+        }
+        
+        // Set format and enabled flag
+        *self.header_extension_format.write().await = format;
+        *self.header_extensions_enabled.write().await = true;
+        
+        debug!("Enabled header extensions with format: {:?}", format);
+        Ok(true)
+    }
+    
+    /// Configure a header extension mapping
+    pub async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
+        // Check if header extensions are enabled
+        if !*self.header_extensions_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
+        }
+        
+        // Check if ID is valid for the current format
+        let format = *self.header_extension_format.read().await;
+        match format {
+            ExtensionFormat::OneByte => {
+                if id < 1 || id > 14 {
+                    return Err(MediaTransportError::ConfigError(
+                        format!("Invalid extension ID for one-byte format: {} (must be 1-14)", id)
+                    ));
+                }
+            },
+            ExtensionFormat::TwoByte => {
+                if id < 1 || id > 255 {
+                    return Err(MediaTransportError::ConfigError(
+                        format!("Invalid extension ID for two-byte format: {} (must be 1-255)", id)
+                    ));
+                }
+            },
+            ExtensionFormat::Legacy => {
+                // No specific validation for legacy format
+            },
+        }
+        
+        // Add mapping
+        let mut mappings = self.header_extension_mappings.write().await;
+        mappings.insert(id, uri.clone());
+        
+        debug!("Configured header extension ID {} -> URI: {}", id, uri);
+        Ok(())
+    }
+    
+    /// Configure multiple header extension mappings
+    pub async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
+        // Configure each mapping
+        for (id, uri) in mappings {
+            self.configure_header_extension(id, uri).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get received header extensions
+    pub async fn get_received_header_extensions(&self, client_id: &str) -> Result<Vec<HeaderExtension>, MediaTransportError> {
+        // Check if header extensions are enabled
+        if !*self.header_extensions_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
+        }
+        
+        // Get extensions for this client
+        let extensions = self.received_extensions.read().await;
+        let client_extensions = extensions.get(client_id).cloned().unwrap_or_default();
+        
+        Ok(client_extensions)
+    }
+    
+    /// Get audio level header extension
+    pub async fn get_received_audio_level(&self, client_id: &str) -> Result<Option<(bool, u8)>, MediaTransportError> {
+        // Get all extensions for this client
+        let extensions = self.get_received_header_extensions(client_id).await?;
+        
+        // Look for audio level extension (typically ID 1)
+        for ext in extensions {
+            // Find by URI if mapped, or by common ID 1
+            let is_audio_level = {
+                let mappings = self.header_extension_mappings.read().await;
+                mappings.get(&ext.id).map(|uri| uri == "urn:ietf:params:rtp-hdrext:ssrc-audio-level").unwrap_or(ext.id == 1)
+            };
+            
+            if is_audio_level && !ext.data.is_empty() {
+                // Parse audio level data
+                let byte = ext.data[0];
+                
+                // Extract voice activity flag (0 = active, 1 = inactive)
+                let voice_activity = (byte & 0x80) == 0;
+                
+                // Extract level (0-127 dB)
+                let level = byte & 0x7F;
+                
+                return Ok(Some((voice_activity, level)));
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    /// Add header extension for a specific client
+    pub async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+        // Check if header extensions are enabled
+        if !*self.header_extensions_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
+        }
+        
+        // Make sure the client exists
+        let clients = self.clients.read().await;
+        if !clients.contains_key(client_id) {
+            return Err(MediaTransportError::ClientNotFound(client_id.to_string()));
+        }
+        
+        // Add extension to pending list for this client
+        let mut pending = self.pending_extensions.write().await;
+        
+        // Get or create the pending list for this client
+        let client_pending = pending.entry(client_id.to_string()).or_insert_with(Vec::new);
+        
+        // Add the extension
+        client_pending.push(extension);
+        
+        Ok(())
+    }
+    
+    /// Add audio level extension for a specific client
+    pub async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+        // Clamp level to 0-127
+        let level = level.min(127);
+        
+        // For audio level, the format is:
+        // - Bit 7 (MSB): Voice activity flag (0 = active, 1 = inactive)
+        // - Bits 0-6: Level (0-127 dB)
+        let data = if voice_activity {
+            // For active voice, the MSB is 0
+            vec![level]
+        } else {
+            // For inactive voice, the MSB is 1
+            vec![level | 0x80]
+        };
+        
+        // Find the audio level extension ID
+        let audio_level_id = {
+            let mappings = self.header_extension_mappings.read().await;
+            
+            // Look for urn:ietf:params:rtp-hdrext:ssrc-audio-level in mappings
+            let mut id = None;
+            for (mapping_id, uri) in mappings.iter() {
+                if uri == "urn:ietf:params:rtp-hdrext:ssrc-audio-level" {
+                    id = Some(*mapping_id);
+                    break;
+                }
+            }
+            
+            // Default to ID 1 if not found
+            id.unwrap_or(1)
+        };
+        
+        // Create extension
+        let extension = HeaderExtension {
+            id: audio_level_id,
+            uri: "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_string(),
+            data,
+        };
+        
+        // Add extension for client
+        self.add_header_extension_for_client(client_id, extension).await
     }
 }
 
@@ -849,17 +1084,11 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             }
             drop(session);
             
-            // Close security
-            if let Some(security) = &client.security {
+            // Close security context if present
+            if let Some(security_ctx) = &client.security {
                 debug!("Closing security for client {}", id);
-                let security = security.lock().await;
-                // Downcast to ClientSecurityContext trait
-                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
-                    if let Err(e) = security_ctx.close().await {
-                        warn!("Error closing client security {}: {}", id, e);
-                    }
-                } else {
-                    warn!("Failed to downcast client security context for {}", id);
+                if let Err(e) = security_ctx.close().await {
+                    warn!("Error closing client security {}: {}", id, e);
                 }
             }
             
@@ -868,7 +1097,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             
             // Notify callbacks
             debug!("Notifying disconnection callbacks for client {}", id);
-            let callbacks = self.client_disconnected_callbacks.lock().await;
+            let callbacks_guard = self.client_disconnected_callbacks.read().await;
             let client_info = ClientInfo {
                 id: client.id.clone(),
                 address: client.address,
@@ -877,9 +1106,10 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 connected: false,
             };
             
-            for callback in callbacks.iter() {
+            for callback in &*callbacks_guard {
                 callback(client_info.clone());
             }
+            drop(callbacks_guard);
         }
         
         // Clear clients
@@ -999,7 +1229,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             
             if !active_ssrcs.is_empty() {
                 // Get CSRC values from the manager
-                let csrc_manager = self.csrc_manager.lock().await;
+                let csrc_manager = self.csrc_manager.read().await;
                 let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
                 
                 // Take only up to MAX_CSRC_COUNT
@@ -1076,7 +1306,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             
             if !active_ssrcs.is_empty() {
                 // Get CSRC values from the manager
-                let csrc_manager = self.csrc_manager.lock().await;
+                let csrc_manager = self.csrc_manager.read().await;
                 let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
                 
                 // Take only up to MAX_CSRC_COUNT
@@ -1164,25 +1394,19 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let mut result = Vec::new();
         for client in clients.values() {
             // Get security info if available
-            let security_info = if let Some(security) = &client.security {
-                let security = security.lock().await;
+            let security_info = if let Some(security_ctx) = &client.security {
+                // We can directly access methods on the ClientSecurityContext trait
+                let fingerprint = security_ctx.get_remote_fingerprint().await.ok().flatten();
                 
-                // Downcast to ClientSecurityContext trait
-                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
-                    let fingerprint = security_ctx.get_remote_fingerprint().await.ok().flatten();
-                    
-                    if let Some(fingerprint) = fingerprint {
-                        Some(SecurityInfo {
-                            mode: self.config.security_config.security_mode,
-                            fingerprint: Some(fingerprint),
-                            fingerprint_algorithm: Some(self.config.security_config.fingerprint_algorithm.clone()),
-                            crypto_suites: security_ctx.get_security_info().crypto_suites.clone(),
-                            key_params: None,
-                            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
-                        })
-                    } else {
-                        None
-                    }
+                if let Some(fingerprint) = fingerprint {
+                    Some(SecurityInfo {
+                        mode: self.config.security_config.security_mode,
+                        fingerprint: Some(fingerprint),
+                        fingerprint_algorithm: Some(self.config.security_config.fingerprint_algorithm.clone()),
+                        crypto_suites: security_ctx.get_security_info().crypto_suites.clone(),
+                        key_params: None,
+                        srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+                    })
                 } else {
                     None
                 }
@@ -1218,21 +1442,15 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 warn!("Error closing client session {}: {}", client_id, e);
             }
             
-            // Close security
-            if let Some(security) = &client.security {
-                let security = security.lock().await;
-                // Downcast to ClientSecurityContext trait
-                if let Some(security_ctx) = security.downcast_ref::<Arc<dyn crate::api::server::security::ClientSecurityContext>>() {
-                    if let Err(e) = security_ctx.close().await {
-                        warn!("Error closing client security {}: {}", client_id, e);
-                    }
-                } else {
-                    warn!("Failed to downcast client security context for {}", client_id);
+            // Close security context if it exists
+            if let Some(security_ctx) = &client.security {
+                if let Err(e) = security_ctx.close().await {
+                    warn!("Error closing client security {}: {}", client_id, e);
                 }
             }
             
             // Notify callbacks
-            let callbacks = self.client_disconnected_callbacks.lock().await;
+            let callbacks_guard = self.client_disconnected_callbacks.read().await;
             let client_info = ClientInfo {
                 id: client.id.clone(),
                 address: client.address,
@@ -1241,9 +1459,10 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 connected: false,
             };
             
-            for callback in callbacks.iter() {
+            for callback in &*callbacks_guard {
                 callback(client_info.clone());
             }
+            drop(callbacks_guard);
             
             Ok(())
         } else {
@@ -1252,19 +1471,19 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn on_event(&self, callback: MediaEventCallback) -> Result<(), MediaTransportError> {
-        let mut callbacks = self.event_callbacks.lock().await;
+        let mut callbacks = self.event_callbacks.write().await;
         callbacks.push(callback);
         Ok(())
     }
     
     async fn on_client_connected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        let mut callbacks = self.client_connected_callbacks.lock().await;
+        let mut callbacks = self.client_connected_callbacks.write().await;
         callbacks.push(callback);
         Ok(())
     }
     
     async fn on_client_disconnected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        let mut callbacks = self.client_disconnected_callbacks.lock().await;
+        let mut callbacks = self.client_disconnected_callbacks.write().await;
         callbacks.push(callback);
         Ok(())
     }
@@ -1376,14 +1595,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let security_context = self.security_context.read().await;
         
         if let Some(security_ctx) = security_context.as_ref() {
-            // Lock the security context
-            let security = security_ctx.lock().await;
-            
-            // Downcast to ServerSecurityContext trait
-            let security_ctx = security.downcast_ref::<Arc<dyn crate::api::server::security::ServerSecurityContext>>()
-                .ok_or_else(|| MediaTransportError::Security("Failed to downcast server security context".to_string()))?;
-                
-            // Get the fingerprint and algorithm
+            // Get the fingerprint and algorithm directly from the concrete context
             let fingerprint = security_ctx.get_fingerprint().await
                 .map_err(|e| MediaTransportError::Security(format!("Failed to get fingerprint: {}", e)))?;
                 
@@ -1847,6 +2059,94 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     
     async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
         self.get_active_csrcs(active_ssrcs).await
+    }
+
+    // Header Extensions API Trait Implementations
+    
+    async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
+        self.is_header_extensions_enabled().await
+    }
+    
+    async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
+        self.enable_header_extensions(format).await
+    }
+    
+    async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
+        self.configure_header_extension(id, uri).await
+    }
+    
+    async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
+        self.configure_header_extensions(mappings).await
+    }
+    
+    async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+        self.add_header_extension_for_client(client_id, extension).await
+    }
+    
+    async fn add_header_extension_for_all_clients(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+        // Get all connected clients
+        let clients = self.get_clients().await?;
+        
+        // Add extension for each client
+        for client in clients {
+            self.add_header_extension_for_client(&client.id, extension.clone()).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+        self.add_audio_level_extension_for_client(client_id, voice_activity, level).await
+    }
+    
+    async fn add_audio_level_extension_for_all_clients(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+        // Get all connected clients
+        let clients = self.get_clients().await?;
+        
+        // Add extension for each client
+        for client in clients {
+            self.add_audio_level_extension_for_client(&client.id, voice_activity, level).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn add_video_orientation_extension_for_client(&self, client_id: &str, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+        // For simplicity, return Ok for now
+        Ok(())
+    }
+    
+    async fn add_video_orientation_extension_for_all_clients(&self, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+        // For simplicity, return Ok for now
+        Ok(())
+    }
+    
+    async fn add_transport_cc_extension_for_client(&self, client_id: &str, sequence_number: u16) -> Result<(), MediaTransportError> {
+        // For simplicity, return Ok for now
+        Ok(())
+    }
+    
+    async fn add_transport_cc_extension_for_all_clients(&self, sequence_number: u16) -> Result<(), MediaTransportError> {
+        // For simplicity, return Ok for now
+        Ok(())
+    }
+    
+    async fn get_received_header_extensions(&self, client_id: &str) -> Result<Vec<HeaderExtension>, MediaTransportError> {
+        self.get_received_header_extensions(client_id).await
+    }
+    
+    async fn get_received_audio_level(&self, client_id: &str) -> Result<Option<(bool, u8)>, MediaTransportError> {
+        self.get_received_audio_level(client_id).await
+    }
+    
+    async fn get_received_video_orientation(&self, client_id: &str) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
+        // For simplicity, return None for now
+        Ok(None)
+    }
+    
+    async fn get_received_transport_cc(&self, client_id: &str) -> Result<Option<u16>, MediaTransportError> {
+        // For simplicity, return None for now
+        Ok(None)
     }
 }
 

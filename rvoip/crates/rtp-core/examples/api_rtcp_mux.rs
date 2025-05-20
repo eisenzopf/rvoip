@@ -224,5 +224,6 @@ fn create_test_frame() -> MediaFrame {
         marker: false,
         payload_type: 8, // G.711 μ-law
         ssrc: 12345,
+        csrcs: Vec::new(),
     }
 } 

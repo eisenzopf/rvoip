@@ -114,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     marker: i == 0, // First packet has marker bit
                     payload_type: 96, // Dynamic audio
                     ssrc: AUDIO_SSRC,
+                    csrcs: Vec::new(), // Empty CSRC list
                 };
                 
                 // Send frame from client to server
@@ -134,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     marker: i == 0, // First packet has marker bit
                     payload_type: 97, // Dynamic video
                     ssrc: VIDEO_SSRC,
+                    csrcs: Vec::new(), // Empty CSRC list
                 };
                 
                 // Send frame from client to server

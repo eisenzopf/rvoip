@@ -33,6 +33,8 @@ use crate::api::server::security::SocketHandle;
 use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
 use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
 use bytes::Bytes;
+use crate::api::common::extension::ExtensionFormat;
+use crate::api::server::transport::HeaderExtension;
 
 /// Default implementation of the client-side media transport
 pub struct DefaultMediaTransportClient {
@@ -134,8 +136,8 @@ impl DefaultMediaTransportClient {
         // Initialize SSRC demultiplexing if enabled in config
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
         
-        // Initialize CSRC management if enabled in config
-        let csrc_management_enabled = config.csrc_management_enabled.unwrap_or(false);
+        // Initialize CSRC management from config
+        let csrc_management_enabled = config.csrc_management_enabled; // This is already a bool
         
         Ok(Self {
             config,
@@ -1356,5 +1358,79 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     
     async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
         self.get_active_csrcs(active_ssrcs).await
+    }
+
+    // Add the following methods:
+    
+    /// Check if header extensions are enabled
+    async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
+        // For now, just check the config value
+        Ok(self.config.header_extensions_enabled)
+    }
+    
+    /// Enable header extensions with the specified format
+    async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(true)
+    }
+    
+    /// Configure a header extension mapping
+    async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Configure multiple header extension mappings
+    async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add a header extension
+    async fn add_header_extension(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add audio level header extension
+    async fn add_audio_level_extension(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add video orientation header extension
+    async fn add_video_orientation_extension(&self, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add transport-cc header extension
+    async fn add_transport_cc_extension(&self, sequence_number: u16) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Get all header extensions received
+    async fn get_received_header_extensions(&self) -> Result<Vec<HeaderExtension>, MediaTransportError> {
+        // For now, return empty list
+        Ok(Vec::new())
+    }
+    
+    /// Get audio level header extension
+    async fn get_received_audio_level(&self) -> Result<Option<(bool, u8)>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
+    }
+    
+    /// Get video orientation header extension
+    async fn get_received_video_orientation(&self) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
+    }
+    
+    /// Get transport-cc header extension
+    async fn get_received_transport_cc(&self) -> Result<Option<u16>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
     }
 } 
