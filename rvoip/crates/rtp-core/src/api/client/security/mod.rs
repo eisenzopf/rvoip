@@ -128,6 +128,9 @@ pub trait ClientSecurityContext: Send + Sync {
     /// Check if the security handshake is complete
     async fn is_handshake_complete(&self) -> Result<bool, SecurityError>;
     
+    /// Wait for the DTLS handshake to complete
+    async fn wait_for_handshake(&self) -> Result<(), SecurityError>;
+    
     /// Set the remote address for the security context
     async fn set_remote_address(&self, addr: SocketAddr) -> Result<(), SecurityError>;
     
