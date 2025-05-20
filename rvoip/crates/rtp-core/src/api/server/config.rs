@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use crate::api::server::security::ServerSecurityConfig;
 use crate::api::common::extension::ExtensionFormat;
+use crate::buffer::{TransmitBufferConfig, BufferLimits};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -37,6 +38,12 @@ pub struct ServerConfig {
     pub header_extensions_enabled: bool,
     /// Header extension format (One-byte or Two-byte)
     pub header_extension_format: ExtensionFormat,
+    /// Transmit buffer configuration
+    pub transmit_buffer_config: TransmitBufferConfig,
+    /// Buffer limits
+    pub buffer_limits: BufferLimits,
+    /// Enable high-performance buffers
+    pub high_performance_buffers_enabled: bool,
 }
 
 /// Builder for ServerConfig
@@ -65,6 +72,13 @@ impl ServerConfigBuilder {
                 csrc_management_enabled: false, // Disabled by default
                 header_extensions_enabled: false, // Disabled by default
                 header_extension_format: ExtensionFormat::OneByte, // One-byte header is standard
+                transmit_buffer_config: TransmitBufferConfig::default(),
+                buffer_limits: BufferLimits {
+                    max_packets_per_stream: 500,
+                    max_packet_size: 1500,
+                    max_memory: 100 * 1024 * 1024, // 100 MB default for server (more than client)
+                },
+                high_performance_buffers_enabled: false,
             },
         }
     }
@@ -167,6 +181,24 @@ impl ServerConfigBuilder {
     /// Set the header extension format (One-byte or Two-byte)
     pub fn header_extension_format(mut self, format: ExtensionFormat) -> Self {
         self.config.header_extension_format = format;
+        self
+    }
+    
+    /// Set the transmit buffer configuration
+    pub fn transmit_buffer_config(mut self, config: TransmitBufferConfig) -> Self {
+        self.config.transmit_buffer_config = config;
+        self
+    }
+    
+    /// Set the buffer limits
+    pub fn buffer_limits(mut self, limits: BufferLimits) -> Self {
+        self.config.buffer_limits = limits;
+        self
+    }
+    
+    /// Enable or disable high-performance buffers
+    pub fn high_performance_buffers_enabled(mut self, enabled: bool) -> Self {
+        self.config.high_performance_buffers_enabled = enabled;
         self
     }
     

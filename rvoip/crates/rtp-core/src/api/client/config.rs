@@ -5,12 +5,15 @@
 use std::net::SocketAddr;
 use crate::api::client::security::ClientSecurityConfig;
 use crate::api::common::extension::ExtensionFormat;
+use crate::buffer::{TransmitBufferConfig, BufferLimits};
 
 /// Client configuration
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Remote address to connect to
     pub remote_address: SocketAddr,
+    /// Local address to connect to
+    pub local_address: Option<SocketAddr>,
     /// Default payload type
     pub default_payload_type: u8,
     /// Clock rate in Hz
@@ -18,9 +21,9 @@ pub struct ClientConfig {
     /// Security configuration
     pub security_config: ClientSecurityConfig,
     /// Jitter buffer size in packets
-    pub jitter_buffer_size: u32,
+    pub jitter_buffer_size: u16,
     /// Maximum packet age in milliseconds
-    pub jitter_max_packet_age_ms: u32,
+    pub jitter_max_packet_age_ms: u16,
     /// Enable jitter buffer
     pub enable_jitter_buffer: bool,
     /// Local SSRC
@@ -37,6 +40,12 @@ pub struct ClientConfig {
     pub header_extensions_enabled: bool,
     /// Header extension format (One-byte or Two-byte)
     pub header_extension_format: ExtensionFormat,
+    /// Transmit buffer configuration
+    pub transmit_buffer_config: TransmitBufferConfig,
+    /// Buffer limits
+    pub buffer_limits: BufferLimits,
+    /// Enable high-performance buffers
+    pub high_performance_buffers_enabled: bool,
 }
 
 /// Builder for ClientConfig
@@ -50,22 +59,7 @@ impl ClientConfigBuilder {
     /// Create a new client config builder with default values
     pub fn new() -> Self {
         Self {
-            config: ClientConfig {
-                remote_address: "127.0.0.1:0".parse().unwrap(),
-                default_payload_type: 0,
-                clock_rate: 8000,
-                security_config: ClientSecurityConfig::default(),
-                jitter_buffer_size: 100,
-                jitter_max_packet_age_ms: 500,
-                enable_jitter_buffer: true,
-                ssrc: Some(rand::random()),
-                rtcp_mux: false, // Disabled by default
-                media_sync_enabled: None, // Optional, defaults to None
-                ssrc_demultiplexing_enabled: None, // Optional, defaults to None
-                csrc_management_enabled: false, // Disabled by default
-                header_extensions_enabled: false, // Disabled by default
-                header_extension_format: ExtensionFormat::OneByte, // One-byte header is standard
-            },
+            config: ClientConfig::default(),
         }
     }
     
@@ -92,6 +86,12 @@ impl ClientConfigBuilder {
         self
     }
     
+    /// Set the local address
+    pub fn local_address(mut self, addr: Option<SocketAddr>) -> Self {
+        self.config.local_address = addr;
+        self
+    }
+    
     /// Set the default payload type
     pub fn default_payload_type(mut self, pt: u8) -> Self {
         self.config.default_payload_type = pt;
@@ -111,13 +111,13 @@ impl ClientConfigBuilder {
     }
     
     /// Set the jitter buffer size
-    pub fn jitter_buffer_size(mut self, size: u32) -> Self {
+    pub fn jitter_buffer_size(mut self, size: u16) -> Self {
         self.config.jitter_buffer_size = size;
         self
     }
     
     /// Set the maximum packet age
-    pub fn jitter_max_packet_age_ms(mut self, age: u32) -> Self {
+    pub fn jitter_max_packet_age_ms(mut self, age: u16) -> Self {
         self.config.jitter_max_packet_age_ms = age;
         self
     }
@@ -170,8 +170,55 @@ impl ClientConfigBuilder {
         self
     }
     
+    /// Set the transmit buffer configuration
+    pub fn transmit_buffer_config(mut self, config: TransmitBufferConfig) -> Self {
+        self.config.transmit_buffer_config = config;
+        self
+    }
+    
+    /// Set the buffer limits
+    pub fn buffer_limits(mut self, limits: BufferLimits) -> Self {
+        self.config.buffer_limits = limits;
+        self
+    }
+    
+    /// Enable or disable high-performance buffers
+    pub fn high_performance_buffers_enabled(mut self, enabled: bool) -> Self {
+        self.config.high_performance_buffers_enabled = enabled;
+        self
+    }
+    
     /// Build the client configuration
     pub fn build(self) -> ClientConfig {
         self.config
+    }
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            remote_address: "127.0.0.1:9000".parse().unwrap(),
+            local_address: None,
+            default_payload_type: 0,
+            clock_rate: 8000,
+            security_config: ClientSecurityConfig::default(),
+            jitter_buffer_size: 50,
+            jitter_max_packet_age_ms: 200,
+            enable_jitter_buffer: true,
+            ssrc: None,
+            rtcp_mux: false,
+            media_sync_enabled: None,
+            ssrc_demultiplexing_enabled: None,
+            csrc_management_enabled: false,
+            header_extensions_enabled: false,
+            header_extension_format: ExtensionFormat::OneByte,
+            transmit_buffer_config: TransmitBufferConfig::default(),
+            buffer_limits: BufferLimits {
+                max_packets_per_stream: 500,
+                max_packet_size: 1500,
+                max_memory: 10 * 1024 * 1024, // 10 MB default
+            },
+            high_performance_buffers_enabled: false,
+        }
     }
 } 

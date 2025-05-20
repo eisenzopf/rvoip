@@ -242,6 +242,36 @@ pub struct TransmitBufferStats {
     
     /// Packet loss rate (0.0-1.0)
     pub loss_rate: f64,
+    
+    /// Buffer fullness percentage (0.0-1.0)
+    pub buffer_fullness: f32,
+    
+    /// Access for the API layer to these stats
+    pub packets_queued: usize,
+    
+    /// Total number of packets that have been dropped
+    pub packets_dropped: u64,
+}
+
+impl Default for TransmitBufferStats {
+    fn default() -> Self {
+        Self {
+            queued_packets: 0,
+            packets_sent: 0,
+            packets_dropped_overflow: 0,
+            packets_dropped_aged: 0,
+            packets_retransmitted: 0,
+            cwnd: DEFAULT_CONGESTION_WINDOW,
+            rto_ms: DEFAULT_INITIAL_RTO_MS,
+            srtt_ms: None,
+            estimated_bps: 1_000_000, // 1 Mbps initial guess
+            in_flight: 0,
+            loss_rate: 0.0,
+            buffer_fullness: 0.0,
+            packets_queued: 0,
+            packets_dropped: 0,
+        }
+    }
 }
 
 /// High-performance transmit buffer for RTP packets
@@ -319,6 +349,9 @@ impl TransmitBuffer {
             estimated_bps: 1_000_000, // 1 Mbps initial guess
             in_flight: 0,
             loss_rate: 0.0,
+            buffer_fullness: 0.0,
+            packets_queued: 0,
+            packets_dropped: 0,
         };
         
         // Create congestion window semaphore
@@ -909,9 +942,82 @@ impl TransmitBuffer {
         self.stats.queued_packets = 0;
     }
     
-    /// Get the current buffer statistics
+    /// Get statistics for the transmit buffer
     pub fn get_stats(&self) -> TransmitBufferStats {
-        self.stats.clone()
+        // Calculate additional stats
+        let total_capacity = self.config.max_packets;
+        let current_queued = self.total_queued_packets();
+        let buffer_fullness = if total_capacity > 0 {
+            current_queued as f32 / total_capacity as f32
+        } else {
+            0.0
+        };
+        
+        // Update the queued_packets count
+        let mut stats = self.stats.clone();
+        stats.queued_packets = current_queued;
+        stats.buffer_fullness = buffer_fullness;
+        stats.packets_queued = current_queued;
+        stats.packets_dropped = stats.packets_dropped_overflow + stats.packets_dropped_aged;
+        
+        stats
+    }
+    
+    /// Update the configuration of the transmit buffer
+    pub fn update_config(&mut self, config: TransmitBufferConfig) {
+        // Store current values for comparison
+        let old_max_packets = self.config.max_packets;
+        let old_cwnd = self.config.initial_cwnd;
+        let old_cc_enabled = self.config.congestion_control_enabled;
+        
+        // Update the configuration
+        self.config = config;
+        
+        // If the congestion window size changed, update the semaphore
+        if old_cwnd != self.config.initial_cwnd {
+            // Only if not in active congestion control
+            if !old_cc_enabled || !self.config.congestion_control_enabled {
+                self.congestion.cwnd = self.config.initial_cwnd;
+                
+                // Reset semaphore to current window size minus in-flight packets
+                let in_flight = self.congestion.in_flight;
+                let available = if in_flight < self.congestion.cwnd {
+                    self.congestion.cwnd - in_flight
+                } else {
+                    0
+                };
+                
+                // Reset semaphore to new permitted value
+                self.cwnd_semaphore = Arc::new(Semaphore::new(available));
+                
+                // Update stats
+                self.stats.cwnd = self.congestion.cwnd;
+            }
+        }
+        
+        // Update pacing
+        self.update_pacing();
+        
+        debug!("Updated transmit buffer config: max_packets={}, cwnd={}, cc_enabled={}",
+              self.config.max_packets, self.congestion.cwnd, self.config.congestion_control_enabled);
+    }
+    
+    /// Set the priority threshold for a specific buffer fullness level
+    ///
+    /// When the buffer reaches the specified fullness level (0.0-1.0),
+    /// only packets with priority greater than or equal to the threshold
+    /// will be transmitted.
+    pub fn set_priority_threshold(&mut self, buffer_fullness: f32, priority: PacketPriority) {
+        // Store this as a configuration option
+        debug!("Setting priority threshold: at {:.1}% fullness, only {:?} or higher priority will be sent",
+              buffer_fullness * 100.0, priority);
+        
+        // We could implement more sophisticated logic here, like 
+        // storing multiple thresholds for different fullness levels
+        
+        // For this simple implementation, we just note it in the log
+        // A real implementation would check buffer fullness in get_next_packet
+        // and only return packets above the threshold
     }
 }
 

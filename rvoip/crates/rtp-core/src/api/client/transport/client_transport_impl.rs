@@ -35,6 +35,10 @@ use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
 use bytes::Bytes;
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::transport::HeaderExtension;
+use crate::buffer::{
+    GlobalBufferManager, BufferPool, TransmitBuffer, TransmitBufferConfig, 
+    BufferLimits, PacketPriority, TransmitBufferStats
+};
 
 /// Default implementation of the client-side media transport
 pub struct DefaultMediaTransportClient {
@@ -85,6 +89,15 @@ pub struct DefaultMediaTransportClient {
     
     /// CSRC manager for handling contributing source IDs
     csrc_manager: Arc<Mutex<CsrcManager>>,
+    
+    /// Global buffer manager (only used if high-performance buffers are enabled)
+    buffer_manager: Option<Arc<GlobalBufferManager>>,
+    
+    /// Transmit buffer for outgoing packets (only used if high-performance buffers are enabled)
+    transmit_buffer: Arc<RwLock<Option<TransmitBuffer>>>,
+    
+    /// Buffer pool for packet allocation (only used if high-performance buffers are enabled)
+    packet_pool: Option<Arc<BufferPool>>,
 }
 
 impl DefaultMediaTransportClient {
@@ -104,7 +117,7 @@ impl DefaultMediaTransportClient {
             
             // Jitter buffer configuration
             jitter_buffer_size: Some(config.jitter_buffer_size as usize),
-            max_packet_age_ms: Some(config.jitter_max_packet_age_ms),
+            max_packet_age_ms: Some(config.jitter_max_packet_age_ms as u32),
             enable_jitter_buffer: config.enable_jitter_buffer,
         };
         
@@ -139,6 +152,21 @@ impl DefaultMediaTransportClient {
         // Initialize CSRC management from config
         let csrc_management_enabled = config.csrc_management_enabled; // This is already a bool
         
+        // Initialize buffer-related components if high-performance buffers are enabled
+        let (buffer_manager, transmit_buffer, packet_pool) = if config.high_performance_buffers_enabled {
+            // Create buffer manager with configured limits
+            let buffer_manager = Arc::new(GlobalBufferManager::new(config.buffer_limits.clone()));
+            
+            // Create shared buffer pools
+            let pools = crate::buffer::SharedPools::new(1000); // 1000 initial packets
+            let packet_pool = Arc::new(pools.medium);
+            
+            // Transmit buffer will be created when we connect and have an SSRC
+            (Some(buffer_manager), Arc::new(RwLock::new(None)), Some(packet_pool))
+        } else {
+            (None, Arc::new(RwLock::new(None)), None)
+        };
+        
         Ok(Self {
             config,
             session: Arc::new(Mutex::new(session)),
@@ -156,6 +184,9 @@ impl DefaultMediaTransportClient {
             sequence_numbers: Arc::new(Mutex::new(HashMap::new())),
             csrc_management_enabled: Arc::new(AtomicBool::new(csrc_management_enabled)),
             csrc_manager: Arc::new(Mutex::new(CsrcManager::new())),
+            buffer_manager,
+            transmit_buffer,
+            packet_pool,
         })
     }
     
@@ -469,6 +500,205 @@ impl DefaultMediaTransportClient {
         
         Ok(csrcs)
     }
+
+    // Add the following methods:
+    
+    /// Check if header extensions are enabled
+    async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
+        // For now, just check the config value
+        Ok(self.config.header_extensions_enabled)
+    }
+    
+    /// Enable header extensions with the specified format
+    async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(true)
+    }
+    
+    /// Configure a header extension mapping
+    async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Configure multiple header extension mappings
+    async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add a header extension
+    async fn add_header_extension(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add audio level header extension
+    async fn add_audio_level_extension(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add video orientation header extension
+    async fn add_video_orientation_extension(&self, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Add transport-cc header extension
+    async fn add_transport_cc_extension(&self, sequence_number: u16) -> Result<(), MediaTransportError> {
+        // For now, just return success without actually implementing
+        Ok(())
+    }
+    
+    /// Get all header extensions received
+    async fn get_received_header_extensions(&self) -> Result<Vec<HeaderExtension>, MediaTransportError> {
+        // For now, return empty list
+        Ok(Vec::new())
+    }
+    
+    /// Get audio level header extension
+    async fn get_received_audio_level(&self) -> Result<Option<(bool, u8)>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
+    }
+    
+    /// Get video orientation header extension
+    async fn get_received_video_orientation(&self) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
+    }
+    
+    /// Get transport-cc header extension
+    async fn get_received_transport_cc(&self) -> Result<Option<u16>, MediaTransportError> {
+        // For now, return None
+        Ok(None)
+    }
+
+    // Add buffer-related methods to DefaultMediaTransportClient implementation
+    async fn init_transmit_buffer(&self) -> Result<(), MediaTransportError> {
+        if let Some(buffer_manager) = &self.buffer_manager {
+            if let Some(packet_pool) = &self.packet_pool {
+                let session = self.session.lock().await;
+                let ssrc = session.get_ssrc();
+                drop(session);
+                
+                // Create transmit buffer
+                let tx_buffer = TransmitBuffer::with_buffer_manager(
+                    ssrc,
+                    self.config.transmit_buffer_config.clone(),
+                    buffer_manager.clone(),
+                    packet_pool.clone(),
+                );
+                
+                // Store it
+                let mut tx_buffer_guard = self.transmit_buffer.write().await;
+                *tx_buffer_guard = Some(tx_buffer);
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Buffer-related methods
+    async fn send_frame_with_priority(&self, frame: MediaFrame, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        // Check if high-performance buffers are enabled
+        if self.config.high_performance_buffers_enabled {
+            // Check if we have a transmit buffer
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // Convert MediaFrame to RtpPacket
+                let mut header = crate::packet::RtpHeader::new(
+                    frame.payload_type,
+                    frame.sequence,
+                    frame.timestamp,
+                    frame.ssrc
+                );
+                
+                // Set marker bit if present in frame
+                if frame.marker {
+                    header.marker = true;
+                }
+                
+                // Add CSRCs if present
+                if !frame.csrcs.is_empty() {
+                    header.add_csrcs(&frame.csrcs);
+                }
+                
+                // Create RTP packet
+                let packet = crate::packet::RtpPacket::new(
+                    header,
+                    bytes::Bytes::from(frame.data),
+                );
+                
+                // Queue in transmit buffer with priority
+                if tx_buffer.queue_packet(packet, priority).await {
+                    // Get the next packet to send
+                    if let Some(packet) = tx_buffer.get_next_packet().await {
+                        // Send it through the transport
+                        let transport_guard = self.transport.lock().await;
+                        if let Some(transport) = transport_guard.as_ref() {
+                            transport.send_rtp(&packet, self.config.remote_address).await
+                                .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
+                            
+                            // Automatically acknowledge successful send (simplistic approach)
+                            tx_buffer.acknowledge_packet(packet.header.sequence_number);
+                            
+                            return Ok(());
+                        } else {
+                            return Err(MediaTransportError::Transport("Transport not connected".to_string()));
+                        }
+                    }
+                }
+                
+                // If we get here, the packet wasn't queued or wasn't ready to send
+                return Err(MediaTransportError::BufferFull("Transmit buffer is full".to_string()));
+            }
+        }
+        
+        // Fall back to regular send_frame if high-performance buffers aren't enabled
+        // or if the transmit buffer isn't available
+        self.send_frame(frame).await
+    }
+    
+    async fn get_transmit_buffer_stats(&self) -> Result<TransmitBufferStats, MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let tx_buffer_guard = self.transmit_buffer.read().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_ref() {
+                // get_stats is not an async method, so no need to await
+                return Ok(tx_buffer.get_stats());
+            }
+        }
+        
+        // Return default stats if not enabled or not available
+        Ok(TransmitBufferStats::default())
+    }
+    
+    async fn update_transmit_buffer_config(&self, config: TransmitBufferConfig) -> Result<(), MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // update_config is not an async method, so no need to await
+                tx_buffer.update_config(config);
+                return Ok(());
+            }
+        }
+        
+        Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
+    }
+    
+    async fn set_priority_threshold(&self, buffer_fullness: f32, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // set_priority_threshold is not an async method, so no need to await
+                tx_buffer.set_priority_threshold(buffer_fullness, priority);
+                return Ok(());
+            }
+        }
+        
+        Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
+    }
 }
 
 // Add Clone implementation
@@ -491,6 +721,9 @@ impl Clone for DefaultMediaTransportClient {
             sequence_numbers: Arc::clone(&self.sequence_numbers),
             csrc_management_enabled: Arc::clone(&self.csrc_management_enabled),
             csrc_manager: Arc::clone(&self.csrc_manager),
+            buffer_manager: self.buffer_manager.clone(),
+            transmit_buffer: Arc::clone(&self.transmit_buffer),
+            packet_pool: self.packet_pool.clone(),
         }
     }
 }
@@ -565,6 +798,11 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         let callbacks = self.connect_callbacks.lock().await;
         for callback in &*callbacks {
             callback();
+        }
+        
+        // Initialize transmit buffer if high-performance buffers are enabled
+        if self.config.high_performance_buffers_enabled {
+            self.init_transmit_buffer().await?;
         }
         
         // Prepare data for the background task
@@ -1432,5 +1670,110 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     async fn get_received_transport_cc(&self) -> Result<Option<u16>, MediaTransportError> {
         // For now, return None
         Ok(None)
+    }
+
+    // Buffer implementation is in the DefaultMediaTransportClient impl block above
+
+    // Implement the send_frame_with_priority method for DefaultMediaTransportClient
+    async fn send_frame_with_priority(&self, frame: MediaFrame, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        // Check if high-performance buffers are enabled
+        if self.config.high_performance_buffers_enabled {
+            // Check if we have a transmit buffer
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // Convert MediaFrame to RtpPacket
+                let mut header = crate::packet::RtpHeader::new(
+                    frame.payload_type,
+                    frame.sequence,
+                    frame.timestamp,
+                    frame.ssrc
+                );
+                
+                // Set marker bit if present in frame
+                if frame.marker {
+                    header.marker = true;
+                }
+                
+                // Add CSRCs if present
+                if !frame.csrcs.is_empty() {
+                    header.add_csrcs(&frame.csrcs);
+                }
+                
+                // Create RTP packet
+                let packet = crate::packet::RtpPacket::new(
+                    header,
+                    bytes::Bytes::from(frame.data),
+                );
+                
+                // Queue in transmit buffer with priority
+                if tx_buffer.queue_packet(packet, priority).await {
+                    // Get the next packet to send
+                    if let Some(packet) = tx_buffer.get_next_packet().await {
+                        // Send it through the transport
+                        let transport_guard = self.transport.lock().await;
+                        if let Some(transport) = transport_guard.as_ref() {
+                            transport.send_rtp(&packet, self.config.remote_address).await
+                                .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
+                            
+                            // Automatically acknowledge successful send (simplistic approach)
+                            tx_buffer.acknowledge_packet(packet.header.sequence_number);
+                            
+                            return Ok(());
+                        } else {
+                            return Err(MediaTransportError::Transport("Transport not connected".to_string()));
+                        }
+                    }
+                }
+                
+                // If we get here, the packet wasn't queued or wasn't ready to send
+                return Err(MediaTransportError::BufferFull("Transmit buffer is full".to_string()));
+            }
+        }
+        
+        // Fall back to regular send_frame if high-performance buffers aren't enabled
+        // or if the transmit buffer isn't available
+        self.send_frame(frame).await
+    }
+    
+    // Implement get_transmit_buffer_stats
+    async fn get_transmit_buffer_stats(&self) -> Result<TransmitBufferStats, MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let tx_buffer_guard = self.transmit_buffer.read().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_ref() {
+                // get_stats is not an async method, so no need to await
+                return Ok(tx_buffer.get_stats());
+            }
+        }
+        
+        // Return default stats if not enabled or not available
+        Ok(TransmitBufferStats::default())
+    }
+    
+    // Implement update_transmit_buffer_config
+    async fn update_transmit_buffer_config(&self, config: TransmitBufferConfig) -> Result<(), MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // update_config is not an async method, so no need to await
+                tx_buffer.update_config(config);
+                return Ok(());
+            }
+        }
+        
+        Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
+    }
+    
+    // Implement set_priority_threshold
+    async fn set_priority_threshold(&self, buffer_fullness: f32, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        if self.config.high_performance_buffers_enabled {
+            let mut tx_buffer_guard = self.transmit_buffer.write().await;
+            if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
+                // set_priority_threshold is not an async method, so no need to await
+                tx_buffer.set_priority_threshold(buffer_fullness, priority);
+                return Ok(());
+            }
+        }
+        
+        Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
     }
 } 

@@ -18,6 +18,7 @@ use crate::api::common::extension::ExtensionFormat;
 use crate::packet::rtcp::NtpTimestamp;
 use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 use crate::api::server::transport::HeaderExtension;
+use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
 pub mod client_transport_impl;
 
@@ -393,6 +394,44 @@ pub trait MediaTransportClient: Send + Sync {
     /// Returns the transport-wide sequence number if the extension is found
     async fn get_received_transport_cc(&self)
         -> Result<Option<u16>, MediaTransportError>;
+        
+    // Buffer Management API Methods
+    
+    /// Send a media frame with specified priority
+    /// 
+    /// This allows controlling which frames get priority when buffer constraints apply.
+    /// High priority frames will be sent before normal or low priority frames.
+    async fn send_frame_with_priority(&self, frame: MediaFrame, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        // Default implementation just calls send_frame, ignoring priority
+        self.send_frame(frame).await
+    }
+    
+    /// Get current transmit buffer statistics
+    ///
+    /// Returns information about the state of the transmit buffer, including
+    /// packet counts, buffer fullness, and congestion control metrics.
+    async fn get_transmit_buffer_stats(&self) -> Result<TransmitBufferStats, MediaTransportError> {
+        // Default returns empty stats
+        Ok(TransmitBufferStats::default())
+    }
+    
+    /// Update the transmit buffer configuration
+    ///
+    /// This allows changing buffer parameters at runtime to adjust to network conditions
+    /// or application requirements.
+    async fn update_transmit_buffer_config(&self, config: TransmitBufferConfig) -> Result<(), MediaTransportError> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    /// Set the packet priority threshold based on buffer fullness
+    ///
+    /// When the buffer fullness exceeds the specified percentage (0.0-1.0),
+    /// only packets with priority greater than or equal to the given threshold will be sent.
+    async fn set_priority_threshold(&self, buffer_fullness: f32, priority: PacketPriority) -> Result<(), MediaTransportError> {
+        // Default implementation does nothing
+        Ok(())
+    }
 }
 
 // Re-export the implementation

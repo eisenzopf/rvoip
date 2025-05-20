@@ -66,6 +66,14 @@ pub enum MediaTransportError {
     /// Client not connected
     #[error("Client not connected: {0}")]
     ClientNotConnected(String),
+    
+    /// Buffer is full
+    #[error("Buffer is full: {0}")]
+    BufferFull(String),
+    
+    /// Buffer error
+    #[error("Buffer error: {0}")]
+    BufferError(String),
 }
 
 /// Error related to security operations
