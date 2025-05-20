@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::any::Any;
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
@@ -140,11 +141,28 @@ pub trait ClientSecurityContext: Send + Sync {
     /// Set the remote fingerprint for DTLS verification
     async fn set_remote_fingerprint(&self, fingerprint: &str, algorithm: &str) -> Result<(), SecurityError>;
     
+    /// Perform a complete handshake in a single call
+    /// This combines setting the remote fingerprint, starting handshake, and waiting for completion
+    async fn complete_handshake(&self, remote_addr: SocketAddr, remote_fingerprint: &str) -> Result<(), SecurityError>;
+    
+    /// Process a DTLS packet manually
+    /// This allows for explicit processing of received DTLS packets
+    async fn process_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
+    
+    /// Start automatic packet handler to process incoming DTLS packets
+    /// This creates a background task that receives packets from the socket
+    /// and automatically passes them to process_packet
+    async fn start_packet_handler(&self) -> Result<(), SecurityError>;
+    
     /// Get security information for SDP exchange
     async fn get_security_info(&self) -> Result<SecurityInfo, SecurityError>;
     
     /// Close the security context and clean up resources
     async fn close(&self) -> Result<(), SecurityError>;
+    
+    /// Check if the security context is fully initialized and ready to start a handshake
+    /// This verifies that all prerequisites (socket, transport, etc.) are set
+    async fn is_ready(&self) -> Result<bool, SecurityError>;
     
     /// Is the client using secure transport?
     fn is_secure(&self) -> bool;
@@ -161,4 +179,10 @@ pub trait ClientSecurityContext: Send + Sync {
     
     /// Check if transport is set
     async fn has_transport(&self) -> Result<bool, SecurityError>;
+    
+    /// Process a DTLS packet received from the server
+    async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
+    
+    /// Allow downcasting for internal implementation details
+    fn as_any(&self) -> &dyn Any;
 } 

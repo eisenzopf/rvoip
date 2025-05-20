@@ -1015,7 +1015,7 @@ impl HandshakeState {
     }
     
     /// Generate a ClientHello message
-    fn generate_client_hello(&mut self) -> Result<super::message::handshake::ClientHello> {
+    pub fn generate_client_hello(&mut self) -> Result<super::message::handshake::ClientHello> {
         // Available cipher suites
         let cipher_suites = vec![
             // Only ECDHE ciphers for now
@@ -1134,6 +1134,11 @@ impl HandshakeState {
     /// Get the negotiated SRTP profile
     pub fn srtp_profile(&self) -> Option<u16> {
         self.srtp_profile
+    }
+
+    /// Get the cookie if any (debug helper)
+    pub fn cookie(&self) -> Option<&Bytes> {
+        self.cookie.as_ref()
     }
 
     /// Set the ChangeCipherSpec received flag

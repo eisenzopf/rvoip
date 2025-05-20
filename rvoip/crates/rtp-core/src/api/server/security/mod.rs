@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::any::Any;
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -130,6 +131,12 @@ pub trait ClientSecurityContext: Send + Sync {
     
     /// Process a DTLS packet received from the client
     async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
+    
+    /// Start a handshake with the remote
+    async fn start_handshake_with_remote(&self, remote_addr: SocketAddr) -> Result<(), SecurityError>;
+    
+    /// Allow downcasting for internal implementation details
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Server security context
@@ -137,6 +144,9 @@ pub trait ClientSecurityContext: Send + Sync {
 /// This trait defines the interface for server-side security operations.
 #[async_trait]
 pub trait ServerSecurityContext: Send + Sync {
+    /// Initialize the server security context
+    async fn initialize(&self) -> Result<(), SecurityError>;
+    
     /// Set the main socket for the server
     async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError>;
     
@@ -151,6 +161,14 @@ pub trait ServerSecurityContext: Send + Sync {
     
     /// Stop listening for incoming DTLS connections
     async fn stop_listening(&self) -> Result<(), SecurityError>;
+    
+    /// Start automatic packet handler to process incoming DTLS packets
+    /// This creates a background task that receives packets from the socket
+    /// and automatically passes them to process_client_packet
+    async fn start_packet_handler(&self) -> Result<(), SecurityError>;
+    
+    /// Capture the first packet from a client for proper handshake sequence
+    async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError>;
     
     /// Create a security context for a new client
     async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext>, SecurityError>;
@@ -175,6 +193,10 @@ pub trait ServerSecurityContext: Send + Sync {
     
     /// Process a packet from a specific client for DTLS handshake
     async fn process_client_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<(), SecurityError>;
+    
+    /// Check if the server is fully initialized and ready to process handshake messages
+    /// This verifies that all prerequisites (socket, etc.) are set
+    async fn is_ready(&self) -> Result<bool, SecurityError>;
 }
 
 /// Create a new server security context

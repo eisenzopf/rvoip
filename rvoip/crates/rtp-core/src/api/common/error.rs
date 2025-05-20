@@ -52,40 +52,36 @@ pub enum MediaTransportError {
     Timeout(String),
 }
 
-/// Error types for security operations
-#[derive(Error, Debug)]
+/// Error related to security operations
+#[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
-    /// Failed to initialize security
-    #[error("Failed to initialize security: {0}")]
-    InitError(String),
-    
     /// Configuration error
-    #[error("Configuration error: {0}")]
+    #[error("Security configuration error: {0}")]
     Configuration(String),
     
-    /// Error during DTLS handshake
+    /// DTLS handshake error
     #[error("DTLS handshake error: {0}")]
     Handshake(String),
     
-    /// Handshake error (specific to handshake process)
+    /// Handshake verification error (e.g. fingerprint mismatch)
+    #[error("Handshake verification error: {0}")]
+    HandshakeVerification(String),
+    
+    /// Generic handshake error
     #[error("Handshake error: {0}")]
     HandshakeError(String),
     
-    /// Internal error
+    /// Not initialized error
+    #[error("Security not initialized: {0}")]
+    NotInitialized(String),
+    
+    /// Internal security error
     #[error("Internal security error: {0}")]
     Internal(String),
     
-    /// Error during SRTP operations
-    #[error("SRTP error: {0}")]
-    SrtpError(String),
-    
-    /// Certificate error
-    #[error("Certificate error: {0}")]
-    CertificateError(String),
-    
-    /// Not initialized error
-    #[error("Component not initialized: {0}")]
-    NotInitialized(String),
+    /// Security timeout error
+    #[error("Security timeout: {0}")]
+    Timeout(String),
 }
 
 /// Error types for buffer operations

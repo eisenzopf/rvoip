@@ -60,7 +60,7 @@ impl ServerConfigBuilder {
     /// Create a builder with SIP-optimized defaults
     pub fn sip() -> Self {
         let mut builder = Self::new();
-        builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::SrtpPsk;
+        builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::Srtp;
         builder
     }
     

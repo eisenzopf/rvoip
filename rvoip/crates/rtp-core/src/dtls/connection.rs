@@ -907,6 +907,76 @@ impl DtlsConnection {
         self.remote_cert.as_ref()
     }
     
+    /// Check if the handshake has a cookie (debug helper)
+    pub fn has_cookie(&self) -> Option<bool> {
+        if let Some(handshake) = &self.handshake {
+            Some(handshake.cookie().is_some())
+        } else {
+            None
+        }
+    }
+    
+    /// Get the current handshake step (debug helper)
+    pub fn handshake_step(&self) -> Option<super::handshake::HandshakeStep> {
+        if let Some(handshake) = &self.handshake {
+            Some(handshake.step())
+        } else {
+            None
+        }
+    }
+    
+    /// Get the cookie (helper to handle HelloVerifyRequest)
+    pub fn get_cookie(&self) -> Option<bytes::Bytes> {
+        if let Some(handshake) = &self.handshake {
+            handshake.cookie().cloned()
+        } else {
+            None
+        }
+    }
+    
+    /// Continue the handshake after receiving HelloVerifyRequest
+    pub async fn continue_handshake(&mut self) -> Result<()> {
+        // Make sure we're in the right state
+        if let Some(handshake) = &self.handshake {
+            if handshake.step() != super::handshake::HandshakeStep::SentClientHello {
+                return Err(crate::error::Error::InvalidState(
+                    "Not in the correct state to continue handshake".to_string()
+                ));
+            }
+            
+            // Make sure we have a cookie
+            if handshake.cookie().is_none() {
+                return Err(crate::error::Error::InvalidState(
+                    "Cannot continue handshake: no cookie available".to_string()
+                ));
+            }
+        } else {
+            return Err(crate::error::Error::InvalidState(
+                "Cannot continue handshake: no handshake state".to_string()
+            ));
+        }
+        
+        println!("Continuing handshake after HelloVerifyRequest");
+        
+        // Generate a new ClientHello with the cookie
+        let client_hello = if let Some(handshake) = self.handshake.as_mut() {
+            handshake.generate_client_hello()?
+        } else {
+            return Err(crate::error::Error::InvalidState(
+                "No handshake state available".to_string()
+            ));
+        };
+        
+        println!("Generated new ClientHello with cookie");
+        
+        // Send the ClientHello message
+        self.send_handshake_message(HandshakeMessage::ClientHello(client_hello)).await?;
+        
+        println!("Sent ClientHello with cookie");
+        
+        Ok(())
+    }
+    
     /// Send a ChangeCipherSpec record
     async fn send_change_cipher_spec(&mut self) -> Result<()> {
         // Create data (a single byte with value 1)

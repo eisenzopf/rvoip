@@ -5,11 +5,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::any::Any;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use std::time::Duration;
 
 use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
@@ -24,6 +26,7 @@ use crate::dtls::DtlsConfig;
 use crate::dtls::DtlsRole;
 use crate::srtp::{SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_NULL_NULL, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM};
 use crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80;
+use crate::dtls::transport::udp::UdpTransport;
 
 /// Client security context managed by the server
 pub struct DefaultClientSecurityContext {
@@ -48,98 +51,100 @@ pub struct DefaultClientSecurityContext {
 }
 
 impl DefaultClientSecurityContext {
-    /// Process a DTLS packet received from the client - implementation
-    async fn process_dtls_packet_impl(&self, data: &[u8]) -> Result<(), SecurityError> {
-        // Check if we're waiting for the first packet
-        let is_waiting = {
-            let waiting_guard = self.waiting_for_first_packet.lock().await;
-            *waiting_guard
-        };
+    /// Process a DTLS packet received from the client
+    async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError> {
+        let mut conn_guard = self.connection.lock().await;
         
-        if is_waiting {
-            debug!("Received first DTLS packet from client {}, initializing handshake", self.address);
+        if let Some(conn) = conn_guard.as_mut() {
+            debug!("Server processing DTLS packet of {} bytes from client {}", data.len(), self.address);
             
-            // Store the initial packet
-            {
-                let mut packet_guard = self.initial_packet.lock().await;
-                *packet_guard = Some(data.to_vec());
-            }
-            
-            // Create a fresh DTLS connection
-            let mut conn_guard = self.connection.lock().await;
-            
-            // Create a new DTLS config with server role
-            let dtls_config = DtlsConfig {
-                role: DtlsRole::Server,
-                version: crate::dtls::DtlsVersion::Dtls12,
-                mtu: 1200,
-                max_retransmissions: 5,
-                srtp_profiles: Self::convert_profiles(&self.config.srtp_profiles),
-            };
-            
-            // Create a new DtlsConnection
-            let mut new_conn = DtlsConnection::new(dtls_config);
-            
-            // Create a certificate if needed
-            let certificate = crate::dtls::crypto::verify::generate_self_signed_certificate()
-                .map_err(|e| SecurityError::Configuration(format!("Failed to generate certificate: {}", e)))?;
-            
-            // Set the certificate
-            new_conn.set_certificate(certificate);
-            
-            // Set the transport
-            let transport = {
-                let transport_guard = self.transport.lock().await;
-                transport_guard.as_ref().ok_or_else(|| 
-                    SecurityError::Configuration("No transport available".to_string())
-                )?.clone()
-            };
-            new_conn.set_transport(transport);
-            
-            // Start the handshake
-            if let Err(e) = new_conn.start_handshake(self.address).await {
-                return Err(SecurityError::Handshake(
-                    format!("Failed to start DTLS handshake: {}", e)
-                ));
-            }
-            
-            // Process the initial packet
-            if let Err(e) = new_conn.process_packet(data).await {
-                return Err(SecurityError::Handshake(
-                    format!("Failed to process initial packet: {}", e)
-                ));
-            }
-            
-            // Store the connection
-            *conn_guard = Some(new_conn);
-            
-            // Clear waiting flag
-            {
-                let mut waiting_guard = self.waiting_for_first_packet.lock().await;
-                *waiting_guard = false;
-            }
-            
-            // Spawn handshake completion task
-            self.spawn_handshake_task_impl().await?;
-            
-            debug!("DTLS handshake initialized for client {}", self.address);
-        } else {
-            // Normal packet processing - pass to connection
-            let mut conn_guard = self.connection.lock().await;
-            if let Some(conn) = conn_guard.as_mut() {
-                if let Err(e) = conn.process_packet(data).await {
-                    return Err(SecurityError::Handshake(
-                        format!("Failed to process DTLS packet: {}", e)
-                    ));
+            // Process the packet with the DTLS library
+            match conn.process_packet(data).await {
+                Ok(_) => {
+                    // Take action based on handshake step
+                    if let Some(step) = conn.handshake_step() {
+                        debug!("Current handshake step: {:?}", step);
+                        
+                        match step {
+                            crate::dtls::handshake::HandshakeStep::SentHelloVerifyRequest => {
+                                debug!("Server sent HelloVerifyRequest, waiting for ClientHello with cookie");
+                                // No action needed, wait for client to respond with cookie
+                            },
+                            crate::dtls::handshake::HandshakeStep::ReceivedClientHello => {
+                                debug!("Server received ClientHello, sending ServerHello");
+                                
+                                // Continue the handshake to send ServerHello and ServerKeyExchange
+                                if let Err(e) = conn.continue_handshake().await {
+                                    warn!("Failed to continue handshake after ClientHello: {}", e);
+                                } else {
+                                    debug!("Successfully sent ServerHello after ClientHello");
+                                }
+                            },
+                            crate::dtls::handshake::HandshakeStep::ReceivedClientKeyExchange => {
+                                debug!("Server received ClientKeyExchange, sending ChangeCipherSpec and Finished");
+                                
+                                // Continue the handshake to send final messages
+                                if let Err(e) = conn.continue_handshake().await {
+                                    warn!("Failed to continue handshake after ClientKeyExchange: {}", e);
+                                } else {
+                                    debug!("Successfully completed handshake from server side");
+                                }
+                            },
+                            crate::dtls::handshake::HandshakeStep::Complete => {
+                                debug!("Server handshake complete with client {}", self.address);
+                                
+                                // Set handshake completed flag
+                                let mut completed = self.handshake_completed.lock().await;
+                                if !*completed {
+                                    *completed = true;
+                                    
+                                    // Extract SRTP keys
+                                    match conn.extract_srtp_keys() {
+                                        Ok(srtp_ctx) => {
+                                            // Get server key (false = server)
+                                            let server_key = srtp_ctx.get_key_for_role(false).clone();
+                                            
+                                            // Create SRTP context for server role
+                                            match SrtpContext::new(srtp_ctx.profile, server_key) {
+                                                Ok(ctx) => {
+                                                    // Store SRTP context
+                                                    let mut srtp_guard = self.srtp_context.lock().await;
+                                                    *srtp_guard = Some(ctx);
+                                                    info!("Server successfully extracted SRTP keys for client {}", self.address);
+                                                },
+                                                Err(e) => warn!("Failed to create server SRTP context: {}", e)
+                                            }
+                                        },
+                                        Err(e) => warn!("Failed to extract SRTP keys: {}", e)
+                                    }
+                                }
+                            },
+                            _ => {} // Ignore other steps
+                        }
+                    }
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    debug!("Error processing DTLS packet: {}", e);
+                    
+                    // If this was a cookie validation error, we might need to restart
+                    if e.to_string().contains("Invalid cookie") {
+                        debug!("Cookie validation failed, restarting handshake");
+                        
+                        // Start a new handshake
+                        if let Err(restart_err) = conn.start_handshake(self.address).await {
+                            warn!("Failed to restart handshake: {}", restart_err);
+                        }
+                    }
+                    
+                    // Return success to allow handshake to continue
+                    Ok(())
                 }
-            } else {
-                return Err(SecurityError::NotInitialized(
-                    "DTLS connection not initialized".to_string()
-                ));
             }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized for client".to_string()))
         }
-        
-        Ok(())
     }
     
     /// Spawn a task to wait for handshake completion
@@ -238,9 +243,28 @@ impl DefaultClientSecurityContext {
             })
             .collect()
     }
+
+    /// Start a handshake with the remote
+    async fn start_handshake_with_remote(&self, remote_addr: SocketAddr) -> Result<(), SecurityError> {
+        // Access the DTLS connection
+        let mut conn_guard = self.connection.lock().await;
+        
+        if let Some(conn) = conn_guard.as_mut() {
+            // Start the DTLS handshake - matches dtls_test.rs sequence
+            debug!("Starting DTLS handshake with client {}", remote_addr);
+            
+            match conn.start_handshake(remote_addr).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(SecurityError::Handshake(format!("Failed to start DTLS handshake: {}", e)))
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
+        }
+    }
 }
 
-/// Default implementation of the ServerSecurityContext
+/// Default server security context implementation
+#[derive(Clone)]
 pub struct DefaultServerSecurityContext {
     /// Configuration
     config: ServerSecurityConfig,
@@ -273,7 +297,7 @@ impl DefaultServerSecurityContext {
                 ConnectionRole::Server => DtlsRole::Server,
             },
             version: crate::dtls::DtlsVersion::Dtls12,
-            mtu: 1200,
+            mtu: 1500,
             max_retransmissions: 5,
             srtp_profiles: Self::convert_profiles(&config.srtp_profiles),
         };
@@ -395,10 +419,135 @@ impl DefaultServerSecurityContext {
     fn convert_profiles(profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
         profiles.iter().map(|p| Self::convert_profile(*p)).collect()
     }
+
+    /// Capture the first packet from a client for proper handshake sequence
+    pub async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError> {
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.as_ref().ok_or_else(||
+            SecurityError::NotInitialized("No socket set for server security context".to_string()))?;
+        
+        // Create a buffer to receive packet
+        let mut buffer = vec![0u8; 2048];
+        
+        // Set a short timeout to avoid blocking indefinitely
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.socket.recv_from(&mut buffer)
+        ).await {
+            Ok(Ok((size, addr))) => {
+                println!("Captured initial packet: {} bytes from {}", size, addr);
+                Ok(Some((buffer[..size].to_vec(), addr)))
+            },
+            Ok(Err(e)) => {
+                Err(SecurityError::HandshakeError(format!("Error receiving initial packet: {}", e)))
+            },
+            Err(_) => {
+                // Timeout occurred
+                Ok(None)
+            }
+        }
+    }
+
+    /// Reset and restart the DTLS handshake for a client
+    async fn restart_client_handshake(&self, addr: SocketAddr) -> Result<(), SecurityError> {
+        // Get the client context if it exists
+        let client_ctx = {
+            let clients = self.clients.read().await;
+            clients.get(&addr).cloned()
+        };
+        
+        if let Some(client_ctx) = client_ctx {
+            debug!("Restarting handshake for client {}", addr);
+            
+            // Get the socket for the client
+            let socket = match client_ctx.socket.lock().await.clone() {
+                Some(s) => s,
+                None => return Err(SecurityError::NotInitialized("No socket set for client context".to_string())),
+            };
+            
+            // Create a completely new connection
+            let config = self.config.clone();
+            
+            // Create DTLS connection with server role
+            let dtls_config = DtlsConfig {
+                role: DtlsRole::Server,
+                version: crate::dtls::DtlsVersion::Dtls12,
+                mtu: 1500,
+                max_retransmissions: 5,
+                srtp_profiles: Self::convert_profiles(&config.srtp_profiles),
+            };
+            let mut connection = DtlsConnection::new(dtls_config);
+            
+            // Set certificate
+            let cert = match self.connection_template.lock().await.as_ref() {
+                Some(conn) => match conn.local_certificate() {
+                    Some(cert) => cert.clone(),
+                    None => return Err(SecurityError::Configuration("No certificate in template".to_string())),
+                },
+                None => return Err(SecurityError::Configuration("No template connection".to_string())),
+            };
+            connection.set_certificate(cert);
+            
+            // Create a new transport
+            let transport = match UdpTransport::new(socket.socket.clone(), 1500).await {
+                Ok(mut t) => {
+                    // Start the transport (CRUCIAL)
+                    if let Err(e) = t.start().await {
+                        return Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", e)));
+                    }
+                    t
+                },
+                Err(e) => return Err(SecurityError::Configuration(format!("Failed to create DTLS transport: {}", e))),
+            };
+            
+            // Wrap transport in Arc<Mutex<>>
+            let transport_arc = Arc::new(Mutex::new(transport));
+            
+            // Set transport on the connection
+            connection.set_transport(transport_arc.clone());
+            
+            // Update the client's connection
+            {
+                let mut conn_guard = client_ctx.connection.lock().await;
+                *conn_guard = Some(connection);
+            }
+            
+            // Reset the handshake completed flag
+            {
+                let mut completed = client_ctx.handshake_completed.lock().await;
+                *completed = false;
+            }
+            
+            // Reset transport
+            {
+                let mut transport_guard = client_ctx.transport.lock().await;
+                *transport_guard = Some(transport_arc);
+            }
+            
+            // Start the handshake
+            client_ctx.start_handshake_with_remote(addr).await?;
+            
+            debug!("Successfully restarted handshake for client {}", addr);
+            Ok(())
+        } else {
+            Err(SecurityError::Configuration(format!("Client {} not found", addr)))
+        }
+    }
 }
 
 #[async_trait]
 impl ServerSecurityContext for DefaultServerSecurityContext {
+    async fn initialize(&self) -> Result<(), SecurityError> {
+        debug!("Initializing server security context");
+        
+        // Verify that the connection template is initialized
+        self.get_connection_template().await?;
+        
+        // Nothing more to do for initialization - each client connection
+        // will be initialized individually on first contact
+        Ok(())
+    }
+    
     async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError> {
         let mut socket_lock = self.socket.lock().await;
         *socket_lock = Some(socket);
@@ -434,75 +583,107 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     }
     
     async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
-        // Check if we already have a context for this client
-        let clients = self.clients.read().await;
-        if let Some(client) = clients.get(&addr) {
-            return Ok(client.clone() as Arc<dyn ClientSecurityContext>);
+        // First check if this client already exists, and if so, completely recreate it
+        {
+            let mut clients = self.clients.write().await;
+            if clients.contains_key(&addr) {
+                debug!("Client {} already exists, removing old connection for clean restart", addr);
+                clients.remove(&addr);
+            }
         }
-        drop(clients);
         
+        // Create a new client context
         debug!("Creating new security context for client {}", addr);
-
-        // Verify we have SRTP profiles configured
-        if self.config.srtp_profiles.is_empty() {
-            return Err(SecurityError::Configuration("No SRTP profiles specified for client context".to_string()));
-        }
         
-        // Get socket
+        // Create DTLS connection with server role
+        let dtls_config = DtlsConfig {
+            role: DtlsRole::Server,
+            version: crate::dtls::DtlsVersion::Dtls12,
+            mtu: 1500,
+            max_retransmissions: 5,
+            srtp_profiles: Self::convert_profiles(&self.config.srtp_profiles),
+        };
+        let mut connection = DtlsConnection::new(dtls_config);
+        
+        // Set certificate
+        let cert = match self.connection_template.lock().await.as_ref() {
+            Some(conn) => match conn.local_certificate() {
+                Some(cert) => cert.clone(),
+                None => return Err(SecurityError::Configuration("No certificate in template".to_string())),
+            },
+            None => return Err(SecurityError::Configuration("No template connection".to_string())),
+        };
+        connection.set_certificate(cert);
+        
+        // Create socket for the client if needed
         let socket_guard = self.socket.lock().await;
         let socket = socket_guard.clone().ok_or_else(|| 
-            SecurityError::Configuration("No socket set for server security context".to_string()))?;
+            SecurityError::NotInitialized("Server socket not initialized".to_string()))?;
         drop(socket_guard);
         
-        // Create socket with remote address set
-        let mut client_socket = socket.clone();
-        client_socket.remote_addr = Some(addr);
-
-        // Create UDP transport
-        let transport = match crate::dtls::transport::udp::UdpTransport::new(
-            client_socket.socket.clone(), 1200
-        ).await {
-            Ok(t) => t,
-            Err(e) => return Err(SecurityError::Configuration(
-                format!("Failed to create DTLS transport: {}", e)
-            ))
+        // Create a transport specifically for this client
+        let transport = match UdpTransport::new(socket.socket.clone(), 1500).await {
+            Ok(mut t) => {
+                // Start the transport (CRUCIAL)
+                if let Err(e) = t.start().await {
+                    return Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", e)));
+                }
+                t
+            },
+            Err(e) => return Err(SecurityError::Configuration(format!("Failed to create DTLS transport: {}", e))),
         };
         
-        // Wrap transport in Arc<Mutex>
+        // Wrap transport in Arc<Mutex<>>
         let transport_arc = Arc::new(Mutex::new(transport));
-        
-        // Start the transport
-        if let Err(e) = transport_arc.lock().await.start().await {
-            return Err(SecurityError::Configuration(
-                format!("Failed to start DTLS transport: {}", e)
-            ));
-        }
-        
         debug!("DTLS transport started for client {}", addr);
-
-        // Create client context with initialized transport
-        let client = DefaultClientSecurityContext {
+        
+        // Set transport on the connection (clone the Arc)
+        connection.set_transport(transport_arc.clone());
+        
+        // Create client context
+        let client_ctx = Arc::new(DefaultClientSecurityContext {
             address: addr,
-            connection: Arc::new(Mutex::new(None)),
+            connection: Arc::new(Mutex::new(Some(connection))),
             srtp_context: Arc::new(Mutex::new(None)),
             handshake_completed: Arc::new(Mutex::new(false)),
-            socket: Arc::new(Mutex::new(Some(client_socket))),
+            socket: Arc::new(Mutex::new(Some(socket.clone()))),
             config: self.config.clone(),
             transport: Arc::new(Mutex::new(Some(transport_arc))),
-            waiting_for_first_packet: Arc::new(Mutex::new(true)),
             initial_packet: Arc::new(Mutex::new(None)),
-        };
+            waiting_for_first_packet: Arc::new(Mutex::new(false)),
+        });
         
-        // Wrap in Arc
-        let client_arc = Arc::new(client);
+        // Start a task to monitor the handshake
+        let client_ctx_clone = client_ctx.clone();
+        tokio::spawn(async move {
+            debug!("Starting handshake monitor task for client {}", addr);
+            
+            // Wait for handshake to complete (with timeout)
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                client_ctx_clone.wait_for_handshake()
+            ).await {
+                Ok(Ok(_)) => {
+                    debug!("Server-side handshake completed successfully for client {}", addr);
+                },
+                Ok(Err(e)) => {
+                    warn!("Server-side handshake failed for client {}: {}", addr, e);
+                },
+                Err(_) => {
+                    warn!("Server-side handshake timed out for client {}", addr);
+                }
+            }
+        });
         
-        // Store in clients map
-        let mut clients = self.clients.write().await;
-        clients.insert(addr, client_arc.clone());
+        // Store the client context
+        {
+            let mut clients = self.clients.write().await;
+            clients.insert(addr, client_ctx.clone());
+        }
         
-        debug!("Created client security context for {} - waiting for first packet", addr);
+        debug!("Created client security context for {} - ready for handshake", addr);
         
-        Ok(client_arc as Arc<dyn ClientSecurityContext>)
+        Ok(client_ctx as Arc<dyn ClientSecurityContext>)
     }
     
     async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext>> {
@@ -559,19 +740,138 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     }
 
     async fn process_client_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<(), SecurityError> {
-        // Find the client context
-        let clients = self.clients.read().await;
-        if let Some(client) = clients.get(&addr) {
-            // Process the packet with the client context
-            client.process_dtls_packet(data).await
+        // Check if there's an existing client context for this address
+        let client_ctx = {
+            let clients = self.clients.read().await;
+            clients.get(&addr).cloned()
+        };
+        
+        // If client context exists, delegate to it
+        if let Some(client_ctx) = client_ctx {
+            debug!("Processing DTLS packet from existing client {}", addr);
+            client_ctx.process_dtls_packet(data).await
         } else {
-            // Create a new client context if we don't have one
-            drop(clients);
-            let client = self.create_client_context(addr).await?;
+            // No client context exists yet - create one
+            debug!("Creating new client context for {}", addr);
+            let client_ctx = self.create_client_context(addr).await?;
             
-            // Process the packet with the new client context
-            client.process_dtls_packet(data).await
+            // Start the handshake first - this initializes the server state machine
+            debug!("Starting server handshake with client {}", addr);
+            if let Err(e) = client_ctx.start_handshake_with_remote(addr).await {
+                warn!("Failed to start handshake with client {}: {}", addr, e);
+                return Err(e);
+            }
+            
+            // Now process the first packet - usually a ClientHello
+            debug!("Processing initial packet from client {}", addr);
+            client_ctx.process_dtls_packet(data).await
         }
+    }
+
+    async fn start_packet_handler(&self) -> Result<(), SecurityError> {
+        // Get the server socket
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.clone().ok_or_else(|| 
+            SecurityError::Configuration("No socket set for server security context".to_string()))?;
+        drop(socket_guard);
+        
+        // Clone what we need for the task
+        let server_ctx = Arc::new(self.clone());
+        let socket_clone = socket.socket.clone();
+        
+        debug!("Starting automatic DTLS packet handler task for server");
+        
+        // Spawn the packet handler task
+        tokio::spawn(async move {
+            // Create a transport for packet reception - this is critical for proper DTLS handling
+            let transport = match UdpTransport::new(socket_clone.clone(), 1500).await {
+                Ok(mut t) => {
+                    // Start the transport - this is essential
+                    if let Err(e) = t.start().await {
+                        error!("Failed to start server transport for packet handler: {}", e);
+                        return;
+                    }
+                    debug!("Server packet handler transport started successfully");
+                    Arc::new(Mutex::new(t))
+                },
+                Err(e) => {
+                    error!("Failed to create server transport for packet handler: {}", e);
+                    return;
+                }
+            };
+            
+            // Main packet handling loop
+            loop {
+                // Use the transport to receive packets
+                let receive_result = transport.lock().await.recv().await;
+                
+                match receive_result {
+                    Some((data, addr)) => {
+                        debug!("Server received {} bytes from {}", data.len(), addr);
+                        
+                        // Process the packet through the server context
+                        match server_ctx.process_client_packet(addr, &data).await {
+                            Ok(_) => debug!("Server successfully processed client DTLS packet"),
+                            Err(e) => debug!("Error processing client DTLS packet: {:?}", e),
+                        }
+                    },
+                    None => {
+                        // Transport returned None - likely an error or shutdown
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        });
+        
+        Ok(())
+    }
+
+    async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError> {
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.as_ref().ok_or_else(||
+            SecurityError::NotInitialized("No socket set for server security context".to_string()))?;
+        
+        // Create a buffer to receive packet
+        let mut buffer = vec![0u8; 2048];
+        
+        // Set a short timeout to avoid blocking indefinitely
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.socket.recv_from(&mut buffer)
+        ).await {
+            Ok(Ok((size, addr))) => {
+                println!("Captured initial packet: {} bytes from {}", size, addr);
+                Ok(Some((buffer[..size].to_vec(), addr)))
+            },
+            Ok(Err(e)) => {
+                Err(SecurityError::HandshakeError(format!("Error receiving initial packet: {}", e)))
+            },
+            Err(_) => {
+                // Timeout occurred
+                Ok(None)
+            }
+        }
+    }
+
+    async fn is_ready(&self) -> Result<bool, SecurityError> {
+        // Check if socket is set
+        let socket_set = self.socket.lock().await.is_some();
+        
+        // Check if template connection is initialized (needed for certificate)
+        let connection_initialized = self.connection_template.lock().await.is_some();
+        
+        // Check if template certificate is initialized
+        let certificate_initialized = self.get_fingerprint_from_template().await.is_ok();
+        
+        // All prerequisites must be met for the context to be ready
+        let is_ready = socket_set && connection_initialized && certificate_initialized;
+        
+        debug!("Server security context ready: {}", is_ready);
+        debug!("  - Socket set: {}", socket_set);
+        debug!("  - Connection initialized: {}", connection_initialized);
+        debug!("  - Certificate initialized: {}", certificate_initialized);
+        
+        Ok(is_ready)
     }
 }
 
@@ -589,7 +889,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             
             // Create UDP transport
             let new_transport = match crate::dtls::transport::udp::UdpTransport::new(
-                socket.socket.clone(), 1200
+                socket.socket.clone(), 1500
             ).await {
                 Ok(t) => t,
                 Err(e) => return Err(SecurityError::Configuration(
@@ -614,11 +914,6 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                 conn.set_transport(new_transport);
                 debug!("Transport set on existing connection for client {}", self.address);
             }
-            
-            // Set waiting for first packet flag
-            let mut waiting_guard = self.waiting_for_first_packet.lock().await;
-            *waiting_guard = true;
-            debug!("Client {} is now waiting for first packet", self.address);
         }
         
         Ok(())
@@ -644,9 +939,11 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         }
     }
     
+    /// Wait for the DTLS handshake to complete
     async fn wait_for_handshake(&self) -> Result<(), SecurityError> {
-        let mut conn = self.connection.lock().await;
-        if let Some(conn) = conn.as_mut() {
+        let mut conn_guard = self.connection.lock().await;
+        
+        if let Some(conn) = conn_guard.as_mut() {
             conn.wait_handshake().await
                 .map_err(|e| SecurityError::Handshake(format!("DTLS handshake failed: {}", e)))?;
                 
@@ -739,7 +1036,120 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
 
     /// Process a DTLS packet received from the client
     async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError> {
-        // Call our implementation
-        self.process_dtls_packet_impl(data).await
+        let mut conn_guard = self.connection.lock().await;
+        
+        if let Some(conn) = conn_guard.as_mut() {
+            debug!("Server processing DTLS packet of {} bytes from client {}", data.len(), self.address);
+            
+            // Process the packet with the DTLS library
+            match conn.process_packet(data).await {
+                Ok(_) => {
+                    // Take action based on handshake step
+                    if let Some(step) = conn.handshake_step() {
+                        debug!("Current handshake step: {:?}", step);
+                        
+                        match step {
+                            crate::dtls::handshake::HandshakeStep::SentHelloVerifyRequest => {
+                                debug!("Server sent HelloVerifyRequest, waiting for ClientHello with cookie");
+                                // No action needed, wait for client to respond with cookie
+                            },
+                            crate::dtls::handshake::HandshakeStep::ReceivedClientHello => {
+                                debug!("Server received ClientHello, sending ServerHello");
+                                
+                                // Continue the handshake to send ServerHello and ServerKeyExchange
+                                if let Err(e) = conn.continue_handshake().await {
+                                    warn!("Failed to continue handshake after ClientHello: {}", e);
+                                } else {
+                                    debug!("Successfully sent ServerHello after ClientHello");
+                                }
+                            },
+                            crate::dtls::handshake::HandshakeStep::ReceivedClientKeyExchange => {
+                                debug!("Server received ClientKeyExchange, sending ChangeCipherSpec and Finished");
+                                
+                                // Continue the handshake to send final messages
+                                if let Err(e) = conn.continue_handshake().await {
+                                    warn!("Failed to continue handshake after ClientKeyExchange: {}", e);
+                                } else {
+                                    debug!("Successfully completed handshake from server side");
+                                }
+                            },
+                            crate::dtls::handshake::HandshakeStep::Complete => {
+                                debug!("Server handshake complete with client {}", self.address);
+                                
+                                // Set handshake completed flag
+                                let mut completed = self.handshake_completed.lock().await;
+                                if !*completed {
+                                    *completed = true;
+                                    
+                                    // Extract SRTP keys
+                                    match conn.extract_srtp_keys() {
+                                        Ok(srtp_ctx) => {
+                                            // Get server key (false = server)
+                                            let server_key = srtp_ctx.get_key_for_role(false).clone();
+                                            
+                                            // Create SRTP context for server role
+                                            match SrtpContext::new(srtp_ctx.profile, server_key) {
+                                                Ok(ctx) => {
+                                                    // Store SRTP context
+                                                    let mut srtp_guard = self.srtp_context.lock().await;
+                                                    *srtp_guard = Some(ctx);
+                                                    info!("Server successfully extracted SRTP keys for client {}", self.address);
+                                                },
+                                                Err(e) => warn!("Failed to create server SRTP context: {}", e)
+                                            }
+                                        },
+                                        Err(e) => warn!("Failed to extract SRTP keys: {}", e)
+                                    }
+                                }
+                            },
+                            _ => {} // Ignore other steps
+                        }
+                    }
+                    
+                    Ok(())
+                },
+                Err(e) => {
+                    debug!("Error processing DTLS packet: {}", e);
+                    
+                    // If this was a cookie validation error, we might need to restart
+                    if e.to_string().contains("Invalid cookie") {
+                        debug!("Cookie validation failed, restarting handshake");
+                        
+                        // Start a new handshake
+                        if let Err(restart_err) = conn.start_handshake(self.address).await {
+                            warn!("Failed to restart handshake: {}", restart_err);
+                        }
+                    }
+                    
+                    // Return success to allow handshake to continue
+                    Ok(())
+                }
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized for client".to_string()))
+        }
+    }
+
+    /// Start a handshake with the remote
+    async fn start_handshake_with_remote(&self, remote_addr: SocketAddr) -> Result<(), SecurityError> {
+        // Access the DTLS connection
+        let mut conn_guard = self.connection.lock().await;
+        
+        if let Some(conn) = conn_guard.as_mut() {
+            // Start the DTLS handshake - matches dtls_test.rs sequence
+            debug!("Starting DTLS handshake with client {}", remote_addr);
+            
+            match conn.start_handshake(remote_addr).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(SecurityError::Handshake(format!("Failed to start DTLS handshake: {}", e)))
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
+        }
+    }
+
+    /// Allow downcasting for internal implementation details
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 } 
