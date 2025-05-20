@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::api::common::frame::MediaFrame;
@@ -13,8 +14,28 @@ use crate::api::common::events::MediaEventCallback;
 use crate::api::client::config::ClientConfig;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::stats::MediaStats;
+use crate::packet::rtcp::NtpTimestamp;
 
 pub mod client_transport_impl;
+
+/// Media Synchronization Information
+#[derive(Debug, Clone)]
+pub struct MediaSyncInfo {
+    /// SSRC of the stream
+    pub ssrc: u32,
+    
+    /// Clock rate of the stream in Hz
+    pub clock_rate: u32,
+    
+    /// Last NTP timestamp from RTCP SR
+    pub last_ntp: Option<NtpTimestamp>,
+    
+    /// RTP timestamp corresponding to the last NTP timestamp
+    pub last_rtp: Option<u32>,
+    
+    /// Measured clock drift in parts-per-million (positive means faster than reference)
+    pub clock_drift_ppm: f64,
+}
 
 /// Client implementation of the media transport interface
 #[async_trait]
@@ -146,6 +167,87 @@ pub trait MediaTransportClient: Send + Sync {
     ///
     /// - `metrics`: The VoIP metrics to include in the XR packet
     async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError>;
+    
+    /// Enable media synchronization
+    ///
+    /// This enables the media synchronization feature if it was not enabled
+    /// in the configuration. Returns true if successfully enabled.
+    async fn enable_media_sync(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Check if media synchronization is enabled
+    ///
+    /// Returns true if media synchronization is enabled.
+    async fn is_media_sync_enabled(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Register a stream for synchronization
+    ///
+    /// - `ssrc`: The SSRC of the stream to register
+    /// - `clock_rate`: The clock rate of the stream in Hz
+    async fn register_sync_stream(&self, ssrc: u32, clock_rate: u32) -> Result<(), MediaTransportError>;
+    
+    /// Set the reference stream for synchronization
+    ///
+    /// The reference stream is typically an audio stream, as audio
+    /// sync issues are more noticeable than video sync issues.
+    ///
+    /// - `ssrc`: The SSRC of the stream to use as reference
+    async fn set_sync_reference_stream(&self, ssrc: u32) -> Result<(), MediaTransportError>;
+    
+    /// Get synchronization information for a stream
+    ///
+    /// Returns the synchronization information for the specified stream.
+    ///
+    /// - `ssrc`: The SSRC of the stream to get information for
+    async fn get_sync_info(&self, ssrc: u32) -> Result<Option<MediaSyncInfo>, MediaTransportError>;
+    
+    /// Get synchronization information for all registered streams
+    ///
+    /// Returns a map of SSRCs to their synchronization information.
+    async fn get_all_sync_info(&self) -> Result<HashMap<u32, MediaSyncInfo>, MediaTransportError>;
+    
+    /// Convert an RTP timestamp from one stream to the equivalent timestamp in another stream
+    ///
+    /// This allows synchronizing media from different streams that use different clock rates.
+    ///
+    /// - `from_ssrc`: The SSRC of the source stream
+    /// - `to_ssrc`: The SSRC of the destination stream
+    /// - `rtp_ts`: The RTP timestamp to convert
+    async fn convert_timestamp(&self, from_ssrc: u32, to_ssrc: u32, rtp_ts: u32) -> Result<Option<u32>, MediaTransportError>;
+    
+    /// Convert an RTP timestamp to an NTP timestamp
+    ///
+    /// This converts an RTP timestamp to an NTP timestamp, which can be used
+    /// to calculate the wall clock time of a packet.
+    ///
+    /// - `ssrc`: The SSRC of the stream
+    /// - `rtp_ts`: The RTP timestamp to convert
+    async fn rtp_to_ntp(&self, ssrc: u32, rtp_ts: u32) -> Result<Option<NtpTimestamp>, MediaTransportError>;
+    
+    /// Convert an NTP timestamp to an RTP timestamp
+    ///
+    /// This converts an NTP timestamp to an RTP timestamp for a specific stream.
+    ///
+    /// - `ssrc`: The SSRC of the stream
+    /// - `ntp`: The NTP timestamp to convert
+    async fn ntp_to_rtp(&self, ssrc: u32, ntp: NtpTimestamp) -> Result<Option<u32>, MediaTransportError>;
+    
+    /// Get clock drift for a stream in parts per million
+    ///
+    /// Returns the clock drift for the specified stream in parts per million.
+    /// Positive values mean the stream's clock is faster than the reference.
+    ///
+    /// - `ssrc`: The SSRC of the stream to get drift for
+    async fn get_clock_drift_ppm(&self, ssrc: u32) -> Result<Option<f64>, MediaTransportError>;
+    
+    /// Check if two streams are sufficiently synchronized
+    ///
+    /// Returns `true` if the streams have valid synchronization info
+    /// and their clocks are aligned within the specified tolerance.
+    ///
+    /// - `ssrc1`: The SSRC of the first stream
+    /// - `ssrc2`: The SSRC of the second stream
+    /// - `tolerance_ms`: The maximum acceptable difference in milliseconds
+    async fn are_streams_synchronized(&self, ssrc1: u32, ssrc2: u32, tolerance_ms: f64) -> Result<bool, MediaTransportError>;
 }
 
 // Re-export the implementation

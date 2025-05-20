@@ -61,6 +61,12 @@ pub struct DefaultMediaTransportClient {
     
     /// Disconnect callbacks
     disconnect_callbacks: Arc<Mutex<Vec<Box<dyn Fn() + Send + Sync>>>>,
+    
+    /// Media synchronization context
+    media_sync: Arc<RwLock<Option<crate::sync::MediaSync>>>,
+    
+    /// Media sync enabled flag (can be enabled even if config.media_sync_enabled is None)
+    media_sync_enabled: Arc<AtomicBool>,
 }
 
 impl DefaultMediaTransportClient {
@@ -100,6 +106,15 @@ impl DefaultMediaTransportClient {
             None
         };
         
+        // Initialize media sync if enabled in config
+        let media_sync_enabled = config.media_sync_enabled.unwrap_or(false);
+        let media_sync = if media_sync_enabled {
+            // Create media sync context
+            Some(crate::sync::MediaSync::new())
+        } else {
+            None
+        };
+        
         Ok(Self {
             config,
             session: Arc::new(Mutex::new(session)),
@@ -111,6 +126,8 @@ impl DefaultMediaTransportClient {
             event_callbacks: Arc::new(Mutex::new(Vec::new())),
             connect_callbacks: Arc::new(Mutex::new(Vec::new())),
             disconnect_callbacks: Arc::new(Mutex::new(Vec::new())),
+            media_sync: Arc::new(RwLock::new(media_sync)),
+            media_sync_enabled: Arc::new(AtomicBool::new(media_sync_enabled)),
         })
     }
     
@@ -194,6 +211,11 @@ impl DefaultMediaTransportClient {
         } else {
             QualityLevel::Unknown
         }
+    }
+    
+    /// Access to the RTP session (for advanced usage in examples)
+    pub async fn get_session(&self) -> Result<Arc<Mutex<crate::session::RtpSession>>, MediaTransportError> {
+        Ok(Arc::clone(&self.session))
     }
 }
 
@@ -738,5 +760,205 @@ impl MediaTransportClient for DefaultMediaTransportClient {
                metrics.loss_rate, metrics.r_factor);
         
         Ok(())
+    }
+    
+    // Media Synchronization API Implementation
+    async fn enable_media_sync(&self) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        
+        // Create media sync context if it doesn't exist
+        let mut sync_guard = self.media_sync.write().await;
+        if sync_guard.is_none() {
+            *sync_guard = Some(crate::sync::MediaSync::new());
+        }
+        
+        // Set enabled flag
+        self.media_sync_enabled.store(true, Ordering::SeqCst);
+        
+        // Register default stream with session SSRC
+        let session = self.session.lock().await;
+        let ssrc = session.get_ssrc();
+        let clock_rate = self.config.clock_rate;
+        drop(session);
+        
+        if let Some(sync) = &mut *sync_guard {
+            sync.register_stream(ssrc, clock_rate);
+        }
+        
+        Ok(true)
+    }
+    
+    async fn is_media_sync_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(self.media_sync_enabled.load(Ordering::SeqCst))
+    }
+    
+    async fn register_sync_stream(&self, ssrc: u32, clock_rate: u32) -> Result<(), MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Register stream with media sync
+        let mut sync_guard = self.media_sync.write().await;
+        if let Some(sync) = &mut *sync_guard {
+            sync.register_stream(ssrc, clock_rate);
+            Ok(())
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn set_sync_reference_stream(&self, ssrc: u32) -> Result<(), MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Set reference stream
+        let mut sync_guard = self.media_sync.write().await;
+        if let Some(sync) = &mut *sync_guard {
+            sync.set_reference_stream(ssrc);
+            Ok(())
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn get_sync_info(&self, ssrc: u32) -> Result<Option<crate::api::client::transport::MediaSyncInfo>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Get sync info
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            // Get stream data from MediaSync
+            let streams = sync.get_streams();
+            if let Some(stream) = streams.get(&ssrc) {
+                // Convert to MediaSyncInfo
+                let info = crate::api::client::transport::MediaSyncInfo {
+                    ssrc,
+                    clock_rate: stream.clock_rate,
+                    last_ntp: stream.last_ntp,
+                    last_rtp: stream.last_rtp,
+                    clock_drift_ppm: stream.clock_drift_ppm,
+                };
+                Ok(Some(info))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn get_all_sync_info(&self) -> Result<std::collections::HashMap<u32, crate::api::client::transport::MediaSyncInfo>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Get all sync info
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            // Get all streams data from MediaSync
+            let streams = sync.get_streams();
+            let mut result = std::collections::HashMap::new();
+            
+            // Convert each stream to MediaSyncInfo
+            for (ssrc, stream) in streams {
+                let info = crate::api::client::transport::MediaSyncInfo {
+                    ssrc: *ssrc,
+                    clock_rate: stream.clock_rate,
+                    last_ntp: stream.last_ntp,
+                    last_rtp: stream.last_rtp,
+                    clock_drift_ppm: stream.clock_drift_ppm,
+                };
+                result.insert(*ssrc, info);
+            }
+            
+            Ok(result)
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn convert_timestamp(&self, from_ssrc: u32, to_ssrc: u32, rtp_ts: u32) -> Result<Option<u32>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Convert timestamp
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            Ok(sync.convert_timestamp(from_ssrc, to_ssrc, rtp_ts))
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn rtp_to_ntp(&self, ssrc: u32, rtp_ts: u32) -> Result<Option<crate::packet::rtcp::NtpTimestamp>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Convert RTP to NTP
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            Ok(sync.rtp_to_ntp(ssrc, rtp_ts))
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn ntp_to_rtp(&self, ssrc: u32, ntp: crate::packet::rtcp::NtpTimestamp) -> Result<Option<u32>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Convert NTP to RTP
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            Ok(sync.ntp_to_rtp(ssrc, ntp))
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn get_clock_drift_ppm(&self, ssrc: u32) -> Result<Option<f64>, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Get clock drift
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            Ok(sync.get_clock_drift_ppm(ssrc))
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
+    }
+    
+    async fn are_streams_synchronized(&self, ssrc1: u32, ssrc2: u32, tolerance_ms: f64) -> Result<bool, MediaTransportError> {
+        // Check if media sync is enabled
+        if !self.media_sync_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("Media synchronization is not enabled".to_string()));
+        }
+        
+        // Check if streams are synchronized
+        let sync_guard = self.media_sync.read().await;
+        if let Some(sync) = &*sync_guard {
+            Ok(sync.are_synchronized(ssrc1, ssrc2, tolerance_ms))
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        }
     }
 } 

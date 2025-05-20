@@ -26,6 +26,8 @@ pub struct ClientConfig {
     pub ssrc: Option<u32>,
     /// Enable RTCP multiplexing (RFC 5761)
     pub rtcp_mux: bool,
+    /// Enable media synchronization features (optional)
+    pub media_sync_enabled: Option<bool>,
 }
 
 /// Builder for ClientConfig
@@ -49,6 +51,7 @@ impl ClientConfigBuilder {
                 enable_jitter_buffer: true,
                 ssrc: Some(rand::random()),
                 rtcp_mux: false, // Disabled by default
+                media_sync_enabled: None, // Optional, defaults to None
             },
         }
     }
@@ -120,6 +123,12 @@ impl ClientConfigBuilder {
     /// Enable or disable RTCP multiplexing (RFC 5761)
     pub fn rtcp_mux(mut self, enable: bool) -> Self {
         self.config.rtcp_mux = enable;
+        self
+    }
+    
+    /// Enable or disable media synchronization features
+    pub fn media_sync_enabled(mut self, enable: bool) -> Self {
+        self.config.media_sync_enabled = Some(enable);
         self
     }
     

@@ -31,27 +31,27 @@ pub struct MediaSync {
 }
 
 /// Synchronization data for a single RTP stream
-struct StreamSyncData {
+pub struct StreamSyncData {
     /// SSRC of the stream
-    ssrc: RtpSsrc,
+    pub ssrc: RtpSsrc,
     
     /// Clock rate of the stream (samples per second)
-    clock_rate: u32,
+    pub clock_rate: u32,
     
     /// Last NTP timestamp from RTCP SR
-    last_ntp: Option<NtpTimestamp>,
+    pub last_ntp: Option<NtpTimestamp>,
     
     /// RTP timestamp corresponding to the last NTP timestamp
-    last_rtp: Option<u32>,
+    pub last_rtp: Option<u32>,
     
     /// Timestamp when last update was received
-    last_update: Option<Instant>,
+    pub last_update: Option<Instant>,
     
     /// Measured clock drift in parts-per-million (positive means faster than reference)
-    clock_drift_ppm: f64,
+    pub clock_drift_ppm: f64,
     
     /// Running average of drift measurements
-    drift_history: Vec<f64>,
+    pub drift_history: Vec<f64>,
 }
 
 impl MediaSync {
@@ -84,6 +84,11 @@ impl MediaSync {
         if self.reference_ssrc.is_none() {
             self.reference_ssrc = Some(ssrc);
         }
+    }
+    
+    /// Get a reference to the streams map
+    pub fn get_streams(&self) -> &HashMap<RtpSsrc, StreamSyncData> {
+        &self.streams
     }
     
     /// Set the reference stream for synchronization
