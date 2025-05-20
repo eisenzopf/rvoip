@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
         certificate_path: None,
         private_key_path: None,
+        require_client_certificate: false,
     };
     
     // Create client security config
@@ -75,6 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Setting client remote address...");
     client_ctx.set_remote_address(server_addr).await?;
     
+    // Initialize contexts
+    println!("Initializing contexts...");
+    client_ctx.initialize().await?;
+    
     // Get and exchange fingerprints
     println!("Exchanging fingerprints...");
     let server_fingerprint = server_ctx.get_fingerprint().await?;
@@ -95,19 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Server receiver task started");
         let mut buffer = vec![0u8; 2048];
         
+        // Add timeout for the receive loop
+        let task_timeout = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(task_timeout);
+        
         loop {
-            match server_socket.recv_from(&mut buffer).await {
-                Ok((size, addr)) => {
-                    println!("Server received {} bytes from {}", size, addr);
-                    
-                    // Process the packet with the server context
-                    if let Err(e) = server_ctx_clone.process_client_packet(addr, &buffer[..size]).await {
-                        println!("Error processing packet: {}", e);
+            tokio::select! {
+                _ = &mut task_timeout => {
+                    println!("Server receiver task timed out after 10 seconds");
+                    break;
+                }
+                result = server_socket.recv_from(&mut buffer) => {
+                    match result {
+                        Ok((size, addr)) => {
+                            println!("Server received {} bytes from {}", size, addr);
+                            
+                            // Process the packet with the server context
+                            match server_ctx_clone.process_client_packet(addr, &buffer[..size]).await {
+                                Ok(_) => println!("Server successfully processed client packet"),
+                                Err(e) => println!("Error processing packet: {:?}", e),
+                            }
+                        },
+                        Err(e) => {
+                            println!("Server receive error: {}", e);
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
                     }
-                },
-                Err(e) => {
-                    println!("Server receive error: {}", e);
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
         }
@@ -119,18 +137,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start client handshake
     println!("Starting client handshake...");
-    client_ctx.initialize().await?;
     client_ctx.start_handshake().await?;
     
-    // Wait for handshake to complete
+    // Wait for handshake to complete with timeout
     println!("Waiting for handshake to complete...");
+    let start_time = std::time::Instant::now();
+    let timeout = Duration::from_secs(5);
+    
     loop {
         if client_ctx.is_handshake_complete().await? {
             println!("Client handshake complete!");
             break;
         }
         
+        if start_time.elapsed() > timeout {
+            println!("Handshake timed out after 5 seconds");
+            break;
+        }
+        
         tokio::time::sleep(Duration::from_millis(100)).await;
+        println!("Still waiting for handshake... ({:?} elapsed)", start_time.elapsed());
     }
     
     // After some time, check if we can find the client context on the server

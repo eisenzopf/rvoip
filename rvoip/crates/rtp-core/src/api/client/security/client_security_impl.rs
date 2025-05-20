@@ -16,6 +16,7 @@ use crate::dtls::{DtlsConnection, DtlsConfig, DtlsRole, DtlsSrtpContext};
 use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_NULL_NULL, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM};
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::api::server::security::SocketHandle;
+use crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80;
 
 /// Default implementation of the ClientSecurityContext trait
 pub struct DefaultClientSecurityContext {
@@ -192,6 +193,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             if conn_guard.is_none() {
                 // Try to initialize the connection if not already done
                 drop(conn_guard); // Drop the guard before calling async function
+                debug!("Connection not initialized, calling init_connection()");
                 self.init_connection().await?;
             }
         }
@@ -199,10 +201,12 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         // Start DTLS handshake
         let mut conn_guard = self.connection.lock().await;
         if let Some(conn) = conn_guard.as_mut() {
-            // Check if transport is set by seeing if we have an active transport
+            // Check if transport is set
             let has_transport = conn.has_transport();
+            debug!("DTLS connection has transport: {}", has_transport);
             
             if !has_transport {
+                debug!("No transport found, creating new UDP transport");
                 // Create UDP transport from socket
                 let transport = Arc::new(Mutex::new(
                     match crate::dtls::transport::udp::UdpTransport::new(socket.as_ref().unwrap().socket.clone(), 1200).await {
@@ -211,17 +215,19 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                     }
                 ));
                 
-                // Start the transport (this was missing)
+                // Start the transport
                 match transport.lock().await.start().await {
                     Ok(_) => debug!("DTLS transport started successfully"),
                     Err(e) => return Err(SecurityError::Handshake(format!("Failed to start DTLS transport: {}", e)))
                 }
                 
                 // Set transport on connection
+                debug!("Setting transport on DTLS connection");
                 conn.set_transport(transport);
             }
             
             // Start the handshake
+            debug!("Calling start_handshake with remote addr: {}", remote_addr);
             match conn.start_handshake(remote_addr).await {
                 Ok(_) => debug!("DTLS handshake started successfully"),
                 Err(e) => return Err(SecurityError::Handshake(format!("Failed to start DTLS handshake: {}", e)))
@@ -232,10 +238,13 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             let srtp_context_clone = self.srtp_context.clone();
             let handshake_completed_clone = self.handshake_completed.clone();
             let profiles = self.config.srtp_profiles.clone();
+            let remote_addr_copy = remote_addr;
             
             tokio::spawn(async move {
+                debug!("Client handshake task started for {}", remote_addr_copy);
                 let mut conn_guard = connection_clone.lock().await;
                 if let Some(conn) = conn_guard.as_mut() {
+                    debug!("Waiting for handshake to complete...");
                     match conn.wait_handshake().await {
                         Ok(()) => {
                             debug!("DTLS handshake completed successfully");
@@ -464,8 +473,8 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         }
         
         // Get the connection
-        let conn_guard = self.connection.lock().await;
-        if let Some(conn) = conn_guard.as_ref() {
+        let mut conn_guard = self.connection.lock().await;
+        if let Some(conn) = conn_guard.as_mut() {
             // Wait for the handshake to complete
             match conn.wait_handshake().await {
                 Ok(_) => {
@@ -487,8 +496,8 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                                 
                                 // Convert SRTP profile
                                 let profile = match srtp_ctx.profile {
-                                    crate::srtp::SrtpCryptoSuite { authentication: crate::srtp::HmacSha1_80, .. } => {
-                                        SrtpCryptoSuite::SRTP_AES128_CM_SHA1_80
+                                    crate::srtp::SrtpCryptoSuite { authentication: HmacSha1_80, .. } => {
+                                        crate::srtp::SRTP_AES128_CM_SHA1_80
                                     },
                                     _ => {
                                         return Err(SecurityError::Handshake("Unsupported SRTP profile".to_string()));

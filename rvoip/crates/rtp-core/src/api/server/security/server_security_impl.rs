@@ -22,6 +22,8 @@ use crate::srtp::crypto::SrtpCryptoKey;
 use crate::dtls::DtlsConnection;
 use crate::dtls::DtlsConfig;
 use crate::dtls::DtlsRole;
+use crate::srtp::{SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_NULL_NULL, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM};
+use crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80;
 
 /// Client security context managed by the server
 pub struct DefaultClientSecurityContext {
@@ -78,13 +80,9 @@ impl DefaultClientSecurityContext {
             // Create a new DtlsConnection
             let mut new_conn = DtlsConnection::new(dtls_config);
             
-            // Get the certificate from template
-            let certificate = {
-                let template = self.config.connection_template.lock().await;
-                template.local_certificate().ok_or_else(|| 
-                    SecurityError::Configuration("No certificate available in template".to_string())
-                )?.clone()
-            };
+            // Create a certificate if needed
+            let certificate = crate::dtls::crypto::verify::generate_self_signed_certificate()
+                .map_err(|e| SecurityError::Configuration(format!("Failed to generate certificate: {}", e)))?;
             
             // Set the certificate
             new_conn.set_certificate(certificate);
@@ -122,7 +120,7 @@ impl DefaultClientSecurityContext {
             }
             
             // Spawn handshake completion task
-            self.spawn_handshake_task().await?;
+            self.spawn_handshake_task_impl().await?;
             
             debug!("DTLS handshake initialized for client {}", self.address);
         } else {
@@ -143,183 +141,14 @@ impl DefaultClientSecurityContext {
         
         Ok(())
     }
-}
-
-#[async_trait]
-impl ClientSecurityContext for DefaultClientSecurityContext {
-    async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError> {
-        // Store socket
-        let mut socket_lock = self.socket.lock().await;
-        *socket_lock = Some(socket.clone());
-        
-        // Set up transport if not already done
-        let mut transport_guard = self.transport.lock().await;
-        if transport_guard.is_none() {
-            debug!("Creating DTLS transport for client {}", self.address);
-            
-            // Create UDP transport
-            let new_transport = match crate::dtls::transport::udp::UdpTransport::new(
-                socket.socket.clone(), 1200
-            ).await {
-                Ok(t) => t,
-                Err(e) => return Err(SecurityError::Configuration(
-                    format!("Failed to create DTLS transport: {}", e)
-                ))
-            };
-            
-            // Start the transport
-            let new_transport = Arc::new(Mutex::new(new_transport));
-            if let Err(e) = new_transport.lock().await.start().await {
-                return Err(SecurityError::Configuration(
-                    format!("Failed to start DTLS transport: {}", e)
-                ));
-            }
-            
-            debug!("DTLS transport started for client {}", self.address);
-            *transport_guard = Some(new_transport.clone());
-            
-            // Set transport on connection if it exists
-            let mut conn_guard = self.connection.lock().await;
-            if let Some(conn) = conn_guard.as_mut() {
-                conn.set_transport(new_transport);
-                debug!("Transport set on existing connection for client {}", self.address);
-            }
-            
-            // Set waiting for first packet flag
-            let mut waiting_guard = self.waiting_for_first_packet.lock().await;
-            *waiting_guard = true;
-            debug!("Client {} is now waiting for first packet", self.address);
-        }
-        
-        Ok(())
-    }
-    
-    async fn get_remote_fingerprint(&self) -> Result<Option<String>, SecurityError> {
-        let conn = self.connection.lock().await;
-        if let Some(conn) = conn.as_ref() {
-            // Check if handshake is complete and remote certificate is available
-            if let Some(remote_cert) = conn.remote_certificate() {
-                // Create a mutable copy of the certificate to compute fingerprint
-                let mut remote_cert_copy = remote_cert.clone();
-                match remote_cert_copy.fingerprint("SHA-256") {
-                    Ok(fingerprint) => Ok(Some(fingerprint)),
-                    Err(e) => Err(SecurityError::Internal(format!("Failed to get remote fingerprint: {}", e)))
-                }
-            } else {
-                // If no remote certificate yet, return None (not an error)
-                Ok(None)
-            }
-        } else {
-            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
-        }
-    }
-    
-    async fn wait_for_handshake(&self) -> Result<(), SecurityError> {
-        let mut conn = self.connection.lock().await;
-        if let Some(conn) = conn.as_mut() {
-            conn.wait_handshake().await
-                .map_err(|e| SecurityError::Handshake(format!("DTLS handshake failed: {}", e)))?;
-                
-            // Set handshake completed flag
-            let mut completed = self.handshake_completed.lock().await;
-            *completed = true;
-            
-            Ok(())
-        } else {
-            Err(SecurityError::HandshakeError("No DTLS connection available".to_string()))
-        }
-    }
-    
-    async fn is_handshake_complete(&self) -> Result<bool, SecurityError> {
-        let completed = *self.handshake_completed.lock().await;
-        Ok(completed)
-    }
-    
-    async fn close(&self) -> Result<(), SecurityError> {
-        // Close DTLS connection
-        let mut conn = self.connection.lock().await;
-        if let Some(conn) = conn.as_mut() {
-            // Await the future first, then handle the Result
-            match conn.close().await {
-                Ok(_) => {},
-                Err(e) => return Err(SecurityError::Internal(format!("Failed to close DTLS connection: {}", e)))
-            }
-        }
-        *conn = None;
-        
-        // Reset handshake state
-        let mut completed = self.handshake_completed.lock().await;
-        *completed = false;
-        
-        // Clear SRTP context
-        let mut srtp = self.srtp_context.lock().await;
-        *srtp = None;
-        
-        Ok(())
-    }
-    
-    fn is_secure(&self) -> bool {
-        self.config.security_mode.is_enabled()
-    }
-    
-    fn get_security_info(&self) -> SecurityInfo {
-        SecurityInfo {
-            mode: self.config.security_mode,
-            fingerprint: None, // Will be filled by async get_fingerprint method
-            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
-            crypto_suites: self.config.srtp_profiles.iter()
-                .map(|p| match p {
-                    SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                    SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                    SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                    SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-                })
-                .map(|s| s.to_string())
-                .collect(),
-            key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
-        }
-    }
-
-    async fn get_fingerprint(&self) -> Result<String, SecurityError> {
-        let conn_guard = self.connection.lock().await;
-        
-        if let Some(conn) = conn_guard.as_ref() {
-            // Get the certificate from the connection
-            if let Some(cert) = conn.local_certificate() {
-                // Create a mutable copy of the certificate to compute fingerprint
-                let mut cert_copy = cert.clone();
-                match cert_copy.fingerprint("SHA-256") {
-                    Ok(fingerprint) => Ok(fingerprint),
-                    Err(e) => Err(SecurityError::Internal(format!("Failed to get fingerprint: {}", e))),
-                }
-            } else {
-                Err(SecurityError::Configuration("No certificate available".to_string()))
-            }
-        } else {
-            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
-        }
-    }
-
-    async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError> {
-        // Return the default algorithm used
-        Ok("sha-256".to_string())
-    }
-
-    /// Process a DTLS packet received from the client
-    async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError> {
-        // Call our implementation
-        self.process_dtls_packet_impl(data).await
-    }
     
     /// Spawn a task to wait for handshake completion
-    async fn spawn_handshake_task(&self) -> Result<(), SecurityError> {
+    async fn spawn_handshake_task_impl(&self) -> Result<(), SecurityError> {
         // Clone values needed for the task
         let address = self.address;
         let connection = self.connection.clone();
         let srtp_context = self.srtp_context.clone();
         let handshake_completed = self.handshake_completed.clone();
-        let profiles = self.config.srtp_profiles.clone();
         
         // Spawn the task
         tokio::spawn(async move {
@@ -351,8 +180,8 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                                 
                                 // Convert to SRTP profile
                                 let profile = match srtp_ctx.profile {
-                                    crate::srtp::SrtpCryptoSuite { authentication: crate::srtp::HmacSha1_80, .. } => {
-                                        SrtpCryptoSuite::SRTP_AES128_CM_SHA1_80
+                                    crate::srtp::SrtpCryptoSuite { authentication: HmacSha1_80, .. } => {
+                                        SRTP_AES128_CM_SHA1_80
                                     },
                                     _ => {
                                         error!("Unsupported SRTP profile for client {}", address);
@@ -402,9 +231,9 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
                 match p {
                     SrtpProfile::AesCm128HmacSha1_80 => Some(SRTP_AES128_CM_SHA1_80),
                     SrtpProfile::AesCm128HmacSha1_32 => Some(SRTP_AES128_CM_SHA1_32),
-                    SrtpProfile::Null => Some(SRTP_NULL_NULL),
                     SrtpProfile::AesGcm128 => Some(SRTP_AEAD_AES_128_GCM),
                     SrtpProfile::AesGcm256 => Some(SRTP_AEAD_AES_256_GCM),
+                    _ => None,
                 }
             })
             .collect()
@@ -629,8 +458,29 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
         let mut client_socket = socket.clone();
         client_socket.remote_addr = Some(addr);
 
-        // Create client context without initializing DTLS connection yet
-        // We'll initialize it when we receive the first packet
+        // Create UDP transport
+        let transport = match crate::dtls::transport::udp::UdpTransport::new(
+            client_socket.socket.clone(), 1200
+        ).await {
+            Ok(t) => t,
+            Err(e) => return Err(SecurityError::Configuration(
+                format!("Failed to create DTLS transport: {}", e)
+            ))
+        };
+        
+        // Wrap transport in Arc<Mutex>
+        let transport_arc = Arc::new(Mutex::new(transport));
+        
+        // Start the transport
+        if let Err(e) = transport_arc.lock().await.start().await {
+            return Err(SecurityError::Configuration(
+                format!("Failed to start DTLS transport: {}", e)
+            ));
+        }
+        
+        debug!("DTLS transport started for client {}", addr);
+
+        // Create client context with initialized transport
         let client = DefaultClientSecurityContext {
             address: addr,
             connection: Arc::new(Mutex::new(None)),
@@ -638,7 +488,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             handshake_completed: Arc::new(Mutex::new(false)),
             socket: Arc::new(Mutex::new(Some(client_socket))),
             config: self.config.clone(),
-            transport: Arc::new(Mutex::new(None)),
+            transport: Arc::new(Mutex::new(Some(transport_arc))),
             waiting_for_first_packet: Arc::new(Mutex::new(true)),
             initial_packet: Arc::new(Mutex::new(None)),
         };
@@ -722,5 +572,174 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             // Process the packet with the new client context
             client.process_dtls_packet(data).await
         }
+    }
+}
+
+#[async_trait]
+impl ClientSecurityContext for DefaultClientSecurityContext {
+    async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError> {
+        // Store socket
+        let mut socket_lock = self.socket.lock().await;
+        *socket_lock = Some(socket.clone());
+        
+        // Set up transport if not already done
+        let mut transport_guard = self.transport.lock().await;
+        if transport_guard.is_none() {
+            debug!("Creating DTLS transport for client {}", self.address);
+            
+            // Create UDP transport
+            let new_transport = match crate::dtls::transport::udp::UdpTransport::new(
+                socket.socket.clone(), 1200
+            ).await {
+                Ok(t) => t,
+                Err(e) => return Err(SecurityError::Configuration(
+                    format!("Failed to create DTLS transport: {}", e)
+                ))
+            };
+            
+            // Start the transport
+            let new_transport = Arc::new(Mutex::new(new_transport));
+            if let Err(e) = new_transport.lock().await.start().await {
+                return Err(SecurityError::Configuration(
+                    format!("Failed to start DTLS transport: {}", e)
+                ));
+            }
+            
+            debug!("DTLS transport started for client {}", self.address);
+            *transport_guard = Some(new_transport.clone());
+            
+            // Set transport on connection if it exists
+            let mut conn_guard = self.connection.lock().await;
+            if let Some(conn) = conn_guard.as_mut() {
+                conn.set_transport(new_transport);
+                debug!("Transport set on existing connection for client {}", self.address);
+            }
+            
+            // Set waiting for first packet flag
+            let mut waiting_guard = self.waiting_for_first_packet.lock().await;
+            *waiting_guard = true;
+            debug!("Client {} is now waiting for first packet", self.address);
+        }
+        
+        Ok(())
+    }
+    
+    async fn get_remote_fingerprint(&self) -> Result<Option<String>, SecurityError> {
+        let conn = self.connection.lock().await;
+        if let Some(conn) = conn.as_ref() {
+            // Check if handshake is complete and remote certificate is available
+            if let Some(remote_cert) = conn.remote_certificate() {
+                // Create a mutable copy of the certificate to compute fingerprint
+                let mut remote_cert_copy = remote_cert.clone();
+                match remote_cert_copy.fingerprint("SHA-256") {
+                    Ok(fingerprint) => Ok(Some(fingerprint)),
+                    Err(e) => Err(SecurityError::Internal(format!("Failed to get remote fingerprint: {}", e)))
+                }
+            } else {
+                // If no remote certificate yet, return None (not an error)
+                Ok(None)
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
+        }
+    }
+    
+    async fn wait_for_handshake(&self) -> Result<(), SecurityError> {
+        let mut conn = self.connection.lock().await;
+        if let Some(conn) = conn.as_mut() {
+            conn.wait_handshake().await
+                .map_err(|e| SecurityError::Handshake(format!("DTLS handshake failed: {}", e)))?;
+                
+            // Set handshake completed flag
+            let mut completed = self.handshake_completed.lock().await;
+            *completed = true;
+            
+            Ok(())
+        } else {
+            Err(SecurityError::HandshakeError("No DTLS connection available".to_string()))
+        }
+    }
+    
+    async fn is_handshake_complete(&self) -> Result<bool, SecurityError> {
+        let completed = *self.handshake_completed.lock().await;
+        Ok(completed)
+    }
+    
+    async fn close(&self) -> Result<(), SecurityError> {
+        // Close DTLS connection
+        let mut conn = self.connection.lock().await;
+        if let Some(conn) = conn.as_mut() {
+            // Await the future first, then handle the Result
+            match conn.close().await {
+                Ok(_) => {},
+                Err(e) => return Err(SecurityError::Internal(format!("Failed to close DTLS connection: {}", e)))
+            }
+        }
+        *conn = None;
+        
+        // Reset handshake state
+        let mut completed = self.handshake_completed.lock().await;
+        *completed = false;
+        
+        // Clear SRTP context
+        let mut srtp = self.srtp_context.lock().await;
+        *srtp = None;
+        
+        Ok(())
+    }
+    
+    fn is_secure(&self) -> bool {
+        self.config.security_mode.is_enabled()
+    }
+    
+    fn get_security_info(&self) -> SecurityInfo {
+        SecurityInfo {
+            mode: self.config.security_mode,
+            fingerprint: None, // Will be filled by async get_fingerprint method
+            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
+            crypto_suites: self.config.srtp_profiles.iter()
+                .map(|p| match p {
+                    SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+                    SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
+                    SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
+                    SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
+                    _ => "UNKNOWN",
+                })
+                .map(|s| s.to_string())
+                .collect(),
+            key_params: None,
+            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+        }
+    }
+
+    async fn get_fingerprint(&self) -> Result<String, SecurityError> {
+        let conn_guard = self.connection.lock().await;
+        
+        if let Some(conn) = conn_guard.as_ref() {
+            // Get the certificate from the connection
+            if let Some(cert) = conn.local_certificate() {
+                // Create a mutable copy of the certificate to compute fingerprint
+                let mut cert_copy = cert.clone();
+                match cert_copy.fingerprint("SHA-256") {
+                    Ok(fingerprint) => Ok(fingerprint),
+                    Err(e) => Err(SecurityError::Internal(format!("Failed to get fingerprint: {}", e))),
+                }
+            } else {
+                Err(SecurityError::Configuration("No certificate available".to_string()))
+            }
+        } else {
+            Err(SecurityError::NotInitialized("DTLS connection not initialized".to_string()))
+        }
+    }
+
+    async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError> {
+        // Return the default algorithm used
+        Ok("sha-256".to_string())
+    }
+
+    /// Process a DTLS packet received from the client
+    async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError> {
+        // Call our implementation
+        self.process_dtls_packet_impl(data).await
     }
 } 
