@@ -356,8 +356,8 @@ The following features are implemented in the underlying library but not yet ful
 - [x] RTCP Sender/Receiver Reports API (see `rtcp_reports.rs` example)
 - [x] RTCP APP/BYE/XR Packets support (see `rtcp_app.rs`, `rtcp_bye.rs`, `rtcp_xr_example.rs`)
 - [ ] RTP Header Extensions support (see `header_extensions.rs` example)
-- [ ] Media Synchronization API (see `media_sync.rs` example)
-- [ ] SSRC Demultiplexing configuration (see `ssrc_demultiplexing.rs` example)
+- [x] Media Synchronization API (see `media_sync.rs` example)
+- [x] SSRC Demultiplexing configuration (see `ssrc_demultiplexing.rs` example)
 - [ ] CSRC Management for conferencing scenarios (see `csrc_management.rs` example)
 
 #### Advanced Buffer Management

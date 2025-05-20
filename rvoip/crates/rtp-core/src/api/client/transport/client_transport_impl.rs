@@ -12,6 +12,8 @@ use tracing::{debug, error, info, warn};
 use uuid;
 use bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use rand::Rng;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::frame::MediaFrameType;
@@ -67,6 +69,12 @@ pub struct DefaultMediaTransportClient {
     
     /// Media sync enabled flag (can be enabled even if config.media_sync_enabled is None)
     media_sync_enabled: Arc<AtomicBool>,
+    
+    /// SSRC demultiplexing enabled flag
+    ssrc_demultiplexing_enabled: Arc<AtomicBool>,
+    
+    /// Sequence number tracking per SSRC
+    sequence_numbers: Arc<Mutex<HashMap<u32, u16>>>,
 }
 
 impl DefaultMediaTransportClient {
@@ -115,6 +123,9 @@ impl DefaultMediaTransportClient {
             None
         };
         
+        // Initialize SSRC demultiplexing if enabled in config
+        let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
+        
         Ok(Self {
             config,
             session: Arc::new(Mutex::new(session)),
@@ -128,6 +139,8 @@ impl DefaultMediaTransportClient {
             disconnect_callbacks: Arc::new(Mutex::new(Vec::new())),
             media_sync: Arc::new(RwLock::new(media_sync)),
             media_sync_enabled: Arc::new(AtomicBool::new(media_sync_enabled)),
+            ssrc_demultiplexing_enabled: Arc::new(AtomicBool::new(ssrc_demultiplexing_enabled)),
+            sequence_numbers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -216,6 +229,76 @@ impl DefaultMediaTransportClient {
     /// Access to the RTP session (for advanced usage in examples)
     pub async fn get_session(&self) -> Result<Arc<Mutex<crate::session::RtpSession>>, MediaTransportError> {
         Ok(Arc::clone(&self.session))
+    }
+    
+    /// Pre-register an SSRC for demultiplexing
+    /// 
+    /// This method pre-creates a stream for the specified SSRC to ensure it's properly tracked
+    /// when packets are received. This is only useful when SSRC demultiplexing is enabled.
+    /// 
+    /// Returns true if the stream was created, false if it already existed or if demultiplexing
+    /// is disabled.
+    pub async fn register_ssrc(&self, ssrc: u32) -> Result<bool, MediaTransportError> {
+        // Check if SSRC demultiplexing is enabled
+        if !self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("SSRC demultiplexing is not enabled".to_string()));
+        }
+        
+        // Create stream for SSRC in the session
+        let mut session = self.session.lock().await;
+        let created = session.create_stream_for_ssrc(ssrc).await;
+        
+        if created {
+            debug!("Pre-registered SSRC {:08x} for demultiplexing", ssrc);
+            
+            // Also initialize sequence numbers
+            drop(session); // Release lock on session
+            let mut seq_map = self.sequence_numbers.lock().await;
+            if !seq_map.contains_key(&ssrc) {
+                // Start with a random sequence number for this SSRC
+                let mut rng = rand::thread_rng();
+                seq_map.insert(ssrc, rng.gen());
+                debug!("Initialized sequence number tracking for SSRC {:08x}", ssrc);
+            }
+        } else {
+            debug!("SSRC {:08x} was already registered", ssrc);
+        }
+        
+        Ok(created)
+    }
+    
+    /// Get a list of all known SSRCs
+    ///
+    /// Returns all SSRCs that have been received or manually registered.
+    pub async fn get_all_ssrcs(&self) -> Result<Vec<u32>, MediaTransportError> {
+        let session = self.session.lock().await;
+        let ssrcs = session.get_all_ssrcs().await;
+        Ok(ssrcs)
+    }
+    
+    /// Check if SSRC demultiplexing is enabled
+    pub async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst))
+    }
+    
+    /// Enable SSRC demultiplexing
+    pub async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        
+        // Set enabled flag
+        self.ssrc_demultiplexing_enabled.store(true, Ordering::SeqCst);
+        
+        debug!("Enabled SSRC demultiplexing");
+        Ok(true)
+    }
+    
+    /// Get the sequence number for a specific SSRC, if it exists in the map
+    pub async fn get_sequence_number(&self, ssrc: u32) -> Option<u16> {
+        let seq_map = self.sequence_numbers.lock().await;
+        seq_map.get(&ssrc).copied()
     }
 }
 
@@ -421,12 +504,89 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         // Convert frame data to Bytes
         let data = bytes::Bytes::from(frame.data);
         
-        // Send the frame through the session
-        if let Err(e) = session.send_packet(timestamp, data, frame.marker).await {
-            return Err(MediaTransportError::SendError(format!("Failed to send frame: {}", e)));
-        }
+        // Check for demultiplexing and log state for debugging
+        let demux_enabled = self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst);
+        let default_ssrc = session.get_ssrc();
+        let using_custom_ssrc = frame.ssrc != default_ssrc;
+        debug!("Sending frame - SSRC demux enabled: {}, default SSRC: {:08x}, frame SSRC: {:08x}", 
+               demux_enabled, default_ssrc, frame.ssrc);
         
-        Ok(())
+        // Send the frame through the session with specified SSRC if SSRC demultiplexing is enabled
+        if demux_enabled && using_custom_ssrc {
+            debug!("Using custom SSRC flow for SSRC={:08x}", frame.ssrc);
+            
+            // Get or create sequence number for this SSRC
+            let sequence_number = {
+                let mut seq_map = self.sequence_numbers.lock().await;
+                let sequence = seq_map.entry(frame.ssrc).or_insert_with(|| {
+                    // Start with a random sequence number
+                    let mut rng = rand::thread_rng();
+                    let seq = rng.gen();
+                    debug!("Created new sequence number {} for SSRC {:08x}", seq, frame.ssrc);
+                    seq
+                });
+                
+                // Get current sequence and increment for next time
+                let current_seq = *sequence;
+                *sequence = current_seq.wrapping_add(1);
+                debug!("Using sequence {} for SSRC {:08x} (next will be {})", 
+                       current_seq, frame.ssrc, current_seq.wrapping_add(1));
+                current_seq
+            };
+            
+            // Create a custom RTP packet with the frame's SSRC
+            let mut header = crate::packet::RtpHeader::new(
+                frame.payload_type,
+                sequence_number, // Use tracked sequence number
+                timestamp,
+                frame.ssrc, // Use the frame's SSRC
+            );
+            header.marker = frame.marker;
+            
+            debug!("Created RTP header - PT: {}, seq: {}, ts: {}, SSRC: {:08x}, marker: {}", 
+                   header.payload_type, header.sequence_number, header.timestamp, 
+                   header.ssrc, header.marker);
+            
+            // Get the transport to send directly
+            let transport_guard = self.transport.lock().await;
+            let transport = transport_guard.as_ref()
+                .ok_or_else(|| MediaTransportError::NotConnected)?;
+            
+            // Create RTP packet
+            let packet = crate::packet::RtpPacket::new(header, data.clone());
+            
+            debug!("Sending custom packet with SSRC={:08x}, seq={}, ts={}, payload_size={}", 
+                   frame.ssrc, sequence_number, timestamp, data.len());
+            
+            // Send the packet directly via transport
+            match transport.send_rtp(&packet, self.config.remote_address).await {
+                Ok(_) => debug!("Successfully sent packet with custom SSRC={:08x} to {}", 
+                                frame.ssrc, self.config.remote_address),
+                Err(e) => {
+                    let err = MediaTransportError::SendError(
+                        format!("Failed to send frame with custom SSRC: {}", e));
+                    error!("{}", err);
+                    return Err(err);
+                }
+            }
+            
+            Ok(())
+        } else {
+            // Using default session SSRC
+            debug!("Using default SSRC flow with session SSRC={:08x}", session.get_ssrc());
+            // Use the session's normal send method (uses session's SSRC)
+            match session.send_packet(timestamp, data, frame.marker).await {
+                Ok(_) => {
+                    debug!("Successfully sent packet with default SSRC");
+                    Ok(())
+                },
+                Err(e) => {
+                    let err = MediaTransportError::SendError(format!("Failed to send frame: {}", e));
+                    error!("{}", err);
+                    Err(err)
+                }
+            }
+        }
     }
     
     async fn receive_frame(&self, timeout: Duration) -> Result<Option<MediaFrame>, MediaTransportError> {

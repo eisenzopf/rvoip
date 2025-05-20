@@ -28,6 +28,8 @@ pub struct ClientConfig {
     pub rtcp_mux: bool,
     /// Enable media synchronization features (optional)
     pub media_sync_enabled: Option<bool>,
+    /// Enable SSRC demultiplexing for handling multiple streams
+    pub ssrc_demultiplexing_enabled: Option<bool>,
 }
 
 /// Builder for ClientConfig
@@ -52,6 +54,7 @@ impl ClientConfigBuilder {
                 ssrc: Some(rand::random()),
                 rtcp_mux: false, // Disabled by default
                 media_sync_enabled: None, // Optional, defaults to None
+                ssrc_demultiplexing_enabled: None, // Optional, defaults to None
             },
         }
     }
@@ -129,6 +132,12 @@ impl ClientConfigBuilder {
     /// Enable or disable media synchronization features
     pub fn media_sync_enabled(mut self, enable: bool) -> Self {
         self.config.media_sync_enabled = Some(enable);
+        self
+    }
+    
+    /// Enable or disable SSRC demultiplexing for handling multiple streams
+    pub fn ssrc_demultiplexing_enabled(mut self, enable: bool) -> Self {
+        self.config.ssrc_demultiplexing_enabled = Some(enable);
         self
     }
     

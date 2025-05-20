@@ -243,12 +243,16 @@ impl UdpRtpTransport {
                                            packet.header.sequence_number,
                                            packet.header.timestamp);
                                     
+                                    // Debug: Log SSRC demultiplexing info
+                                    debug!("SSRC demultiplexing: Forwarding packet with SSRC={:08x}, seq={}, payload size={} bytes",
+                                           packet.header.ssrc, packet.header.sequence_number, packet.payload.len());
+                                    
                                     // Create RTP event
                                     let event = RtpEvent::MediaReceived {
                                         payload_type: packet.header.payload_type,
                                         timestamp: packet.header.timestamp,
                                         marker: packet.header.marker,
-                                        payload: packet.payload.clone(),
+                                        payload: Bytes::copy_from_slice(&buffer[0..size]), // Use original buffer to preserve SSRC
                                         source: addr,
                                     };
                                     

@@ -33,6 +33,7 @@ use crate::api::common::frame::MediaFrameType;
 use crate::api::client::transport::RtcpStats;
 use crate::api::client::transport::VoipMetrics;
 use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
+use crate::packet::RtpPacket;
 
 /// Client connection in the server
 struct ClientConnection {
@@ -76,6 +77,8 @@ pub struct DefaultMediaTransportServer {
     event_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Server is running flag
     running: Arc<RwLock<bool>>,
+    /// SSRC demultiplexing enabled flag
+    ssrc_demultiplexing_enabled: Arc<RwLock<bool>>,
 }
 
 // Custom implementation of Clone for DefaultMediaTransportServer
@@ -92,6 +95,7 @@ impl Clone for DefaultMediaTransportServer {
             main_socket: self.main_socket.clone(),
             event_task: self.event_task.clone(),
             running: self.running.clone(),
+            ssrc_demultiplexing_enabled: self.ssrc_demultiplexing_enabled.clone(),
         }
     }
 }
@@ -101,6 +105,9 @@ impl DefaultMediaTransportServer {
     pub async fn new(config: ServerConfig) -> Result<Self, MediaTransportError> {
         // Create broadcast channel for frames from clients with capacity for 100 frames
         let (tx, _rx) = broadcast::channel(100);
+        
+        // Initialize SSRC demultiplexing if enabled in config
+        let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
         
         Ok(Self {
             config,
@@ -113,6 +120,7 @@ impl DefaultMediaTransportServer {
             main_socket: Arc::new(RwLock::new(None)),
             event_task: Arc::new(Mutex::new(None)),
             running: Arc::new(RwLock::new(false)),
+            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(ssrc_demultiplexing_enabled)),
         })
     }
     
@@ -193,33 +201,39 @@ impl DefaultMediaTransportServer {
             drop(session);
             
             while let Ok(event) = event_rx.recv().await {
-                if let RtpSessionEvent::PacketReceived(packet) = event {
-                    // Determine frame type from payload type
-                    let frame_type = if packet.header.payload_type <= 34 {
-                        crate::api::common::frame::MediaFrameType::Audio
-                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                        crate::api::common::frame::MediaFrameType::Video
-                    } else {
-                        crate::api::common::frame::MediaFrameType::Data
-                    };
-                    
-                    // Convert to MediaFrame
-                    let frame = MediaFrame {
-                        frame_type,
-                        data: packet.payload.to_vec(),
-                        timestamp: packet.header.timestamp,
-                        sequence: packet.header.sequence_number,
-                        marker: packet.header.marker,
-                        payload_type: packet.header.payload_type,
-                        ssrc: packet.header.ssrc,
-                    };
-                    
-                    // Forward to server via broadcast channel
-                    // We can ignore send errors since they just mean no receivers are listening
-                    if let Err(e) = frame_sender.send((client_id_clone.clone(), frame)) {
-                        // Only log this as a warning, not an error - it's expected if no subscribers
-                        debug!("No receivers for frame from client {}: {}", client_id_clone, e);
-                    }
+                match event {
+                    RtpSessionEvent::PacketReceived(packet) => {
+                        // Determine frame type from payload type
+                        let frame_type = if packet.header.payload_type <= 34 {
+                            crate::api::common::frame::MediaFrameType::Audio
+                        } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                            crate::api::common::frame::MediaFrameType::Video
+                        } else {
+                            crate::api::common::frame::MediaFrameType::Data
+                        };
+                        
+                        // Convert to MediaFrame
+                        let frame = MediaFrame {
+                            frame_type,
+                            data: packet.payload.to_vec(),
+                            timestamp: packet.header.timestamp,
+                            sequence: packet.header.sequence_number,
+                            marker: packet.header.marker,
+                            payload_type: packet.header.payload_type,
+                            ssrc: packet.header.ssrc,
+                        };
+                        
+                        // Forward to server via broadcast channel
+                        // We can ignore send errors since they just mean no receivers are listening
+                        if let Err(e) = frame_sender.send((client_id_clone.clone(), frame)) {
+                            // Only log this as a warning, not an error - it's expected if no subscribers
+                            debug!("No receivers for frame from client {}: {}", client_id_clone, e);
+                        }
+                    },
+                    RtpSessionEvent::NewStreamDetected { ssrc } => {
+                        debug!("New stream with SSRC={:08x} detected for client {}", ssrc, client_id_clone);
+                    },
+                    _ => {} // Handle other events if needed
                 }
             }
         });
@@ -256,6 +270,79 @@ impl DefaultMediaTransportServer {
         }
         
         Ok(client_id)
+    }
+    
+    /// Pre-register an SSRC for a specific client
+    /// 
+    /// Returns true if the stream was created, false if it already existed or if demultiplexing
+    /// is disabled.
+    pub async fn register_client_ssrc(&self, client_id: &str, ssrc: u32) -> Result<bool, MediaTransportError> {
+        // Check if SSRC demultiplexing is enabled
+        if !*self.ssrc_demultiplexing_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("SSRC demultiplexing is not enabled".to_string()));
+        }
+        
+        // Get the client
+        let clients = self.clients.read().await;
+        let client = clients.get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        
+        // Check if client is connected
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(client_id.to_string()));
+        }
+        
+        // Create stream for SSRC in the session
+        let mut session = client.session.lock().await;
+        let created = session.create_stream_for_ssrc(ssrc).await;
+        
+        if created {
+            debug!("Pre-registered SSRC {:08x} for client {}", ssrc, client_id);
+        } else {
+            debug!("SSRC {:08x} was already registered for client {}", ssrc, client_id);
+        }
+        
+        Ok(created)
+    }
+    
+    /// Get a list of all known SSRCs for a client
+    ///
+    /// Returns all SSRCs that have been received or manually registered for the specified client.
+    pub async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError> {
+        // Get the client
+        let clients = self.clients.read().await;
+        let client = clients.get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        
+        // Check if client is connected
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(client_id.to_string()));
+        }
+        
+        // Get all SSRCs for the client
+        let session = client.session.lock().await;
+        let ssrcs = session.get_all_ssrcs().await;
+        
+        Ok(ssrcs)
+    }
+    
+    /// Check if SSRC demultiplexing is enabled
+    pub async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(*self.ssrc_demultiplexing_enabled.read().await)
+    }
+    
+    /// Enable SSRC demultiplexing
+    pub async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if *self.ssrc_demultiplexing_enabled.read().await {
+            return Ok(true);
+        }
+        
+        // Set enabled flag
+        *self.ssrc_demultiplexing_enabled.write().await = true;
+        
+        debug!("Enabled SSRC demultiplexing on server");
+        Ok(true)
     }
     
     /// Initialize security context if needed
@@ -499,6 +586,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let mut transport_events = transport_arc.subscribe();
         let clients_clone = self.clients.clone();
         let sender_clone = self.frame_sender.clone();
+        let ssrc_demux_enabled_clone = self.ssrc_demultiplexing_enabled.clone();
         
         let task = tokio::spawn(async move {
             debug!("Started transport event task");
@@ -506,35 +594,81 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 match event {
                     crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker } => {
                         // Debug output to help diagnose issues
-                        debug!("RtpEvent::MediaReceived from {}", source);
+                        debug!("RtpEvent::MediaReceived from {} - payload size={}", source, payload.len());
                         
-                        // Direct handling of received frames:
-                        // 1. Convert to MediaFrame
-                        let frame_type = if payload_type <= 34 {
-                            crate::api::common::frame::MediaFrameType::Audio
-                        } else if payload_type >= 35 && payload_type <= 50 {
-                            crate::api::common::frame::MediaFrameType::Video
-                        } else {
-                            crate::api::common::frame::MediaFrameType::Data
+                        // Parse the RTP packet to extract the SSRC and other header information
+                        debug!("Attempting to parse RTP packet from payload...");
+                        let packet_result = crate::packet::RtpPacket::parse(&payload);
+                        
+                        // Process the parsed packet or create a frame with available info
+                        let (frame, ssrc) = match packet_result {
+                            Ok(packet) => {
+                                // Successfully parsed the packet, use its header information
+                                debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
+                                       packet.header.ssrc, packet.header.sequence_number, 
+                                       packet.header.timestamp, packet.header.payload_type);
+                                
+                                let frame = crate::api::common::frame::MediaFrame {
+                                    frame_type: if packet.header.payload_type <= 34 {
+                                        crate::api::common::frame::MediaFrameType::Audio
+                                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                                        crate::api::common::frame::MediaFrameType::Video
+                                    } else {
+                                        crate::api::common::frame::MediaFrameType::Data
+                                    },
+                                    data: packet.payload.to_vec(),
+                                    timestamp: packet.header.timestamp,
+                                    sequence: packet.header.sequence_number,
+                                    marker: packet.header.marker,
+                                    payload_type: packet.header.payload_type,
+                                    ssrc: packet.header.ssrc,
+                                };
+                                
+                                // Log payload data if it's text (helps with debugging)
+                                if let Ok(text) = std::str::from_utf8(&packet.payload) {
+                                    debug!("Packet payload (text): {}", text);
+                                }
+                                
+                                (frame, packet.header.ssrc)
+                            },
+                            Err(e) => {
+                                // If we couldn't parse the packet, create a MediaFrame with the available info
+                                debug!("Couldn't parse RTP packet, using available info: {}", e);
+                                
+                                // Attempt to dump the first few bytes for debugging
+                                if payload.len() >= 12 {
+                                    let mut header_bytes = [0u8; 12];
+                                    header_bytes.copy_from_slice(&payload[0..12]);
+                                    debug!("First 12 bytes of payload: {:?}", header_bytes);
+                                }
+                                
+                                // Generate a random sequence number and SSRC as fallback
+                                let sequence_number = rand::random::<u16>();
+                                let ssrc = rand::random::<u32>();
+                                
+                                let frame = crate::api::common::frame::MediaFrame {
+                                    frame_type: if payload_type <= 34 {
+                                        crate::api::common::frame::MediaFrameType::Audio
+                                    } else if payload_type >= 35 && payload_type <= 50 {
+                                        crate::api::common::frame::MediaFrameType::Video
+                                    } else {
+                                        crate::api::common::frame::MediaFrameType::Data
+                                    },
+                                    data: payload.to_vec(),
+                                    timestamp,
+                                    sequence: sequence_number,
+                                    marker,
+                                    payload_type,
+                                    ssrc,
+                                };
+                                (frame, ssrc)
+                            }
                         };
                         
-                        // Generate a random sequence number since it's not provided in the event
-                        // In a production scenario, we would track these per source
-                        let sequence_number = rand::random::<u16>();
-                        
-                        // Use a random SSRC if not available from the event
-                        // In a production scenario, we would track these per source
-                        let ssrc = rand::random::<u32>();
-                        
-                        let frame = crate::api::common::frame::MediaFrame {
-                            frame_type,
-                            data: payload.to_vec(),
-                            timestamp,
-                            sequence: sequence_number,
-                            marker,
-                            payload_type,
-                            ssrc,
-                        };
+                        // Check if SSRC demultiplexing is enabled
+                        let ssrc_demux_enabled = *ssrc_demux_enabled_clone.read().await;
+                        debug!("SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}", 
+                               ssrc_demux_enabled, ssrc);
                         
                         // Check if we already have a client for this address
                         let clients = clients_clone.read().await;
@@ -551,19 +685,19 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         };
                         drop(clients);
                         
-                        // 2. Forward directly to broadcast channel
+                        // Forward directly to broadcast channel
                         // This ensures frames are available immediately via the receive_frame method
                         match sender_clone.send((client_id.clone(), frame)) {
                             Ok(receivers) => {
-                                debug!("Directly forwarded frame to {} receivers for client {} (seq={})", 
-                                        receivers, client_id, sequence_number);
+                                debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})", 
+                                        receivers, client_id, ssrc);
                             },
                             Err(e) => {
                                 debug!("No receivers for direct frame forwarding: {}", e);
                             }
                         }
                         
-                        // 3. Handle client creation if new
+                        // Handle client creation if new
                         if !client_exists {
                             // New client - handle it
                             debug!("New client detected at {}, handling...", source);
@@ -974,8 +1108,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     async fn get_client_stats(&self, client_id: &str) -> Result<MediaStats, MediaTransportError> {
         // Find client
         let clients = self.clients.read().await;
-        let client = clients.get(client_id).ok_or_else(|| 
-            MediaTransportError::Transport(format!("Client not found: {}", client_id)))?;
+        let client = clients.get(client_id)
+            .ok_or_else(|| MediaTransportError::Transport(format!("Client not found: {}", client_id)))?;
         
         // Get stats
         let session = client.session.lock().await;
