@@ -119,6 +119,33 @@ pub trait MediaTransportClient: Send + Sync {
     /// 5% of the session bandwidth, but this can be adjusted for more or less
     /// frequent reporting.
     async fn set_rtcp_interval(&self, interval: Duration) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Application-Defined (APP) packet
+    ///
+    /// This sends an RTCP APP packet with the specified name and application data.
+    /// APP packets are used for application-specific purposes and allow
+    /// custom data to be exchanged between endpoints.
+    ///
+    /// - `name`: A four-character ASCII name to identify the application
+    /// - `data`: The application-specific data to send
+    async fn send_rtcp_app(&self, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Goodbye (BYE) packet
+    ///
+    /// This sends an RTCP BYE packet with an optional reason for leaving.
+    /// BYE packets are used to indicate that a source is no longer active.
+    ///
+    /// - `reason`: An optional reason string for leaving
+    async fn send_rtcp_bye(&self, reason: Option<String>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Extended Report (XR) packet with VoIP metrics
+    ///
+    /// This sends an RTCP XR packet with VoIP metrics for the specified SSRC.
+    /// XR packets are used to report extended statistics beyond what is
+    /// available in standard Sender/Receiver Reports.
+    ///
+    /// - `metrics`: The VoIP metrics to include in the XR packet
+    async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError>;
 }
 
 // Re-export the implementation
@@ -150,4 +177,62 @@ pub struct RtcpStats {
     
     /// Cumulative number of packets lost
     pub cumulative_packets_lost: u32,
+}
+
+/// VoIP Metrics for RTCP XR
+#[derive(Debug, Clone)]
+pub struct VoipMetrics {
+    /// SSRC of the stream this metrics belongs to
+    pub ssrc: u32,
+    
+    /// Packet loss rate in percent (0-255)
+    pub loss_rate: u8,
+    
+    /// Packet discard rate in percent (0-255)
+    pub discard_rate: u8,
+    
+    /// Burst density in percent (0-255)
+    pub burst_density: u8,
+    
+    /// Gap density in percent (0-255)
+    pub gap_density: u8,
+    
+    /// Burst duration in milliseconds
+    pub burst_duration: u16,
+    
+    /// Gap duration in milliseconds
+    pub gap_duration: u16,
+    
+    /// Round trip delay in milliseconds
+    pub round_trip_delay: u16,
+    
+    /// End system delay in milliseconds
+    pub end_system_delay: u16,
+    
+    /// Signal level in dBm (-127 to 0)
+    pub signal_level: i8,
+    
+    /// Noise level in dBm (-127 to 0)
+    pub noise_level: i8,
+    
+    /// Residual Echo Return Loss in dB (0-255)
+    pub rerl: u8,
+    
+    /// R-factor (listening quality)
+    pub r_factor: u8,
+    
+    /// MOS-LQ (listening quality MOS, 10-50, representing 1.0 to 5.0)
+    pub mos_lq: u8,
+    
+    /// MOS-CQ (conversational quality MOS, 10-50, representing 1.0 to 5.0)
+    pub mos_cq: u8,
+    
+    /// Jitter buffer nominal delay in milliseconds
+    pub jb_nominal: u16,
+    
+    /// Jitter buffer maximum delay in milliseconds
+    pub jb_maximum: u16,
+    
+    /// Jitter buffer absolute maximum delay in milliseconds
+    pub jb_abs_max: u16,
 } 

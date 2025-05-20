@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use crate::api::common::stats::QualityLevel;
 use std::time::Duration;
+use crate::api::client::transport::VoipMetrics;
 
 /// Media transport event types for notifications
 #[derive(Debug, Clone)]
@@ -56,6 +57,30 @@ pub enum MediaTransportEvent {
         
         /// Round-trip time if available
         round_trip_time: Option<Duration>,
+    },
+    /// RTCP Application-Defined (APP) packet received
+    RtcpAppReceived {
+        /// SSRC of the sender
+        ssrc: u32,
+        
+        /// Name of the application (4 ASCII characters)
+        name: String,
+        
+        /// Application-specific data
+        data: Vec<u8>,
+    },
+    /// RTCP Goodbye (BYE) packet received
+    RtcpByeReceived {
+        /// SSRC that is leaving
+        ssrc: u32,
+        
+        /// Optional reason for leaving
+        reason: Option<String>,
+    },
+    /// RTCP Extended Report (XR) with VoIP metrics received
+    RtcpXrVoipMetrics {
+        /// The VoIP metrics included in the XR packet
+        metrics: VoipMetrics,
     },
 }
 

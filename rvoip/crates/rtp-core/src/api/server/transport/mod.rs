@@ -14,6 +14,7 @@ use crate::api::common::config::SecurityInfo;
 use crate::api::common::stats::MediaStats;
 use crate::api::server::config::ServerConfig;
 use crate::api::client::transport::RtcpStats;
+use crate::api::client::transport::VoipMetrics;
 
 pub mod server_transport_impl;
 
@@ -141,4 +142,62 @@ pub trait MediaTransportServer: Send + Sync {
     /// 5% of the session bandwidth, but this can be adjusted for more or less
     /// frequent reporting.
     async fn set_rtcp_interval(&self, interval: Duration) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Application-Defined (APP) packet to all clients
+    ///
+    /// This sends an RTCP APP packet with the specified name and application data
+    /// to all connected clients. APP packets are used for application-specific
+    /// purposes and allow custom data to be exchanged between endpoints.
+    ///
+    /// - `name`: A four-character ASCII name to identify the application
+    /// - `data`: The application-specific data to send
+    async fn send_rtcp_app(&self, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Application-Defined (APP) packet to a specific client
+    ///
+    /// This sends an RTCP APP packet with the specified name and application data
+    /// to the specified client. APP packets are used for application-specific
+    /// purposes and allow custom data to be exchanged between endpoints.
+    ///
+    /// - `client_id`: The ID of the client to send the packet to
+    /// - `name`: A four-character ASCII name to identify the application
+    /// - `data`: The application-specific data to send
+    async fn send_rtcp_app_to_client(&self, client_id: &str, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Goodbye (BYE) packet to all clients
+    ///
+    /// This sends an RTCP BYE packet with an optional reason for leaving.
+    /// BYE packets are used to indicate that a source is no longer active.
+    ///
+    /// - `reason`: An optional reason string for leaving
+    async fn send_rtcp_bye(&self, reason: Option<String>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Goodbye (BYE) packet to a specific client
+    ///
+    /// This sends an RTCP BYE packet with an optional reason for leaving
+    /// to the specified client. BYE packets are used to indicate that a
+    /// source is no longer active.
+    ///
+    /// - `client_id`: The ID of the client to send the packet to
+    /// - `reason`: An optional reason string for leaving
+    async fn send_rtcp_bye_to_client(&self, client_id: &str, reason: Option<String>) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Extended Report (XR) packet with VoIP metrics to all clients
+    ///
+    /// This sends an RTCP XR packet with VoIP metrics for the specified SSRC
+    /// to all connected clients. XR packets are used to report extended
+    /// statistics beyond what is available in standard Sender/Receiver Reports.
+    ///
+    /// - `metrics`: The VoIP metrics to include in the XR packet
+    async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Extended Report (XR) packet with VoIP metrics to a specific client
+    ///
+    /// This sends an RTCP XR packet with VoIP metrics for the specified SSRC
+    /// to the specified client. XR packets are used to report extended
+    /// statistics beyond what is available in standard Sender/Receiver Reports.
+    ///
+    /// - `client_id`: The ID of the client to send the packet to
+    /// - `metrics`: The VoIP metrics to include in the XR packet
+    async fn send_rtcp_xr_voip_metrics_to_client(&self, client_id: &str, metrics: VoipMetrics) -> Result<(), MediaTransportError>;
 } 

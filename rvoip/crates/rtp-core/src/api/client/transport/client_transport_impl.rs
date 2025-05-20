@@ -23,10 +23,12 @@ use crate::api::common::stats::{StreamStats, Direction, QualityLevel};
 use crate::api::client::config::ClientConfig;
 use crate::api::client::transport::MediaTransportClient;
 use crate::api::client::transport::RtcpStats;
+use crate::api::client::transport::VoipMetrics;
 use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
 use crate::transport::{RtpTransport, UdpRtpTransport};
 use crate::api::server::security::SocketHandle;
+use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
 
 /// Default implementation of the client-side media transport
 pub struct DefaultMediaTransportClient {
@@ -588,6 +590,152 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         
         // Set bandwidth on the session
         session.set_bandwidth(bits_per_second as u32);
+        
+        Ok(())
+    }
+    
+    async fn send_rtcp_app(&self, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError> {
+        // Check if connected
+        if !self.is_connected().await? {
+            return Err(MediaTransportError::NotConnected);
+        }
+        
+        // Validate name (must be exactly 4 ASCII characters)
+        if name.len() != 4 || !name.chars().all(|c| c.is_ascii()) {
+            return Err(MediaTransportError::ConfigError(
+                "APP name must be exactly 4 ASCII characters".to_string()
+            ));
+        }
+        
+        // Get session for SSRC
+        let session = self.session.lock().await;
+        let ssrc = session.get_ssrc();
+        
+        // Create APP packet
+        let mut app_packet = crate::RtcpApplicationDefined::new_with_name(ssrc, name)
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to create APP packet: {}", e)))?;
+        
+        // Set data - clone it before using
+        let data_clone = data.clone();
+        app_packet.set_data(bytes::Bytes::from(data));
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::RtcpPacket::ApplicationDefined(app_packet);
+        
+        // Serialize
+        let rtcp_data = rtcp_packet.serialize()
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to serialize APP packet: {}", e)))?;
+        
+        // Get transport
+        let transport_guard = self.transport.lock().await;
+        let transport = transport_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::NotConnected)?;
+        
+        // Send to remote address
+        transport.send_rtcp_bytes(&rtcp_data, self.config.remote_address).await
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to send APP packet: {}", e)))?;
+        
+        debug!("Sent RTCP APP packet: name={}, data_len={}", name, data_clone.len());
+        
+        Ok(())
+    }
+    
+    async fn send_rtcp_bye(&self, reason: Option<String>) -> Result<(), MediaTransportError> {
+        // Check if connected
+        if !self.is_connected().await? {
+            return Err(MediaTransportError::NotConnected);
+        }
+        
+        // Get session
+        let session = self.session.lock().await;
+        
+        // Create BYE packet with our SSRC - clone reason before moving
+        let reason_clone = reason.clone();
+        let bye_packet = crate::RtcpGoodbye {
+            sources: vec![session.get_ssrc()],
+            reason,
+        };
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::RtcpPacket::Goodbye(bye_packet);
+        
+        // Serialize
+        let rtcp_data = rtcp_packet.serialize()
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to serialize BYE packet: {}", e)))?;
+        
+        // Get transport
+        let transport_guard = self.transport.lock().await;
+        let transport = transport_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::NotConnected)?;
+        
+        // Send to remote address
+        transport.send_rtcp_bytes(&rtcp_data, self.config.remote_address).await
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to send BYE packet: {}", e)))?;
+        
+        debug!("Sent RTCP BYE packet: reason={:?}", reason_clone);
+        
+        Ok(())
+    }
+    
+    async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError> {
+        // Check if connected
+        if !self.is_connected().await? {
+            return Err(MediaTransportError::NotConnected);
+        }
+        
+        // Get session for SSRC
+        let session = self.session.lock().await;
+        let ssrc = session.get_ssrc();
+        
+        // Create XR packet
+        let mut xr_packet = crate::RtcpExtendedReport::new(ssrc);
+        
+        // Convert our metrics to VoipMetricsBlock
+        let voip_metrics_block = crate::VoipMetricsBlock {
+            ssrc: metrics.ssrc,
+            loss_rate: metrics.loss_rate,
+            discard_rate: metrics.discard_rate,
+            burst_density: metrics.burst_density,
+            gap_density: metrics.gap_density,
+            burst_duration: metrics.burst_duration,
+            gap_duration: metrics.gap_duration,
+            round_trip_delay: metrics.round_trip_delay,
+            end_system_delay: metrics.end_system_delay,
+            signal_level: metrics.signal_level as u8, // Convert i8 to u8
+            noise_level: metrics.noise_level as u8,   // Convert i8 to u8
+            rerl: metrics.rerl,
+            r_factor: metrics.r_factor,
+            ext_r_factor: 0, // Not used in our API
+            mos_lq: metrics.mos_lq,
+            mos_cq: metrics.mos_cq,
+            rx_config: 0, // Default configuration
+            jb_nominal: metrics.jb_nominal,
+            jb_maximum: metrics.jb_maximum,
+            jb_abs_max: metrics.jb_abs_max,
+            gmin: 16, // Default value for minimum gap threshold
+        };
+        
+        // Add the VoIP metrics block to the XR packet
+        xr_packet.add_block(crate::RtcpXrBlock::VoipMetrics(voip_metrics_block));
+        
+        // Create RTCP packet
+        let rtcp_packet = crate::RtcpPacket::ExtendedReport(xr_packet);
+        
+        // Serialize
+        let rtcp_data = rtcp_packet.serialize()
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to serialize XR packet: {}", e)))?;
+        
+        // Get transport
+        let transport_guard = self.transport.lock().await;
+        let transport = transport_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::NotConnected)?;
+        
+        // Send to remote address
+        transport.send_rtcp_bytes(&rtcp_data, self.config.remote_address).await
+            .map_err(|e| MediaTransportError::RtcpError(format!("Failed to send XR packet: {}", e)))?;
+        
+        debug!("Sent RTCP XR VoIP metrics: loss_rate={}%, r_factor={}", 
+               metrics.loss_rate, metrics.r_factor);
         
         Ok(())
     }
