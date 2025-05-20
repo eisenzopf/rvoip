@@ -24,6 +24,8 @@ pub struct ClientConfig {
     pub enable_jitter_buffer: bool,
     /// Local SSRC
     pub ssrc: Option<u32>,
+    /// Enable RTCP multiplexing (RFC 5761)
+    pub rtcp_mux: bool,
 }
 
 /// Builder for ClientConfig
@@ -46,6 +48,7 @@ impl ClientConfigBuilder {
                 jitter_max_packet_age_ms: 500,
                 enable_jitter_buffer: true,
                 ssrc: Some(rand::random()),
+                rtcp_mux: false, // Disabled by default
             },
         }
     }
@@ -54,6 +57,7 @@ impl ClientConfigBuilder {
     pub fn webrtc() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::DtlsSrtp;
+        builder.config.rtcp_mux = true; // WebRTC typically uses RTCP-MUX
         builder
     }
     
@@ -61,6 +65,7 @@ impl ClientConfigBuilder {
     pub fn sip() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode = crate::api::common::config::SecurityMode::Srtp;
+        builder.config.rtcp_mux = false; // Traditional SIP doesn't use RTCP-MUX by default
         builder
     }
     
@@ -109,6 +114,12 @@ impl ClientConfigBuilder {
     /// Set the SSRC
     pub fn ssrc(mut self, ssrc: u32) -> Self {
         self.config.ssrc = Some(ssrc);
+        self
+    }
+    
+    /// Enable or disable RTCP multiplexing (RFC 5761)
+    pub fn rtcp_mux(mut self, enable: bool) -> Self {
+        self.config.rtcp_mux = enable;
         self
     }
     

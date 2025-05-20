@@ -452,7 +452,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             local_rtp_addr: self.config.local_address,
             local_rtcp_addr: None,
             symmetric_rtp: true,
-            rtcp_mux: true,
+            rtcp_mux: self.config.rtcp_mux,
             session_id: Some(format!("media-server-main-{}", Uuid::new_v4())),
             use_port_allocator: false, // Changed from true to false to use exact specified port
         };

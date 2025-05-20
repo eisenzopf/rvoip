@@ -330,10 +330,10 @@ This separation will resolve the current DTLS handshake issues by eliminating ro
 ## Next Priorities (Updated)
 
 ### CRITICAL for media-core integration
-- [ ] Separate client and server API layers
-  - [ ] Create dedicated MediaTransportClient trait
-  - [ ] Create dedicated MediaTransportServer trait 
-  - [ ] Move shared types to common module
+- [x] Separate client and server API layers
+  - [x] Create dedicated MediaTransportClient trait
+  - [x] Create dedicated MediaTransportServer trait 
+  - [x] Move shared types to common module
   - [ ] Update examples to use new separation
 - [x] Fix server transport's receive_frame() method to use broadcast channel pattern instead of MPSC
   - [x] Replace implementation that created a new empty channel
@@ -347,6 +347,47 @@ This separation will resolve the current DTLS handshake issues by eliminating ro
   - [x] Implement method for client API
   - [x] Implement method for server API 
   - [x] Create port_allocation_demo example
+
+### API Features Pending Integration
+The following features are implemented in the underlying library but not yet fully exposed in the client/server APIs:
+
+#### Advanced RTP/RTCP Features
+- [x] RTCP-MUX configuration option (see `rtcp_mux.rs` example)
+- [ ] RTCP Sender/Receiver Reports API (see `rtcp_reports.rs` example)
+- [ ] RTCP APP/BYE/XR Packets support (see `rtcp_app.rs`, `rtcp_bye.rs`, `rtcp_xr_example.rs`)
+- [ ] RTP Header Extensions support (see `header_extensions.rs` example)
+- [ ] Media Synchronization API (see `media_sync.rs` example)
+- [ ] SSRC Demultiplexing configuration (see `ssrc_demultiplexing.rs` example)
+- [ ] CSRC Management for conferencing scenarios (see `csrc_management.rs` example)
+
+#### Advanced Buffer Management
+- [ ] High-performance buffer tuning options (see `high_performance_buffers.rs` example)
+- [ ] Transmit buffer configuration in APIs
+- [ ] Memory pooling configuration
+- [ ] Priority-based packet handling options
+
+#### Advanced Security
+- [ ] More detailed DTLS configuration options (see `dtls_test.rs`, `direct_dtls_media_streaming.rs`)
+- [ ] SRTP Profile configuration (see `srtp_crypto.rs`, `srtp_protected.rs`)
+- [ ] Security key rotation options
+- [ ] Custom certificate generation options (see `generate_certificates.rs`)
+
+#### Codec-specific Features
+- [ ] Advanced payload format configuration (see `payload_format.rs`)
+- [ ] G.722 special timestamp handling configuration (see `g722_payload.rs`)
+- [ ] Opus bandwidth/channel configuration (see `opus_payload.rs`)
+- [ ] VP8/VP9 layer configuration (see `video_payload.rs`)
+
+#### Platform/Network Features
+- [ ] Socket validation strategies configuration (see `socket_validation.rs`)
+- [ ] Advanced port allocation strategies (see `port_allocation.rs`)
+- [ ] Network quality metrics API
+- [ ] RTCP rate limiting configuration (see `rtcp_rate_limiting.rs`)
+
+#### Miscellaneous
+- [ ] Create comprehensive examples using the client/server APIs
+- [ ] Update existing examples to use the new API where appropriate
+- [ ] Improve API documentation with code samples for each feature
 
 ### Important for production use
 - [ ] Enhance DTLS for full WebRTC compliance

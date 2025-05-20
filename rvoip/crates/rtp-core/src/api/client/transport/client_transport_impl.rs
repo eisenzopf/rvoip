@@ -206,7 +206,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             local_rtp_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             local_rtcp_addr: None,
             symmetric_rtp: true,
-            rtcp_mux: true,
+            rtcp_mux: self.config.rtcp_mux,
             session_id: Some(format!("client-{}", uuid::Uuid::new_v4())),
             use_port_allocator: true,
         };
