@@ -188,6 +188,15 @@ The current implementation has significant challenges with DTLS-SRTP handshakes 
 
 This separation will resolve the current DTLS handshake issues by eliminating role confusion and allowing each implementation to focus on its specific responsibilities in the security negotiation process.
 
+### Current DTLS Implementation Status
+
+- [x] Implemented core low-level DTLS functionality that works correctly in direct usage
+- [ ] Successfully integrated DTLS into the high-level API layer
+  - [x] Created direct_dtls_media_streaming.rs example demonstrating successful direct DTLS usage
+  - [ ] Current API integration (ClientSecurityImpl/ServerSecurityImpl) has issues with handshake completion
+  - [ ] Need to completely refactor security API to properly handle DTLS handshake states
+  - [ ] Current workaround: Use the low-level DTLS connection directly as demonstrated in direct_dtls_media_streaming.rs
+
 ### Media Transport API (api/transport.rs)
 - [ ] Create `MediaTransportConfig` with builder pattern
 - [ ] Implement `MediaTransportSession` as main integration point
