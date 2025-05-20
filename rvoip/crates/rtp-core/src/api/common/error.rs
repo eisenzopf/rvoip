@@ -50,6 +50,22 @@ pub enum MediaTransportError {
     /// Timeout error
     #[error("Timeout error: {0}")]
     Timeout(String),
+    
+    /// RTCP error
+    #[error("RTCP error: {0}")]
+    RtcpError(String),
+    
+    /// No clients connected
+    #[error("No clients connected")]
+    NoClients,
+    
+    /// Client not found
+    #[error("Client not found: {0}")]
+    ClientNotFound(String),
+    
+    /// Client not connected
+    #[error("Client not connected: {0}")]
+    ClientNotConnected(String),
 }
 
 /// Error related to security operations

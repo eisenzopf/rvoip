@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use crate::api::common::stats::QualityLevel;
+use std::time::Duration;
 
 /// Media transport event types for notifications
 #[derive(Debug, Clone)]
@@ -44,6 +45,17 @@ pub enum MediaTransportEvent {
     NewStream {
         /// Stream SSRC
         ssrc: u32,
+    },
+    /// RTCP Report with quality statistics
+    RtcpReport {
+        /// Jitter in milliseconds
+        jitter: f64,
+        
+        /// Packet loss ratio (0.0 - 1.0)
+        packet_loss: f64,
+        
+        /// Round-trip time if available
+        round_trip_time: Option<Duration>,
     },
 }
 

@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
+use std::time::Duration;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
@@ -12,6 +13,7 @@ use crate::api::common::events::MediaEventCallback;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::stats::MediaStats;
 use crate::api::server::config::ServerConfig;
+use crate::api::client::transport::RtcpStats;
 
 pub mod server_transport_impl;
 
@@ -94,4 +96,49 @@ pub trait MediaTransportServer: Send + Sync {
     
     /// Get security information for SDP exchange
     async fn get_security_info(&self) -> Result<SecurityInfo, MediaTransportError>;
+    
+    /// Send an RTCP Receiver Report to all clients
+    ///
+    /// This sends a Receiver Report RTCP packet to all connected clients. This can be
+    /// useful to force an immediate quality report instead of waiting for the
+    /// automatic interval-based reports.
+    async fn send_rtcp_receiver_report(&self) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Sender Report to all clients
+    ///
+    /// This sends a Sender Report RTCP packet to all connected clients. This can be
+    /// useful to force an immediate quality report instead of waiting for the
+    /// automatic interval-based reports.
+    async fn send_rtcp_sender_report(&self) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Receiver Report to a specific client
+    ///
+    /// This sends a Receiver Report RTCP packet to the specified client. This can be
+    /// useful to force an immediate quality report for a specific client.
+    async fn send_rtcp_receiver_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError>;
+    
+    /// Send an RTCP Sender Report to a specific client
+    ///
+    /// This sends a Sender Report RTCP packet to the specified client. This can be
+    /// useful to force an immediate quality report for a specific client.
+    async fn send_rtcp_sender_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError>;
+    
+    /// Get detailed RTCP statistics for all clients
+    ///
+    /// This returns detailed quality metrics gathered from RTCP reports
+    /// including jitter, packet loss, and round-trip time, aggregated across all clients.
+    async fn get_rtcp_stats(&self) -> Result<RtcpStats, MediaTransportError>;
+    
+    /// Get detailed RTCP statistics for a specific client
+    ///
+    /// This returns detailed quality metrics gathered from RTCP reports
+    /// including jitter, packet loss, and round-trip time for a specific client.
+    async fn get_client_rtcp_stats(&self, client_id: &str) -> Result<RtcpStats, MediaTransportError>;
+    
+    /// Set the RTCP report interval
+    ///
+    /// This sets how frequently RTCP reports are sent. The default is usually
+    /// 5% of the session bandwidth, but this can be adjusted for more or less
+    /// frequent reporting.
+    async fn set_rtcp_interval(&self, interval: Duration) -> Result<(), MediaTransportError>;
 } 
