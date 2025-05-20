@@ -358,7 +358,7 @@ The following features are implemented in the underlying library but not yet ful
 - [ ] RTP Header Extensions support (see `header_extensions.rs` example)
 - [x] Media Synchronization API (see `media_sync.rs` example)
 - [x] SSRC Demultiplexing configuration (see `ssrc_demultiplexing.rs` example)
-- [ ] CSRC Management for conferencing scenarios (see `csrc_management.rs` example)
+- [x] CSRC Management for conferencing scenarios (see `csrc_management.rs` example)
 
 #### Advanced Buffer Management
 - [ ] High-performance buffer tuning options (see `high_performance_buffers.rs` example)

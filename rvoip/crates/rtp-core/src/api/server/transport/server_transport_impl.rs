@@ -34,6 +34,7 @@ use crate::api::client::transport::RtcpStats;
 use crate::api::client::transport::VoipMetrics;
 use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
 use crate::packet::RtpPacket;
+use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
 
 /// Client connection in the server
 struct ClientConnection {
@@ -79,6 +80,10 @@ pub struct DefaultMediaTransportServer {
     running: Arc<RwLock<bool>>,
     /// SSRC demultiplexing enabled flag
     ssrc_demultiplexing_enabled: Arc<RwLock<bool>>,
+    /// CSRC management enabled flag
+    csrc_management_enabled: Arc<RwLock<bool>>,
+    /// CSRC manager for handling contributing source IDs
+    csrc_manager: Arc<Mutex<CsrcManager>>,
 }
 
 // Custom implementation of Clone for DefaultMediaTransportServer
@@ -96,6 +101,8 @@ impl Clone for DefaultMediaTransportServer {
             event_task: self.event_task.clone(),
             running: self.running.clone(),
             ssrc_demultiplexing_enabled: self.ssrc_demultiplexing_enabled.clone(),
+            csrc_management_enabled: self.csrc_management_enabled.clone(),
+            csrc_manager: self.csrc_manager.clone(),
         }
     }
 }
@@ -109,6 +116,9 @@ impl DefaultMediaTransportServer {
         // Initialize SSRC demultiplexing if enabled in config
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
         
+        // Initialize CSRC management if enabled in config
+        let csrc_management_enabled = config.csrc_management_enabled.unwrap_or(false);
+        
         Ok(Self {
             config,
             security_context: Arc::new(RwLock::new(None)),
@@ -121,6 +131,8 @@ impl DefaultMediaTransportServer {
             event_task: Arc::new(Mutex::new(None)),
             running: Arc::new(RwLock::new(false)),
             ssrc_demultiplexing_enabled: Arc::new(RwLock::new(ssrc_demultiplexing_enabled)),
+            csrc_management_enabled: Arc::new(RwLock::new(csrc_management_enabled)),
+            csrc_manager: Arc::new(Mutex::new(CsrcManager::new())),
         })
     }
     
@@ -212,16 +224,17 @@ impl DefaultMediaTransportServer {
                             crate::api::common::frame::MediaFrameType::Data
                         };
                         
-                        // Convert to MediaFrame
-                        let frame = MediaFrame {
-                            frame_type,
-                            data: packet.payload.to_vec(),
-                            timestamp: packet.header.timestamp,
-                            sequence: packet.header.sequence_number,
-                            marker: packet.header.marker,
-                            payload_type: packet.header.payload_type,
-                            ssrc: packet.header.ssrc,
-                        };
+                                            // Convert to MediaFrame
+                    let frame = MediaFrame {
+                        frame_type,
+                        data: packet.payload.to_vec(),
+                        timestamp: packet.header.timestamp,
+                        sequence: packet.header.sequence_number,
+                        marker: packet.header.marker,
+                        payload_type: packet.header.payload_type,
+                        ssrc: packet.header.ssrc,
+                        csrcs: packet.header.csrc.clone(),
+                    };
                         
                         // Forward to server via broadcast channel
                         // We can ignore send errors since they just mean no receivers are listening
@@ -400,133 +413,168 @@ impl DefaultMediaTransportServer {
         // Return client address and session
         Ok((client.address, client.session.clone()))
     }
-}
 
-/// Helper function to handle a new client connection
-/// This doesn't need a full server instance, just the necessary components
-async fn handle_client_static(
-    addr: SocketAddr,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    frame_sender: &broadcast::Sender<(String, MediaFrame)>
-) -> Result<String, MediaTransportError> {
-    info!("Handling new client from {}", addr);
+    /// Check if CSRC management is enabled
+    pub async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(*self.csrc_management_enabled.read().await)
+    }
     
-    let client_id = format!("client-{}", Uuid::new_v4());
-    debug!("Assigned client ID: {}", client_id);
-    
-    // Create RTP session config for this client - bind to 0.0.0.0:0 to let OS choose a port
-    let session_config = RtpSessionConfig {
-        local_addr: "0.0.0.0:0".parse().unwrap(),
-        remote_addr: Some(addr),
-        ssrc: Some(rand::random()),
-        payload_type: 8, // Default payload type
-        clock_rate: 8000, // Default clock rate
-        jitter_buffer_size: Some(50 as usize), // Default buffer size
-        max_packet_age_ms: Some(200), // Default max packet age
-        enable_jitter_buffer: true,
-    };
-    
-    // Create RTP session
-    debug!("Creating RTP session for client {}", client_id);
-    let rtp_session = RtpSession::new(session_config).await
-        .map_err(|e| MediaTransportError::Transport(format!("Failed to create client RTP session: {}", e)))?;
-        
-    let rtp_session = Arc::new(Mutex::new(rtp_session));
-    
-    // Create client connection without security for now (will be added later)
-    let client = ClientConnection {
-        id: client_id.clone(),
-        address: addr,
-        session: rtp_session,
-        security: None,
-        task: None,
-        connected: true,
-        created_at: SystemTime::now(),
-        last_activity: Arc::new(Mutex::new(SystemTime::now())),
-    };
-    
-    // Start a task to forward frames from this client
-    let frame_sender_clone = frame_sender.clone();
-    let client_id_clone = client_id.clone();
-    let session_clone = client.session.clone();
-    
-    debug!("Starting packet forwarding task for client {}", client_id);
-    let forward_task = tokio::spawn(async move {
-        let session = session_clone.lock().await;
-        
-        // Get session details for debugging
-        debug!("Session details - SSRC: {}, Target: {}", 
-               session.get_ssrc(), addr);
-        
-        let mut event_rx = session.subscribe();
-        drop(session);
-        
-        debug!("Starting packet receive loop for client {}", client_id_clone);
-        let mut packets_received = 0;
-        
-        while let Ok(event) = event_rx.recv().await {
-            match event {
-                RtpSessionEvent::PacketReceived(packet) => {
-                    packets_received += 1;
-                    
-                    // Determine frame type from payload type
-                    let frame_type = if packet.header.payload_type <= 34 {
-                        crate::api::common::frame::MediaFrameType::Audio
-                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                        crate::api::common::frame::MediaFrameType::Video
-                    } else {
-                        crate::api::common::frame::MediaFrameType::Data
-                    };
-                    
-                    // Log packet details
-                    debug!("Client {}: Received packet #{} - PT: {}, Seq: {}, TS: {}, Size: {} bytes",
-                          client_id_clone, packets_received, 
-                          packet.header.payload_type, packet.header.sequence_number,
-                          packet.header.timestamp, packet.payload.len());
-                    
-                    // Convert to MediaFrame
-                    let frame = MediaFrame {
-                        frame_type,
-                        data: packet.payload.to_vec(),
-                        timestamp: packet.header.timestamp,
-                        sequence: packet.header.sequence_number,
-                        marker: packet.header.marker,
-                        payload_type: packet.header.payload_type,
-                        ssrc: packet.header.ssrc,
-                    };
-                    
-                    // Forward to server via broadcast channel
-                    match frame_sender_clone.send((client_id_clone.clone(), frame)) {
-                        Ok(receiver_count) => {
-                            debug!("Broadcast packet to {} receivers - Client: {}, Seq: {}", 
-                                  receiver_count, client_id_clone, packet.header.sequence_number);
-                        },
-                        Err(e) => {
-                            // This is expected if no subscribers are listening
-                            debug!("No receivers for frame from client {}: {}", client_id_clone, e);
-                        }
-                    }
-                },
-                other_event => {
-                    debug!("Client {}: Received non-packet event: {:?}", client_id_clone, other_event);
-                }
-            }
+    /// Enable CSRC management
+    pub async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if *self.csrc_management_enabled.read().await {
+            return Ok(true);
         }
         
-        debug!("Packet forwarding task ended for client {}", client_id_clone);
-    });
+        // Set enabled flag
+        *self.csrc_management_enabled.write().await = true;
+        
+        debug!("Enabled CSRC management on server");
+        Ok(true)
+    }
     
-    // Update the client with the task
-    let mut client_with_task = client;
-    client_with_task.task = Some(forward_task);
+    /// Add a CSRC mapping for a source
+    pub async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Add mapping to the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mapping_clone = mapping.clone(); // Clone before adding
+        csrc_manager.add_mapping(mapping);
+        
+        debug!("Added CSRC mapping: {:?}", mapping_clone);
+        Ok(())
+    }
     
-    // Add to clients
-    debug!("Adding client {} to clients map", client_id);
-    let mut clients_write = clients.write().await;
-    clients_write.insert(client_id.clone(), client_with_task);
+    /// Add a simple SSRC to CSRC mapping
+    pub async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Add simple mapping to the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        csrc_manager.add_simple_mapping(original_ssrc, csrc);
+        
+        debug!("Added simple CSRC mapping: {:08x} -> {:08x}", original_ssrc, csrc);
+        Ok(())
+    }
     
-    info!("Successfully added client {}", client_id);
-    Ok(client_id)
+    /// Remove a CSRC mapping by SSRC
+    pub async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Remove mapping from the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let removed = csrc_manager.remove_by_ssrc(original_ssrc);
+        
+        if removed.is_some() {
+            debug!("Removed CSRC mapping for SSRC: {:08x}", original_ssrc);
+        }
+        
+        Ok(removed)
+    }
+    
+    /// Get a CSRC mapping by SSRC
+    pub async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get mapping from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let mapping = csrc_manager.get_by_ssrc(original_ssrc).cloned();
+        
+        Ok(mapping)
+    }
+    
+    /// Get a list of all CSRC mappings
+    pub async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get all mappings from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let mappings = csrc_manager.get_all_mappings().to_vec();
+        
+        Ok(mappings)
+    }
+    
+    /// Update the CNAME for a source
+    pub async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Update CNAME in the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let updated = csrc_manager.update_cname(original_ssrc, cname.clone());
+        
+        if updated {
+            debug!("Updated CNAME for SSRC {:08x}: {}", original_ssrc, cname);
+        }
+        
+        Ok(updated)
+    }
+    
+    /// Update the display name for a source
+    pub async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Update display name in the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let updated = csrc_manager.update_display_name(original_ssrc, name.clone());
+        
+        if updated {
+            debug!("Updated display name for SSRC {:08x}: {}", original_ssrc, name);
+        }
+        
+        Ok(updated)
+    }
+    
+    /// Get CSRC values for active sources
+    pub async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !*self.csrc_management_enabled.read().await {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get active CSRCs from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let csrcs = csrc_manager.get_active_csrcs(active_ssrcs);
+        
+        debug!("Got {} active CSRCs for {} active SSRCs", csrcs.len(), active_ssrcs.len());
+        
+        Ok(csrcs)
+    }
+}
+
+impl DefaultMediaTransportServer {
+    /// Estimate quality level from media statistics
+    fn estimate_quality_level(&self, media_stats: &crate::api::common::stats::MediaStats) -> crate::api::common::stats::QualityLevel {
+        // For simplicity, just use the first stream's quality
+        // In a real implementation, this would be more sophisticated
+        for stream in media_stats.streams.values() {
+            return stream.quality;
+        }
+        
+        // If no streams, return unknown quality
+        crate::api::common::stats::QualityLevel::Unknown
+    }
 }
 
 #[async_trait]
@@ -622,6 +670,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     marker: packet.header.marker,
                                     payload_type: packet.header.payload_type,
                                     ssrc: packet.header.ssrc,
+                                    csrcs: packet.header.csrc.clone(),
                                 };
                                 
                                 // Log payload data if it's text (helps with debugging)
@@ -660,6 +709,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     marker,
                                     payload_type,
                                     ssrc,
+                                    csrcs: Vec::new(), // No CSRCs in fallback case
                                 };
                                 (frame, ssrc)
                             }
@@ -712,7 +762,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 Err(e) => error!("Failed to handle new client from {}: {}", source, e),
                             }
                         } else {
-                            debug!("Existing client from {}, no new client creation needed", source);
+                                                         debug!("Existing client from {}, no new client creation needed", source);
                         }
                     },
                     crate::traits::RtpEvent::RtcpReceived { source, .. } => {
@@ -905,36 +955,204 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     /// Send a media frame to a specific client
     ///
     /// If the client is not connected, this will return an error.
-    async fn send_frame_to(&self, client_id: &str, frame: MediaFrame) -> Result<(), MediaTransportError> {
-        // Find client
-        let clients = self.clients.read().await;
-        let client = clients.get(client_id).ok_or_else(|| 
-            MediaTransportError::Transport(format!("Client not found: {}", client_id)))?;
+    async fn send_frame_to(&self, client_id: &str, mut frame: MediaFrame) -> Result<(), MediaTransportError> {
+        // Get client transport info
+        let (addr, session) = self.get_client_transport_info(client_id).await?;
         
-        // Send frame
-        let mut session = client.session.lock().await;
+        let mut session_guard = session.lock().await;
         
-        // Convert MediaFrame to RTP packet payload
-        let payload = Bytes::from(frame.data);
+        // Get SSRC to use
+        let ssrc = if *self.ssrc_demultiplexing_enabled.read().await && frame.ssrc != 0 {
+            frame.ssrc
+        } else {
+            session_guard.get_ssrc()
+        };
+        
+        // Create RTP header
+        let mut header = crate::packet::RtpHeader::new(
+            frame.payload_type,
+            frame.sequence,
+            frame.timestamp,
+            ssrc
+        );
+        
+        // Set marker bit
+        if frame.marker {
+            header.marker = true;
+        }
+        
+        // Add CSRCs if CSRC management is enabled
+        if *self.csrc_management_enabled.read().await {
+            // For simplicity, we'll just use all known SSRCs as active sources
+            // In a real conference mixer, this would be based on audio activity
+            let clients_guard = self.clients.read().await;
+            
+            // Get all SSRCs from all clients (simplified approach)
+            let mut active_ssrcs = Vec::new();
+            for client in clients_guard.values() {
+                if client.connected {
+                    let client_session = client.session.lock().await;
+                    active_ssrcs.push(client_session.get_ssrc());
+                    // In a real implementation, we would also include all streams tracked by this client
+                }
+            }
+            
+            if !active_ssrcs.is_empty() {
+                // Get CSRC values from the manager
+                let csrc_manager = self.csrc_manager.lock().await;
+                let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
+                
+                // Take only up to MAX_CSRC_COUNT
+                let csrcs = if csrcs.len() > MAX_CSRC_COUNT as usize {
+                    csrcs[0..MAX_CSRC_COUNT as usize].to_vec()
+                } else {
+                    csrcs
+                };
+                
+                // Add CSRCs to the header if we have any
+                if !csrcs.is_empty() {
+                    debug!("Adding {} CSRCs to outgoing packet", csrcs.len());
+                    header.add_csrcs(&csrcs);
+                }
+            }
+        }
+        
+        // Store frame data length before it's moved
+        let data_len = frame.data.len(); 
+        
+        // Create RTP packet
+        let packet = crate::packet::RtpPacket::new(
+            header,
+            Bytes::from(frame.data),
+        );
+        
+        // Get main socket
+        let socket_guard = self.main_socket.read().await;
+        let socket = socket_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::Transport("Server is not running".to_string()))?;
         
         // Send packet
-        session.send_packet(frame.timestamp, payload, frame.marker).await
-            .map_err(|e| MediaTransportError::Transport(format!("Failed to send frame: {}", e)))?;
-            
+        socket.send_rtp(&packet, addr).await
+            .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
+        
+        // We don't have update_sent_stats method in RtpSession, so we'll just log
+        debug!("Sent frame to client {}: PT={}, TS={}, SEQ={}, Size={} bytes", 
+               client_id, frame.payload_type, frame.timestamp, frame.sequence, data_len);
+        
         Ok(())
     }
     
-    async fn broadcast_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
-        // Get all client IDs
+    async fn broadcast_frame(&self, mut frame: MediaFrame) -> Result<(), MediaTransportError> {
+        // Get list of connected clients
         let clients = self.clients.read().await;
-        let client_ids = clients.keys().cloned().collect::<Vec<_>>();
-        drop(clients);
         
-        // Send to each client
-        for client_id in client_ids {
-            if let Err(e) = self.send_frame_to(&client_id, frame.clone()).await {
-                warn!("Failed to send frame to client {}: {}", client_id, e);
+        // Create a base header with frame info
+        let mut base_header = crate::packet::RtpHeader::new(
+            frame.payload_type,
+            frame.sequence,
+            frame.timestamp,
+            frame.ssrc
+        );
+        
+        // Set marker bit
+        if frame.marker {
+            base_header.marker = true;
+        }
+        
+        // Add CSRCs if CSRC management is enabled
+        if *self.csrc_management_enabled.read().await {
+            // For simplicity, we'll just use all known SSRCs as active sources
+            // In a real conference mixer, this would be based on audio activity
+            
+            // Get all SSRCs from all clients (simplified approach)
+            let mut active_ssrcs = Vec::new();
+            for client in clients.values() {
+                if client.connected {
+                    let client_session = client.session.lock().await;
+                    active_ssrcs.push(client_session.get_ssrc());
+                    // In a real implementation, we would also include all streams tracked by this client
+                }
             }
+            
+            if !active_ssrcs.is_empty() {
+                // Get CSRC values from the manager
+                let csrc_manager = self.csrc_manager.lock().await;
+                let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
+                
+                // Take only up to MAX_CSRC_COUNT
+                let csrcs = if csrcs.len() > MAX_CSRC_COUNT as usize {
+                    csrcs[0..MAX_CSRC_COUNT as usize].to_vec()
+                } else {
+                    csrcs
+                };
+                
+                // Add CSRCs to the header if we have any
+                if !csrcs.is_empty() {
+                    debug!("Adding {} CSRCs to outgoing broadcast packet", csrcs.len());
+                    base_header.add_csrcs(&csrcs);
+                }
+            }
+        }
+        
+        // Create RTP packet once with shared data
+        let shared_data = Arc::new(Bytes::from(frame.data));
+        
+        // Get main socket
+        let socket_guard = self.main_socket.read().await;
+        let socket = socket_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::Transport("Server is not running".to_string()))?;
+        
+        // Send to each client (in parallel)
+        let mut send_tasks = Vec::new();
+        
+        for (client_id, client) in clients.iter() {
+            if !client.connected {
+                continue;
+            }
+            
+            // Clone header for each client
+            let mut header = base_header.clone();
+            
+            // Clone data reference
+            let data = shared_data.clone();
+            
+            // Get client address
+            let addr = client.address;
+            
+            // Create RTP packet
+            let packet = crate::packet::RtpPacket::new(
+                header,
+                Bytes::clone(&data),
+            );
+            
+            // Clone socket reference
+            let socket_clone = socket.clone();
+            
+            // Update stats in client session
+            let session_clone = client.session.clone();
+            let client_id_clone = client_id.clone();
+            let payload_type = frame.payload_type;
+            let data_len = data.len();
+            
+            // Spawn task to send packet and update stats
+            let task = tokio::spawn(async move {
+                // Send packet
+                if let Err(e) = socket_clone.send_rtp(&packet, addr).await {
+                    warn!("Failed to send broadcast frame to client {}: {}", client_id_clone, e);
+                    return;
+                }
+                
+                // We don't have update_sent_stats method in RtpSession, so we'll just log
+                debug!("Sent broadcast frame to client {}: PT={}, Size={} bytes", 
+                       client_id_clone, payload_type, data_len);
+            });
+            
+            send_tasks.push(task);
+        }
+        
+        // Wait for all sends to complete
+        for task in send_tasks {
+            let _ = task.await;
         }
         
         Ok(())
@@ -1596,18 +1814,168 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         
         Ok(())
     }
+    
+    // CSRC Management API Implementation
+    
+    async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
+        self.is_csrc_management_enabled().await
+    }
+    
+    async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
+        self.enable_csrc_management().await
+    }
+    
+    async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
+        self.add_csrc_mapping(mapping).await
+    }
+    
+    async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
+        self.add_simple_csrc_mapping(original_ssrc, csrc).await
+    }
+    
+    async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        self.remove_csrc_mapping_by_ssrc(original_ssrc).await
+    }
+    
+    async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        self.get_csrc_mapping_by_ssrc(original_ssrc).await
+    }
+    
+    async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
+        self.get_all_csrc_mappings().await
+    }
+    
+    async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
+        self.get_active_csrcs(active_ssrcs).await
+    }
 }
 
-impl DefaultMediaTransportServer {
-    /// Estimate quality level from media statistics
-    fn estimate_quality_level(&self, media_stats: &crate::api::common::stats::MediaStats) -> crate::api::common::stats::QualityLevel {
-        // For simplicity, just use the first stream's quality
-        // In a real implementation, this would be more sophisticated
-        for stream in media_stats.streams.values() {
-            return stream.quality;
+/// Helper function to handle a new client connection
+/// This doesn't need a full server instance, just the necessary components
+async fn handle_client_static(
+    addr: SocketAddr,
+    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    frame_sender: &broadcast::Sender<(String, MediaFrame)>
+) -> Result<String, MediaTransportError> {
+    info!("Handling new client from {}", addr);
+    
+    let client_id = format!("client-{}", Uuid::new_v4());
+    debug!("Assigned client ID: {}", client_id);
+    
+    // Create RTP session config for this client - bind to 0.0.0.0:0 to let OS choose a port
+    let session_config = RtpSessionConfig {
+        local_addr: "0.0.0.0:0".parse().unwrap(),
+        remote_addr: Some(addr),
+        ssrc: Some(rand::random()),
+        payload_type: 8, // Default payload type
+        clock_rate: 8000, // Default clock rate
+        jitter_buffer_size: Some(50 as usize), // Default buffer size
+        max_packet_age_ms: Some(200), // Default max packet age
+        enable_jitter_buffer: true,
+    };
+    
+    // Create RTP session
+    debug!("Creating RTP session for client {}", client_id);
+    let rtp_session = RtpSession::new(session_config).await
+        .map_err(|e| MediaTransportError::Transport(format!("Failed to create client RTP session: {}", e)))?;
+        
+    let rtp_session = Arc::new(Mutex::new(rtp_session));
+    
+    // Create client connection without security for now (will be added later)
+    let client = ClientConnection {
+        id: client_id.clone(),
+        address: addr,
+        session: rtp_session,
+        security: None,
+        task: None,
+        connected: true,
+        created_at: SystemTime::now(),
+        last_activity: Arc::new(Mutex::new(SystemTime::now())),
+    };
+    
+    // Start a task to forward frames from this client
+    let frame_sender_clone = frame_sender.clone();
+    let client_id_clone = client_id.clone();
+    let session_clone = client.session.clone();
+    
+    debug!("Starting packet forwarding task for client {}", client_id);
+    let forward_task = tokio::spawn(async move {
+        let session = session_clone.lock().await;
+        
+        // Get session details for debugging
+        debug!("Session details - SSRC: {}, Target: {}", 
+               session.get_ssrc(), addr);
+        
+        let mut event_rx = session.subscribe();
+        drop(session);
+        
+        debug!("Starting packet receive loop for client {}", client_id_clone);
+        let mut packets_received = 0;
+        
+        while let Ok(event) = event_rx.recv().await {
+            match event {
+                RtpSessionEvent::PacketReceived(packet) => {
+                    packets_received += 1;
+                    
+                    // Determine frame type from payload type
+                    let frame_type = if packet.header.payload_type <= 34 {
+                        crate::api::common::frame::MediaFrameType::Audio
+                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                        crate::api::common::frame::MediaFrameType::Video
+                    } else {
+                        crate::api::common::frame::MediaFrameType::Data
+                    };
+                    
+                    // Log packet details
+                    debug!("Client {}: Received packet #{} - PT: {}, Seq: {}, TS: {}, Size: {} bytes",
+                          client_id_clone, packets_received, 
+                          packet.header.payload_type, packet.header.sequence_number,
+                          packet.header.timestamp, packet.payload.len());
+                    
+                                            // Convert to MediaFrame
+                        let frame = MediaFrame {
+                            frame_type,
+                            data: packet.payload.to_vec(),
+                            timestamp: packet.header.timestamp,
+                            sequence: packet.header.sequence_number,
+                            marker: packet.header.marker,
+                            payload_type: packet.header.payload_type,
+                            ssrc: packet.header.ssrc,
+                            csrcs: packet.header.csrc.clone(),
+                        };
+                    
+                    // Forward to server via broadcast channel
+                    match frame_sender_clone.send((client_id_clone.clone(), frame)) {
+                        Ok(receiver_count) => {
+                            debug!("Broadcast packet to {} receivers - Client: {}, Seq: {}", 
+                                  receiver_count, client_id_clone, packet.header.sequence_number);
+                        },
+                        Err(e) => {
+                            // This is expected if no subscribers are listening
+                            debug!("No receivers for frame from client {}: {}", client_id_clone, e);
+                        }
+                    }
+                },
+                other_event => {
+                    debug!("Client {}: Received non-packet event: {:?}", client_id_clone, other_event);
+                }
+            }
         }
         
-        // If no streams, return unknown quality
-        crate::api::common::stats::QualityLevel::Unknown
-    }
-} 
+        debug!("Packet forwarding task ended for client {}", client_id_clone);
+    });
+    
+    // Update the client with the task
+    let mut client_with_task = client;
+    client_with_task.task = Some(forward_task);
+    
+    // Add to clients
+    debug!("Adding client {} to clients map", client_id);
+    let mut clients_write = clients.write().await;
+    clients_write.insert(client_id.clone(), client_with_task);
+    
+    info!("Successfully added client {}", client_id);
+    Ok(client_id)
+}
+
+ 

@@ -131,6 +131,7 @@ impl DefaultMediaBuffer {
             marker: packet.header.marker,
             payload_type: packet.header.payload_type,
             ssrc: packet.header.ssrc,
+            csrcs: packet.header.csrc.clone(),
         }
     }
 }

@@ -15,6 +15,7 @@ use crate::api::common::stats::MediaStats;
 use crate::api::server::config::ServerConfig;
 use crate::api::client::transport::RtcpStats;
 use crate::api::client::transport::VoipMetrics;
+use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 
 pub mod server_transport_impl;
 
@@ -200,4 +201,65 @@ pub trait MediaTransportServer: Send + Sync {
     /// - `client_id`: The ID of the client to send the packet to
     /// - `metrics`: The VoIP metrics to include in the XR packet
     async fn send_rtcp_xr_voip_metrics_to_client(&self, client_id: &str, metrics: VoipMetrics) -> Result<(), MediaTransportError>;
+    
+    // CSRC Management API Methods
+    
+    /// Check if CSRC management is enabled
+    ///
+    /// Returns true if CSRC management is enabled for this server.
+    async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Enable CSRC management
+    ///
+    /// This enables the CSRC management feature if it was not enabled
+    /// in the configuration. Returns true if successfully enabled.
+    async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Add a CSRC mapping for contributing sources
+    ///
+    /// Maps an original SSRC to a CSRC value with optional metadata.
+    /// This is used in conferencing scenarios where multiple sources
+    /// contribute to a single mixed stream.
+    ///
+    /// - `mapping`: The CSRC mapping to add
+    async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError>;
+    
+    /// Add a simple SSRC to CSRC mapping
+    ///
+    /// Simplified version that just maps an SSRC to a CSRC without metadata.
+    ///
+    /// - `original_ssrc`: The original SSRC to map
+    /// - `csrc`: The CSRC value to map to
+    async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) 
+        -> Result<(), MediaTransportError>;
+    
+    /// Remove a CSRC mapping by SSRC
+    ///
+    /// Removes a mapping for the specified SSRC.
+    ///
+    /// - `original_ssrc`: The original SSRC to remove mapping for
+    async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) 
+        -> Result<Option<CsrcMapping>, MediaTransportError>;
+    
+    /// Get a CSRC mapping by SSRC
+    ///
+    /// Returns the mapping for the specified SSRC if it exists.
+    ///
+    /// - `original_ssrc`: The original SSRC to get mapping for
+    async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc)
+        -> Result<Option<CsrcMapping>, MediaTransportError>;
+    
+    /// Get all CSRC mappings
+    ///
+    /// Returns all CSRC mappings currently registered.
+    async fn get_all_csrc_mappings(&self)
+        -> Result<Vec<CsrcMapping>, MediaTransportError>;
+    
+    /// Get CSRC values for active sources
+    ///
+    /// Returns the CSRC values for the specified active SSRCs.
+    ///
+    /// - `active_ssrcs`: The list of active SSRCs to get CSRCs for
+    async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc])
+        -> Result<Vec<RtpCsrc>, MediaTransportError>;
 } 

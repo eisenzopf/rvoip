@@ -30,6 +30,8 @@ pub struct ServerConfig {
     pub media_sync_enabled: Option<bool>,
     /// Enable SSRC demultiplexing for handling multiple streams
     pub ssrc_demultiplexing_enabled: Option<bool>,
+    /// Enable CSRC management for conferencing scenarios
+    pub csrc_management_enabled: Option<bool>,
 }
 
 /// Builder for ServerConfig
@@ -55,6 +57,7 @@ impl ServerConfigBuilder {
                 rtcp_mux: false, // Disabled by default
                 media_sync_enabled: None, // Optional, defaults to None
                 ssrc_demultiplexing_enabled: None, // Optional, defaults to None
+                csrc_management_enabled: None, // Optional, defaults to None
             },
         }
     }
@@ -138,6 +141,12 @@ impl ServerConfigBuilder {
     /// Enable or disable SSRC demultiplexing for handling multiple streams
     pub fn ssrc_demultiplexing_enabled(mut self, enable: bool) -> Self {
         self.config.ssrc_demultiplexing_enabled = Some(enable);
+        self
+    }
+    
+    /// Enable or disable CSRC management for conferencing scenarios
+    pub fn csrc_management_enabled(mut self, enable: bool) -> Self {
+        self.config.csrc_management_enabled = Some(enable);
         self
     }
     

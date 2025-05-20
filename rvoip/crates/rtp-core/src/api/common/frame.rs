@@ -2,6 +2,8 @@
 //!
 //! This module defines the common media frame types used by both client and server APIs.
 
+use crate::RtpCsrc;
+
 /// Media frame types that can be transported
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaFrameType {
@@ -30,4 +32,6 @@ pub struct MediaFrame {
     pub payload_type: u8,
     /// Synchronization source identifier
     pub ssrc: u32,
+    /// Contributing source identifiers
+    pub csrcs: Vec<RtpCsrc>,
 } 

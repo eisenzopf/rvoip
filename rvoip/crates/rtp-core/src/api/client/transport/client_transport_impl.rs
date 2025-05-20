@@ -31,6 +31,8 @@ use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
 use crate::transport::{RtpTransport, UdpRtpTransport};
 use crate::api::server::security::SocketHandle;
 use crate::packet::rtcp::{RtcpPacket, RtcpApplicationDefined, RtcpGoodbye, RtcpExtendedReport, RtcpXrBlock, VoipMetricsBlock};
+use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
+use bytes::Bytes;
 
 /// Default implementation of the client-side media transport
 pub struct DefaultMediaTransportClient {
@@ -75,6 +77,12 @@ pub struct DefaultMediaTransportClient {
     
     /// Sequence number tracking per SSRC
     sequence_numbers: Arc<Mutex<HashMap<u32, u16>>>,
+    
+    /// CSRC management enabled flag
+    csrc_management_enabled: Arc<AtomicBool>,
+    
+    /// CSRC manager for handling contributing source IDs
+    csrc_manager: Arc<Mutex<CsrcManager>>,
 }
 
 impl DefaultMediaTransportClient {
@@ -126,6 +134,9 @@ impl DefaultMediaTransportClient {
         // Initialize SSRC demultiplexing if enabled in config
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
         
+        // Initialize CSRC management if enabled in config
+        let csrc_management_enabled = config.csrc_management_enabled.unwrap_or(false);
+        
         Ok(Self {
             config,
             session: Arc::new(Mutex::new(session)),
@@ -141,6 +152,8 @@ impl DefaultMediaTransportClient {
             media_sync_enabled: Arc::new(AtomicBool::new(media_sync_enabled)),
             ssrc_demultiplexing_enabled: Arc::new(AtomicBool::new(ssrc_demultiplexing_enabled)),
             sequence_numbers: Arc::new(Mutex::new(HashMap::new())),
+            csrc_management_enabled: Arc::new(AtomicBool::new(csrc_management_enabled)),
+            csrc_manager: Arc::new(Mutex::new(CsrcManager::new())),
         })
     }
     
@@ -178,6 +191,7 @@ impl DefaultMediaTransportClient {
                     marker: rtp_packet.header.marker,
                     payload_type: rtp_packet.header.payload_type,
                     ssrc: rtp_packet.header.ssrc,
+                    csrcs: rtp_packet.header.csrc.clone(),
                 };
                 
                 // Forward frame to the application
@@ -300,6 +314,183 @@ impl DefaultMediaTransportClient {
         let seq_map = self.sequence_numbers.lock().await;
         seq_map.get(&ssrc).copied()
     }
+    
+    /// Generate a new sequence number
+    fn generate_sequence_number(&self) -> u16 {
+        rand::random()
+    }
+    
+    /// Check if CSRC management is enabled
+    pub async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(self.csrc_management_enabled.load(Ordering::SeqCst))
+    }
+    
+    /// Enable CSRC management
+    pub async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
+        // Check if already enabled
+        if self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        
+        // Set enabled flag
+        self.csrc_management_enabled.store(true, Ordering::SeqCst);
+        
+        debug!("Enabled CSRC management");
+        Ok(true)
+    }
+    
+    /// Add a CSRC mapping for a source
+    pub async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Add mapping to the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let mapping_clone = mapping.clone(); // Clone before adding
+        csrc_manager.add_mapping(mapping);
+        
+        debug!("Added CSRC mapping: {:?}", mapping_clone);
+        Ok(())
+    }
+    
+    /// Add a simple SSRC to CSRC mapping
+    pub async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Add simple mapping to the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        csrc_manager.add_simple_mapping(original_ssrc, csrc);
+        
+        debug!("Added simple CSRC mapping: {:08x} -> {:08x}", original_ssrc, csrc);
+        Ok(())
+    }
+    
+    /// Remove a CSRC mapping by SSRC
+    pub async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Remove mapping from the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let removed = csrc_manager.remove_by_ssrc(original_ssrc);
+        
+        if removed.is_some() {
+            debug!("Removed CSRC mapping for SSRC: {:08x}", original_ssrc);
+        }
+        
+        Ok(removed)
+    }
+    
+    /// Get a CSRC mapping by SSRC
+    pub async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get mapping from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let mapping = csrc_manager.get_by_ssrc(original_ssrc).cloned();
+        
+        Ok(mapping)
+    }
+    
+    /// Get a list of all CSRC mappings
+    pub async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get all mappings from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let mappings = csrc_manager.get_all_mappings().to_vec();
+        
+        Ok(mappings)
+    }
+    
+    /// Update the CNAME for a source
+    pub async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Update CNAME in the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let updated = csrc_manager.update_cname(original_ssrc, cname.clone());
+        
+        if updated {
+            debug!("Updated CNAME for SSRC {:08x}: {}", original_ssrc, cname);
+        }
+        
+        Ok(updated)
+    }
+    
+    /// Update the display name for a source
+    pub async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Update display name in the manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        let updated = csrc_manager.update_display_name(original_ssrc, name.clone());
+        
+        if updated {
+            debug!("Updated display name for SSRC {:08x}: {}", original_ssrc, name);
+        }
+        
+        Ok(updated)
+    }
+    
+    /// Get CSRC values for active sources
+    pub async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
+        // Check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get active CSRCs from the manager
+        let csrc_manager = self.csrc_manager.lock().await;
+        let csrcs = csrc_manager.get_active_csrcs(active_ssrcs);
+        
+        debug!("Got {} active CSRCs for {} active SSRCs", csrcs.len(), active_ssrcs.len());
+        
+        Ok(csrcs)
+    }
+}
+
+// Add Clone implementation
+impl Clone for DefaultMediaTransportClient {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            session: Arc::clone(&self.session),
+            security: self.security.clone(),
+            transport: Arc::clone(&self.transport),
+            connected: Arc::clone(&self.connected),
+            frame_sender: self.frame_sender.clone(),
+            frame_receiver: Arc::clone(&self.frame_receiver),
+            event_callbacks: Arc::clone(&self.event_callbacks),
+            connect_callbacks: Arc::clone(&self.connect_callbacks),
+            disconnect_callbacks: Arc::clone(&self.disconnect_callbacks),
+            media_sync: Arc::clone(&self.media_sync),
+            media_sync_enabled: Arc::clone(&self.media_sync_enabled),
+            ssrc_demultiplexing_enabled: Arc::clone(&self.ssrc_demultiplexing_enabled),
+            sequence_numbers: Arc::clone(&self.sequence_numbers),
+            csrc_management_enabled: Arc::clone(&self.csrc_management_enabled),
+            csrc_manager: Arc::clone(&self.csrc_manager),
+        }
+    }
 }
 
 #[async_trait]
@@ -418,6 +609,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
                                         marker: rtp_packet.header.marker,
                                         payload_type: rtp_packet.header.payload_type,
                                         ssrc: rtp_packet.header.ssrc,
+                                        csrcs: rtp_packet.header.csrc.clone(),
                                     };
                                     
                                     // Send frame to application
@@ -490,7 +682,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         }
     }
     
-    async fn send_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
+    async fn send_frame(&self, mut frame: MediaFrame) -> Result<(), MediaTransportError> {
         // Check if connected
         if !self.is_connected().await? {
             return Err(MediaTransportError::NotConnected);
@@ -498,95 +690,105 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         
         let mut session = self.session.lock().await;
         
-        // Convert MediaFrame to RTP packets
-        let timestamp = frame.timestamp;
-        
-        // Convert frame data to Bytes
-        let data = bytes::Bytes::from(frame.data);
-        
-        // Check for demultiplexing and log state for debugging
-        let demux_enabled = self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst);
-        let default_ssrc = session.get_ssrc();
-        let using_custom_ssrc = frame.ssrc != default_ssrc;
-        debug!("Sending frame - SSRC demux enabled: {}, default SSRC: {:08x}, frame SSRC: {:08x}", 
-               demux_enabled, default_ssrc, frame.ssrc);
-        
-        // Send the frame through the session with specified SSRC if SSRC demultiplexing is enabled
-        if demux_enabled && using_custom_ssrc {
-            debug!("Using custom SSRC flow for SSRC={:08x}", frame.ssrc);
-            
-            // Get or create sequence number for this SSRC
-            let sequence_number = {
-                let mut seq_map = self.sequence_numbers.lock().await;
-                let sequence = seq_map.entry(frame.ssrc).or_insert_with(|| {
-                    // Start with a random sequence number
-                    let mut rng = rand::thread_rng();
-                    let seq = rng.gen();
-                    debug!("Created new sequence number {} for SSRC {:08x}", seq, frame.ssrc);
-                    seq
-                });
-                
-                // Get current sequence and increment for next time
-                let current_seq = *sequence;
-                *sequence = current_seq.wrapping_add(1);
-                debug!("Using sequence {} for SSRC {:08x} (next will be {})", 
-                       current_seq, frame.ssrc, current_seq.wrapping_add(1));
-                current_seq
-            };
-            
-            // Create a custom RTP packet with the frame's SSRC
-            let mut header = crate::packet::RtpHeader::new(
-                frame.payload_type,
-                sequence_number, // Use tracked sequence number
-                timestamp,
-                frame.ssrc, // Use the frame's SSRC
-            );
-            header.marker = frame.marker;
-            
-            debug!("Created RTP header - PT: {}, seq: {}, ts: {}, SSRC: {:08x}, marker: {}", 
-                   header.payload_type, header.sequence_number, header.timestamp, 
-                   header.ssrc, header.marker);
-            
-            // Get the transport to send directly
-            let transport_guard = self.transport.lock().await;
-            let transport = transport_guard.as_ref()
-                .ok_or_else(|| MediaTransportError::NotConnected)?;
-            
-            // Create RTP packet
-            let packet = crate::packet::RtpPacket::new(header, data.clone());
-            
-            debug!("Sending custom packet with SSRC={:08x}, seq={}, ts={}, payload_size={}", 
-                   frame.ssrc, sequence_number, timestamp, data.len());
-            
-            // Send the packet directly via transport
-            match transport.send_rtp(&packet, self.config.remote_address).await {
-                Ok(_) => debug!("Successfully sent packet with custom SSRC={:08x} to {}", 
-                                frame.ssrc, self.config.remote_address),
-                Err(e) => {
-                    let err = MediaTransportError::SendError(
-                        format!("Failed to send frame with custom SSRC: {}", e));
-                    error!("{}", err);
-                    return Err(err);
-                }
-            }
-            
-            Ok(())
+        // Select SSRC
+        let ssrc = if self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst) && frame.ssrc != 0 {
+            // Use custom SSRC from the frame
+            frame.ssrc
         } else {
-            // Using default session SSRC
-            debug!("Using default SSRC flow with session SSRC={:08x}", session.get_ssrc());
-            // Use the session's normal send method (uses session's SSRC)
-            match session.send_packet(timestamp, data, frame.marker).await {
-                Ok(_) => {
-                    debug!("Successfully sent packet with default SSRC");
-                    Ok(())
-                },
-                Err(e) => {
-                    let err = MediaTransportError::SendError(format!("Failed to send frame: {}", e));
-                    error!("{}", err);
-                    Err(err)
+            // Use default SSRC from session
+            session.get_ssrc()
+        };
+        
+        // Get sequence number
+        let sequence = if self.ssrc_demultiplexing_enabled.load(Ordering::SeqCst) && frame.ssrc != 0 {
+            // Use sequence number mapping for this SSRC
+            let mut seq_map = self.sequence_numbers.lock().await;
+            let sequence = if let Some(seq) = seq_map.get_mut(&frame.ssrc) {
+                // Increment sequence number
+                *seq = seq.wrapping_add(1);
+                *seq
+            } else {
+                // Start with a random sequence number for this SSRC
+                let sequence = rand::random::<u16>();
+                seq_map.insert(frame.ssrc, sequence);
+                sequence
+            };
+            sequence
+        } else {
+            // Default: Use sequence number from the frame or generate a new one
+            if frame.sequence != 0 {
+                frame.sequence
+            } else {
+                // Generate a new sequence number
+                let sequence = self.generate_sequence_number();
+                sequence
+            }
+        };
+        
+        // Store frame data length before it's moved
+        let data_len = frame.data.len();
+        
+        // Get transport
+        let transport_guard = self.transport.lock().await;
+        let transport = transport_guard.as_ref()
+            .ok_or_else(|| MediaTransportError::Transport("Transport not connected".to_string()))?;
+        
+        // Create RTP header
+        let mut header = crate::packet::RtpHeader::new(
+            frame.payload_type,
+            sequence,
+            frame.timestamp,
+            ssrc
+        );
+        
+        // Set marker flag if present in frame
+        if frame.marker {
+            header.marker = true;
+        }
+        
+        // Add CSRCs if CSRC management is enabled
+        if self.csrc_management_enabled.load(Ordering::SeqCst) {
+            // For simplicity, we'll just use all active SSRCs as active sources
+            // In a real conference mixer, this would be based on audio activity
+            // Get all SSRCs from the session (we don't have get_active_streams)
+            let active_ssrcs = session.get_all_ssrcs().await;
+            
+            if !active_ssrcs.is_empty() {
+                // Get CSRC values from the manager
+                let csrc_manager = self.csrc_manager.lock().await;
+                let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
+                
+                // Take only up to MAX_CSRC_COUNT
+                let csrcs = if csrcs.len() > MAX_CSRC_COUNT as usize {
+                    csrcs[0..MAX_CSRC_COUNT as usize].to_vec()
+                } else {
+                    csrcs
+                };
+                
+                // Add CSRCs to the header if we have any
+                if !csrcs.is_empty() {
+                    debug!("Adding {} CSRCs to outgoing packet", csrcs.len());
+                    header.add_csrcs(&csrcs);
                 }
             }
         }
+        
+        // Create RTP packet
+        let packet = crate::packet::RtpPacket::new(
+            header,
+            Bytes::from(frame.data),
+        );
+        
+        // Send packet
+        let remote_addr = self.config.remote_address;
+        transport.send_rtp(&packet, remote_addr).await
+            .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
+        
+        // We don't have update_sent_stats method in RtpSession, so we'll just log
+        debug!("Sent frame: PT={}, TS={}, SEQ={}, Size={} bytes", 
+               frame.payload_type, frame.timestamp, sequence, data_len);
+        
+        Ok(())
     }
     
     async fn receive_frame(&self, timeout: Duration) -> Result<Option<MediaFrame>, MediaTransportError> {
@@ -1120,5 +1322,39 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         } else {
             Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
         }
+    }
+    
+    // CSRC Management API Implementation
+    
+    async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
+        self.is_csrc_management_enabled().await
+    }
+    
+    async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
+        self.enable_csrc_management().await
+    }
+    
+    async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
+        self.add_csrc_mapping(mapping).await
+    }
+    
+    async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
+        self.add_simple_csrc_mapping(original_ssrc, csrc).await
+    }
+    
+    async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        self.remove_csrc_mapping_by_ssrc(original_ssrc).await
+    }
+    
+    async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+        self.get_csrc_mapping_by_ssrc(original_ssrc).await
+    }
+    
+    async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
+        self.get_all_csrc_mappings().await
+    }
+    
+    async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
+        self.get_active_csrcs(active_ssrcs).await
     }
 } 
