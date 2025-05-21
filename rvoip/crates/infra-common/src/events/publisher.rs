@@ -75,22 +75,34 @@ impl<E: Event> Publisher<E> {
 /// Fast publisher for static events with cached type information
 pub struct FastPublisher<E: StaticEvent> {
     _phantom: PhantomData<E>,
+    sender: TypedBroadcastSender<E>,
 }
 
 impl<E: StaticEvent> FastPublisher<E> {
     /// Create a new fast publisher
     pub fn new() -> Self {
+        let sender = GlobalTypeRegistry::get_sender::<E>();
         Self {
             _phantom: PhantomData,
+            sender,
+        }
+    }
+    
+    /// Create a new fast publisher with custom channel capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        let sender = GlobalTypeRegistry::register_with_capacity::<E>(capacity);
+        
+        Self {
+            _phantom: PhantomData,
+            sender,
         }
     }
     
     /// Publish an event using the global type registry
     pub async fn publish(&self, event: E) -> EventResult<()> {
-        let sender = GlobalTypeRegistry::get_sender::<E>();
         let arc_event = Arc::new(event);
         
-        match sender.send(arc_event) {
+        match self.sender.send(arc_event) {
             Ok(_) => Ok(()),
             Err(err) => Err(crate::events::types::EventError::ChannelError(
                 format!("Fast broadcast failed: {}", err)
@@ -100,7 +112,7 @@ impl<E: StaticEvent> FastPublisher<E> {
     
     /// Get a broadcast receiver for this event type
     pub fn subscribe(&self) -> TypedBroadcastReceiver<E> {
-        GlobalTypeRegistry::subscribe::<E>()
+        TypedBroadcastReceiver::new(self.sender.subscribe())
     }
 }
 

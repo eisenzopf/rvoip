@@ -38,6 +38,7 @@ mimalloc = { version = "0.1", default-features = false }
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.5"
+chrono = "0.4"
 
 [[bench]]
 name = "event_bus"

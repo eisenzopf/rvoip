@@ -54,6 +54,82 @@ Each RVOIP library should follow these implementation guidelines:
 
 ## Usage Examples
 
+### Unified Event System API
+
+The unified `EventSystem` API provides a consistent interface for working with both implementation types:
+
+```rust
+use infra_common::events::system::{EventSystem, EventPublisher, EventSubscriber};
+use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use infra_common::events::types::{Event, StaticEvent};
+use std::time::Duration;
+
+// Define your event
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MyEvent {
+    id: u64,
+    data: String,
+}
+
+impl Event for MyEvent {
+    fn event_type() -> &'static str {
+        "my_event"
+    }
+}
+
+// Implement StaticEvent for fast path eligibility 
+impl StaticEvent for MyEvent {}
+
+// Create an event system with the builder
+let event_system = EventSystemBuilder::new()
+    .implementation(ImplementationType::StaticFastPath)  // or ZeroCopy
+    .channel_capacity(10_000)
+    .build();
+
+// Start the event system
+event_system.start().await.unwrap();
+
+// Create a publisher
+let publisher = event_system.create_publisher::<MyEvent>();
+
+// Subscribe to events
+let mut subscriber = event_system.subscribe::<MyEvent>().await.unwrap();
+
+// Publish an event
+publisher.publish(MyEvent { 
+    id: 1, 
+    data: "Hello".to_string() 
+}).await.unwrap();
+
+// Receive the event
+if let Ok(event) = subscriber.receive().await {
+    println!("Received event with id: {}", event.id);
+}
+
+// Publish a batch of events for higher throughput
+let mut batch = Vec::with_capacity(100);
+for i in 0..100 {
+    batch.push(MyEvent { 
+        id: i, 
+        data: format!("Event {}", i) 
+    });
+}
+publisher.publish_batch(batch).await.unwrap();
+
+// Receive with timeout
+if let Ok(event) = subscriber.receive_timeout(Duration::from_millis(100)).await {
+    println!("Received event: {}", event.id);
+}
+
+// Check if messages are available without blocking
+if let Ok(Some(event)) = subscriber.try_receive() {
+    println!("Got event without blocking: {}", event.id);
+}
+
+// Shutdown when done
+event_system.shutdown().await.unwrap();
+```
+
 ### Basic Publishing and Subscribing
 
 ```rust

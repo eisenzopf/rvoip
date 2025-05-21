@@ -310,13 +310,20 @@ impl EventBus {
         Ok(handle)
     }
     
-    /// Subscribe to events via zero-copy broadcast channel for maximum throughput
-    pub async fn subscribe_broadcast<E: Event>(&self) -> EventResult<TypedBroadcastReceiver<E>> 
-    where
-        E: 'static
-    {
-        // Create a broadcast receiver
-        Ok(self.type_registry.get_or_create::<E>().subscribe())
+    /// Subscribe to broadcast events of a specific type.
+    ///
+    /// This method allows you to receive all events of a specific type that are broadcast through the event bus.
+    /// It creates a new TypedBroadcastReceiver for the event type.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `E` - The event type to subscribe to.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a TypedBroadcastReceiver on success, or an EventError on failure.
+    pub async fn subscribe_broadcast<E: Event>(&self) -> EventResult<TypedBroadcastReceiver<E>> {
+        Ok(TypedBroadcastReceiver::new(self.type_registry.get_or_create::<E>().subscribe()))
     }
     
     /// Create a channel-based publisher for a specific event type

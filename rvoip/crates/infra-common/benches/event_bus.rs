@@ -151,6 +151,9 @@ fn bench_event_bus_channel(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("event_bus_channel");
     
+    // Configure longer measurement time for high-volume tests
+    group.measurement_time(Duration::from_secs(10));
+    
     for &num_subscribers in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(1000));
         group.bench_with_input(
@@ -291,6 +294,9 @@ fn bench_zero_copy_event_bus(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("zero_copy_event_bus");
     
+    // Configure longer measurement time for high-volume tests
+    group.measurement_time(Duration::from_secs(15));
+    
     for &num_subscribers in &[1, 10, 100, 1000] {
         group.throughput(Throughput::Elements(1000));
         group.bench_with_input(
@@ -360,6 +366,10 @@ fn bench_static_event_fast_path(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("static_event_fast_path");
     
+    // Configure longer measurement time for high-volume tests
+    group.measurement_time(Duration::from_secs(20));
+    group.sample_size(80);
+    
     for &num_subscribers in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(10000));
         group.bench_with_input(
@@ -414,6 +424,9 @@ fn bench_batch_processing(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     
     let mut group = c.benchmark_group("batch_processing");
+    
+    // Configure longer measurement time for high-volume tests
+    group.measurement_time(Duration::from_secs(10));
     
     for &batch_size in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(10000));

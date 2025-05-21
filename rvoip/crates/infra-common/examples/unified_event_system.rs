@@ -1,0 +1,358 @@
+use infra_common::events::system::EventSystem;
+use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
+use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use serde::{Serialize, Deserialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use std::any::Any;
+
+// ---- Constants for testing ----
+const SUBSCRIBER_COUNT: usize = 5;
+const TEST_DURATION_SECS: u64 = 10;
+const CHANNEL_CAPACITY: usize = 10_000;
+
+/// Define a media packet event that's compatible with both implementations
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MediaPacketEvent {
+    stream_id: String,
+    sequence_number: u32,
+    timestamp: u64,
+    payload_type: u8,
+    marker: bool,
+    payload_size: usize,
+}
+
+// Implement Event trait for MediaPacketEvent
+impl Event for MediaPacketEvent {
+    fn event_type() -> &'static str {
+        "media_packet"
+    }
+    
+    fn priority() -> EventPriority {
+        EventPriority::High
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// Implement StaticEvent to enable fast path
+impl StaticEvent for MediaPacketEvent {}
+
+/// Stats collector for performance measurement
+struct StatsCollector {
+    name: String,
+    packets_processed: AtomicU64,
+    start_time: Instant,
+}
+
+impl StatsCollector {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            packets_processed: AtomicU64::new(0),
+            start_time: Instant::now(),
+        }
+    }
+    
+    fn count_event(&self) {
+        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    fn print_stats(&self) {
+        let count = self.packets_processed.load(Ordering::Relaxed);
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let rate = count as f64 / elapsed;
+        
+        println!("[{}] Processed {} packets ({:.2} packets/sec)",
+            self.name,
+            count,
+            rate);
+    }
+}
+
+/// Create a test media packet
+fn create_media_packet(id: u64) -> MediaPacketEvent {
+    MediaPacketEvent {
+        stream_id: format!("stream-{}", id % 8),
+        sequence_number: (id % 65535) as u32,
+        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+        payload_type: 96,
+        marker: id % 30 == 0,
+        payload_size: 1400,
+    }
+}
+
+/// Run a benchmark with the specified event system
+async fn run_benchmark(
+    event_system: EventSystem,
+    implementation_name: &str,
+) -> EventResult<()> {
+    println!("\n{} Implementation Test", implementation_name);
+    println!("==========================");
+    println!("Subscribers: {}", SUBSCRIBER_COUNT);
+    println!("Duration: {} seconds", TEST_DURATION_SECS);
+    println!("Channel capacity: {}", CHANNEL_CAPACITY);
+    
+    // Start the event system
+    event_system.start().await?;
+    
+    // Create the publisher
+    let publisher = event_system.create_publisher::<MediaPacketEvent>();
+    
+    // Create the stats collector
+    let stats = Arc::new(StatsCollector::new(implementation_name));
+    
+    // Create and start subscribers
+    let mut handles = Vec::new();
+    
+    for _ in 0..SUBSCRIBER_COUNT {
+        let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
+        let stats_clone = stats.clone();
+        
+        let handle = tokio::spawn(async move {
+            while let Ok(_event) = subscriber.receive().await {
+                stats_clone.count_event();
+            }
+        });
+        
+        handles.push(handle);
+    }
+    
+    // Start publishing task
+    let publisher_handle = tokio::spawn({
+        let publisher = publisher;
+        async move {
+            let mut event_id = 0;
+            let end_time = Instant::now() + Duration::from_secs(TEST_DURATION_SECS);
+            
+            while Instant::now() < end_time {
+                let _ = publisher.publish(create_media_packet(event_id)).await;
+                event_id += 1;
+                
+                if event_id % 10_000 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    });
+    
+    // Wait for publisher to finish
+    publisher_handle.await.unwrap();
+    
+    // Print final stats
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stats.print_stats();
+    
+    // Shutdown the event system
+    event_system.shutdown().await?;
+    
+    // Cancel all subscriber tasks
+    for handle in handles {
+        handle.abort();
+    }
+    
+    Ok(())
+}
+
+/// Demonstrate batch publishing
+async fn demonstrate_batch_publishing(event_system: &EventSystem) -> EventResult<()> {
+    println!("\nDemonstrating batch publishing...");
+    
+    // Create the publisher
+    let publisher = event_system.create_publisher::<MediaPacketEvent>();
+    
+    // Create a subscriber
+    let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
+    
+    // Prepare a batch of events
+    let batch_size = 100;
+    let events: Vec<MediaPacketEvent> = (0..batch_size)
+        .map(|i| create_media_packet(i as u64))
+        .collect();
+    
+    println!("Publishing batch of {} events", batch_size);
+    
+    // Publish the batch
+    publisher.publish_batch(events).await?;
+    
+    // Receive some events to verify
+    let mut received = 0;
+    while let Ok(Ok(_event)) = tokio::time::timeout(
+        Duration::from_millis(100),
+        subscriber.receive()
+    ).await {
+        received += 1;
+        if received >= 5 {
+            break;
+        }
+    }
+    
+    println!("Successfully received {} events from batch", received);
+    Ok(())
+}
+
+/// Simple test for the StaticEvent publishing
+async fn test_static_event_publishing() -> EventResult<()> {
+    println!("\nSimple StaticEvent Publishing Test");
+    println!("-------------------------------");
+    
+    // Create a static system with enough capacity
+    let system = EventSystemBuilder::new()
+        .implementation(ImplementationType::StaticFastPath)
+        .channel_capacity(1000)
+        .build();
+    
+    // Start the system
+    system.start().await?;
+    
+    // Create a publisher
+    let publisher = system.create_publisher::<MediaPacketEvent>();
+    
+    // Subscribe to the events
+    let mut subscriber = system.subscribe::<MediaPacketEvent>().await?;
+    
+    // Create a test packet
+    let packet = create_media_packet(42);
+    
+    // Publish it
+    println!("Publishing a single packet...");
+    publisher.publish(packet.clone()).await?;
+    
+    // Try to receive it with a timeout
+    match tokio::time::timeout(Duration::from_secs(1), subscriber.receive()).await {
+        Ok(Ok(received)) => {
+            println!("Successfully received packet with sequence number: {}", received.sequence_number);
+        },
+        Ok(Err(e)) => {
+            println!("Error receiving packet: {}", e);
+        },
+        Err(_) => {
+            println!("Timeout waiting for packet");
+        }
+    }
+    
+    // Shut down the system
+    system.shutdown().await?;
+    
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Unified Event System API - Performance Benchmark");
+    println!("===============================================");
+    
+    // Create a static fast path event system
+    let static_system = EventSystemBuilder::new()
+        .implementation(ImplementationType::StaticFastPath)
+        .channel_capacity(CHANNEL_CAPACITY)
+        .build();
+    
+    // Create a zero-copy event bus
+    let zero_copy_system = EventSystemBuilder::new()
+        .implementation(ImplementationType::ZeroCopy)
+        .channel_capacity(CHANNEL_CAPACITY)
+        .max_concurrent_dispatches(1000)
+        .enable_priority(true)
+        .default_timeout(Some(Duration::from_secs(1)))
+        .batch_size(100)
+        .shard_count(8)
+        .enable_metrics(true)
+        .metrics_reporting_interval(Duration::from_secs(5))
+        .build();
+    
+    // Create tokio runtime for running the benchmarks
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    
+    // Run benchmarks for each implementation
+    runtime.block_on(async {
+        // Run the simple test first
+        match test_static_event_publishing().await {
+            Ok(_) => println!("Simple test passed!"),
+            Err(e) => println!("Simple test failed: {}", e),
+        }
+        
+        // Short pause
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        // Run benchmark for static fast path implementation
+        run_benchmark(static_system, "Static Fast Path").await?;
+        
+        // Short pause between benchmarks
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
+        // Run benchmark for zero-copy implementation
+        run_benchmark(zero_copy_system, "Zero Copy").await?;
+        
+        // Demonstrate batch publishing with static implementation
+        let demo_system = EventSystemBuilder::new()
+            .implementation(ImplementationType::StaticFastPath)
+            .channel_capacity(1000)
+            .build();
+            
+        demo_system.start().await?;
+        demonstrate_batch_publishing(&demo_system).await?;
+        demo_system.shutdown().await?;
+        
+        // Example of MediaProcessor with both implementations
+        println!("\nTesting MediaProcessor with different implementations");
+        println!("--------------------------------------------------");
+        
+        // Test with high performance (static) implementation
+        let high_perf_processor = MediaProcessor::new(true);
+        high_perf_processor.start().await?;
+        
+        // Test with feature-rich (zero-copy) implementation
+        let feature_rich_processor = MediaProcessor::new(false);
+        feature_rich_processor.start().await?;
+        
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    
+    println!("\nAll benchmarks completed successfully");
+    Ok(())
+}
+
+/// Example component that can use either implementation
+struct MediaProcessor {
+    event_system: EventSystem,
+}
+
+impl MediaProcessor {
+    pub fn new(high_performance: bool) -> Self {
+        let builder = EventSystemBuilder::new()
+            .channel_capacity(CHANNEL_CAPACITY);
+        
+        let event_system = if high_performance {
+            // Use static fast path for max performance
+            builder.implementation(ImplementationType::StaticFastPath)
+        } else {
+            // Use zero-copy for more features
+            builder.implementation(ImplementationType::ZeroCopy)
+                .max_concurrent_dispatches(500)
+                .enable_priority(true)
+                .default_timeout(Some(Duration::from_millis(100)))
+        }.build();
+        
+        Self { event_system }
+    }
+    
+    pub async fn start(&self) -> EventResult<()> {
+        // Start the event system
+        self.event_system.start().await?;
+        
+        // Report which implementation we're using
+        if let Some(_) = self.event_system.advanced() {
+            println!("Started media processor with feature-rich zero-copy implementation");
+        } else {
+            println!("Started media processor with high-performance static implementation");
+        }
+        
+        Ok(())
+    }
+} 
