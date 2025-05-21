@@ -898,7 +898,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ✅ Add proper derive macro for StaticEvent types
 ✅ Implement automatic registration of event types when modules are loaded
-- [ ] Add support for event filtering
+✅ Add support for event filtering
+✅ Add unit tests for event filtering
 ✅ Add proper metrics to compare implementations
 
 ## Current Status
@@ -917,3 +918,11 @@ The API abstraction layer maintains full performance while providing a simplifie
 4. Improve the batch publishing to work in both implementations
 5. Implement buffer management and backpressure mechanisms
 6. Add comprehensive observability and metrics functionality 
+
+
+buffer
+backpressure
+metrics
+observability
+
+

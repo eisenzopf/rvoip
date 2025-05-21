@@ -13,11 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
 
-use crate::events::types::{Event, EventResult};
+use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
 use crate::events::bus::{EventBus, EventBusConfig};
-use crate::events::api;
+use crate::events::api::{self, EventSystem as EventSystemTrait};
 use crate::events::static_path::StaticFastPathSystem;
 use crate::events::zero_copy::ZeroCopySystem;
+use crate::events::builder::{ImplementationType, EventSystemBuilder};
 
 /// Unified event system that provides a common interface to both implementations.
 ///
@@ -81,6 +82,54 @@ impl EventSystem {
             Self::ZeroCopy(system) => Some(system.event_bus()),
         }
     }
+
+    /// Subscribe to events with a filter.
+    ///
+    /// This is a convenience method that combines subscribing and filtering in one step.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `E` - The event type to subscribe to
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - A function that takes a reference to an event and returns a boolean indicating whether to accept it
+    ///
+    /// # Returns
+    ///
+    /// A subscriber that will only receive events that pass the filter
+    pub async fn subscribe_filtered<E, F>(&self, filter: F) -> EventResult<Box<dyn api::EventSubscriber<E>>>
+    where
+        E: Event + 'static,
+        F: Fn(&E) -> bool + Send + Sync + 'static,
+    {
+        match self {
+            Self::StaticFastPath(system) => system.subscribe_filtered(filter).await,
+            Self::ZeroCopy(system) => system.subscribe_filtered(filter).await,
+        }
+    }
+    
+    /// Subscribe to events with a predefined filter.
+    ///
+    /// This method is similar to `subscribe_filtered`, but takes an `EventFilter` instead of a function.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `E` - The event type to subscribe to
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - An `EventFilter` for the event type
+    ///
+    /// # Returns
+    ///
+    /// A subscriber that will only receive events that pass the filter
+    pub async fn subscribe_with_filter<E: Event + 'static>(&self, filter: EventFilter<E>) -> EventResult<Box<dyn api::EventSubscriber<E>>> {
+        match self {
+            Self::StaticFastPath(system) => system.subscribe_with_filter(filter).await,
+            Self::ZeroCopy(system) => system.subscribe_with_filter(filter).await,
+        }
+    }
 }
 
 #[async_trait]
@@ -110,6 +159,24 @@ impl api::EventSystem for EventSystem {
         match self {
             Self::StaticFastPath(system) => system.subscribe::<E>().await,
             Self::ZeroCopy(system) => system.subscribe::<E>().await,
+        }
+    }
+    
+    async fn subscribe_filtered<E, F>(&self, filter: F) -> EventResult<Box<dyn api::EventSubscriber<E>>> 
+    where
+        E: Event + 'static,
+        F: Fn(&E) -> bool + Send + Sync + 'static,
+    {
+        match self {
+            Self::StaticFastPath(system) => system.subscribe_filtered(filter).await,
+            Self::ZeroCopy(system) => system.subscribe_filtered(filter).await,
+        }
+    }
+    
+    async fn subscribe_with_filter<E: Event + 'static>(&self, filter: EventFilter<E>) -> EventResult<Box<dyn api::EventSubscriber<E>>> {
+        match self {
+            Self::StaticFastPath(system) => system.subscribe_with_filter(filter).await,
+            Self::ZeroCopy(system) => system.subscribe_with_filter(filter).await,
         }
     }
 }
@@ -217,5 +284,177 @@ impl<E: Event + 'static> EventSubscriber<E> {
     /// or an error if receiving fails
     pub fn try_receive(&mut self) -> EventResult<Option<Arc<E>>> {
         self.inner.try_receive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::types::EventPriority;
+    use crate::events::builder::{EventSystemBuilder, ImplementationType};
+    use crate::events::api::EventSystem as EventSystemTrait;
+    use serde::{Serialize, Deserialize};
+    use std::any::Any;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct FilterableEvent {
+        id: u32,
+        category: String,
+        is_important: bool,
+    }
+
+    impl Event for FilterableEvent {
+        fn event_type() -> &'static str {
+            "filterable_event"
+        }
+        
+        fn priority() -> EventPriority {
+            EventPriority::Normal
+        }
+        
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+    
+    // Implement StaticEvent trait for FilterableEvent to work with StaticFastPath
+    impl StaticEvent for FilterableEvent {}
+    
+    // Helper to register with the static registry
+    fn register_event() {
+        use crate::events::registry::GlobalTypeRegistry;
+        GlobalTypeRegistry::register_static_event_type::<FilterableEvent>();
+        GlobalTypeRegistry::register_with_capacity::<FilterableEvent>(1000);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Test the subscribe_filtered method
+    #[tokio::test]
+    async fn test_subscribe_filtered() {
+        // Register the event for static path
+        register_event();
+        
+        // Test with both implementations
+        for implementation in [ImplementationType::ZeroCopy, ImplementationType::StaticFastPath] {
+            let system = EventSystemBuilder::new()
+                .implementation(implementation)
+                .channel_capacity(1000)
+                .build();
+                
+            system.start().await.unwrap();
+            
+            // Create filtered subscriber for important events in category "A"
+            let mut filtered_subscriber = system.subscribe_filtered::<FilterableEvent, _>(|event| {
+                event.is_important && event.category == "A"
+            }).await.unwrap();
+            
+            // Create publisher
+            let publisher = system.create_publisher::<FilterableEvent>();
+            
+            // Publish a mix of events
+            let events = vec![
+                FilterableEvent { id: 1, category: "A".to_string(), is_important: true },   // Match
+                FilterableEvent { id: 2, category: "A".to_string(), is_important: false },  // No match
+                FilterableEvent { id: 3, category: "B".to_string(), is_important: true },   // No match
+                FilterableEvent { id: 4, category: "A".to_string(), is_important: true },   // Match
+            ];
+            
+            for event in events {
+                publisher.publish(event).await.unwrap();
+            }
+            
+            // Should receive only the 2 matching events
+            let mut received_ids = Vec::new();
+            
+            for _ in 0..2 {
+                match filtered_subscriber.receive_timeout(Duration::from_millis(100)).await {
+                    Ok(event) => {
+                        assert!(event.is_important, "Should only receive important events");
+                        assert_eq!(event.category, "A", "Should only receive events from category A");
+                        received_ids.push(event.id);
+                    },
+                    Err(_) => break,
+                }
+            }
+            
+            // Verify we got the matching events
+            assert_eq!(received_ids.len(), 2);
+            assert!(received_ids.contains(&1));
+            assert!(received_ids.contains(&4));
+            
+            // No more events should be available
+            match filtered_subscriber.receive_timeout(Duration::from_millis(50)).await {
+                Ok(_) => panic!("Should not receive any more events"),
+                Err(_) => (), // Expected timeout
+            }
+            
+            system.shutdown().await.unwrap();
+        }
+    }
+    
+    // Test the subscribe_with_filter method
+    #[tokio::test]
+    async fn test_subscribe_with_filter() {
+        // Register the event for static path
+        register_event();
+        
+        // Test with both implementations
+        for implementation in [ImplementationType::ZeroCopy, ImplementationType::StaticFastPath] {
+            let system = EventSystemBuilder::new()
+                .implementation(implementation)
+                .channel_capacity(1000)
+                .build();
+                
+            system.start().await.unwrap();
+            
+            // Create a filter using the utility functions
+            use crate::events::api::filters;
+            let category_filter = filters::field_equals(|e: &FilterableEvent| &e.category, "B".to_string());
+            let importance_filter = filters::field_equals(|e: &FilterableEvent| &e.is_important, true);
+            
+            // Combine filters with AND
+            let combined_filter = filters::and(category_filter, importance_filter);
+            
+            // Subscribe with the combined filter
+            let mut filtered_subscriber = system.subscribe_with_filter::<FilterableEvent>(combined_filter).await.unwrap();
+            
+            // Create publisher
+            let publisher = system.create_publisher::<FilterableEvent>();
+            
+            // Publish a mix of events
+            let events = vec![
+                FilterableEvent { id: 1, category: "A".to_string(), is_important: true },   // No match
+                FilterableEvent { id: 2, category: "B".to_string(), is_important: false },  // No match
+                FilterableEvent { id: 3, category: "B".to_string(), is_important: true },   // Match
+                FilterableEvent { id: 4, category: "B".to_string(), is_important: true },   // Match
+            ];
+            
+            for event in events {
+                publisher.publish(event).await.unwrap();
+            }
+            
+            // Should receive only the 2 matching events from category B that are important
+            let mut received_ids = Vec::new();
+            
+            for _ in 0..2 {
+                match filtered_subscriber.receive_timeout(Duration::from_millis(100)).await {
+                    Ok(event) => {
+                        assert!(event.is_important, "Should only receive important events");
+                        assert_eq!(event.category, "B", "Should only receive events from category B");
+                        received_ids.push(event.id);
+                    },
+                    Err(_) => break,
+                }
+            }
+            
+            // Verify we got the matching events
+            assert_eq!(received_ids.len(), 2);
+            assert!(received_ids.contains(&3));
+            assert!(received_ids.contains(&4));
+            
+            system.shutdown().await.unwrap();
+        }
     }
 } 

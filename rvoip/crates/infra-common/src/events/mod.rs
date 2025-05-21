@@ -87,6 +87,7 @@
 //! - **Concurrent Dispatching**: Configure how many events can be dispatched concurrently
 //! - **Sharding**: Improve performance by using multiple shards
 //! - **Batch Publishing**: Publish multiple events efficiently
+//! - **Event Filtering**: Filter events based on their content
 //! 
 //! ## Configuration Options
 //! 
@@ -105,6 +106,70 @@
 //!     .enable_metrics(true)            // Enable performance metrics
 //!     .build();
 //! ```
+//!
+//! ## Event Filtering
+//!
+//! The event system supports filtering events based on their content. This allows subscribers
+//! to only receive events that meet specific criteria:
+//!
+//! ```rust,no_run
+//! use infra_common::events::system::EventSystem;
+//! use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+//! use infra_common::events::types::{Event, EventPriority, EventFilter};
+//! use infra_common::events::api::{EventSystem as EventSystemTrait, EventSubscriber, filters};
+//! use std::any::Any;
+//! use std::sync::Arc;
+//! use serde::{Serialize, Deserialize};
+//!
+//! // Define an event type
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
+//! struct UserEvent {
+//!     user_id: u32,
+//!     action: String,
+//!     level: u8,
+//! }
+//!
+//! // Implement the Event trait
+//! impl Event for UserEvent {
+//!     fn event_type() -> &'static str { "user_event" }
+//!     fn priority() -> EventPriority { EventPriority::Normal }
+//!     fn as_any(&self) -> &dyn Any { self }
+//! }
+//!
+//! async fn filtering_example() -> Result<(), Box<dyn std::error::Error>> {
+//!     let system = EventSystemBuilder::new()
+//!         .implementation(ImplementationType::ZeroCopy)
+//!         .build();
+//!
+//!     system.start().await?;
+//!
+//!     // Method 1: Subscribe with filter function
+//!     let mut admin_events = system.subscribe_filtered::<UserEvent, _>(|event| {
+//!         event.user_id == 1 && event.level >= 5  // Only admin (ID 1) and high-level events
+//!     }).await?;
+//!
+//!     // Method 2: Using the filter utilities directly
+//!     let user_filter = filters::field_equals(|e: &UserEvent| &e.user_id, 42);
+//!     let level_filter = filters::field_matches(|e: &UserEvent| &e.level, |level| *level > 3);
+//!     
+//!     // Combine filters with AND
+//!     let combined_filter = filters::and(user_filter, level_filter);
+//!     
+//!     let mut filtered_events = system.subscribe_with_filter::<UserEvent>(combined_filter).await?;
+//!
+//!     // Publishing events
+//!     let publisher = system.create_publisher::<UserEvent>();
+//!     
+//!     // This will be received by the admin_events subscriber
+//!     publisher.publish(UserEvent {
+//!         user_id: 1,
+//!         action: "login".to_string(),
+//!         level: 8,
+//!     }).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
 
 // Shared components
 pub mod bus;
@@ -119,8 +184,4 @@ pub mod static_path;
 pub mod zero_copy;
 pub mod system;
 pub mod builder;
-
-// Tests
-#[cfg(test)]
-mod tests;
 

@@ -76,59 +76,38 @@ impl Debug for Box<dyn AnyBroadcastSender> {
 /// Typed broadcast sender for a specific event type
 pub type TypedBroadcastSender<E> = broadcast::Sender<Arc<E>>;
 
-/// Typed wrapper around tokio::sync::broadcast::Receiver for events of a specific type
+/// Typed broadcast receiver for a specific event type
 pub struct TypedBroadcastReceiver<T> {
-    pub(crate) receiver: tokio::sync::broadcast::Receiver<Arc<T>>,
-    type_name: String,
+    /// Inner broadcast receiver
+    inner: tokio::sync::broadcast::Receiver<Arc<T>>,
 }
 
 impl<T> TypedBroadcastReceiver<T> {
-    pub fn new(receiver: tokio::sync::broadcast::Receiver<Arc<T>>) -> Self {
-        let type_name = std::any::type_name::<T>().to_string();
-        tracing::debug!("Created TypedBroadcastReceiver for {}", type_name);
-        Self { 
-            receiver,
-            type_name,
-        }
+    /// Creates a new typed broadcast receiver
+    pub fn new(inner: tokio::sync::broadcast::Receiver<Arc<T>>) -> Self {
+        Self { inner }
     }
     
-    /// Receive a broadcast message.
+    /// Receive an event
     pub async fn recv(&mut self) -> Result<Arc<T>, tokio::sync::broadcast::error::RecvError> {
-        match self.receiver.recv().await {
-            Ok(event) => {
-                tracing::trace!("TypedBroadcastReceiver received event for {}", self.type_name);
-                Ok(event)
-            },
-            Err(e) => {
-                tracing::warn!("TypedBroadcastReceiver error for {}: {}", self.type_name, e);
-                Err(e)
-            }
-        }
+        self.inner.recv().await
     }
     
-    /// Try to receive a broadcast message without blocking.
+    /// Try to receive an event without blocking
     pub fn try_recv(&mut self) -> Result<Arc<T>, tokio::sync::broadcast::error::TryRecvError> {
-        match self.receiver.try_recv() {
-            Ok(event) => {
-                tracing::trace!("TypedBroadcastReceiver try_recv successful for {}", self.type_name);
-                Ok(event)
-            },
-            Err(e) => {
-                // Only log warnings for actual errors, not for Empty (which is normal)
-                if !matches!(e, tokio::sync::broadcast::error::TryRecvError::Empty) {
-                    tracing::warn!("TypedBroadcastReceiver try_recv error for {}: {}", self.type_name, e);
-                }
-                Err(e)
-            }
-        }
+        self.inner.try_recv()
     }
     
-    /// Resubscribe to a topic.
-    pub fn resubscribe(&self) -> Self {
-        tracing::debug!("Resubscribing TypedBroadcastReceiver for {}", self.type_name);
-        Self { 
-            receiver: self.receiver.resubscribe(),
-            type_name: self.type_name.clone(),
+    /// Get reference to the inner broadcast receiver
+    pub fn inner_receiver(&self) -> &tokio::sync::broadcast::Receiver<Arc<T>> {
+        &self.inner
+    }
+}
+
+impl<T> Clone for TypedBroadcastReceiver<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.resubscribe(),
         }
     }
 }
