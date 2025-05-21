@@ -69,6 +69,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use tracing::{warn, debug};
+use std::any::Any;
+use std::any::TypeId;
 
 use crate::events::bus::{EventBus, EventBusConfig};
 use crate::events::publisher::{Publisher, FastPublisher};
@@ -91,13 +93,27 @@ impl Event for TestEvent {
         EventPriority::Normal
     }
     
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
 // Make TestEvent a StaticEvent for static fast path tests
 impl StaticEvent for TestEvent {}
+
+// Register standard event types for static dispatch
+fn register_standard_static_events() {
+    // Register test events
+    GlobalTypeRegistry::register_static_event_type::<TestEvent>();
+    
+    // For examples, register known event types used in documentation
+    // This would typically be done by each module that defines a StaticEvent type
+    tracing::debug!("Registering TestEvent as StaticEvent");
+    
+    // Note: We can't directly register MediaPacketEvent here since it's defined
+    // in the example file. In a real implementation, you'd have a mechanism for
+    // modules to register their event types at startup.
+}
 
 /// Unified interface for event system operations.
 ///
@@ -165,6 +181,9 @@ impl EventSystem {
     pub fn new_static_fast_path(channel_capacity: usize) -> Self {
         // Register the global channel capacity for static events
         GlobalTypeRegistry::register_default_capacity(channel_capacity);
+        
+        // Register our known StaticEvent implementations
+        register_standard_static_events();
         
         Self {
             implementation: EventSystemImpl::StaticFastPath,
@@ -247,26 +266,20 @@ impl EventSystem {
             EventSystemImpl::StaticFastPath => {
                 // For static events, use the global registry
                 if self.is_static_event::<E>() {
-                    // If this is a StaticEvent, we can use the FastPublisher
-                    // We create a typed intermediate function to handle the StaticEvent bound
-                    fn make_static_publisher<T: Event + StaticEvent>() -> EventPublisher<T> {
-                        EventPublisher::new_static_fast_path()
-                    }
+                    // Print the type name for debugging
+                    let type_name = std::any::type_name::<E>();
+                    debug!("Creating static publisher for registered StaticEvent type: {}", type_name);
                     
-                    // Safety: We've checked that E implements StaticEvent via reflection
-                    if std::any::type_name::<E>() == std::any::type_name::<TestEvent>() {
-                        // Special case for our test type
-                        unsafe {
-                            std::mem::transmute(make_static_publisher::<TestEvent>())
-                        }
-                    } else if std::any::type_name::<E>().contains("MediaPacketEvent") {
-                        // Since our registry checks found MediaPacketEvent, use the proper EventBus
-                        // implementation to ensure we get a properly registered channel
-                        EventPublisher::new_zero_copy(EventBus::new())
-                    } else {
-                        // Fallback for unknown static event types
-                        EventPublisher::new_zero_copy_fallback()
-                    }
+                    // Create a zero-copy bus with static registration
+                    // This isn't as efficient as a true static path would be, but it's type-safe
+                    // and works for our demonstration purposes
+                    let mut bus = EventBus::new();
+                    
+                    // Pre-register the type with our registry to ensure channels exist
+                    let _ = bus.type_registry().get_or_create::<E>();
+                    
+                    // Return a publisher using this bus
+                    EventPublisher::new_zero_copy(bus)
                 } else {
                     // If not a StaticEvent, we need to warn and provide a fallback
                     warn!("Event type {} is not a StaticEvent, falling back to zero-copy implementation", 
@@ -332,36 +345,18 @@ impl EventSystem {
     
     /// Helper method to check if a type implements StaticEvent.
     /// 
-    /// This is implemented via type name reflection since we can't use specialization yet.
-    /// In a real implementation, you would use a proper registry of StaticEvent types.
+    /// Uses the proper type registry instead of string matching.
     #[inline]
     fn is_static_event<E: Event>(&self) -> bool {
-        // The proper way to do this would be with specialization, but that's not stable yet.
-        // Instead, we use type reflection to determine if the type is one we know implements StaticEvent
-        let type_name = std::any::type_name::<E>();
+        // Check if the type is registered in our StaticEventRegistry
+        let is_static = GlobalTypeRegistry::is_static_event::<E>();
         
-        // Debug: Print the type name to help diagnose issues
-        println!("DEBUG: Checking if type '{}' is a StaticEvent", type_name);
-        
-        // For unit tests, TestEvent is a StaticEvent
-        if type_name.contains("TestEvent") {
-            return true;
-        }
-
-        // For our example MediaPacketEvent
-        if type_name.contains("MediaPacketEvent") {
-            println!("DEBUG: Found MediaPacketEvent in type name");
-            return true;
-        }
-
-        // For tutorial/documentation examples
-        if type_name.contains("MyEvent") {
-            return true;
-        }
-        
-        // Fallback - this shouldn't be needed if the above checks work
-        println!("DEBUG: Type '{}' not recognized as StaticEvent", type_name);
-        false
+        // Add extra debug logging to help with issue diagnosis
+        debug!("Checking if {} is a StaticEvent: {}", 
+              std::any::type_name::<E>(), 
+              is_static);
+              
+        is_static
     }
 }
 
@@ -446,19 +441,6 @@ impl<E: Event + StaticEvent> StaticPublisherTrait<E> for StaticFastPathPublisher
 
 impl<E: Event> EventPublisher<E> {
     /// Creates a new publisher using the static fast path implementation.
-    /// 
-    /// For internal use - the StaticEvent bound will be enforced at the call site.
-    fn new_static_fast_path_internal() -> Self 
-    where E: StaticEvent
-    {
-        Self {
-            implementation: EventPublisherImpl::StaticFastPath(
-                Box::new(StaticFastPathPublisher::<E>::new())
-            ),
-        }
-    }
-    
-    /// Creates a new publisher using the static fast path implementation.
     ///
     /// # Returns
     ///
@@ -466,7 +448,33 @@ impl<E: Event> EventPublisher<E> {
     pub(crate) fn new_static_fast_path() -> Self 
     where E: StaticEvent
     {
-        Self::new_static_fast_path_internal()
+        Self::new_static_fast_path_from_builder(|| FastPublisher::<E>::new())
+    }
+    
+    /// Creates a new publisher from a builder function.
+    /// This is safer than using transmute.
+    pub(crate) fn new_static_fast_path_from_builder<F>(builder: F) -> Self 
+    where 
+        F: FnOnce() -> FastPublisher<E>,
+        E: StaticEvent, 
+    {
+        Self {
+            implementation: EventPublisherImpl::StaticFastPath(
+                Box::new(builder())
+            ),
+        }
+    }
+    
+    /// Creates a publisher from an existing static publisher.
+    /// This is for cases where we've checked the type at runtime.
+    pub(crate) fn from_static_publisher(publisher: FastPublisher<E>) -> Self 
+    where E: StaticEvent
+    {
+        Self {
+            implementation: EventPublisherImpl::StaticFastPath(
+                Box::new(publisher)
+            ),
+        }
     }
     
     /// Creates a new publisher using the zero-copy event bus implementation.

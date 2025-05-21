@@ -81,6 +81,10 @@ pub struct FastPublisher<E: StaticEvent> {
 impl<E: StaticEvent> FastPublisher<E> {
     /// Create a new fast publisher
     pub fn new() -> Self {
+        // Register this type as a StaticEvent if not already registered
+        GlobalTypeRegistry::register_static_event_type::<E>();
+        
+        // Get the sender from registry
         let sender = GlobalTypeRegistry::get_sender::<E>();
         Self {
             _phantom: PhantomData,
@@ -90,6 +94,10 @@ impl<E: StaticEvent> FastPublisher<E> {
     
     /// Create a new fast publisher with custom channel capacity
     pub fn with_capacity(capacity: usize) -> Self {
+        // Register this type as a StaticEvent
+        GlobalTypeRegistry::register_static_event_type::<E>();
+        
+        // Register with custom capacity
         let sender = GlobalTypeRegistry::register_with_capacity::<E>(capacity);
         
         Self {
@@ -113,6 +121,11 @@ impl<E: StaticEvent> FastPublisher<E> {
     /// Get a broadcast receiver for this event type
     pub fn subscribe(&self) -> TypedBroadcastReceiver<E> {
         TypedBroadcastReceiver::new(self.sender.subscribe())
+    }
+    
+    /// Get the number of receivers for this event type
+    pub fn receiver_count(&self) -> usize {
+        self.sender.receiver_count()
     }
 }
 

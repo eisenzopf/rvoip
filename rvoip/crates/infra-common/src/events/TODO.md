@@ -810,4 +810,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     Ok(())
 }
-``` 
+```
+
+# Event System Implementation Status
+
+## Phase 1: Registry and Type-Safety Improvements (COMPLETED)
+
+✅ We replaced the string-based type matching with a proper type registry  
+✅ Removed unsafe code (`std::mem::transmute` usage)  
+✅ Implemented a proper `StaticEventRegistry` with `TypeId` lookups  
+✅ Removed brittle string matching approach  
+✅ Added proper debug logging for diagnosis  
+
+## Phase 2: Performance Improvements (TODO)
+
+- Implement true static dispatch for the FastPublisher path
+- Benchmark and verify improved throughput
+- Fix the Static Fast Path implementation to actually handle messages (currently showing 0 processed)
+- Make batch publishing work with proper static registration
+
+## Phase 3: API Enhancements (TODO)
+
+- Add proper derive macro for StaticEvent types
+- Implement automatic registration of event types when modules are loaded
+- Add support for event filtering
+- Add proper metrics to compare implementations
+
+## Current Status
+
+The Zero-Copy implementation is working correctly with excellent throughput (approx 4-5M packets/second),
+but the Static Fast Path is not yet processing messages properly.
+
+The StaticEvent registration system is improved, but we're not properly using it yet in the fast path.
+
+## Next Steps
+
+1. Fix the Static Fast Path implementation to properly process messages
+2. Create a true static dispatch mechanism that avoids runtime type lookup
+3. Implement a derive macro for StaticEvent to help with registration
+4. Improve the batch publishing to work in both implementations 

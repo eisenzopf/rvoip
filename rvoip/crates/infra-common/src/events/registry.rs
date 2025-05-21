@@ -1,4 +1,4 @@
-use crate::events::types::{Event, EventType};
+use crate::events::types::{Event, EventType, StaticEvent};
 use std::any::Any;
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -8,6 +8,20 @@ use std::fmt::Debug;
 use std::any::TypeId;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Static event registry to properly track types implementing StaticEvent
+static STATIC_EVENT_REGISTRY: once_cell::sync::Lazy<dashmap::DashSet<TypeId>> = 
+    once_cell::sync::Lazy::new(|| dashmap::DashSet::new());
+
+/// Register a type as a StaticEvent in the registry
+pub fn register_static_event<T: 'static + StaticEvent>() {
+    STATIC_EVENT_REGISTRY.insert(TypeId::of::<T>());
+}
+
+/// Check if a type is registered as a StaticEvent
+pub fn is_registered_static_event<T: 'static>() -> bool {
+    STATIC_EVENT_REGISTRY.contains(&TypeId::of::<T>())
+}
 
 /// Trait for erased broadcast senders of any type.
 trait AnyBroadcastSender: Send + Sync + 'static {
@@ -216,5 +230,15 @@ impl GlobalTypeRegistry {
     pub fn register_default_capacity(capacity: usize) {
         let _registry = GLOBAL_REGISTRY.get_or_init(|| TypeRegistry::new(capacity));
         // Nothing else to do - the registry will use this capacity for future channels
+    }
+    
+    /// Register a type as implementing StaticEvent
+    pub fn register_static_event_type<E: StaticEvent>() {
+        register_static_event::<E>();
+    }
+    
+    /// Check if a type is registered as implementing StaticEvent
+    pub fn is_static_event<E: 'static>() -> bool {
+        is_registered_static_event::<E>()
     }
 } 

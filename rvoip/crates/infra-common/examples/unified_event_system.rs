@@ -1,6 +1,7 @@
 use infra_common::events::system::EventSystem;
 use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
 use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use infra_common::events::registry::GlobalTypeRegistry;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,7 @@ use std::any::Any;
 const SUBSCRIBER_COUNT: usize = 5;
 const TEST_DURATION_SECS: u64 = 10;
 const CHANNEL_CAPACITY: usize = 10_000;
+const DEBUG_MODE: bool = true;
 
 /// Define a media packet event that's compatible with both implementations
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +42,14 @@ impl Event for MediaPacketEvent {
 
 // Implement StaticEvent to enable fast path
 impl StaticEvent for MediaPacketEvent {}
+
+// Register our MediaPacketEvent with the GlobalTypeRegistry
+fn register_event_types() {
+    GlobalTypeRegistry::register_static_event_type::<MediaPacketEvent>();
+    if DEBUG_MODE {
+        println!("Registered MediaPacketEvent as StaticEvent");
+    }
+}
 
 /// Stats collector for performance measurement
 struct StatsCollector {
@@ -101,20 +111,39 @@ async fn run_benchmark(
     
     // Create the publisher
     let publisher = event_system.create_publisher::<MediaPacketEvent>();
+    if DEBUG_MODE {
+        println!("[DEBUG] Created publisher for {}", implementation_name);
+    }
     
     // Create the stats collector
     let stats = Arc::new(StatsCollector::new(implementation_name));
     
     // Create and start subscribers
     let mut handles = Vec::new();
+    let implementation_name_str = implementation_name.to_string();
     
-    for _ in 0..SUBSCRIBER_COUNT {
+    for i in 0..SUBSCRIBER_COUNT {
         let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
         let stats_clone = stats.clone();
+        let impl_name_clone = implementation_name_str.clone();
+        
+        if DEBUG_MODE {
+            println!("[DEBUG] Created subscriber {} for {}", i, implementation_name);
+        }
         
         let handle = tokio::spawn(async move {
+            if DEBUG_MODE {
+                println!("[DEBUG] Subscriber {} started for {}", i, impl_name_clone);
+            }
+            
             while let Ok(_event) = subscriber.receive().await {
                 stats_clone.count_event();
+                if DEBUG_MODE && stats_clone.packets_processed.load(Ordering::Relaxed) % 10000 == 0 {
+                    println!("[DEBUG] Subscriber {} processed packet {} for {}", 
+                        i, 
+                        stats_clone.packets_processed.load(Ordering::Relaxed),
+                        impl_name_clone);
+                }
             }
         });
         
@@ -124,17 +153,37 @@ async fn run_benchmark(
     // Start publishing task
     let publisher_handle = tokio::spawn({
         let publisher = publisher;
+        let implementation_name = implementation_name.to_string();
         async move {
             let mut event_id = 0;
             let end_time = Instant::now() + Duration::from_secs(TEST_DURATION_SECS);
             
+            if DEBUG_MODE {
+                println!("[DEBUG] Publisher started for {}", implementation_name);
+            }
+            
             while Instant::now() < end_time {
-                let _ = publisher.publish(create_media_packet(event_id)).await;
+                let result = publisher.publish(create_media_packet(event_id)).await;
+                if let Err(e) = result {
+                    if DEBUG_MODE {
+                        println!("[DEBUG] Publish error in {}: {}", implementation_name, e);
+                    }
+                }
+                
                 event_id += 1;
+                
+                if event_id % 10_000 == 0 && DEBUG_MODE {
+                    println!("[DEBUG] Published {} events for {}", event_id, implementation_name);
+                }
                 
                 if event_id % 10_000 == 0 {
                     tokio::task::yield_now().await;
                 }
+            }
+            
+            if DEBUG_MODE {
+                println!("[DEBUG] Publisher finished for {} after {} events", 
+                    implementation_name, event_id);
             }
         }
     });
@@ -243,6 +292,9 @@ async fn test_static_event_publishing() -> EventResult<()> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Unified Event System API - Performance Benchmark");
     println!("===============================================");
+    
+    // Register our event types first
+    register_event_types();
     
     // Create a static fast path event system
     let static_system = EventSystemBuilder::new()
