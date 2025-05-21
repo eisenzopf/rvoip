@@ -2,6 +2,8 @@ use infra_common::events::system::EventSystem;
 use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
 use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
 use infra_common::events::registry::GlobalTypeRegistry;
+use infra_common::events::bus::EventBus;
+use infra_common::events::system::{EventPublisher, EventSubscriber};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,7 +14,8 @@ use std::any::Any;
 const SUBSCRIBER_COUNT: usize = 5;
 const TEST_DURATION_SECS: u64 = 10;
 const CHANNEL_CAPACITY: usize = 10_000;
-const DEBUG_MODE: bool = true;
+const DEBUG_MODE: bool = false;
+const MINIMAL_OUTPUT: bool = true; // Set to true to show only essential results
 
 /// Define a media packet event that's compatible with both implementations
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +52,15 @@ fn register_event_types() {
     if DEBUG_MODE {
         println!("Registered MediaPacketEvent as StaticEvent");
     }
+    
+    // Also register with a specific capacity for better performance
+    GlobalTypeRegistry::register_with_capacity::<MediaPacketEvent>(CHANNEL_CAPACITY);
+    if DEBUG_MODE {
+        println!("Configured MediaPacketEvent with capacity {}", CHANNEL_CAPACITY);
+    }
+    
+    // Add a short delay to ensure the registration is fully processed
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
 /// Stats collector for performance measurement
@@ -76,10 +88,15 @@ impl StatsCollector {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         let rate = count as f64 / elapsed;
         
-        println!("[{}] Processed {} packets ({:.2} packets/sec)",
-            self.name,
-            count,
-            rate);
+        if MINIMAL_OUTPUT {
+            println!("{}: {} packets ({:.2} packets/sec)", 
+                self.name, count, rate);
+        } else {
+            println!("[{}] Processed {} packets ({:.2} packets/sec)",
+                self.name,
+                count,
+                rate);
+        }
     }
 }
 
@@ -100,49 +117,57 @@ async fn run_benchmark(
     event_system: EventSystem,
     implementation_name: &str,
 ) -> EventResult<()> {
-    println!("\n{} Implementation Test", implementation_name);
-    println!("==========================");
-    println!("Subscribers: {}", SUBSCRIBER_COUNT);
-    println!("Duration: {} seconds", TEST_DURATION_SECS);
-    println!("Channel capacity: {}", CHANNEL_CAPACITY);
+    if !MINIMAL_OUTPUT {
+        println!("\n{} Implementation Test", implementation_name);
+        println!("==========================");
+        println!("Subscribers: {}", SUBSCRIBER_COUNT);
+        println!("Duration: {} seconds", TEST_DURATION_SECS);
+        println!("Channel capacity: {}", CHANNEL_CAPACITY);
+    } else {
+        println!("\nRunning {} test...", implementation_name);
+    }
     
     // Start the event system
     event_system.start().await?;
     
+    // Register MediaPacketEvent to ensure it's available
+    GlobalTypeRegistry::register_static_event_type::<MediaPacketEvent>();
+    GlobalTypeRegistry::register_with_capacity::<MediaPacketEvent>(CHANNEL_CAPACITY);
+    
     // Create the publisher
     let publisher = event_system.create_publisher::<MediaPacketEvent>();
-    if DEBUG_MODE {
-        println!("[DEBUG] Created publisher for {}", implementation_name);
-    }
     
     // Create the stats collector
     let stats = Arc::new(StatsCollector::new(implementation_name));
     
-    // Create and start subscribers
+    // Create and start subscribers first, before publishing
     let mut handles = Vec::new();
     let implementation_name_str = implementation_name.to_string();
     
+    // Create a barrier to synchronize the start of subscribers
+    let (start_tx, _) = tokio::sync::broadcast::channel::<bool>(SUBSCRIBER_COUNT);
+    
+    // Create all subscribers
     for i in 0..SUBSCRIBER_COUNT {
         let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
         let stats_clone = stats.clone();
         let impl_name_clone = implementation_name_str.clone();
-        
-        if DEBUG_MODE {
-            println!("[DEBUG] Created subscriber {} for {}", i, implementation_name);
-        }
+        let mut rx = start_tx.subscribe();
         
         let handle = tokio::spawn(async move {
-            if DEBUG_MODE {
-                println!("[DEBUG] Subscriber {} started for {}", i, impl_name_clone);
-            }
+            // Wait for the start signal
+            let _ = rx.recv().await;
             
-            while let Ok(_event) = subscriber.receive().await {
+            // Process events
+            let mut count = 0;
+            while let Ok(event) = subscriber.receive().await {
+                count += 1;
                 stats_clone.count_event();
-                if DEBUG_MODE && stats_clone.packets_processed.load(Ordering::Relaxed) % 10000 == 0 {
-                    println!("[DEBUG] Subscriber {} processed packet {} for {}", 
-                        i, 
-                        stats_clone.packets_processed.load(Ordering::Relaxed),
-                        impl_name_clone);
+                
+                // Minimal logging for important events
+                if !MINIMAL_OUTPUT && count <= 5 {
+                    println!("Subscriber {} received event {}: stream_id={}, seq={}", 
+                        i, count, event.stream_id, event.sequence_number);
                 }
             }
         });
@@ -150,40 +175,41 @@ async fn run_benchmark(
         handles.push(handle);
     }
     
+    // Small pause before starting publisher to ensure all subscribers are ready
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    
+    // Signal all subscribers to start processing
+    let _ = start_tx.send(true);
+    
+    // Another small pause to ensure subscribers are ready
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
     // Start publishing task
     let publisher_handle = tokio::spawn({
         let publisher = publisher;
-        let implementation_name = implementation_name.to_string();
+        
         async move {
             let mut event_id = 0;
             let end_time = Instant::now() + Duration::from_secs(TEST_DURATION_SECS);
             
-            if DEBUG_MODE {
-                println!("[DEBUG] Publisher started for {}", implementation_name);
-            }
-            
             while Instant::now() < end_time {
-                let result = publisher.publish(create_media_packet(event_id)).await;
+                let packet = create_media_packet(event_id);
+                
+                // Publish event and handle any errors
+                let result = publisher.publish(packet).await;
                 if let Err(e) = result {
-                    if DEBUG_MODE {
-                        println!("[DEBUG] Publish error in {}: {}", implementation_name, e);
+                    if !MINIMAL_OUTPUT {
+                        println!("Publish error: {}", e);
                     }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 
                 event_id += 1;
                 
-                if event_id % 10_000 == 0 && DEBUG_MODE {
-                    println!("[DEBUG] Published {} events for {}", event_id, implementation_name);
-                }
-                
-                if event_id % 10_000 == 0 {
+                // Yield periodically to avoid starving other tasks
+                if event_id % 1000 == 0 {
                     tokio::task::yield_now().await;
                 }
-            }
-            
-            if DEBUG_MODE {
-                println!("[DEBUG] Publisher finished for {} after {} events", 
-                    implementation_name, event_id);
             }
         }
     });
@@ -191,8 +217,10 @@ async fn run_benchmark(
     // Wait for publisher to finish
     publisher_handle.await.unwrap();
     
+    // Let subscribers process any remaining events
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
     // Print final stats
-    tokio::time::sleep(Duration::from_millis(100)).await;
     stats.print_stats();
     
     // Shutdown the event system
@@ -274,6 +302,7 @@ async fn test_static_event_publishing() -> EventResult<()> {
     match tokio::time::timeout(Duration::from_secs(1), subscriber.receive()).await {
         Ok(Ok(received)) => {
             println!("Successfully received packet with sequence number: {}", received.sequence_number);
+            println!("Packet details: stream_id={}, marker={}", received.stream_id, received.marker);
         },
         Ok(Err(e)) => {
             println!("Error receiving packet: {}", e);
@@ -290,8 +319,13 @@ async fn test_static_event_publishing() -> EventResult<()> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Unified Event System API - Performance Benchmark");
-    println!("===============================================");
+    if MINIMAL_OUTPUT {
+        println!("Running event system performance comparison:");
+        println!("- {} subscribers, {} seconds per test", SUBSCRIBER_COUNT, TEST_DURATION_SECS);
+    } else {
+        println!("Unified Event System API - Performance Benchmark");
+        println!("===============================================");
+    }
     
     // Register our event types first
     register_event_types();
@@ -323,14 +357,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Run benchmarks for each implementation
     runtime.block_on(async {
-        // Run the simple test first
-        match test_static_event_publishing().await {
-            Ok(_) => println!("Simple test passed!"),
-            Err(e) => println!("Simple test failed: {}", e),
+        // Short introduction
+        if !MINIMAL_OUTPUT {
+            println!("Running performance tests for static fast path and zero copy implementations");
+            println!("Each test will run for {} seconds with {} subscribers", TEST_DURATION_SECS, SUBSCRIBER_COUNT);
         }
-        
-        // Short pause
-        tokio::time::sleep(Duration::from_secs(1)).await;
         
         // Run benchmark for static fast path implementation
         run_benchmark(static_system, "Static Fast Path").await?;
@@ -340,33 +371,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Run benchmark for zero-copy implementation
         run_benchmark(zero_copy_system, "Zero Copy").await?;
-        
-        // Demonstrate batch publishing with static implementation
-        let demo_system = EventSystemBuilder::new()
-            .implementation(ImplementationType::StaticFastPath)
-            .channel_capacity(1000)
-            .build();
-            
-        demo_system.start().await?;
-        demonstrate_batch_publishing(&demo_system).await?;
-        demo_system.shutdown().await?;
-        
-        // Example of MediaProcessor with both implementations
-        println!("\nTesting MediaProcessor with different implementations");
-        println!("--------------------------------------------------");
-        
-        // Test with high performance (static) implementation
-        let high_perf_processor = MediaProcessor::new(true);
-        high_perf_processor.start().await?;
-        
-        // Test with feature-rich (zero-copy) implementation
-        let feature_rich_processor = MediaProcessor::new(false);
-        feature_rich_processor.start().await?;
-        
+                
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     
-    println!("\nAll benchmarks completed successfully");
+    if !MINIMAL_OUTPUT {
+        println!("\nAll benchmarks completed successfully");
+    } else {
+        println!("\nTest complete.");
+    }
     Ok(())
 }
 

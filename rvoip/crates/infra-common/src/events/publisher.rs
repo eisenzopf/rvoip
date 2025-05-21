@@ -86,6 +86,12 @@ impl<E: StaticEvent> FastPublisher<E> {
         
         // Get the sender from registry
         let sender = GlobalTypeRegistry::get_sender::<E>();
+        
+        // Log for debugging
+        tracing::debug!("Created FastPublisher for {} with {} receivers", 
+                       std::any::type_name::<E>(), 
+                       sender.receiver_count());
+        
         Self {
             _phantom: PhantomData,
             sender,
@@ -100,6 +106,12 @@ impl<E: StaticEvent> FastPublisher<E> {
         // Register with custom capacity
         let sender = GlobalTypeRegistry::register_with_capacity::<E>(capacity);
         
+        // Log for debugging
+        tracing::debug!("Created FastPublisher with capacity {} for {} with {} receivers", 
+                       capacity,
+                       std::any::type_name::<E>(), 
+                       sender.receiver_count());
+        
         Self {
             _phantom: PhantomData,
             sender,
@@ -111,16 +123,61 @@ impl<E: StaticEvent> FastPublisher<E> {
         let arc_event = Arc::new(event);
         
         match self.sender.send(arc_event) {
-            Ok(_) => Ok(()),
-            Err(err) => Err(crate::events::types::EventError::ChannelError(
-                format!("Fast broadcast failed: {}", err)
-            )),
+            Ok(receiver_count) => {
+                tracing::trace!("FastPublisher sent message to {} receivers", receiver_count);
+                Ok(())
+            },
+            Err(err) => {
+                tracing::warn!("FastPublisher broadcast failed: {}", err);
+                Err(crate::events::types::EventError::ChannelError(
+                    format!("Fast broadcast failed: {}", err)
+                ))
+            },
+        }
+    }
+    
+    /// Publish a batch of events for high throughput
+    pub async fn publish_batch(&self, events: Vec<E>) -> EventResult<()> {
+        let mut last_error = None;
+        let mut success_count = 0;
+        
+        for event in events {
+            match self.publish(event).await {
+                Ok(_) => success_count += 1,
+                Err(e) => {
+                    // Store the last error to return if all fails
+                    last_error = Some(e);
+                }
+            }
+        }
+        
+        if success_count > 0 {
+            if let Some(ref e) = last_error {
+                tracing::warn!(
+                    "FastPublisher batch partially succeeded: {}/{} events published, last error: {}", 
+                    success_count, 
+                    success_count + 1, 
+                    e
+                );
+            }
+            // Return success if at least one event was published
+            Ok(())
+        } else if let Some(e) = last_error {
+            // If nothing succeeded and we have an error, return it
+            Err(e)
+        } else {
+            // This should never happen - empty batch or all events failed but no error?
+            Err(crate::events::types::EventError::Other(
+                "Batch publish failed with no specific error".into()
+            ))
         }
     }
     
     /// Get a broadcast receiver for this event type
     pub fn subscribe(&self) -> TypedBroadcastReceiver<E> {
-        TypedBroadcastReceiver::new(self.sender.subscribe())
+        let receiver = self.sender.subscribe();
+        tracing::debug!("FastPublisher created new subscriber for {}", std::any::type_name::<E>());
+        TypedBroadcastReceiver::new(receiver)
     }
     
     /// Get the number of receivers for this event type

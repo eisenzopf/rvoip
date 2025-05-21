@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::any::TypeId;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing;
 
 // Static event registry to properly track types implementing StaticEvent
 static STATIC_EVENT_REGISTRY: once_cell::sync::Lazy<dashmap::DashSet<TypeId>> = 
@@ -21,6 +22,13 @@ pub fn register_static_event<T: 'static + StaticEvent>() {
 /// Check if a type is registered as a StaticEvent
 pub fn is_registered_static_event<T: 'static>() -> bool {
     STATIC_EVENT_REGISTRY.contains(&TypeId::of::<T>())
+}
+
+/// Helper function to check if a type is registered as a StaticEvent
+/// This is used since std::any::any_is is not available
+fn is_type_static_event<T: 'static>() -> bool {
+    // Check if T is registered in our static event registry
+    is_registered_static_event::<T>()
 }
 
 /// Trait for erased broadcast senders of any type.
@@ -71,26 +79,57 @@ pub type TypedBroadcastSender<E> = broadcast::Sender<Arc<E>>;
 /// Typed wrapper around tokio::sync::broadcast::Receiver for events of a specific type
 pub struct TypedBroadcastReceiver<T> {
     pub(crate) receiver: tokio::sync::broadcast::Receiver<Arc<T>>,
+    type_name: String,
 }
 
 impl<T> TypedBroadcastReceiver<T> {
     pub fn new(receiver: tokio::sync::broadcast::Receiver<Arc<T>>) -> Self {
-        Self { receiver }
+        let type_name = std::any::type_name::<T>().to_string();
+        tracing::debug!("Created TypedBroadcastReceiver for {}", type_name);
+        Self { 
+            receiver,
+            type_name,
+        }
     }
     
     /// Receive a broadcast message.
     pub async fn recv(&mut self) -> Result<Arc<T>, tokio::sync::broadcast::error::RecvError> {
-        self.receiver.recv().await
+        match self.receiver.recv().await {
+            Ok(event) => {
+                tracing::trace!("TypedBroadcastReceiver received event for {}", self.type_name);
+                Ok(event)
+            },
+            Err(e) => {
+                tracing::warn!("TypedBroadcastReceiver error for {}: {}", self.type_name, e);
+                Err(e)
+            }
+        }
     }
     
     /// Try to receive a broadcast message without blocking.
     pub fn try_recv(&mut self) -> Result<Arc<T>, tokio::sync::broadcast::error::TryRecvError> {
-        self.receiver.try_recv()
+        match self.receiver.try_recv() {
+            Ok(event) => {
+                tracing::trace!("TypedBroadcastReceiver try_recv successful for {}", self.type_name);
+                Ok(event)
+            },
+            Err(e) => {
+                // Only log warnings for actual errors, not for Empty (which is normal)
+                if !matches!(e, tokio::sync::broadcast::error::TryRecvError::Empty) {
+                    tracing::warn!("TypedBroadcastReceiver try_recv error for {}: {}", self.type_name, e);
+                }
+                Err(e)
+            }
+        }
     }
     
     /// Resubscribe to a topic.
     pub fn resubscribe(&self) -> Self {
-        Self { receiver: self.receiver.resubscribe() }
+        tracing::debug!("Resubscribing TypedBroadcastReceiver for {}", self.type_name);
+        Self { 
+            receiver: self.receiver.resubscribe(),
+            type_name: self.type_name.clone(),
+        }
     }
 }
 
@@ -209,36 +248,74 @@ impl GlobalTypeRegistry {
     
     /// Get or create a broadcast sender for a specific static event type
     pub fn get_sender<E: Event + Send + Sync>() -> TypedBroadcastSender<E> {
-        let registry = GLOBAL_REGISTRY.get_or_init(|| TypeRegistry::new(Self::DEFAULT_CAPACITY));
+        let registry = GLOBAL_REGISTRY.get_or_init(|| {
+            tracing::info!("Initializing GlobalTypeRegistry with default capacity {}", Self::DEFAULT_CAPACITY);
+            TypeRegistry::new(Self::DEFAULT_CAPACITY)
+        });
         registry.get_or_create::<E>()
     }
     
     /// Subscribe to a specific static event type
     pub fn subscribe<E: Event + Send + Sync>() -> TypedBroadcastReceiver<E> {
-        let registry = GLOBAL_REGISTRY.get_or_init(|| TypeRegistry::new(Self::DEFAULT_CAPACITY));
-        let receiver = registry.get_or_create::<E>().subscribe();
+        let registry = GLOBAL_REGISTRY.get_or_init(|| {
+            tracing::info!("Initializing GlobalTypeRegistry with default capacity {}", Self::DEFAULT_CAPACITY);
+            TypeRegistry::new(Self::DEFAULT_CAPACITY)
+        });
+        
+        // Make sure we've registered this type
+        if is_registered_static_event::<E>() {
+            tracing::debug!("Using pre-registered StaticEvent channel for {}", std::any::type_name::<E>());
+        } else {
+            // Warn if not using built-in test events
+            tracing::warn!("Subscribing to {} which is not registered as StaticEvent", std::any::type_name::<E>());
+        }
+        
+        // Get or create the sender
+        let sender = registry.get_or_create::<E>();
+        
+        // Create and return the receiver
+        let receiver = sender.subscribe();
         TypedBroadcastReceiver::new(receiver)
     }
     
     /// Register a specific event type with custom capacity
     pub fn register_with_capacity<E: Event + Send + Sync>(capacity: usize) -> TypedBroadcastSender<E> {
-        let registry = GLOBAL_REGISTRY.get_or_init(|| TypeRegistry::new(Self::DEFAULT_CAPACITY));
+        let registry = GLOBAL_REGISTRY.get_or_init(|| {
+            tracing::info!("Initializing GlobalTypeRegistry with default capacity {}", Self::DEFAULT_CAPACITY);
+            TypeRegistry::new(Self::DEFAULT_CAPACITY)
+        });
+        
+        // Register as static event if it's in our registry
+        if is_type_static_event::<E>() {
+            // This already means E is registered, but we'll make sure
+            STATIC_EVENT_REGISTRY.insert(TypeId::of::<E>());
+            tracing::debug!("Registered {} as StaticEvent with capacity {}", std::any::type_name::<E>(), capacity);
+        }
+        
         registry.register_with_capacity::<E>(capacity)
     }
     
     /// Register the default capacity for all channels
     pub fn register_default_capacity(capacity: usize) {
-        let _registry = GLOBAL_REGISTRY.get_or_init(|| TypeRegistry::new(capacity));
-        // Nothing else to do - the registry will use this capacity for future channels
+        let registry = GLOBAL_REGISTRY.get_or_init(|| {
+            tracing::info!("Initializing GlobalTypeRegistry with capacity {}", capacity);
+            TypeRegistry::new(capacity)
+        });
+        
+        registry.set_default_capacity(capacity);
+        tracing::debug!("Set default channel capacity to {}", capacity);
     }
     
     /// Register a type as implementing StaticEvent
     pub fn register_static_event_type<E: StaticEvent>() {
         register_static_event::<E>();
+        tracing::debug!("Registered {} as StaticEvent in global registry", std::any::type_name::<E>());
     }
     
     /// Check if a type is registered as implementing StaticEvent
     pub fn is_static_event<E: 'static>() -> bool {
-        is_registered_static_event::<E>()
+        let is_registered = is_registered_static_event::<E>();
+        tracing::trace!("Checking if {} is registered as StaticEvent: {}", std::any::type_name::<E>(), is_registered);
+        is_registered
     }
 } 
