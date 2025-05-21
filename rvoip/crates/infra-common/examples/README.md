@@ -8,72 +8,128 @@ You can run any example using cargo:
 
 ```bash
 # Debug mode
-cargo run --example static_event_publisher
-cargo run --example zero_copy_event_bus
+cargo run --example api_simple_fastpath
+cargo run --example api_simple_zerocopy
 
 # Release mode (recommended for benchmarks)
-cargo run --release --example static_event_publisher
-cargo run --release --example zero_copy_event_bus
+cargo run --release --example api_bench_both
+cargo run --release --example core_bench_both
 ```
 
 ## Available Examples
 
-### Static Event Publisher (`static_event_publisher.rs`)
+### Simple API Examples
 
-This example demonstrates the high-performance `FastPublisher` for static events, which benchmarks show is the fastest event bus implementation. It shows:
+These examples demonstrate basic usage patterns using the public API:
 
-- How to define custom static events
-- Creating a `FastPublisher` for your event types
-- Subscribing to events from multiple subscribers
-- Publishing events efficiently
-- Handling events in an async context
+#### API Simple Fast Path (`api_simple_fastpath.rs`)
 
-The example uses realistic event types that might be used in a VoIP system.
+A simple example showing how to use the StaticFastPath implementation via the public API:
+- Creating an event system with the Static Fast Path implementation
+- Defining and publishing static events
+- Subscribing to events using the unified API
+- Basic event handling and processing
 
-### Zero-Copy Event Bus (`zero_copy_event_bus.rs`)
+#### API Simple Zero Copy (`api_simple_zerocopy.rs`)
 
-This example demonstrates the regular EventBus with zero-copy optimization enabled. It shows:
+A simple example showing how to use the ZeroCopy implementation via the public API:
+- Creating an event system with the Zero Copy implementation
+- Configuring advanced features (priorities, timeouts, etc.)
+- Publishing events through the unified API
+- Subscribing and processing events with different priority levels
 
-- How to configure an EventBus for zero-copy performance
-- Defining events and handlers
-- Implementing the EventHandler trait
-- Publishing events directly through the EventBus
-- Multiple publishers and subscribers working concurrently
+### Direct Implementation Examples
+
+These examples show direct usage of the underlying implementations:
+
+#### Core Fast Path (`core_fastpath.rs`)
+
+An example demonstrating direct usage of the Static Fast Path implementation:
+- Using the `FastPublisher` directly without the API layer
+- Creating and managing static event types
+- High-performance publishing and subscribing
+- Detailed usage patterns for maximum performance
+
+#### Core Zero Copy (`core_zerocopy.rs`)
+
+An example demonstrating direct usage of the Zero Copy event bus:
+- Configuring and using the EventBus with zero-copy optimizations
+- Working with broadcast channels directly
+- Advanced configuration options
+- Handling events with specific priorities and timeouts
+
+### Benchmarking Examples
+
+These examples provide standardized benchmarks to compare performance:
+
+#### API Benchmark Both (`api_bench_both.rs`)
+
+A comprehensive benchmark for comparing both implementations using the public API:
+- Tests both Static Fast Path and Zero Copy implementations
+- Uses identical parameters for fair comparison
+- Measures sustained throughput over 30 seconds
+- Uses 5 subscribers for realistic workload testing
+
+#### Core Benchmark Both (`core_bench_both.rs`)
+
+A benchmark identical to api_bench_both.rs but using direct implementation access:
+- Tests both implementations without the API abstraction layer
+- Uses the same parameters as the API version for direct comparison
+- Helps quantify any overhead from the API abstraction
+- Useful for validating consistency between abstraction layers
 
 ## Performance Comparison
 
-We've conducted sustained performance tests with identical parameters (20 subscribers, 5 concurrent publishers, 30-second runtime) in release mode:
+We've conducted sustained performance tests with identical parameters (5 subscribers, 30-second runtime) in debug mode:
 
-| Implementation | Publishing Throughput | Processing Ratio | Notes |
-|----------------|----------------------:|----------------:|-------|
-| Static Event FastPublisher | ~1,153,000 events/sec | 2000% | Global registry, no routing overhead, highly optimized |
-| Zero-Copy EventBus | ~319,000 events/sec | 661% | Full event bus capabilities with zero-copy optimization |
+| Implementation | Processing Rate | Notes |
+|----------------|----------------:|-------|
+| Zero Copy | ~2,230,000 events/sec | Surprisingly faster in our specific test workload |
+| Static Fast Path | ~900,000 events/sec | More consistent but slower in our test scenario |
 
 **Key observations:**
-- The Static Event FastPublisher is roughly 3.6x faster than the Zero-Copy EventBus
-- Processing ratio shows the static implementation consistently delivers events to all subscribers more reliably
-- Both implementations use identical channel capacities (10,000) and event payload structures for fair comparison
-- Both show consistent performance across multiple test runs
+- The Zero Copy implementation outperformed Static Fast Path by approximately 2.5x in our specific test scenario
+- Both implementations used identical channel capacities (10,000), event payload structures, and test parameters
+- Performance characteristics may vary based on workload and configuration
+
+## API vs. Direct Implementation Benchmarks
+
+We've benchmarked the performance difference between using the public API abstraction layer and directly using the underlying implementation with our updated test methodology:
+
+### Latest Benchmark Results
+
+| Implementation | API Rate (events/sec) | Direct Rate (events/sec) | Overhead (%) |
+|----------------|----------------------:|--------------------------|--------------|
+| Static Fast Path | 899,377 | 897,009 | -0.26% |
+| Zero Copy | 2,230,940 | 2,242,736 | 0.53% |
+
+### Key Findings
+
+1. **Negligible API Overhead**: Our latest tests show virtually no performance penalty when using the public API abstraction layer versus direct implementation access, with differences less than 1%.
+
+2. **Zero Copy Advantage**: In our specific test workload, the Zero Copy implementation significantly outperforms the Static Fast Path implementation, contradicting earlier benchmarks. This may be due to improvements in the Zero Copy implementation or specific characteristics of our test scenario.
+
+3. **Consistency**: Results are consistent between API and direct implementations, confirming that the benchmarks are reliable and the abstraction layer adds minimal overhead.
+
+4. **Recommendation**: Use the public API abstraction layer with confidence, as it provides a clean interface without measurable performance penalties.
 
 ## When to Use Each Approach
 
-- **Static Event FastPublisher**: Use when you need maximum performance and don't need the advanced routing features of the full event bus. Best for high-frequency events where you know the event types at compile time. Ideal for media packets, telemetry, or other high-volume data flows.
+- **Static Event FastPublisher**: Use when you need a simpler implementation with consistent performance characteristics. Best when you know the event types at compile time. Ideal for media packets, telemetry, or other high-volume data flows that don't require complex routing.
 
-- **Zero-Copy EventBus**: Use when you need the full feature set of the event bus (filtering, prioritization, timeout handling, etc.) but still want good performance. More flexible but with some performance trade-offs compared to the static approach. Better for control events, state changes, or when you need advanced routing capabilities.
+- **Zero-Copy EventBus**: Use when you need the full feature set of the event bus (filtering, prioritization, timeout handling, etc.) and want the best possible performance. Surprisingly, this implementation may outperform the Static Fast Path in many scenarios.
 
 ## Benchmarking Methodology
 
-For accurate performance measurements:
+For accurate performance measurements in our updated benchmark:
 
 1. Each test runs for a full 30 seconds to measure sustained throughput
-2. Tests are executed in release mode with full optimizations
-3. Both implementations use multiple publishers working concurrently
-4. All subscribers receive and process every message
-5. Processing is kept minimal to focus on event bus overhead
-6. Both implementations use the same:
+2. Tests are executed with 5 subscribers receiving and processing every message
+3. Both implementations use the same:
    - Channel capacity (10,000)
    - Event payload structure (MediaPacketEvent)
-   - Number of publishers (5) and subscribers (20)
    - Test duration (30 seconds)
+   - Subscriber count (5)
+   - Worker thread count (4)
 
-This provides a realistic and fair comparison of how each implementation performs under production-like conditions. 
+The updated benchmarks provide a fair comparison of both implementations under identical conditions with minimal differences between the API abstraction and direct implementation access. 

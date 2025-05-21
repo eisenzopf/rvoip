@@ -2,8 +2,8 @@ use infra_common::events::system::EventSystem;
 use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
 use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
 use infra_common::events::registry::GlobalTypeRegistry;
-use infra_common::events::bus::EventBus;
-use infra_common::events::system::{EventPublisher, EventSubscriber};
+use infra_common::events::api::EventSystem as EventSystemTrait;
+use infra_common::events::api::{EventPublisher, EventSubscriber};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,7 +12,7 @@ use std::any::Any;
 
 // ---- Constants for testing ----
 const SUBSCRIBER_COUNT: usize = 5;
-const TEST_DURATION_SECS: u64 = 10;
+const TEST_DURATION_SECS: u64 = 30;
 const CHANNEL_CAPACITY: usize = 10_000;
 const DEBUG_MODE: bool = false;
 const MINIMAL_OUTPUT: bool = true; // Set to true to show only essential results
@@ -128,14 +128,14 @@ async fn run_benchmark(
     }
     
     // Start the event system
-    event_system.start().await?;
+    EventSystemTrait::start(&event_system).await?;
     
     // Register MediaPacketEvent to ensure it's available
     GlobalTypeRegistry::register_static_event_type::<MediaPacketEvent>();
     GlobalTypeRegistry::register_with_capacity::<MediaPacketEvent>(CHANNEL_CAPACITY);
     
     // Create the publisher
-    let publisher = event_system.create_publisher::<MediaPacketEvent>();
+    let publisher = EventSystemTrait::create_publisher::<MediaPacketEvent>(&event_system);
     
     // Create the stats collector
     let stats = Arc::new(StatsCollector::new(implementation_name));
@@ -149,7 +149,7 @@ async fn run_benchmark(
     
     // Create all subscribers
     for i in 0..SUBSCRIBER_COUNT {
-        let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
+        let mut subscriber = EventSystemTrait::subscribe::<MediaPacketEvent>(&event_system).await?;
         let stats_clone = stats.clone();
         let impl_name_clone = implementation_name_str.clone();
         let mut rx = start_tx.subscribe();
@@ -224,7 +224,7 @@ async fn run_benchmark(
     stats.print_stats();
     
     // Shutdown the event system
-    event_system.shutdown().await?;
+    EventSystemTrait::shutdown(&event_system).await?;
     
     // Cancel all subscriber tasks
     for handle in handles {
@@ -239,10 +239,10 @@ async fn demonstrate_batch_publishing(event_system: &EventSystem) -> EventResult
     println!("\nDemonstrating batch publishing...");
     
     // Create the publisher
-    let publisher = event_system.create_publisher::<MediaPacketEvent>();
+    let publisher = EventSystemTrait::create_publisher::<MediaPacketEvent>(event_system);
     
     // Create a subscriber
-    let mut subscriber = event_system.subscribe::<MediaPacketEvent>().await?;
+    let mut subscriber = EventSystemTrait::subscribe::<MediaPacketEvent>(event_system).await?;
     
     // Prepare a batch of events
     let batch_size = 100;
@@ -283,13 +283,13 @@ async fn test_static_event_publishing() -> EventResult<()> {
         .build();
     
     // Start the system
-    system.start().await?;
+    EventSystemTrait::start(&system).await?;
     
     // Create a publisher
-    let publisher = system.create_publisher::<MediaPacketEvent>();
+    let publisher = EventSystemTrait::create_publisher::<MediaPacketEvent>(&system);
     
     // Subscribe to the events
-    let mut subscriber = system.subscribe::<MediaPacketEvent>().await?;
+    let mut subscriber = EventSystemTrait::subscribe::<MediaPacketEvent>(&system).await?;
     
     // Create a test packet
     let packet = create_media_packet(42);
@@ -313,7 +313,7 @@ async fn test_static_event_publishing() -> EventResult<()> {
     }
     
     // Shut down the system
-    system.shutdown().await?;
+    EventSystemTrait::shutdown(&system).await?;
     
     Ok(())
 }
@@ -343,8 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_concurrent_dispatches(1000)
         .enable_priority(true)
         .default_timeout(Some(Duration::from_secs(1)))
-        .batch_size(100)
-        .shard_count(8)
+        .shard_count(10)
         .enable_metrics(true)
         .metrics_reporting_interval(Duration::from_secs(5))
         .build();
@@ -409,7 +408,7 @@ impl MediaProcessor {
     
     pub async fn start(&self) -> EventResult<()> {
         // Start the event system
-        self.event_system.start().await?;
+        EventSystemTrait::start(&self.event_system).await?;
         
         // Report which implementation we're using
         if let Some(_) = self.event_system.advanced() {

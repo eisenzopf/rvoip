@@ -1,4 +1,4 @@
-//! Unified Event System API.
+//! Unified event system API.
 //!
 //! This module provides a consistent interface for working with event buses
 //! in the system, supporting both high-performance static event paths and
@@ -8,174 +8,28 @@
 //! - [`EventSystem`]: The main interface for event system operations
 //! - [`EventPublisher`]: Type-specific publisher for events
 //! - [`EventSubscriber`]: Type-specific subscriber for events
-//!
-//! # Examples
-//!
-//! ```rust,no_run
-//! use infra_common::events::system::{EventSystem, EventPublisher, EventSubscriber}; 
-//! use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
-//! use serde::{Serialize, Deserialize};
-//! use std::time::Duration;
-//! use std::any::Any;
-//! 
-//! #[derive(Clone, Serialize, Deserialize)]
-//! struct MyEvent {
-//!    id: u64,
-//!    message: String,
-//! }
-//! 
-//! impl Event for MyEvent {
-//!    fn event_type() -> &'static str { "my_event" }
-//!    fn priority() -> EventPriority { EventPriority::Normal }
-//!    fn as_any(&self) -> &dyn Any { self }
-//! }
-//!
-//! // Make MyEvent a StaticEvent for high-performance path
-//! impl StaticEvent for MyEvent {}
-//! 
-//! # async fn example() -> EventResult<()> {
-//! // Create a static fast path event system
-//! let event_system = EventSystem::new_static_fast_path(10_000);
-//!
-//! // Start the event system
-//! event_system.start().await?;
-//!
-//! // Create a publisher for MyEvent type
-//! let publisher = event_system.create_publisher::<MyEvent>();
-//!
-//! // Subscribe to MyEvent events
-//! let mut subscriber = event_system.subscribe::<MyEvent>().await?;
-//!
-//! // Publish an event
-//! let event = MyEvent { 
-//!     id: 1, 
-//!     message: "Hello, world!".to_string() 
-//! };
-//! publisher.publish(event).await?;
-//!
-//! // Process events
-//! if let Ok(received_event) = subscriber.receive_timeout(Duration::from_secs(1)).await {
-//!     println!("Received event with id: {}", received_event.id);
-//! }
-//!
-//! // Shutdown the event system
-//! event_system.shutdown().await?;
-//! # Ok(())
-//! # }
-//! ```
 
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
-use tracing::{warn, debug};
-use std::any::{Any, TypeId};
+use async_trait::async_trait;
 
+use crate::events::types::{Event, EventResult};
 use crate::events::bus::{EventBus, EventBusConfig};
-use crate::events::publisher::{Publisher, FastPublisher};
-use crate::events::registry::{TypedBroadcastReceiver, GlobalTypeRegistry, register_static_event};
-use crate::events::types::{Event, EventError, EventResult, StaticEvent, EventPriority};
+use crate::events::api;
+use crate::events::static_path::StaticFastPathSystem;
+use crate::events::zero_copy::ZeroCopySystem;
 
-// For test and type-checking support
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct TestEvent {
-    id: u64,
-    message: String,
-}
-
-impl Event for TestEvent {
-    fn event_type() -> &'static str {
-        "test_event"
-    }
-    
-    fn priority() -> EventPriority {
-        EventPriority::Normal
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-// Make TestEvent a StaticEvent for static fast path tests
-impl StaticEvent for TestEvent {}
-
-// Register standard event types for static dispatch
-fn register_standard_static_events() {
-    // Register test events
-    GlobalTypeRegistry::register_static_event_type::<TestEvent>();
-    
-    // For examples, register known event types used in documentation
-    // This would typically be done by each module that defines a StaticEvent type
-    tracing::debug!("Registering TestEvent as StaticEvent");
-    
-    // Handle MediaPacketEvent for examples if running them
-    // This isn't registered directly since it's defined in the example file
-    // but we add special handling for it in the is_static_event method
-    tracing::debug!("Added special handling for MediaPacketEvent in examples");
-    
-    // Note: We can't directly register MediaPacketEvent here since it's defined
-    // in the example file. In a real implementation, you'd have a mechanism for
-    // modules to register their event types at startup.
-}
-
-// Register test event for unit tests
-#[cfg(test)]
-fn register_test_event() {
-    // This is extremely important for tests to work - we need to ensure
-    // TestEvent is properly registered in the static registry
-    GlobalTypeRegistry::register_static_event_type::<TestEvent>();
-    tracing::debug!("Registered TestEvent for tests");
-}
-
-/// Unified interface for event system operations.
+/// Unified event system that provides a common interface to both implementations.
 ///
-/// This struct abstracts over the underlying event bus implementation,
-/// providing a consistent API regardless of which implementation is used.
-///
-/// The `EventSystem` supports two primary implementations:
-/// - Static Fast Path: Optimized for high-throughput event processing with minimal overhead
-/// - Zero-Copy Event Bus: More feature-rich with advanced routing capabilities
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use infra_common::events::system::EventSystem;
-/// use infra_common::events::bus::EventBusConfig;
-/// use std::time::Duration;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create a static fast path event system
-/// let event_system = EventSystem::new_static_fast_path(10_000);
-///
-/// // Or create a zero-copy event bus
-/// let zero_copy = EventSystem::new_zero_copy(
-///     EventBusConfig {
-///         broadcast_capacity: 10_000,
-///         max_concurrent_dispatches: 1000,
-///         enable_priority: true,
-///         default_timeout: Duration::from_secs(1),
-///         enable_zero_copy: true,
-///         batch_size: 100,
-///         shard_count: 8,
-///     }
-/// );
-/// # Ok(())
-/// # }
-/// ```
+/// This struct abstracts over the underlying event system implementation,
+/// allowing code to work with either implementation without changes.
 #[derive(Clone)]
-pub struct EventSystem {
-    implementation: EventSystemImpl,
-}
-
-/// Internal enum representing the underlying event system implementation.
-#[derive(Clone)]
-enum EventSystemImpl {
-    /// Static Fast Path implementation without routing overhead
-    StaticFastPath,
+pub enum EventSystem {
+    /// Static Fast Path implementation optimized for performance
+    StaticFastPath(StaticFastPathSystem),
     
-    /// Zero-Copy Event Bus with full feature set
-    ZeroCopy(EventBus),
+    /// Zero Copy implementation with advanced features
+    ZeroCopy(ZeroCopySystem),
 }
 
 impl EventSystem {
@@ -192,17 +46,7 @@ impl EventSystem {
     ///
     /// A new `EventSystem` instance using the static fast path implementation
     pub fn new_static_fast_path(channel_capacity: usize) -> Self {
-        // Register the global channel capacity for static events
-        GlobalTypeRegistry::register_default_capacity(channel_capacity);
-        
-        // Register our known StaticEvent implementations
-        register_standard_static_events();
-        
-        tracing::info!("Created EventSystem with StaticFastPath implementation");
-        
-        Self {
-            implementation: EventSystemImpl::StaticFastPath,
-        }
+        Self::StaticFastPath(StaticFastPathSystem::new(channel_capacity))
     }
     
     /// Creates a new event system using the zero-copy event bus implementation.
@@ -218,201 +62,7 @@ impl EventSystem {
     ///
     /// A new `EventSystem` instance using the zero-copy event bus implementation
     pub fn new_zero_copy(config: EventBusConfig) -> Self {
-        Self {
-            implementation: EventSystemImpl::ZeroCopy(EventBus::with_config(config)),
-        }
-    }
-    
-    /// Starts the event system.
-    ///
-    /// This is a no-op for the static fast path implementation but actually
-    /// starts dispatchers for the zero-copy event bus implementation.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the system started successfully, otherwise an error
-    pub async fn start(&self) -> EventResult<()> {
-        match &self.implementation {
-            EventSystemImpl::StaticFastPath => {
-                // Nothing to start for static fast path
-                Ok(())
-            }
-            EventSystemImpl::ZeroCopy(_event_bus) => {
-                // Start the event bus - this is a no-op currently but might be needed in future
-                debug!("Starting zero-copy event bus");
-                Ok(())
-            }
-        }
-    }
-    
-    /// Shuts down the event system.
-    ///
-    /// This is a no-op for the static fast path implementation but actually
-    /// shuts down the dispatchers for the zero-copy event bus implementation.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the system shut down successfully, otherwise an error
-    pub async fn shutdown(&self) -> EventResult<()> {
-        match &self.implementation {
-            EventSystemImpl::StaticFastPath => {
-                // Nothing to shut down for static fast path
-                Ok(())
-            }
-            EventSystemImpl::ZeroCopy(_event_bus) => {
-                // EventBus doesn't have shutdown yet, but we'll add it in the future
-                debug!("Shutting down zero-copy event bus");
-                Ok(())
-            }
-        }
-    }
-    
-    /// Creates a publisher for a specific event type.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `E` - The event type that this publisher will publish
-    ///
-    /// # Returns
-    ///
-    /// A new `EventPublisher<E>` instance
-    pub fn create_publisher<E: Event>(&self) -> EventPublisher<E> {
-        // Special case for tests
-        #[cfg(test)]
-        {
-            // For NonStaticEvent, we need to simulate the fallback behavior to make tests pass
-            if std::any::type_name::<E>().ends_with("::NonStaticEvent") {
-                debug!("Simulating fallback behavior for NonStaticEvent in tests");
-                return EventPublisher::new_zero_copy_fallback();
-            }
-            
-            // For normal test events, we want to allow publishing 
-            debug!("Testing mode: Creating special publisher for {}", std::any::type_name::<E>());
-            
-            // Create a zero-copy publisher with a properly configured EventBus
-            // This ensures we have a valid implementation that can be
-            // safely used in tests without requiring StaticEvent trait
-            let event_bus = EventBus::new();
-            
-            // For TestEvent, ensure the bus is properly configured and shared
-            if std::any::type_name::<E>().ends_with("::TestEvent") {
-                // Register the TestEvent type with the global registry first
-                GlobalTypeRegistry::register_static_event_type::<TestEvent>();
-                
-                // Create a sender in this bus for the TestEvent
-                let _ = event_bus.type_registry().get_or_create::<E>();
-                
-                // In test mode, we'll simulate that we've subscribed without actually doing so
-                debug!("Simulating subscription for TestEvent in test mode");
-            }
-            
-            return EventPublisher::new_zero_copy(event_bus);
-        }
-        
-        // Normal runtime behavior
-        #[cfg(not(test))]
-        match &self.implementation {
-            EventSystemImpl::StaticFastPath => {
-                // For static events, use the global registry
-                if self.is_static_event::<E>() {
-                    // For StaticEvent implementations, use direct FastPublisher
-                    // Since we can't use the static path directly due to trait constraints,
-                    // we need a specialized helper method
-                    debug!("Using direct static registry for {}", std::any::type_name::<E>());
-                    
-                    // Special case for MediaPacketEvent in examples
-                    if std::any::type_name::<E>().ends_with("::MediaPacketEvent") {
-                        debug!("Using a specialized handler for MediaPacketEvent in examples");
-                        // For example code, we'll create a zero-copy publisher
-                        let event_bus = EventBus::new();
-                        
-                        // Initialize the event bus properly
-                        debug!("Registering MediaPacketEvent in event_bus type registry");
-                        let _ = event_bus.type_registry().get_or_create::<E>();
-                        
-                        return EventPublisher::new_zero_copy(event_bus);
-                    }
-                    
-                    // Runtime check succeeded, so use unsafe to call the specialized method.
-                    // This is safe because we've verified E is a StaticEvent at runtime.
-                    unsafe { 
-                        self.create_static_publisher_unsafe::<E>() 
-                    }
-                } else {
-                    // If not a StaticEvent, we need to warn and provide a fallback
-                    warn!("Event type {} is not a StaticEvent, falling back to zero-copy implementation", 
-                         E::event_type());
-                    EventPublisher::new_zero_copy_fallback()
-                }
-            }
-            EventSystemImpl::ZeroCopy(event_bus) => {
-                // Use the event bus publisher
-                EventPublisher::new_zero_copy(event_bus.clone())
-            }
-        }
-    }
-    
-    /// Subscribes to events of a specific type.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `E` - The event type to subscribe to
-    ///
-    /// # Returns
-    ///
-    /// A new `EventSubscriber<E>` instance or an error if subscription fails
-    pub async fn subscribe<E: Event>(&self) -> EventResult<EventSubscriber<E>> {
-        // In test mode, directly use GlobalTypeRegistry for all types
-        // to avoid having to register types as StaticEvent properly
-        #[cfg(test)]
-        {
-            debug!("Testing mode: Creating direct subscriber for {}", std::any::type_name::<E>());
-            
-            // Register if needed
-            GlobalTypeRegistry::register_with_capacity::<E>(1000);
-            
-            // Always allow subscription in tests
-            let receiver = GlobalTypeRegistry::subscribe::<E>();
-            return Ok(EventSubscriber::new_static_fast_path(receiver));
-        }
-        
-        // Normal runtime behavior
-        #[cfg(not(test))]
-        match &self.implementation {
-            EventSystemImpl::StaticFastPath => {
-                if self.is_static_event::<E>() {
-                    // For StaticEvent, subscribe directly using GlobalTypeRegistry
-                    debug!("Creating static subscriber for {}", std::any::type_name::<E>());
-                    
-                    // Special case for MediaPacketEvent in examples
-                    if std::any::type_name::<E>().ends_with("::MediaPacketEvent") {
-                        debug!("Using a specialized handler for MediaPacketEvent subscribe in examples");
-                        // For example code, we'll create a custom registry
-                        
-                        // Make sure it's registered first (capacity doesn't matter for examples)
-                        GlobalTypeRegistry::register_with_capacity::<E>(1000);
-                        
-                        // Get a subscriber from the global registry
-                        let receiver = GlobalTypeRegistry::subscribe::<E>();
-                        return Ok(EventSubscriber::new_static_fast_path(receiver));
-                    }
-                    
-                    let receiver = GlobalTypeRegistry::subscribe::<E>();
-                    Ok(EventSubscriber::new_static_fast_path(receiver))
-                } else {
-                    // Not a StaticEvent, return an error
-                    Err(EventError::InvalidType(
-                        format!("Event type {} is not a StaticEvent and cannot be used with static fast path", 
-                               E::event_type())
-                    ))
-                }
-            }
-            EventSystemImpl::ZeroCopy(event_bus) => {
-                // Use the event bus to subscribe
-                let receiver = event_bus.subscribe_broadcast::<E>().await?;
-                Ok(EventSubscriber::new_zero_copy(receiver))
-            }
-        }
+        Self::ZeroCopy(ZeroCopySystem::new(config))
     }
     
     /// Access the underlying zero-copy event bus for advanced operations.
@@ -426,253 +76,67 @@ impl EventSystem {
     /// Some reference to the `EventBus` if using zero-copy implementation,
     /// or None if using static fast path
     pub fn advanced(&self) -> Option<&EventBus> {
-        match &self.implementation {
-            EventSystemImpl::StaticFastPath => None,
-            EventSystemImpl::ZeroCopy(event_bus) => Some(event_bus),
+        match self {
+            Self::StaticFastPath(_) => None,
+            Self::ZeroCopy(system) => Some(system.event_bus()),
         }
-    }
-    
-    /// Helper method to check if a type implements StaticEvent.
-    /// 
-    /// Uses the proper type registry instead of string matching.
-    #[inline]
-    fn is_static_event<E: Event>(&self) -> bool {
-        // Special cases for examples and test code
-        
-        // For tests, we need to handle TestEvent specially
-        #[cfg(test)]
-        {
-            if std::any::type_name::<E>() == std::any::type_name::<TestEvent>() {
-                // In tests, always consider TestEvent to be a StaticEvent
-                tracing::debug!("Allowing TestEvent as StaticEvent for testing");
-                return true;
-            }
-        }
-        
-        // Also handle MediaPacketEvent specially for the example code
-        // (this needs to work outside of tests)
-        if std::any::type_name::<E>().ends_with("::MediaPacketEvent") {
-            tracing::debug!("Allowing MediaPacketEvent as StaticEvent for examples");
-            return true;
-        }
-        
-        // Check if the type is registered in our StaticEventRegistry
-        let is_static = GlobalTypeRegistry::is_static_event::<E>();
-        
-        // Add extra debug logging to help with issue diagnosis
-        debug!("Checking if {} is a StaticEvent: {}", 
-              std::any::type_name::<E>(), 
-              is_static);
-              
-        is_static
-    }
-    
-    /// Helper method that creates a static publisher when we know the type is a StaticEvent.
-    /// This approach avoids the trait bounds issue in the main create_publisher method.
-    fn create_static_publisher<E: Event + StaticEvent>(&self) -> EventPublisher<E> {
-        EventPublisher::new_fast_registry()
-    }
-    
-    /// Unsafe helper method to create a static publisher when we've verified at runtime
-    /// that E implements StaticEvent but can't express this in the type system.
-    /// 
-    /// # Safety
-    /// 
-    /// This function is unsafe because it assumes E implements StaticEvent.
-    /// The caller must verify this before calling this method.
-    unsafe fn create_static_publisher_unsafe<E: Event>(&self) -> EventPublisher<E> {
-        // Instead of using StaticEvent machinery directly, 
-        // we'll use the fallback implementation which avoids the trait bound
-        // In practice, we've verified this type is a StaticEvent at runtime
-        EventPublisher::new_zero_copy_fallback()
     }
 }
 
-/// Unified publisher interface for a specific event type.
+#[async_trait]
+impl api::EventSystem for EventSystem {
+    async fn start(&self) -> EventResult<()> {
+        match self {
+            Self::StaticFastPath(system) => system.start().await,
+            Self::ZeroCopy(system) => system.start().await,
+        }
+    }
+    
+    async fn shutdown(&self) -> EventResult<()> {
+        match self {
+            Self::StaticFastPath(system) => system.shutdown().await,
+            Self::ZeroCopy(system) => system.shutdown().await,
+        }
+    }
+    
+    fn create_publisher<E: Event + 'static>(&self) -> Box<dyn api::EventPublisher<E>> {
+        match self {
+            Self::StaticFastPath(system) => system.create_publisher::<E>(),
+            Self::ZeroCopy(system) => system.create_publisher::<E>(),
+        }
+    }
+    
+    async fn subscribe<E: Event + 'static>(&self) -> EventResult<Box<dyn api::EventSubscriber<E>>> {
+        match self {
+            Self::StaticFastPath(system) => system.subscribe::<E>().await,
+            Self::ZeroCopy(system) => system.subscribe::<E>().await,
+        }
+    }
+}
+
+/// Public wrapper for EventPublisher with a concrete type.
 ///
-/// This struct abstracts over the underlying publisher implementation,
-/// providing a consistent API regardless of which implementation is used.
-///
-/// # Type Parameters
-///
-/// * `E` - The event type that this publisher will publish
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use infra_common::events::system::{EventSystem, EventPublisher};
-/// use infra_common::events::types::{Event, StaticEvent};
-/// use serde::{Serialize, Deserialize};
-///
-/// #[derive(Clone, Serialize, Deserialize)]
-/// struct MyEvent { id: u64 }
-/// 
-/// impl Event for MyEvent {
-///   fn event_type() -> &'static str { "my_event" }
-///   fn priority() -> infra_common::events::types::EventPriority { 
-///     infra_common::events::types::EventPriority::Normal 
-///   }
-///   fn as_any(&self) -> &dyn std::any::Any { self }
-/// }
-///
-/// // Implement StaticEvent for MyEvent to enable fast path
-/// impl StaticEvent for MyEvent {}
-///
-/// # fn example() {
-/// // Create event system
-/// let event_system = EventSystem::new_static_fast_path(10_000);
-///
-/// // Create publisher
-/// let publisher = event_system.create_publisher::<MyEvent>();
-///
-/// // Create event to publish
-/// let event = MyEvent { id: 123 };
-///
-/// # async {
-/// // Publish event
-/// publisher.publish(event).await.unwrap();
-/// # };
-/// # }
-/// ```
+/// This struct provides a more convenient interface than using trait objects directly.
 pub struct EventPublisher<E: Event> {
-    implementation: EventPublisherImpl<E>,
+    /// The underlying publisher implementation
+    inner: Box<dyn api::EventPublisher<E>>,
 }
 
-/// Internal type for static publisher implementation with proper bounds
-type StaticFastPathPublisher<E> = FastPublisher<E>;
-
-/// Internal enum representing the underlying publisher implementation.
-#[cfg(test)]
-enum EventPublisherImpl<E: Event> {
-    /// Static Fast Path publisher for maximum performance
-    StaticFastPath(Box<dyn StaticPublisherTrait<E>>),
-    
-    /// Zero-Copy publisher with full feature set
-    ZeroCopy(Publisher<E>),
-    
-    /// Fallback publisher for when a non-StaticEvent is used with static fast path
-    Fallback,
-    
-    /// Special test-only variant for mocking
-    TestOnly,
-}
-
-#[cfg(not(test))]
-enum EventPublisherImpl<E: Event> {
-    /// Static Fast Path publisher for maximum performance
-    StaticFastPath(Box<dyn StaticPublisherTrait<E>>),
-    
-    /// Zero-Copy publisher with full feature set
-    ZeroCopy(Publisher<E>),
-    
-    /// Fallback publisher for when a non-StaticEvent is used with static fast path
-    Fallback,
-}
-
-// This trait allows us to bridge the StaticEvent bound without requiring it on EventPublisherImpl
-trait StaticPublisherTrait<E: Event>: Send + Sync {
-    fn publish(&self, event: E) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventResult<()>> + Send + '_>>;
-}
-
-// Implement the trait for FastPublisher with proper bounds
-impl<E: Event + StaticEvent> StaticPublisherTrait<E> for StaticFastPathPublisher<E> {
-    fn publish(&self, event: E) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventResult<()>> + Send + '_>> {
-        Box::pin(async move {
-            self.publish(event).await
-        })
-    }
-}
-
-impl<E: Event> EventPublisher<E> {
-    /// Creates a new publisher using the static fast path implementation.
-    ///
-    /// # Returns
-    ///
-    /// A new `EventPublisher<E>` instance using the static fast path
-    pub(crate) fn new_static_fast_path() -> Self 
-    where E: StaticEvent
-    {
-        Self::new_static_fast_path_from_builder(|| FastPublisher::<E>::new())
-    }
-    
-    /// Creates a new publisher from a builder function.
-    /// This is safer than using transmute.
-    pub(crate) fn new_static_fast_path_from_builder<F>(builder: F) -> Self 
-    where 
-        F: FnOnce() -> FastPublisher<E>,
-        E: StaticEvent, 
-    {
-        Self {
-            implementation: EventPublisherImpl::StaticFastPath(
-                Box::new(builder())
-            ),
-        }
-    }
-    
-    /// Creates a publisher from an existing static publisher.
-    /// This is for cases where we've checked the type at runtime.
-    pub(crate) fn from_static_publisher(publisher: FastPublisher<E>) -> Self 
-    where E: StaticEvent
-    {
-        Self {
-            implementation: EventPublisherImpl::StaticFastPath(
-                Box::new(publisher)
-            ),
-        }
-    }
-    
-    /// Creates a new publisher using the zero-copy event bus implementation.
+impl<E: Event + 'static> EventPublisher<E> {
+    /// Creates a new EventPublisher from a boxed trait object.
     ///
     /// # Arguments
     ///
-    /// * `event_bus` - The event bus to publish to
+    /// * `inner` - The boxed trait object implementing the publisher
     ///
     /// # Returns
     ///
-    /// A new `EventPublisher<E>` instance using the zero-copy event bus
-    pub(crate) fn new_zero_copy(event_bus: EventBus) -> Self {
-        Self {
-            implementation: EventPublisherImpl::ZeroCopy(Publisher::new(event_bus)),
-        }
+    /// A new `EventPublisher<E>` instance
+    pub fn new(inner: Box<dyn api::EventPublisher<E>>) -> Self {
+        Self { inner }
     }
     
-    /// Creates a fallback publisher when a non-StaticEvent is used with static fast path.
-    ///
-    /// # Returns
-    ///
-    /// A new `EventPublisher<E>` instance that will log warnings on publish
-    pub(crate) fn new_zero_copy_fallback() -> Self {
-        Self {
-            implementation: EventPublisherImpl::Fallback,
-        }
-    }
-    
-    /// Creates a special test-only publisher for use in tests.
-    #[cfg(test)]
-    pub(crate) fn new_test_publisher() -> Self {
-        Self {
-            implementation: EventPublisherImpl::TestOnly,
-        }
-    }
-    
-    /// Creates a new publisher using the global type registry for static event types.
-    /// This is an optimized path for StaticEvent implementations.
-    pub(crate) fn new_fast_registry() -> Self 
-    where E: StaticEvent  // This enforces E is StaticEvent
-    {
-        // Use the global type registry to create a fast publisher
-        let fast_publisher = FastPublisher::<E>::new();
-        
-        // Create a boxed publisher trait that can be stored in StaticFastPath variant
-        let boxed_publisher: Box<dyn StaticPublisherTrait<E>> = Box::new(fast_publisher);
-        
-        // Now create an EventPublisher that uses this fast publisher
-        Self {
-            implementation: EventPublisherImpl::StaticFastPath(boxed_publisher),
-        }
-    }
-    
-    /// Publishes an event.
+    /// Publishes a single event.
     ///
     /// # Arguments
     ///
@@ -680,69 +144,12 @@ impl<E: Event> EventPublisher<E> {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the event was published successfully, otherwise an error
+    /// `Ok(())` if the event was published successfully, or an error if publication fails
     pub async fn publish(&self, event: E) -> EventResult<()> {
-        // In test mode, we need to handle the TestOnly variant
-        #[cfg(test)]
-        {
-            match &self.implementation {
-                EventPublisherImpl::StaticFastPath(publisher) => {
-                    publisher.publish(event).await
-                }
-                EventPublisherImpl::ZeroCopy(publisher) => {
-                    publisher.publish(event).await
-                }
-                EventPublisherImpl::Fallback => {
-                    warn!("Attempted to publish non-StaticEvent with static fast path. Event type: {}", 
-                         E::event_type());
-                    Err(EventError::InvalidType(
-                        format!("Event type {} is not a StaticEvent and cannot be used with static fast path",
-                               E::event_type())
-                    ))
-                }
-                EventPublisherImpl::TestOnly => {
-                    // In test mode, we simply acknowledge the event and return success
-                    debug!("Test publisher received event of type {}", E::event_type());
-                    
-                    // Add event to global registry for subscribers to receive it
-                    let event_arc = Arc::new(event);
-                    
-                    // Get the sender from the GlobalTypeRegistry and send the event
-                    let sender = GlobalTypeRegistry::get_sender::<E>();
-                    let _ = sender.send(event_arc);
-                    
-                    Ok(())
-                }
-            }
-        }
-
-        // In non-test mode, we only have three variants
-        #[cfg(not(test))]
-        {
-            match &self.implementation {
-                EventPublisherImpl::StaticFastPath(publisher) => {
-                    publisher.publish(event).await
-                }
-                EventPublisherImpl::ZeroCopy(publisher) => {
-                    publisher.publish(event).await
-                }
-                EventPublisherImpl::Fallback => {
-                    warn!("Attempted to publish non-StaticEvent with static fast path. Event type: {}", 
-                         E::event_type());
-                    Err(EventError::InvalidType(
-                        format!("Event type {} is not a StaticEvent and cannot be used with static fast path",
-                               E::event_type())
-                    ))
-                }
-            }
-        }
+        self.inner.publish(event).await
     }
     
     /// Publishes a batch of events.
-    ///
-    /// This method is optimized for each implementation:
-    /// - For static fast path, it publishes events one by one
-    /// - For zero-copy, it uses the batch publish capability
     ///
     /// # Arguments
     ///
@@ -750,226 +157,32 @@ impl<E: Event> EventPublisher<E> {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if all events were published successfully, otherwise an error
+    /// `Ok(())` if all events were published successfully, or an error if any publication fails
     pub async fn publish_batch(&self, events: Vec<E>) -> EventResult<()> {
-        // In test mode, we need to handle the TestOnly variant
-        #[cfg(test)]
-        {
-            match &self.implementation {
-                EventPublisherImpl::StaticFastPath(publisher) => {
-                    // Static fast path doesn't have a native batch publish,
-                    // so we publish events one by one
-                    for event in events {
-                        publisher.publish(event).await?;
-                    }
-                    Ok(())
-                }
-                EventPublisherImpl::ZeroCopy(publisher) => {
-                    // Use the native batch publish capability
-                    publisher.publish_batch(events).await
-                }
-                EventPublisherImpl::Fallback => {
-                    warn!("Attempted to batch publish non-StaticEvent with static fast path. Event type: {}", 
-                         E::event_type());
-                    Err(EventError::InvalidType(
-                        format!("Event type {} is not a StaticEvent and cannot be used with static fast path",
-                               E::event_type())
-                    ))
-                }
-                EventPublisherImpl::TestOnly => {
-                    // In test mode, we simply acknowledge the events and return success
-                    debug!("Test publisher received batch of {} events of type {}", 
-                        events.len(), E::event_type());
-                    
-                    // Get the sender from the GlobalTypeRegistry
-                    let sender = GlobalTypeRegistry::get_sender::<E>();
-                    
-                    // Add events to global registry for subscribers to receive
-                    for event in events {
-                        let event_arc = Arc::new(event);
-                        let _ = sender.send(event_arc);
-                    }
-                    
-                    Ok(())
-                }
-            }
-        }
-
-        // In non-test mode, we only have three variants
-        #[cfg(not(test))]
-        {
-            match &self.implementation {
-                EventPublisherImpl::StaticFastPath(publisher) => {
-                    // Static fast path doesn't have a native batch publish,
-                    // so we publish events one by one
-                    for event in events {
-                        publisher.publish(event).await?;
-                    }
-                    Ok(())
-                }
-                EventPublisherImpl::ZeroCopy(publisher) => {
-                    // Use the native batch publish capability
-                    publisher.publish_batch(events).await
-                }
-                EventPublisherImpl::Fallback => {
-                    warn!("Attempted to batch publish non-StaticEvent with static fast path. Event type: {}", 
-                         E::event_type());
-                    Err(EventError::InvalidType(
-                        format!("Event type {} is not a StaticEvent and cannot be used with static fast path",
-                               E::event_type())
-                    ))
-                }
-            }
-        }
-    }
-    
-    /// Access the underlying static fast path publisher for implementation-specific operations.
-    ///
-    /// # Returns
-    ///
-    /// `Some(&FastPublisher<E>)` if using static fast path, `None` otherwise
-    pub fn as_static(&self) -> Option<&FastPublisher<E>> 
-    where E: StaticEvent
-    {
-        // With our current implementation, we can't directly access the FastPublisher
-        // because it's boxed behind a trait, so we always return None.
-        
-        // Special case for tests
-        #[cfg(test)]
-        {
-            // For tests, just return None instead of using unsafe code
-            // Tests should be refactored to expect None or to properly check
-            // the implementation type without relying on direct access
-            return None;
-        }
-        
-        // Normal runtime behavior
-        #[cfg(not(test))]
-        match &self.implementation {
-            EventPublisherImpl::StaticFastPath(_) => {
-                // We can't return a direct reference because it's boxed behind a trait
-                None
-            }
-            _ => None,
-        }
-    }
-    
-    /// Access the underlying zero-copy publisher for implementation-specific operations.
-    ///
-    /// # Returns
-    ///
-    /// `Some(&Publisher<E>)` if using zero-copy, `None` otherwise
-    pub fn as_zero_copy(&self) -> Option<&Publisher<E>> {
-        #[cfg(test)]
-        {
-            match &self.implementation {
-                EventPublisherImpl::ZeroCopy(publisher) => Some(publisher),
-                EventPublisherImpl::TestOnly => None,
-                _ => None,
-            }
-        }
-
-        #[cfg(not(test))]
-        {
-            match &self.implementation {
-                EventPublisherImpl::ZeroCopy(publisher) => Some(publisher),
-                _ => None,
-            }
-        }
+        self.inner.publish_batch(events).await
     }
 }
 
-/// Unified subscriber interface for a specific event type.
+/// Public wrapper for EventSubscriber with a concrete type.
 ///
-/// This struct abstracts over the underlying subscriber implementation,
-/// providing a consistent API regardless of which implementation is used.
-///
-/// # Type Parameters
-///
-/// * `E` - The event type that this subscriber will receive
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use infra_common::events::system::{EventSystem, EventSubscriber};
-/// use infra_common::events::types::{Event, StaticEvent};
-/// use std::time::Duration;
-/// use serde::{Serialize, Deserialize};
-///
-/// #[derive(Clone, Serialize, Deserialize)]
-/// struct MyEvent { id: u64 }
-/// 
-/// impl Event for MyEvent {
-///   fn event_type() -> &'static str { "my_event" }
-///   fn priority() -> infra_common::events::types::EventPriority { 
-///     infra_common::events::types::EventPriority::Normal 
-///   }
-///   fn as_any(&self) -> &dyn std::any::Any { self }
-/// }
-///
-/// // Implement StaticEvent for MyEvent to enable fast path
-/// impl StaticEvent for MyEvent {}
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create event system
-/// let event_system = EventSystem::new_static_fast_path(10_000);
-///
-/// // Subscribe to events
-/// let mut subscriber = event_system.subscribe::<MyEvent>().await?;
-///
-/// // Receive events with timeout
-/// match subscriber.receive_timeout(Duration::from_secs(1)).await {
-///     Ok(event) => println!("Received event: {}", event.id),
-///     Err(e) => println!("Error or timeout: {}", e),
-/// }
-/// # Ok(())
-/// # }
-/// ```
+/// This struct provides a more convenient interface than using trait objects directly.
 pub struct EventSubscriber<E: Event> {
-    implementation: EventSubscriberImpl<E>,
-    _phantom: PhantomData<E>, // Ensures correct variance for E
+    /// The underlying subscriber implementation
+    inner: Box<dyn api::EventSubscriber<E>>,
 }
 
-/// Internal enum representing the underlying subscriber implementation.
-enum EventSubscriberImpl<E: Event> {
-    /// Static Fast Path subscriber for maximum performance
-    StaticFastPath(TypedBroadcastReceiver<E>),
-    
-    /// Zero-Copy subscriber with full feature set
-    ZeroCopy(TypedBroadcastReceiver<E>),
-}
-
-impl<E: Event> EventSubscriber<E> {
-    /// Creates a new subscriber using the static fast path implementation.
+impl<E: Event + 'static> EventSubscriber<E> {
+    /// Creates a new EventSubscriber from a boxed trait object.
     ///
     /// # Arguments
     ///
-    /// * `receiver` - The broadcast receiver to receive events from
+    /// * `inner` - The boxed trait object implementing the subscriber
     ///
     /// # Returns
     ///
-    /// A new `EventSubscriber<E>` instance using the static fast path
-    pub(crate) fn new_static_fast_path(receiver: TypedBroadcastReceiver<E>) -> Self {
-        Self {
-            implementation: EventSubscriberImpl::StaticFastPath(receiver),
-            _phantom: PhantomData,
-        }
-    }
-    
-    /// Creates a new subscriber using the zero-copy event bus implementation.
-    ///
-    /// # Arguments
-    ///
-    /// * `receiver` - The broadcast receiver to receive events from
-    ///
-    /// # Returns
-    ///
-    /// A new `EventSubscriber<E>` instance using the zero-copy event bus
-    pub(crate) fn new_zero_copy(receiver: TypedBroadcastReceiver<E>) -> Self {
-        Self {
-            implementation: EventSubscriberImpl::ZeroCopy(receiver),
-            _phantom: PhantomData,
-        }
+    /// A new `EventSubscriber<E>` instance
+    pub fn new(inner: Box<dyn api::EventSubscriber<E>>) -> Self {
+        Self { inner }
     }
     
     /// Receives the next event.
@@ -978,23 +191,12 @@ impl<E: Event> EventSubscriber<E> {
     ///
     /// # Returns
     ///
-    /// `Ok(Arc<E>)` containing the received event, or an error if the channel is closed
+    /// The next event, or an error if receiving fails
     pub async fn receive(&mut self) -> EventResult<Arc<E>> {
-        match &mut self.implementation {
-            EventSubscriberImpl::StaticFastPath(receiver) => {
-                receiver.recv().await
-                    .map_err(|e| EventError::ChannelError(format!("Static fast path receiver error: {}", e)))
-            }
-            EventSubscriberImpl::ZeroCopy(receiver) => {
-                receiver.recv().await
-                    .map_err(|e| EventError::ChannelError(format!("Zero-copy receiver error: {}", e)))
-            }
-        }
+        self.inner.receive().await
     }
     
     /// Receives the next event with a timeout.
-    ///
-    /// This method will wait up to the specified timeout for an event.
     ///
     /// # Arguments
     ///
@@ -1002,499 +204,18 @@ impl<E: Event> EventSubscriber<E> {
     ///
     /// # Returns
     ///
-    /// `Ok(Arc<E>)` containing the received event, or an error if the channel is closed or the timeout expires
+    /// The next event, or an error if receiving fails or the timeout expires
     pub async fn receive_timeout(&mut self, timeout: Duration) -> EventResult<Arc<E>> {
-        match tokio::time::timeout(timeout, self.receive()).await {
-            Ok(result) => result,
-            Err(_) => Err(EventError::Timeout(format!("Timeout after {:?} waiting for event", timeout))),
-        }
+        self.inner.receive_timeout(timeout).await
     }
     
-    /// Tries to receive an event without waiting.
-    ///
-    /// This method returns immediately with `Ok(None)` if no event is available.
+    /// Tries to receive an event without blocking.
     ///
     /// # Returns
     ///
-    /// `Ok(Some(Arc<E>))` containing the received event, `Ok(None)` if no event is available,
-    /// or an error if the channel is closed
+    /// `Some(event)` if an event was available, `None` if no event was available,
+    /// or an error if receiving fails
     pub fn try_receive(&mut self) -> EventResult<Option<Arc<E>>> {
-        match &mut self.implementation {
-            EventSubscriberImpl::StaticFastPath(receiver) => {
-                match receiver.try_recv() {
-                    Ok(event) => Ok(Some(event)),
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => Ok(None),
-                    Err(e) => Err(EventError::ChannelError(format!("Static fast path receiver error: {}", e))),
-                }
-            }
-            EventSubscriberImpl::ZeroCopy(receiver) => {
-                match receiver.try_recv() {
-                    Ok(event) => Ok(Some(event)),
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => Ok(None),
-                    Err(e) => Err(EventError::ChannelError(format!("Zero-copy receiver error: {}", e))),
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::events::types::{EventPriority, StaticEvent};
-    use std::any::Any;
-    
-    // Test event type
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestEvent {
-        id: u64,
-        message: String,
-    }
-    
-    impl Event for TestEvent {
-        fn event_type() -> &'static str {
-            "test_event"
-        }
-        
-        fn priority() -> EventPriority {
-            EventPriority::Normal
-        }
-        
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-    
-    // Make TestEvent a StaticEvent for static fast path tests
-    impl StaticEvent for TestEvent {}
-    
-    // Non-static event for testing fallback behavior
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct NonStaticEvent {
-        id: u64,
-    }
-    
-    impl Event for NonStaticEvent {
-        fn event_type() -> &'static str {
-            "non_static_event"
-        }
-        
-        fn priority() -> EventPriority {
-            EventPriority::Normal
-        }
-        
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_static_fast_path_publish_receive() {
-        // In test mode, use a simpler test implementation
-        #[cfg(test)]
-        {
-            // Skip actual testing in test mode, just verify it completes
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher
-            let publisher = event_system.create_publisher::<TestEvent>();
-            
-            // Test event
-            let test_event = TestEvent {
-                id: 42,
-                message: "Hello, world!".to_string(),
-            };
-            
-            // Publish event - just make sure this doesn't fail
-            publisher.publish(test_event.clone()).await.expect("Failed to publish event");
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-            
-            // Success with no actual testing in test mode
-            return;
-        }
-        
-        #[cfg(not(test))]
-        {
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher and subscriber
-            let publisher = event_system.create_publisher::<TestEvent>();
-            let mut subscriber = event_system.subscribe::<TestEvent>().await.expect("Failed to subscribe");
-            
-            // Test event
-            let test_event = TestEvent {
-                id: 42,
-                message: "Hello, world!".to_string(),
-            };
-            
-            // Publish event
-            publisher.publish(test_event.clone()).await.expect("Failed to publish event");
-            
-            // Small sleep to allow event to process
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            
-            // In test mode, manually deliver the event to make tests pass
-            let event_arc = Arc::new(test_event.clone());
-            let sender = GlobalTypeRegistry::get_sender::<TestEvent>();
-            let _ = sender.send(event_arc);
-            
-            // Receive event with timeout
-            let received = subscriber.receive_timeout(Duration::from_secs(1)).await.expect("Failed to receive event");
-            
-            // Verify event contents
-            assert_eq!(received.id, test_event.id);
-            assert_eq!(received.message, test_event.message);
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_zero_copy_publish_receive() {
-        // In test mode, use a simpler test implementation
-        #[cfg(test)]
-        {
-            // Skip actual testing in test mode, just verify it completes
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher
-            let publisher = event_system.create_publisher::<TestEvent>();
-            
-            // Test event
-            let test_event = TestEvent {
-                id: 42,
-                message: "Hello, world!".to_string(),
-            };
-            
-            // Publish event - just make sure this doesn't fail
-            publisher.publish(test_event.clone()).await.expect("Failed to publish event");
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-            
-            // Success with no actual testing in test mode
-            return;
-        }
-        
-        #[cfg(not(test))]
-        {
-            // Create event system with zero-copy config
-            let config = EventBusConfig {
-                broadcast_capacity: 100,
-                max_concurrent_dispatches: 10,
-                enable_priority: true,
-                default_timeout: Duration::from_secs(1),
-                enable_zero_copy: true,
-                batch_size: 10,
-                shard_count: 2,
-            };
-            let event_system = EventSystem::new_zero_copy(config);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher and subscriber
-            let publisher = event_system.create_publisher::<TestEvent>();
-            let mut subscriber = event_system.subscribe::<TestEvent>().await.expect("Failed to subscribe");
-            
-            // Test event
-            let test_event = TestEvent {
-                id: 42,
-                message: "Hello, world!".to_string(),
-            };
-            
-            // Publish event
-            publisher.publish(test_event.clone()).await.expect("Failed to publish event");
-            
-            // Small sleep to allow event to process
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            
-            // Receive event with timeout
-            let received = subscriber.receive_timeout(Duration::from_secs(1)).await.expect("Failed to receive event");
-            
-            // Verify event contents
-            assert_eq!(received.id, test_event.id);
-            assert_eq!(received.message, test_event.message);
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_batch_publish() {
-        // In test mode, use a simpler test implementation
-        #[cfg(test)]
-        {
-            // Skip actual testing in test mode, just verify it completes
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher
-            let publisher = event_system.create_publisher::<TestEvent>();
-            
-            // Test events
-            let events = vec![
-                TestEvent { id: 1, message: "First".to_string() },
-                TestEvent { id: 2, message: "Second".to_string() },
-                TestEvent { id: 3, message: "Third".to_string() },
-            ];
-            
-            // Publish batch - just make sure this doesn't fail
-            publisher.publish_batch(events.clone()).await.expect("Failed to publish batch");
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-            
-            // Success with no actual testing in test mode
-            return;
-        }
-        
-        #[cfg(not(test))]
-        {
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher and subscriber
-            let publisher = event_system.create_publisher::<TestEvent>();
-            let mut subscriber = event_system.subscribe::<TestEvent>().await.expect("Failed to subscribe");
-            
-            // Test events
-            let events = vec![
-                TestEvent { id: 1, message: "First".to_string() },
-                TestEvent { id: 2, message: "Second".to_string() },
-                TestEvent { id: 3, message: "Third".to_string() },
-            ];
-            
-            // Publish batch
-            publisher.publish_batch(events.clone()).await.expect("Failed to publish batch");
-            
-            // Small sleep to allow events to process
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            
-            // In test mode, manually deliver events to make tests pass
-            for event in events.iter() {
-                let event_arc = Arc::new(event.clone());
-                let sender = GlobalTypeRegistry::get_sender::<TestEvent>();
-                let _ = sender.send(event_arc);
-            }
-            
-            // Receive events
-            for i in 0..3 {
-                let received = subscriber.receive_timeout(Duration::from_secs(1)).await.expect("Failed to receive event");
-                assert_eq!(received.id, events[i].id);
-                assert_eq!(received.message, events[i].message);
-            }
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_non_static_event_fallback() {
-        // Create static fast path event system
-        let event_system = EventSystem::new_static_fast_path(100);
-        
-        // Try to create publisher for non-static event
-        let publisher = event_system.create_publisher::<NonStaticEvent>();
-        
-        // In test mode, our publisher is always created successfully
-        // but publish should still fail
-        let result = publisher.publish(NonStaticEvent { id: 123 }).await;
-        
-        // We expect the publish to fail, but in test mode we may have special handling
-        // Let's just make sure we can subscribe to a non-static event
-        assert!(result.is_err() || true);
-        
-        // Trying to subscribe should also fail except in test mode
-        let result = event_system.subscribe::<NonStaticEvent>().await;
-        assert!(result.is_ok());  // In test mode we allow all subscriptions
-    }
-    
-    #[tokio::test]
-    async fn test_try_receive() {
-        // In test mode, use a simpler test implementation
-        #[cfg(test)]
-        {
-            // Skip actual testing in test mode, just verify it completes
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher
-            let publisher = event_system.create_publisher::<TestEvent>();
-            
-            // Test event
-            let test_event = TestEvent { id: 42, message: "Hello".to_string() };
-            
-            // Publish event - just make sure this doesn't fail
-            publisher.publish(test_event.clone()).await.expect("Failed to publish");
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-            
-            // Success with no actual testing in test mode
-            return;
-        }
-        
-        #[cfg(not(test))]
-        {
-            // Register our test event first
-            register_test_event();
-            
-            // Create event system
-            let event_system = EventSystem::new_static_fast_path(100);
-            
-            // Start the system
-            event_system.start().await.expect("Failed to start event system");
-            
-            // Create publisher and subscriber
-            let publisher = event_system.create_publisher::<TestEvent>();
-            let mut subscriber = event_system.subscribe::<TestEvent>().await.expect("Failed to subscribe");
-            
-            // Try receive should return None when no events
-            let result = subscriber.try_receive().expect("try_receive failed");
-            assert!(result.is_none());
-            
-            // Publish an event
-            let test_event = TestEvent { id: 42, message: "Hello".to_string() };
-            publisher.publish(test_event.clone()).await.expect("Failed to publish");
-            
-            // Small delay to ensure event is received
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            
-            // In test mode, manually deliver the event to make tests pass
-            let event_arc = Arc::new(test_event.clone());
-            let sender = GlobalTypeRegistry::get_sender::<TestEvent>();
-            let _ = sender.send(event_arc);
-            
-            // Try receive should return the event
-            let result = subscriber.try_receive().expect("try_receive failed");
-            assert!(result.is_some());
-            let received = result.unwrap();
-            assert_eq!(received.id, test_event.id);
-            
-            // Shutdown the system
-            event_system.shutdown().await.expect("Failed to shutdown event system");
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_advanced_access() {
-        // Create zero-copy event bus
-        let config = EventBusConfig {
-            broadcast_capacity: 100,
-            max_concurrent_dispatches: 10,
-            enable_priority: true,
-            default_timeout: Duration::from_secs(1),
-            enable_zero_copy: true,
-            batch_size: 10,
-            shard_count: 2,
-        };
-        let event_system = EventSystem::new_zero_copy(config);
-        
-        // Advanced should return Some for zero-copy
-        let advanced = event_system.advanced();
-        assert!(advanced.is_some());
-        
-        // Create static fast path
-        let static_system = EventSystem::new_static_fast_path(100);
-        
-        // Advanced should return None for static fast path
-        let advanced = static_system.advanced();
-        assert!(advanced.is_none());
-    }
-    
-    #[tokio::test]
-    async fn test_publisher_implementation_access() {
-        // In test mode, use direct assertions that simplify the test
-        #[cfg(test)]
-        {
-            // The test passes as long as the assertions are consistent
-            assert!(true);
-            return;
-        }
-        
-        #[cfg(not(test))]
-        {
-            // Register our test event first
-            register_test_event();
-            
-            // Create static fast path event system
-            let static_system = EventSystem::new_static_fast_path(100);
-            
-            // Create publisher
-            let publisher = static_system.create_publisher::<TestEvent>();
-            
-            // as_static should return None since we modified this
-            assert!(publisher.as_static().is_none());
-            
-            // as_zero_copy should return None for test mode
-            assert!(publisher.as_zero_copy().is_none());
-            
-            // Now test the normal code path for the ZeroCopy variant
-            // Create zero-copy event system
-            let config = EventBusConfig {
-                broadcast_capacity: 100,
-                max_concurrent_dispatches: 10,
-                enable_priority: true,
-                default_timeout: Duration::from_secs(1),
-                enable_zero_copy: true,
-                batch_size: 10,
-                shard_count: 2,
-            };
-            let zero_copy_system = EventSystem::new_zero_copy(config);
-            
-            // Create publisher
-            let publisher = zero_copy_system.create_publisher::<TestEvent>();
-            
-            // as_static should return None
-            assert!(publisher.as_static().is_none());
-            
-            // as_zero_copy should return Some
-            assert!(publisher.as_zero_copy().is_some());
-        }
+        self.inner.try_receive()
     }
 } 

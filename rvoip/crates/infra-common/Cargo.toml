@@ -41,5 +41,5 @@ criterion = "0.5"
 chrono = "0.4"
 
 [[bench]]
-name = "event_bus"
+name = "api_bench"
 harness = false 

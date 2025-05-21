@@ -1,13 +1,22 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
 use infra_common::events::bus::{EventBus, EventBusConfig};
 use infra_common::events::types::{Event, EventHandler, EventPriority, StaticEvent};
-use infra_common::events::publisher::{Publisher, FastPublisher};
+use infra_common::events::bus::Publisher;
+use infra_common::events::publisher::FastPublisher;
 use infra_common::events::registry::GlobalTypeRegistry;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use serde::{Serialize, Deserialize};
+
+// --- Common benchmark configuration ---
+const CHANNEL_CAPACITY: usize = 10000;
+const EVENT_COUNT: usize = 10000;
+const BENCH_MEASUREMENT_TIME: Duration = Duration::from_secs(20);
+const BENCH_SAMPLE_SIZE: usize = 80;
+const SHARD_COUNT: usize = 32;
+const SUBSCRIBER_COUNTS: [usize; 4] = [1, 10, 100, 1000];
 
 // Sample event for benchmarking
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,7 +105,11 @@ fn bench_event_bus_single_publisher(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("event_bus_single_publisher");
     
-    for &num_subscribers in &[1, 10, 100] {
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
+    
+    for &num_subscribers in &SUBSCRIBER_COUNTS[0..3] { // Using first 3 elements: 1, 10, 100
         group.throughput(Throughput::Elements(100));
         group.bench_with_input(
             BenchmarkId::from_parameter(num_subscribers),
@@ -108,8 +121,8 @@ fn bench_event_bus_single_publisher(c: &mut Criterion) {
                         let event_bus = EventBus::with_config(EventBusConfig {
                             max_concurrent_dispatches: 10000,
                             default_timeout: Duration::from_secs(1),
-                            shard_count: 32,
-                            broadcast_capacity: 1024,
+                            shard_count: SHARD_COUNT,
+                            broadcast_capacity: CHANNEL_CAPACITY,
                             enable_priority: true,
                             enable_zero_copy: false, // Use legacy mode
                             batch_size: 100,
@@ -129,7 +142,7 @@ fn bench_event_bus_single_publisher(c: &mut Criterion) {
                         }
                         
                         // Wait for all events to be processed
-                        let expected_count = n * 100;
+                        let expected_count = (n * 100) as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -151,10 +164,11 @@ fn bench_event_bus_channel(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("event_bus_channel");
     
-    // Configure longer measurement time for high-volume tests
-    group.measurement_time(Duration::from_secs(10));
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
     
-    for &num_subscribers in &[10, 100, 1000] {
+    for &num_subscribers in &SUBSCRIBER_COUNTS[1..] { // Using last 3 elements: 10, 100, 1000
         group.throughput(Throughput::Elements(1000));
         group.bench_with_input(
             BenchmarkId::from_parameter(num_subscribers),
@@ -166,8 +180,8 @@ fn bench_event_bus_channel(c: &mut Criterion) {
                         let event_bus = EventBus::with_config(EventBusConfig {
                             max_concurrent_dispatches: 10000,
                             default_timeout: Duration::from_secs(1),
-                            shard_count: 32,
-                            broadcast_capacity: 1024,
+                            shard_count: SHARD_COUNT,
+                            broadcast_capacity: CHANNEL_CAPACITY,
                             enable_priority: true,
                             enable_zero_copy: true,
                             batch_size: 100,
@@ -205,7 +219,7 @@ fn bench_event_bus_channel(c: &mut Criterion) {
                         }
                         
                         // Wait for all events to be processed
-                        let expected_count = n * 1000;
+                        let expected_count = (n * 1000) as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -235,6 +249,10 @@ fn bench_event_priority(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("event_priority");
     
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
+    
     for &priority in &[EventPriority::Low, EventPriority::Normal, EventPriority::High, EventPriority::Critical] {
         group.throughput(Throughput::Elements(100));
         group.bench_with_input(
@@ -247,8 +265,8 @@ fn bench_event_priority(c: &mut Criterion) {
                         let event_bus = EventBus::with_config(EventBusConfig {
                             max_concurrent_dispatches: 10000,
                             default_timeout: Duration::from_secs(1),
-                            shard_count: 32,
-                            broadcast_capacity: 1024,
+                            shard_count: SHARD_COUNT,
+                            broadcast_capacity: CHANNEL_CAPACITY,
                             enable_priority: true,
                             enable_zero_copy: true,
                             batch_size: 100,
@@ -274,7 +292,7 @@ fn bench_event_priority(c: &mut Criterion) {
                         }
                         
                         // Wait for all events to be processed
-                        let expected_count = 10 * 100;
+                        let expected_count = (10 * 100) as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -294,11 +312,12 @@ fn bench_zero_copy_event_bus(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("zero_copy_event_bus");
     
-    // Configure longer measurement time for high-volume tests
-    group.measurement_time(Duration::from_secs(15));
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
     
-    for &num_subscribers in &[1, 10, 100, 1000] {
-        group.throughput(Throughput::Elements(1000));
+    for &num_subscribers in &SUBSCRIBER_COUNTS {
+        group.throughput(Throughput::Elements(EVENT_COUNT as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(num_subscribers),
             &num_subscribers,
@@ -309,8 +328,8 @@ fn bench_zero_copy_event_bus(c: &mut Criterion) {
                         let event_bus = EventBus::with_config(EventBusConfig {
                             max_concurrent_dispatches: 10000,
                             default_timeout: Duration::from_secs(1),
-                            shard_count: 32,
-                            broadcast_capacity: 4096,
+                            shard_count: SHARD_COUNT,
+                            broadcast_capacity: CHANNEL_CAPACITY,
                             enable_priority: true,
                             enable_zero_copy: true,
                             batch_size: 100,
@@ -330,19 +349,19 @@ fn bench_zero_copy_event_bus(c: &mut Criterion) {
                             let counter = counter.clone();
                             tokio::spawn(async move {
                                 while let Ok(event) = rx.recv().await {
-                                    let _ = event; // Use event to prevent the compiler from optimizing it away
+                                    let _ = black_box(event); // Use event to prevent the compiler from optimizing it away
                                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
                             })
                         }).collect();
                         
                         // Publish events
-                        for i in 0..1000 {
-                            let _ = event_bus.publish(create_test_event(i, EventPriority::Normal)).await;
+                        for i in 0..EVENT_COUNT {
+                            let _ = event_bus.publish(create_test_event(i as u64, EventPriority::Normal)).await;
                         }
                         
                         // Wait for events to be processed
-                        let expected_count = n * 1000;
+                        let expected_count = (n * EVENT_COUNT) as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -366,12 +385,12 @@ fn bench_static_event_fast_path(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("static_event_fast_path");
     
-    // Configure longer measurement time for high-volume tests
-    group.measurement_time(Duration::from_secs(20));
-    group.sample_size(80);
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
     
-    for &num_subscribers in &[10, 100, 1000] {
-        group.throughput(Throughput::Elements(10000));
+    for &num_subscribers in &SUBSCRIBER_COUNTS {
+        group.throughput(Throughput::Elements(EVENT_COUNT as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(num_subscribers),
             &num_subscribers,
@@ -389,19 +408,19 @@ fn bench_static_event_fast_path(c: &mut Criterion) {
                             let mut rx = publisher.subscribe();
                             tokio::spawn(async move {
                                 while let Ok(event) = rx.recv().await {
-                                    let _ = event; // Use event to prevent compiler optimization
+                                    let _ = black_box(event); // Use event to prevent compiler optimization
                                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
                             })
                         }).collect();
                         
-                        // Publish a large number of events
-                        for i in 0..10000 {
-                            let _ = publisher.publish(create_static_event(i)).await;
+                        // Publish events - using standardized EVENT_COUNT
+                        for i in 0..EVENT_COUNT {
+                            let _ = publisher.publish(create_static_event(i as u64)).await;
                         }
                         
                         // Wait for events to be processed
-                        let expected_count = n * 10000;
+                        let expected_count = (n * EVENT_COUNT) as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -425,11 +444,12 @@ fn bench_batch_processing(c: &mut Criterion) {
     
     let mut group = c.benchmark_group("batch_processing");
     
-    // Configure longer measurement time for high-volume tests
-    group.measurement_time(Duration::from_secs(10));
+    // Configure standardized measurement parameters
+    group.measurement_time(BENCH_MEASUREMENT_TIME);
+    group.sample_size(BENCH_SAMPLE_SIZE);
     
     for &batch_size in &[10, 100, 1000] {
-        group.throughput(Throughput::Elements(10000));
+        group.throughput(Throughput::Elements(EVENT_COUNT as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -440,8 +460,8 @@ fn bench_batch_processing(c: &mut Criterion) {
                         let event_bus = EventBus::with_config(EventBusConfig {
                             max_concurrent_dispatches: 10000,
                             default_timeout: Duration::from_secs(1),
-                            shard_count: 32,
-                            broadcast_capacity: 4096,
+                            shard_count: SHARD_COUNT,
+                            broadcast_capacity: CHANNEL_CAPACITY,
                             enable_priority: true,
                             enable_zero_copy: true,
                             batch_size: size,
@@ -455,13 +475,13 @@ fn bench_batch_processing(c: &mut Criterion) {
                         let counter_clone = counter.clone();
                         let task = tokio::spawn(async move {
                             while let Ok(event) = rx.recv().await {
-                                let _ = event; // Use event to prevent compiler optimization
+                                let _ = black_box(event); // Use event to prevent compiler optimization
                                 counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         });
                         
-                        // Create batch of events
-                        let batches = 10000 / size;
+                        // Create batch of events - using standardized EVENT_COUNT
+                        let batches = EVENT_COUNT / size;
                         for j in 0..batches {
                             let mut batch = Vec::with_capacity(size);
                             for i in 0..size {
@@ -473,7 +493,7 @@ fn bench_batch_processing(c: &mut Criterion) {
                         }
                         
                         // Wait for events to be processed
-                        let expected_count = 10000;
+                        let expected_count = EVENT_COUNT as u64;
                         let mut attempts = 0;
                         while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
                             tokio::time::sleep(Duration::from_millis(10)).await;

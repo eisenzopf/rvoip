@@ -23,6 +23,62 @@ Create a unified `EventSystem` API that provides a simple, consistent interface 
 5. **BufferManager**: Global buffer management and backpressure handling
 6. **EventMetrics**: System-wide event metrics collection and reporting
 
+## New Architecture: Separation of Concerns
+
+Based on lessons learned from our current implementation, we'll restructure the codebase with better separation of concerns:
+
+```
+src/events/
+├── api.rs             # Pure interface definitions (traits)
+├── static_path.rs     # Static Fast Path implementation
+├── zero_copy.rs       # Zero Copy implementation
+├── builder.rs         # Builder pattern to create appropriate implementation
+└── system.rs          # Re-exports and minimal glue code
+```
+
+### Benefits of This Approach
+
+1. **Clear separation of concerns**: Each implementation lives in its own file with focused responsibilities
+2. **Type safety**: All trait implementations are specialized for their context, eliminating the need for runtime type checks
+3. **No more special cases**: Each implementation handles its specific cases cleanly without affecting the other
+4. **Easier to evolve**: New implementations can be added without modifying existing ones
+5. **Better error handling**: Type safety and compile-time checks replace runtime checks and unsafe code
+6. **Consistent abstractions**: Common interfaces ensure all implementations behave consistently from user code
+7. **Simplified debugging**: When something goes wrong, it's much clearer where to look
+
+### Core Interface Definitions (api.rs)
+
+```rust
+// Core traits that define the event system interfaces
+pub trait EventSystem: Send + Sync + Clone {
+    fn start(&self) -> impl std::future::Future<Output = EventResult<()>> + Send;
+    fn shutdown(&self) -> impl std::future::Future<Output = EventResult<()>> + Send;
+    fn create_publisher<E: Event>(&self) -> Box<dyn EventPublisher<E>>;
+    fn subscribe<E: Event>(&self) -> impl std::future::Future<Output = EventResult<Box<dyn EventSubscriber<E>>>> + Send;
+}
+
+pub trait EventPublisher<E: Event>: Send + Sync {
+    fn publish(&self, event: E) -> impl std::future::Future<Output = EventResult<()>> + Send;
+    fn publish_batch(&self, events: Vec<E>) -> impl std::future::Future<Output = EventResult<()>> + Send;
+}
+
+pub trait EventSubscriber<E: Event>: Send {
+    fn receive(&mut self) -> impl std::future::Future<Output = EventResult<Arc<E>>> + Send;
+    fn receive_timeout(&mut self, timeout: Duration) -> impl std::future::Future<Output = EventResult<Arc<E>>> + Send;
+    fn try_receive(&mut self) -> EventResult<Option<Arc<E>>>;
+}
+```
+
+### Implementation Strategy
+
+1. First, create api.rs with the core trait definitions
+2. Then implement the StaticFastPathSystem in static_path.rs
+3. Next, implement the ZeroCopySystem in zero_copy.rs 
+4. Update system.rs to be a thin wrapper that selects between implementations
+5. Refine the builder.rs to choose the right implementation
+6. Add tests for both implementations
+7. Update documentation and examples
+
 ## Detailed Design Artifacts
 
 ### EventSystemBuilder Interface
@@ -822,14 +878,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ✅ Removed brittle string matching approach  
 ✅ Added proper debug logging for diagnosis  
 
-## Phase 2: Performance Improvements (TODO)
+## Phase 2: Architecture Improvements (IN PROGRESS)
+
+- [ ] Restructure codebase with better separation of concerns:
+  - [ ] Create api.rs with pure trait interfaces
+  - [ ] Move static fast path implementation to static_path.rs
+  - [ ] Move zero-copy implementation to zero_copy.rs
+  - [ ] Simplify system.rs to be a thin wrapper
+  - [ ] Update builder.rs to work with new architecture
+
+## Phase 3: Performance Improvements (TODO)
 
 - Implement true static dispatch for the FastPublisher path
 - Benchmark and verify improved throughput
 - Fix the Static Fast Path implementation to actually handle messages (currently showing 0 processed)
 - Make batch publishing work with proper static registration
 
-## Phase 3: API Enhancements (TODO)
+## Phase 4: API Enhancements (TODO)
 
 - Add proper derive macro for StaticEvent types
 - Implement automatic registration of event types when modules are loaded
@@ -845,7 +910,8 @@ The StaticEvent registration system is improved, but we're not properly using it
 
 ## Next Steps
 
-1. Fix the Static Fast Path implementation to properly process messages
-2. Create a true static dispatch mechanism that avoids runtime type lookup
-3. Implement a derive macro for StaticEvent to help with registration
-4. Improve the batch publishing to work in both implementations 
+1. Implement the new architecture with separation of concerns
+2. Fix the Static Fast Path implementation to properly process messages
+3. Create a true static dispatch mechanism that avoids runtime type lookup
+4. Implement a derive macro for StaticEvent to help with registration
+5. Improve the batch publishing to work in both implementations 

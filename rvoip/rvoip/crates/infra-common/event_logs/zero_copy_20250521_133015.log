@@ -1,0 +1,812 @@
+[Zero Copy] Published event 0: stream=stream-0, seq=0, ts=1747834215430
+[Zero Copy] Subscriber 2 received event 1: stream=stream-0, seq=0, ts=1747834215430, marker=true
+[Zero Copy] Subscriber 0 received event 1: stream=stream-0, seq=0, ts=1747834215430, marker=true
+[Zero Copy] Subscriber 1 received event 1: stream=stream-0, seq=0, ts=1747834215430, marker=true
+[Zero Copy] Subscriber 4 received event 1: stream=stream-0, seq=0, ts=1747834215430, marker=true
+[Zero Copy] Subscriber 3 received event 1: stream=stream-0, seq=0, ts=1747834215430, marker=true
+[Zero Copy] Published event 100000: stream=stream-0, seq=34465, ts=1747834215673
+[Zero Copy] Subscriber 3 received event 100001: stream=stream-0, seq=34465, ts=1747834215673, marker=false
+[Zero Copy] Subscriber 1 received event 100001: stream=stream-0, seq=34465, ts=1747834215673, marker=false
+[Zero Copy] Subscriber 4 received event 100001: stream=stream-0, seq=34465, ts=1747834215673, marker=false
+[Zero Copy] Subscriber 2 received event 100001: stream=stream-0, seq=34465, ts=1747834215673, marker=false
+[Zero Copy] Subscriber 0 received event 100001: stream=stream-0, seq=34465, ts=1747834215673, marker=false
+[Zero Copy] Published event 200000: stream=stream-0, seq=3395, ts=1747834215892
+[Zero Copy] Subscriber 2 received event 200001: stream=stream-0, seq=3395, ts=1747834215892, marker=false
+[Zero Copy] Subscriber 4 received event 200001: stream=stream-0, seq=3395, ts=1747834215892, marker=false
+[Zero Copy] Subscriber 1 received event 200001: stream=stream-0, seq=3395, ts=1747834215892, marker=false
+[Zero Copy] Subscriber 3 received event 200001: stream=stream-0, seq=3395, ts=1747834215892, marker=false
+[Zero Copy] Subscriber 0 received event 200001: stream=stream-0, seq=3395, ts=1747834215892, marker=false
+[Zero Copy] Published event 300000: stream=stream-0, seq=37860, ts=1747834216115
+[Zero Copy] Subscriber 3 received event 300001: stream=stream-0, seq=37860, ts=1747834216115, marker=true
+[Zero Copy] Subscriber 0 received event 300001: stream=stream-0, seq=37860, ts=1747834216115, marker=true
+[Zero Copy] Subscriber 4 received event 300001: stream=stream-0, seq=37860, ts=1747834216115, marker=true
+[Zero Copy] Subscriber 1 received event 300001: stream=stream-0, seq=37860, ts=1747834216115, marker=true
+[Zero Copy] Subscriber 2 received event 300001: stream=stream-0, seq=37860, ts=1747834216115, marker=true
+[Zero Copy] Published event 400000: stream=stream-0, seq=6790, ts=1747834216333
+[Zero Copy] Subscriber 0 received event 400001: stream=stream-0, seq=6790, ts=1747834216333, marker=false
+[Zero Copy] Subscriber 1 received event 400001: stream=stream-0, seq=6790, ts=1747834216333, marker=false
+[Zero Copy] Subscriber 2 received event 400001: stream=stream-0, seq=6790, ts=1747834216333, marker=false
+[Zero Copy] Subscriber 3 received event 400001: stream=stream-0, seq=6790, ts=1747834216333, marker=false
+[Zero Copy] Subscriber 4 received event 400001: stream=stream-0, seq=6790, ts=1747834216333, marker=false
+[Zero Copy] Published event 500000: stream=stream-0, seq=41255, ts=1747834216556
+[Zero Copy] Subscriber 2 received event 500001: stream=stream-0, seq=41255, ts=1747834216556, marker=false
+[Zero Copy] Subscriber 4 received event 500001: stream=stream-0, seq=41255, ts=1747834216556, marker=false
+[Zero Copy] Subscriber 3 received event 500001: stream=stream-0, seq=41255, ts=1747834216556, marker=false
+[Zero Copy] Subscriber 1 received event 500001: stream=stream-0, seq=41255, ts=1747834216556, marker=false
+[Zero Copy] Subscriber 0 received event 500001: stream=stream-0, seq=41255, ts=1747834216556, marker=false
+[Zero Copy] Published event 600000: stream=stream-0, seq=10185, ts=1747834216790
+[Zero Copy] Subscriber 0 received event 600001: stream=stream-0, seq=10185, ts=1747834216790, marker=true
+[Zero Copy] Subscriber 3 received event 600001: stream=stream-0, seq=10185, ts=1747834216790, marker=true
+[Zero Copy] Subscriber 2 received event 600001: stream=stream-0, seq=10185, ts=1747834216790, marker=true
+[Zero Copy] Subscriber 4 received event 600001: stream=stream-0, seq=10185, ts=1747834216790, marker=true
+[Zero Copy] Subscriber 1 received event 600001: stream=stream-0, seq=10185, ts=1747834216790, marker=true
+[Zero Copy] Published event 700000: stream=stream-0, seq=44650, ts=1747834217014
+[Zero Copy] Subscriber 2 received event 700001: stream=stream-0, seq=44650, ts=1747834217014, marker=false
+[Zero Copy] Subscriber 4 received event 700001: stream=stream-0, seq=44650, ts=1747834217014, marker=false
+[Zero Copy] Subscriber 3 received event 700001: stream=stream-0, seq=44650, ts=1747834217014, marker=false
+[Zero Copy] Subscriber 0 received event 700001: stream=stream-0, seq=44650, ts=1747834217014, marker=false
+[Zero Copy] Subscriber 1 received event 700001: stream=stream-0, seq=44650, ts=1747834217014, marker=false
+[Zero Copy] Published event 800000: stream=stream-0, seq=13580, ts=1747834217234
+[Zero Copy] Subscriber 3 received event 800001: stream=stream-0, seq=13580, ts=1747834217234, marker=false
+[Zero Copy] Subscriber 0 received event 800001: stream=stream-0, seq=13580, ts=1747834217234, marker=false
+[Zero Copy] Subscriber 4 received event 800001: stream=stream-0, seq=13580, ts=1747834217234, marker=false
+[Zero Copy] Subscriber 1 received event 800001: stream=stream-0, seq=13580, ts=1747834217234, marker=false
+[Zero Copy] Subscriber 2 received event 800001: stream=stream-0, seq=13580, ts=1747834217234, marker=false
+[Zero Copy] Published event 900000: stream=stream-0, seq=48045, ts=1747834217453
+[Zero Copy] Subscriber 1 received event 900001: stream=stream-0, seq=48045, ts=1747834217453, marker=true
+[Zero Copy] Subscriber 2 received event 900001: stream=stream-0, seq=48045, ts=1747834217453, marker=true
+[Zero Copy] Subscriber 4 received event 900001: stream=stream-0, seq=48045, ts=1747834217453, marker=true
+[Zero Copy] Subscriber 0 received event 900001: stream=stream-0, seq=48045, ts=1747834217453, marker=true
+[Zero Copy] Subscriber 3 received event 900001: stream=stream-0, seq=48045, ts=1747834217453, marker=true
+[Zero Copy] Published event 1000000: stream=stream-0, seq=16975, ts=1747834217672
+[Zero Copy] Subscriber 4 received event 1000001: stream=stream-0, seq=16975, ts=1747834217672, marker=false
+[Zero Copy] Subscriber 2 received event 1000001: stream=stream-0, seq=16975, ts=1747834217672, marker=false
+[Zero Copy] Subscriber 3 received event 1000001: stream=stream-0, seq=16975, ts=1747834217672, marker=false
+[Zero Copy] Subscriber 0 received event 1000001: stream=stream-0, seq=16975, ts=1747834217672, marker=false
+[Zero Copy] Subscriber 1 received event 1000001: stream=stream-0, seq=16975, ts=1747834217672, marker=false
+[Zero Copy] Published event 1100000: stream=stream-0, seq=51440, ts=1747834217890
+[Zero Copy] Subscriber 4 received event 1100001: stream=stream-0, seq=51440, ts=1747834217890, marker=false
+[Zero Copy] Subscriber 1 received event 1100001: stream=stream-0, seq=51440, ts=1747834217890, marker=false
+[Zero Copy] Subscriber 2 received event 1100001: stream=stream-0, seq=51440, ts=1747834217890, marker=false
+[Zero Copy] Subscriber 0 received event 1100001: stream=stream-0, seq=51440, ts=1747834217890, marker=false
+[Zero Copy] Subscriber 3 received event 1100001: stream=stream-0, seq=51440, ts=1747834217890, marker=false
+[Zero Copy] Published event 1200000: stream=stream-0, seq=20370, ts=1747834218109
+[Zero Copy] Subscriber 2 received event 1200001: stream=stream-0, seq=20370, ts=1747834218109, marker=true
+[Zero Copy] Subscriber 3 received event 1200001: stream=stream-0, seq=20370, ts=1747834218109, marker=true
+[Zero Copy] Subscriber 4 received event 1200001: stream=stream-0, seq=20370, ts=1747834218109, marker=true
+[Zero Copy] Subscriber 1 received event 1200001: stream=stream-0, seq=20370, ts=1747834218109, marker=true
+[Zero Copy] Subscriber 0 received event 1200001: stream=stream-0, seq=20370, ts=1747834218109, marker=true
+[Zero Copy] Published event 1300000: stream=stream-0, seq=54835, ts=1747834218326
+[Zero Copy] Subscriber 4 received event 1300001: stream=stream-0, seq=54835, ts=1747834218326, marker=false
+[Zero Copy] Subscriber 2 received event 1300001: stream=stream-0, seq=54835, ts=1747834218326, marker=false
+[Zero Copy] Subscriber 0 received event 1300001: stream=stream-0, seq=54835, ts=1747834218326, marker=false
+[Zero Copy] Subscriber 1 received event 1300001: stream=stream-0, seq=54835, ts=1747834218326, marker=false
+[Zero Copy] Subscriber 3 received event 1300001: stream=stream-0, seq=54835, ts=1747834218326, marker=false
+[Zero Copy] Published event 1400000: stream=stream-0, seq=23765, ts=1747834218542
+[Zero Copy] Subscriber 1 received event 1400001: stream=stream-0, seq=23765, ts=1747834218542, marker=false
+[Zero Copy] Subscriber 0 received event 1400001: stream=stream-0, seq=23765, ts=1747834218542, marker=false
+[Zero Copy] Subscriber 3 received event 1400001: stream=stream-0, seq=23765, ts=1747834218542, marker=false
+[Zero Copy] Subscriber 4 received event 1400001: stream=stream-0, seq=23765, ts=1747834218542, marker=false
+[Zero Copy] Subscriber 2 received event 1400001: stream=stream-0, seq=23765, ts=1747834218542, marker=false
+[Zero Copy] Published event 1500000: stream=stream-0, seq=58230, ts=1747834218761
+[Zero Copy] Subscriber 0 received event 1500001: stream=stream-0, seq=58230, ts=1747834218761, marker=true
+[Zero Copy] Subscriber 1 received event 1500001: stream=stream-0, seq=58230, ts=1747834218761, marker=true
+[Zero Copy] Subscriber 2 received event 1500001: stream=stream-0, seq=58230, ts=1747834218761, marker=true
+[Zero Copy] Subscriber 3 received event 1500001: stream=stream-0, seq=58230, ts=1747834218761, marker=true
+[Zero Copy] Subscriber 4 received event 1500001: stream=stream-0, seq=58230, ts=1747834218761, marker=true
+[Zero Copy] Published event 1600000: stream=stream-0, seq=27160, ts=1747834218978
+[Zero Copy] Subscriber 4 received event 1600001: stream=stream-0, seq=27160, ts=1747834218978, marker=false
+[Zero Copy] Subscriber 3 received event 1600001: stream=stream-0, seq=27160, ts=1747834218978, marker=false
+[Zero Copy] Subscriber 1 received event 1600001: stream=stream-0, seq=27160, ts=1747834218978, marker=false
+[Zero Copy] Subscriber 0 received event 1600001: stream=stream-0, seq=27160, ts=1747834218978, marker=false
+[Zero Copy] Subscriber 2 received event 1600001: stream=stream-0, seq=27160, ts=1747834218978, marker=false
+[Zero Copy] Published event 1700000: stream=stream-0, seq=61625, ts=1747834219206
+[Zero Copy] Subscriber 1 received event 1700001: stream=stream-0, seq=61625, ts=1747834219206, marker=false
+[Zero Copy] Subscriber 0 received event 1700001: stream=stream-0, seq=61625, ts=1747834219206, marker=false
+[Zero Copy] Subscriber 2 received event 1700001: stream=stream-0, seq=61625, ts=1747834219206, marker=false
+[Zero Copy] Subscriber 3 received event 1700001: stream=stream-0, seq=61625, ts=1747834219206, marker=false
+[Zero Copy] Subscriber 4 received event 1700001: stream=stream-0, seq=61625, ts=1747834219206, marker=false
+[Zero Copy] Published event 1800000: stream=stream-0, seq=30555, ts=1747834219425
+[Zero Copy] Subscriber 3 received event 1800001: stream=stream-0, seq=30555, ts=1747834219425, marker=true
+[Zero Copy] Subscriber 2 received event 1800001: stream=stream-0, seq=30555, ts=1747834219425, marker=true
+[Zero Copy] Subscriber 0 received event 1800001: stream=stream-0, seq=30555, ts=1747834219425, marker=true
+[Zero Copy] Subscriber 1 received event 1800001: stream=stream-0, seq=30555, ts=1747834219425, marker=true
+[Zero Copy] Subscriber 4 received event 1800001: stream=stream-0, seq=30555, ts=1747834219425, marker=true
+[Zero Copy] Published event 1900000: stream=stream-0, seq=65020, ts=1747834219652
+[Zero Copy] Subscriber 1 received event 1900001: stream=stream-0, seq=65020, ts=1747834219652, marker=false
+[Zero Copy] Subscriber 2 received event 1900001: stream=stream-0, seq=65020, ts=1747834219652, marker=false
+[Zero Copy] Subscriber 3 received event 1900001: stream=stream-0, seq=65020, ts=1747834219652, marker=false
+[Zero Copy] Subscriber 4 received event 1900001: stream=stream-0, seq=65020, ts=1747834219652, marker=false
+[Zero Copy] Subscriber 0 received event 1900001: stream=stream-0, seq=65020, ts=1747834219652, marker=false
+[Zero Copy] Published event 2000000: stream=stream-0, seq=33950, ts=1747834219872
+[Zero Copy] Subscriber 1 received event 2000001: stream=stream-0, seq=33950, ts=1747834219872, marker=false
+[Zero Copy] Subscriber 3 received event 2000001: stream=stream-0, seq=33950, ts=1747834219872, marker=false
+[Zero Copy] Subscriber 4 received event 2000001: stream=stream-0, seq=33950, ts=1747834219872, marker=false
+[Zero Copy] Subscriber 0 received event 2000001: stream=stream-0, seq=33950, ts=1747834219872, marker=false
+[Zero Copy] Subscriber 2 received event 2000001: stream=stream-0, seq=33950, ts=1747834219872, marker=false
+[Zero Copy] Published event 2100000: stream=stream-0, seq=2880, ts=1747834220098
+[Zero Copy] Subscriber 2 received event 2100001: stream=stream-0, seq=2880, ts=1747834220098, marker=true
+[Zero Copy] Subscriber 0 received event 2100001: stream=stream-0, seq=2880, ts=1747834220098, marker=true
+[Zero Copy] Subscriber 4 received event 2100001: stream=stream-0, seq=2880, ts=1747834220098, marker=true
+[Zero Copy] Subscriber 1 received event 2100001: stream=stream-0, seq=2880, ts=1747834220098, marker=true
+[Zero Copy] Subscriber 3 received event 2100001: stream=stream-0, seq=2880, ts=1747834220098, marker=true
+[Zero Copy] Published event 2200000: stream=stream-0, seq=37345, ts=1747834220330
+[Zero Copy] Subscriber 1 received event 2200001: stream=stream-0, seq=37345, ts=1747834220330, marker=false
+[Zero Copy] Subscriber 2 received event 2200001: stream=stream-0, seq=37345, ts=1747834220330, marker=false
+[Zero Copy] Subscriber 3 received event 2200001: stream=stream-0, seq=37345, ts=1747834220330, marker=false
+[Zero Copy] Subscriber 4 received event 2200001: stream=stream-0, seq=37345, ts=1747834220330, marker=false
+[Zero Copy] Subscriber 0 received event 2200001: stream=stream-0, seq=37345, ts=1747834220330, marker=false
+[Zero Copy] Published event 2300000: stream=stream-0, seq=6275, ts=1747834220552
+[Zero Copy] Subscriber 3 received event 2300001: stream=stream-0, seq=6275, ts=1747834220552, marker=false
+[Zero Copy] Subscriber 2 received event 2300001: stream=stream-0, seq=6275, ts=1747834220552, marker=false
+[Zero Copy] Subscriber 1 received event 2300001: stream=stream-0, seq=6275, ts=1747834220552, marker=false
+[Zero Copy] Subscriber 4 received event 2300001: stream=stream-0, seq=6275, ts=1747834220552, marker=false
+[Zero Copy] Subscriber 0 received event 2300001: stream=stream-0, seq=6275, ts=1747834220552, marker=false
+[Zero Copy] Published event 2400000: stream=stream-0, seq=40740, ts=1747834220772
+[Zero Copy] Subscriber 4 received event 2400001: stream=stream-0, seq=40740, ts=1747834220772, marker=true
+[Zero Copy] Subscriber 3 received event 2400001: stream=stream-0, seq=40740, ts=1747834220772, marker=true
+[Zero Copy] Subscriber 2 received event 2400001: stream=stream-0, seq=40740, ts=1747834220772, marker=true
+[Zero Copy] Subscriber 1 received event 2400001: stream=stream-0, seq=40740, ts=1747834220772, marker=true
+[Zero Copy] Subscriber 0 received event 2400001: stream=stream-0, seq=40740, ts=1747834220772, marker=true
+[Zero Copy] Published event 2500000: stream=stream-0, seq=9670, ts=1747834220991
+[Zero Copy] Subscriber 3 received event 2500001: stream=stream-0, seq=9670, ts=1747834220991, marker=false
+[Zero Copy] Subscriber 2 received event 2500001: stream=stream-0, seq=9670, ts=1747834220991, marker=false
+[Zero Copy] Subscriber 0 received event 2500001: stream=stream-0, seq=9670, ts=1747834220991, marker=false
+[Zero Copy] Subscriber 1 received event 2500001: stream=stream-0, seq=9670, ts=1747834220991, marker=false
+[Zero Copy] Subscriber 4 received event 2500001: stream=stream-0, seq=9670, ts=1747834220991, marker=false
+[Zero Copy] Published event 2600000: stream=stream-0, seq=44135, ts=1747834221213
+[Zero Copy] Subscriber 2 received event 2600001: stream=stream-0, seq=44135, ts=1747834221213, marker=false
+[Zero Copy] Subscriber 3 received event 2600001: stream=stream-0, seq=44135, ts=1747834221213, marker=false
+[Zero Copy] Subscriber 0 received event 2600001: stream=stream-0, seq=44135, ts=1747834221213, marker=false
+[Zero Copy] Subscriber 1 received event 2600001: stream=stream-0, seq=44135, ts=1747834221213, marker=false
+[Zero Copy] Subscriber 4 received event 2600001: stream=stream-0, seq=44135, ts=1747834221213, marker=false
+[Zero Copy] Published event 2700000: stream=stream-0, seq=13065, ts=1747834221430
+[Zero Copy] Subscriber 1 received event 2700001: stream=stream-0, seq=13065, ts=1747834221430, marker=true
+[Zero Copy] Subscriber 2 received event 2700001: stream=stream-0, seq=13065, ts=1747834221430, marker=true
+[Zero Copy] Subscriber 0 received event 2700001: stream=stream-0, seq=13065, ts=1747834221430, marker=true
+[Zero Copy] Subscriber 3 received event 2700001: stream=stream-0, seq=13065, ts=1747834221430, marker=true
+[Zero Copy] Subscriber 4 received event 2700001: stream=stream-0, seq=13065, ts=1747834221430, marker=true
+[Zero Copy] Published event 2800000: stream=stream-0, seq=47530, ts=1747834221648
+[Zero Copy] Subscriber 3 received event 2800001: stream=stream-0, seq=47530, ts=1747834221648, marker=false
+[Zero Copy] Subscriber 1 received event 2800001: stream=stream-0, seq=47530, ts=1747834221648, marker=false
+[Zero Copy] Subscriber 4 received event 2800001: stream=stream-0, seq=47530, ts=1747834221648, marker=false
+[Zero Copy] Subscriber 0 received event 2800001: stream=stream-0, seq=47530, ts=1747834221648, marker=false
+[Zero Copy] Subscriber 2 received event 2800001: stream=stream-0, seq=47530, ts=1747834221648, marker=false
+[Zero Copy] Published event 2900000: stream=stream-0, seq=16460, ts=1747834221865
+[Zero Copy] Subscriber 0 received event 2900001: stream=stream-0, seq=16460, ts=1747834221865, marker=false
+[Zero Copy] Subscriber 2 received event 2900001: stream=stream-0, seq=16460, ts=1747834221865, marker=false
+[Zero Copy] Subscriber 4 received event 2900001: stream=stream-0, seq=16460, ts=1747834221865, marker=false
+[Zero Copy] Subscriber 3 received event 2900001: stream=stream-0, seq=16460, ts=1747834221865, marker=false
+[Zero Copy] Subscriber 1 received event 2900001: stream=stream-0, seq=16460, ts=1747834221865, marker=false
+[Zero Copy] Published event 3000000: stream=stream-0, seq=50925, ts=1747834222087
+[Zero Copy] Subscriber 2 received event 3000001: stream=stream-0, seq=50925, ts=1747834222087, marker=true
+[Zero Copy] Subscriber 0 received event 3000001: stream=stream-0, seq=50925, ts=1747834222087, marker=true
+[Zero Copy] Subscriber 3 received event 3000001: stream=stream-0, seq=50925, ts=1747834222087, marker=true
+[Zero Copy] Subscriber 4 received event 3000001: stream=stream-0, seq=50925, ts=1747834222087, marker=true
+[Zero Copy] Subscriber 1 received event 3000001: stream=stream-0, seq=50925, ts=1747834222087, marker=true
+[Zero Copy] Published event 3100000: stream=stream-0, seq=19855, ts=1747834222305
+[Zero Copy] Subscriber 2 received event 3100001: stream=stream-0, seq=19855, ts=1747834222305, marker=false
+[Zero Copy] Subscriber 4 received event 3100001: stream=stream-0, seq=19855, ts=1747834222305, marker=false
+[Zero Copy] Subscriber 3 received event 3100001: stream=stream-0, seq=19855, ts=1747834222305, marker=false
+[Zero Copy] Subscriber 0 received event 3100001: stream=stream-0, seq=19855, ts=1747834222305, marker=false
+[Zero Copy] Subscriber 1 received event 3100001: stream=stream-0, seq=19855, ts=1747834222305, marker=false
+[Zero Copy] Published event 3200000: stream=stream-0, seq=54320, ts=1747834222522
+[Zero Copy] Subscriber 4 received event 3200001: stream=stream-0, seq=54320, ts=1747834222522, marker=false
+[Zero Copy] Subscriber 2 received event 3200001: stream=stream-0, seq=54320, ts=1747834222522, marker=false
+[Zero Copy] Subscriber 1 received event 3200001: stream=stream-0, seq=54320, ts=1747834222522, marker=false
+[Zero Copy] Subscriber 0 received event 3200001: stream=stream-0, seq=54320, ts=1747834222522, marker=false
+[Zero Copy] Subscriber 3 received event 3200001: stream=stream-0, seq=54320, ts=1747834222522, marker=false
+[Zero Copy] Published event 3300000: stream=stream-0, seq=23250, ts=1747834222740
+[Zero Copy] Subscriber 2 received event 3300001: stream=stream-0, seq=23250, ts=1747834222740, marker=true
+[Zero Copy] Subscriber 4 received event 3300001: stream=stream-0, seq=23250, ts=1747834222740, marker=true
+[Zero Copy] Subscriber 1 received event 3300001: stream=stream-0, seq=23250, ts=1747834222740, marker=true
+[Zero Copy] Subscriber 3 received event 3300001: stream=stream-0, seq=23250, ts=1747834222740, marker=true
+[Zero Copy] Subscriber 0 received event 3300001: stream=stream-0, seq=23250, ts=1747834222740, marker=true
+[Zero Copy] Published event 3400000: stream=stream-0, seq=57715, ts=1747834222959
+[Zero Copy] Subscriber 4 received event 3400001: stream=stream-0, seq=57715, ts=1747834222959, marker=false
+[Zero Copy] Subscriber 2 received event 3400001: stream=stream-0, seq=57715, ts=1747834222959, marker=false
+[Zero Copy] Subscriber 3 received event 3400001: stream=stream-0, seq=57715, ts=1747834222959, marker=false
+[Zero Copy] Subscriber 1 received event 3400001: stream=stream-0, seq=57715, ts=1747834222959, marker=false
+[Zero Copy] Subscriber 0 received event 3400001: stream=stream-0, seq=57715, ts=1747834222959, marker=false
+[Zero Copy] Published event 3500000: stream=stream-0, seq=26645, ts=1747834223178
+[Zero Copy] Subscriber 4 received event 3500001: stream=stream-0, seq=26645, ts=1747834223178, marker=false
+[Zero Copy] Subscriber 0 received event 3500001: stream=stream-0, seq=26645, ts=1747834223178, marker=false
+[Zero Copy] Subscriber 1 received event 3500001: stream=stream-0, seq=26645, ts=1747834223178, marker=false
+[Zero Copy] Subscriber 2 received event 3500001: stream=stream-0, seq=26645, ts=1747834223178, marker=false
+[Zero Copy] Subscriber 3 received event 3500001: stream=stream-0, seq=26645, ts=1747834223178, marker=false
+[Zero Copy] Published event 3600000: stream=stream-0, seq=61110, ts=1747834223398
+[Zero Copy] Subscriber 1 received event 3600001: stream=stream-0, seq=61110, ts=1747834223398, marker=true
+[Zero Copy] Subscriber 3 received event 3600001: stream=stream-0, seq=61110, ts=1747834223398, marker=true
+[Zero Copy] Subscriber 2 received event 3600001: stream=stream-0, seq=61110, ts=1747834223398, marker=true
+[Zero Copy] Subscriber 0 received event 3600001: stream=stream-0, seq=61110, ts=1747834223398, marker=true
+[Zero Copy] Subscriber 4 received event 3600001: stream=stream-0, seq=61110, ts=1747834223398, marker=true
+[Zero Copy] Published event 3700000: stream=stream-0, seq=30040, ts=1747834223620
+[Zero Copy] Subscriber 2 received event 3700001: stream=stream-0, seq=30040, ts=1747834223620, marker=false
+[Zero Copy] Subscriber 3 received event 3700001: stream=stream-0, seq=30040, ts=1747834223620, marker=false
+[Zero Copy] Subscriber 4 received event 3700001: stream=stream-0, seq=30040, ts=1747834223620, marker=false
+[Zero Copy] Subscriber 0 received event 3700001: stream=stream-0, seq=30040, ts=1747834223620, marker=false
+[Zero Copy] Subscriber 1 received event 3700001: stream=stream-0, seq=30040, ts=1747834223620, marker=false
+[Zero Copy] Published event 3800000: stream=stream-0, seq=64505, ts=1747834223852
+[Zero Copy] Subscriber 3 received event 3800001: stream=stream-0, seq=64505, ts=1747834223852, marker=false
+[Zero Copy] Subscriber 0 received event 3800001: stream=stream-0, seq=64505, ts=1747834223852, marker=false
+[Zero Copy] Subscriber 4 received event 3800001: stream=stream-0, seq=64505, ts=1747834223852, marker=false
+[Zero Copy] Subscriber 2 received event 3800001: stream=stream-0, seq=64505, ts=1747834223852, marker=false
+[Zero Copy] Subscriber 1 received event 3800001: stream=stream-0, seq=64505, ts=1747834223852, marker=false
+[Zero Copy] Published event 3900000: stream=stream-0, seq=33435, ts=1747834224085
+[Zero Copy] Subscriber 1 received event 3900001: stream=stream-0, seq=33435, ts=1747834224085, marker=true
+[Zero Copy] Subscriber 2 received event 3900001: stream=stream-0, seq=33435, ts=1747834224085, marker=true
+[Zero Copy] Subscriber 3 received event 3900001: stream=stream-0, seq=33435, ts=1747834224085, marker=true
+[Zero Copy] Subscriber 4 received event 3900001: stream=stream-0, seq=33435, ts=1747834224085, marker=true
+[Zero Copy] Subscriber 0 received event 3900001: stream=stream-0, seq=33435, ts=1747834224085, marker=true
+[Zero Copy] Published event 4000000: stream=stream-0, seq=2365, ts=1747834224303
+[Zero Copy] Subscriber 0 received event 4000001: stream=stream-0, seq=2365, ts=1747834224303, marker=false
+[Zero Copy] Subscriber 1 received event 4000001: stream=stream-0, seq=2365, ts=1747834224303, marker=false
+[Zero Copy] Subscriber 3 received event 4000001: stream=stream-0, seq=2365, ts=1747834224303, marker=false
+[Zero Copy] Subscriber 2 received event 4000001: stream=stream-0, seq=2365, ts=1747834224303, marker=false
+[Zero Copy] Subscriber 4 received event 4000001: stream=stream-0, seq=2365, ts=1747834224303, marker=false
+[Zero Copy] Published event 4100000: stream=stream-0, seq=36830, ts=1747834224521
+[Zero Copy] Subscriber 2 received event 4100001: stream=stream-0, seq=36830, ts=1747834224521, marker=false
+[Zero Copy] Subscriber 0 received event 4100001: stream=stream-0, seq=36830, ts=1747834224521, marker=false
+[Zero Copy] Subscriber 4 received event 4100001: stream=stream-0, seq=36830, ts=1747834224521, marker=false
+[Zero Copy] Subscriber 3 received event 4100001: stream=stream-0, seq=36830, ts=1747834224521, marker=false
+[Zero Copy] Subscriber 1 received event 4100001: stream=stream-0, seq=36830, ts=1747834224521, marker=false
+[Zero Copy] Published event 4200000: stream=stream-0, seq=5760, ts=1747834224740
+[Zero Copy] Subscriber 1 received event 4200001: stream=stream-0, seq=5760, ts=1747834224740, marker=true
+[Zero Copy] Subscriber 3 received event 4200001: stream=stream-0, seq=5760, ts=1747834224740, marker=true
+[Zero Copy] Subscriber 2 received event 4200001: stream=stream-0, seq=5760, ts=1747834224740, marker=true
+[Zero Copy] Subscriber 0 received event 4200001: stream=stream-0, seq=5760, ts=1747834224740, marker=true
+[Zero Copy] Subscriber 4 received event 4200001: stream=stream-0, seq=5760, ts=1747834224740, marker=true
+[Zero Copy] Published event 4300000: stream=stream-0, seq=40225, ts=1747834224961
+[Zero Copy] Subscriber 4 received event 4300001: stream=stream-0, seq=40225, ts=1747834224961, marker=false
+[Zero Copy] Subscriber 1 received event 4300001: stream=stream-0, seq=40225, ts=1747834224961, marker=false
+[Zero Copy] Subscriber 2 received event 4300001: stream=stream-0, seq=40225, ts=1747834224961, marker=false
+[Zero Copy] Subscriber 3 received event 4300001: stream=stream-0, seq=40225, ts=1747834224961, marker=false
+[Zero Copy] Subscriber 0 received event 4300001: stream=stream-0, seq=40225, ts=1747834224961, marker=false
+[Zero Copy] Published event 4400000: stream=stream-0, seq=9155, ts=1747834225180
+[Zero Copy] Subscriber 3 received event 4400001: stream=stream-0, seq=9155, ts=1747834225180, marker=false
+[Zero Copy] Subscriber 2 received event 4400001: stream=stream-0, seq=9155, ts=1747834225180, marker=false
+[Zero Copy] Subscriber 1 received event 4400001: stream=stream-0, seq=9155, ts=1747834225180, marker=false
+[Zero Copy] Subscriber 4 received event 4400001: stream=stream-0, seq=9155, ts=1747834225180, marker=false
+[Zero Copy] Subscriber 0 received event 4400001: stream=stream-0, seq=9155, ts=1747834225180, marker=false
+[Zero Copy] Published event 4500000: stream=stream-0, seq=43620, ts=1747834225399
+[Zero Copy] Subscriber 3 received event 4500001: stream=stream-0, seq=43620, ts=1747834225399, marker=true
+[Zero Copy] Subscriber 4 received event 4500001: stream=stream-0, seq=43620, ts=1747834225399, marker=true
+[Zero Copy] Subscriber 0 received event 4500001: stream=stream-0, seq=43620, ts=1747834225399, marker=true
+[Zero Copy] Subscriber 2 received event 4500001: stream=stream-0, seq=43620, ts=1747834225399, marker=true
+[Zero Copy] Subscriber 1 received event 4500001: stream=stream-0, seq=43620, ts=1747834225399, marker=true
+[Zero Copy] Published event 4600000: stream=stream-0, seq=12550, ts=1747834225619
+[Zero Copy] Subscriber 3 received event 4600001: stream=stream-0, seq=12550, ts=1747834225619, marker=false
+[Zero Copy] Subscriber 1 received event 4600001: stream=stream-0, seq=12550, ts=1747834225619, marker=false
+[Zero Copy] Subscriber 4 received event 4600001: stream=stream-0, seq=12550, ts=1747834225619, marker=false
+[Zero Copy] Subscriber 2 received event 4600001: stream=stream-0, seq=12550, ts=1747834225619, marker=false
+[Zero Copy] Subscriber 0 received event 4600001: stream=stream-0, seq=12550, ts=1747834225619, marker=false
+[Zero Copy] Published event 4700000: stream=stream-0, seq=47015, ts=1747834225837
+[Zero Copy] Subscriber 3 received event 4700001: stream=stream-0, seq=47015, ts=1747834225837, marker=false
+[Zero Copy] Subscriber 2 received event 4700001: stream=stream-0, seq=47015, ts=1747834225837, marker=false
+[Zero Copy] Subscriber 0 received event 4700001: stream=stream-0, seq=47015, ts=1747834225837, marker=false
+[Zero Copy] Subscriber 4 received event 4700001: stream=stream-0, seq=47015, ts=1747834225837, marker=false
+[Zero Copy] Subscriber 1 received event 4700001: stream=stream-0, seq=47015, ts=1747834225837, marker=false
+[Zero Copy] Published event 4800000: stream=stream-0, seq=15945, ts=1747834226057
+[Zero Copy] Subscriber 0 received event 4800001: stream=stream-0, seq=15945, ts=1747834226057, marker=true
+[Zero Copy] Subscriber 4 received event 4800001: stream=stream-0, seq=15945, ts=1747834226057, marker=true
+[Zero Copy] Subscriber 2 received event 4800001: stream=stream-0, seq=15945, ts=1747834226057, marker=true
+[Zero Copy] Subscriber 3 received event 4800001: stream=stream-0, seq=15945, ts=1747834226057, marker=true
+[Zero Copy] Subscriber 1 received event 4800001: stream=stream-0, seq=15945, ts=1747834226057, marker=true
+[Zero Copy] Published event 4900000: stream=stream-0, seq=50410, ts=1747834226280
+[Zero Copy] Subscriber 3 received event 4900001: stream=stream-0, seq=50410, ts=1747834226280, marker=false
+[Zero Copy] Subscriber 4 received event 4900001: stream=stream-0, seq=50410, ts=1747834226280, marker=false
+[Zero Copy] Subscriber 2 received event 4900001: stream=stream-0, seq=50410, ts=1747834226280, marker=false
+[Zero Copy] Subscriber 1 received event 4900001: stream=stream-0, seq=50410, ts=1747834226280, marker=false
+[Zero Copy] Subscriber 0 received event 4900001: stream=stream-0, seq=50410, ts=1747834226280, marker=false
+[Zero Copy] Published event 5000000: stream=stream-0, seq=19340, ts=1747834226497
+[Zero Copy] Subscriber 1 received event 5000001: stream=stream-0, seq=19340, ts=1747834226497, marker=false
+[Zero Copy] Subscriber 0 received event 5000001: stream=stream-0, seq=19340, ts=1747834226497, marker=false
+[Zero Copy] Subscriber 4 received event 5000001: stream=stream-0, seq=19340, ts=1747834226497, marker=false
+[Zero Copy] Subscriber 3 received event 5000001: stream=stream-0, seq=19340, ts=1747834226497, marker=false
+[Zero Copy] Subscriber 2 received event 5000001: stream=stream-0, seq=19340, ts=1747834226497, marker=false
+[Zero Copy] Published event 5100000: stream=stream-0, seq=53805, ts=1747834226721
+[Zero Copy] Subscriber 2 received event 5100001: stream=stream-0, seq=53805, ts=1747834226721, marker=true
+[Zero Copy] Subscriber 3 received event 5100001: stream=stream-0, seq=53805, ts=1747834226721, marker=true
+[Zero Copy] Subscriber 0 received event 5100001: stream=stream-0, seq=53805, ts=1747834226721, marker=true
+[Zero Copy] Subscriber 4 received event 5100001: stream=stream-0, seq=53805, ts=1747834226721, marker=true
+[Zero Copy] Subscriber 1 received event 5100001: stream=stream-0, seq=53805, ts=1747834226721, marker=true
+[Zero Copy] Published event 5200000: stream=stream-0, seq=22735, ts=1747834226957
+[Zero Copy] Subscriber 2 received event 5200001: stream=stream-0, seq=22735, ts=1747834226957, marker=false
+[Zero Copy] Subscriber 4 received event 5200001: stream=stream-0, seq=22735, ts=1747834226957, marker=false
+[Zero Copy] Subscriber 0 received event 5200001: stream=stream-0, seq=22735, ts=1747834226957, marker=false
+[Zero Copy] Subscriber 3 received event 5200001: stream=stream-0, seq=22735, ts=1747834226957, marker=false
+[Zero Copy] Subscriber 1 received event 5200001: stream=stream-0, seq=22735, ts=1747834226957, marker=false
+[Zero Copy] Published event 5300000: stream=stream-0, seq=57200, ts=1747834227191
+[Zero Copy] Subscriber 4 received event 5300001: stream=stream-0, seq=57200, ts=1747834227191, marker=false
+[Zero Copy] Subscriber 3 received event 5300001: stream=stream-0, seq=57200, ts=1747834227191, marker=false
+[Zero Copy] Subscriber 2 received event 5300001: stream=stream-0, seq=57200, ts=1747834227191, marker=false
+[Zero Copy] Subscriber 0 received event 5300001: stream=stream-0, seq=57200, ts=1747834227191, marker=false
+[Zero Copy] Subscriber 1 received event 5300001: stream=stream-0, seq=57200, ts=1747834227191, marker=false
+[Zero Copy] Published event 5400000: stream=stream-0, seq=26130, ts=1747834227418
+[Zero Copy] Subscriber 2 received event 5400001: stream=stream-0, seq=26130, ts=1747834227418, marker=true
+[Zero Copy] Subscriber 1 received event 5400001: stream=stream-0, seq=26130, ts=1747834227418, marker=true
+[Zero Copy] Subscriber 4 received event 5400001: stream=stream-0, seq=26130, ts=1747834227418, marker=true
+[Zero Copy] Subscriber 3 received event 5400001: stream=stream-0, seq=26130, ts=1747834227418, marker=true
+[Zero Copy] Subscriber 0 received event 5400001: stream=stream-0, seq=26130, ts=1747834227418, marker=true
+[Zero Copy] Published event 5500000: stream=stream-0, seq=60595, ts=1747834227643
+[Zero Copy] Subscriber 0 received event 5500001: stream=stream-0, seq=60595, ts=1747834227643, marker=false
+[Zero Copy] Subscriber 3 received event 5500001: stream=stream-0, seq=60595, ts=1747834227643, marker=false
+[Zero Copy] Subscriber 1 received event 5500001: stream=stream-0, seq=60595, ts=1747834227643, marker=false
+[Zero Copy] Subscriber 2 received event 5500001: stream=stream-0, seq=60595, ts=1747834227643, marker=false
+[Zero Copy] Subscriber 4 received event 5500001: stream=stream-0, seq=60595, ts=1747834227643, marker=false
+[Zero Copy] Published event 5600000: stream=stream-0, seq=29525, ts=1747834227864
+[Zero Copy] Subscriber 3 received event 5600001: stream=stream-0, seq=29525, ts=1747834227864, marker=false
+[Zero Copy] Subscriber 2 received event 5600001: stream=stream-0, seq=29525, ts=1747834227864, marker=false
+[Zero Copy] Subscriber 4 received event 5600001: stream=stream-0, seq=29525, ts=1747834227864, marker=false
+[Zero Copy] Subscriber 0 received event 5600001: stream=stream-0, seq=29525, ts=1747834227864, marker=false
+[Zero Copy] Subscriber 1 received event 5600001: stream=stream-0, seq=29525, ts=1747834227864, marker=false
+[Zero Copy] Published event 5700000: stream=stream-0, seq=63990, ts=1747834228084
+[Zero Copy] Subscriber 0 received event 5700001: stream=stream-0, seq=63990, ts=1747834228084, marker=true
+[Zero Copy] Subscriber 3 received event 5700001: stream=stream-0, seq=63990, ts=1747834228084, marker=true
+[Zero Copy] Subscriber 4 received event 5700001: stream=stream-0, seq=63990, ts=1747834228084, marker=true
+[Zero Copy] Subscriber 2 received event 5700001: stream=stream-0, seq=63990, ts=1747834228084, marker=true
+[Zero Copy] Subscriber 1 received event 5700001: stream=stream-0, seq=63990, ts=1747834228084, marker=true
+[Zero Copy] Published event 5800000: stream=stream-0, seq=32920, ts=1747834228302
+[Zero Copy] Subscriber 4 received event 5800001: stream=stream-0, seq=32920, ts=1747834228302, marker=false
+[Zero Copy] Subscriber 3 received event 5800001: stream=stream-0, seq=32920, ts=1747834228302, marker=false
+[Zero Copy] Subscriber 2 received event 5800001: stream=stream-0, seq=32920, ts=1747834228302, marker=false
+[Zero Copy] Subscriber 1 received event 5800001: stream=stream-0, seq=32920, ts=1747834228302, marker=false
+[Zero Copy] Subscriber 0 received event 5800001: stream=stream-0, seq=32920, ts=1747834228302, marker=false
+[Zero Copy] Published event 5900000: stream=stream-0, seq=1850, ts=1747834228520
+[Zero Copy] Subscriber 3 received event 5900001: stream=stream-0, seq=1850, ts=1747834228520, marker=false
+[Zero Copy] Subscriber 4 received event 5900001: stream=stream-0, seq=1850, ts=1747834228520, marker=false
+[Zero Copy] Subscriber 1 received event 5900001: stream=stream-0, seq=1850, ts=1747834228520, marker=false
+[Zero Copy] Subscriber 0 received event 5900001: stream=stream-0, seq=1850, ts=1747834228520, marker=false
+[Zero Copy] Subscriber 2 received event 5900001: stream=stream-0, seq=1850, ts=1747834228520, marker=false
+[Zero Copy] Published event 6000000: stream=stream-0, seq=36315, ts=1747834228737
+[Zero Copy] Subscriber 1 received event 6000001: stream=stream-0, seq=36315, ts=1747834228737, marker=true
+[Zero Copy] Subscriber 0 received event 6000001: stream=stream-0, seq=36315, ts=1747834228737, marker=true
+[Zero Copy] Subscriber 2 received event 6000001: stream=stream-0, seq=36315, ts=1747834228737, marker=true
+[Zero Copy] Subscriber 4 received event 6000001: stream=stream-0, seq=36315, ts=1747834228737, marker=true
+[Zero Copy] Subscriber 3 received event 6000001: stream=stream-0, seq=36315, ts=1747834228737, marker=true
+[Zero Copy] Published event 6100000: stream=stream-0, seq=5245, ts=1747834228957
+[Zero Copy] Subscriber 0 received event 6100001: stream=stream-0, seq=5245, ts=1747834228957, marker=false
+[Zero Copy] Subscriber 3 received event 6100001: stream=stream-0, seq=5245, ts=1747834228957, marker=false
+[Zero Copy] Subscriber 2 received event 6100001: stream=stream-0, seq=5245, ts=1747834228957, marker=false
+[Zero Copy] Subscriber 1 received event 6100001: stream=stream-0, seq=5245, ts=1747834228957, marker=false
+[Zero Copy] Subscriber 4 received event 6100001: stream=stream-0, seq=5245, ts=1747834228957, marker=false
+[Zero Copy] Published event 6200000: stream=stream-0, seq=39710, ts=1747834229182
+[Zero Copy] Subscriber 3 received event 6200001: stream=stream-0, seq=39710, ts=1747834229182, marker=false
+[Zero Copy] Subscriber 1 received event 6200001: stream=stream-0, seq=39710, ts=1747834229182, marker=false
+[Zero Copy] Subscriber 0 received event 6200001: stream=stream-0, seq=39710, ts=1747834229182, marker=false
+[Zero Copy] Subscriber 4 received event 6200001: stream=stream-0, seq=39710, ts=1747834229182, marker=false
+[Zero Copy] Subscriber 2 received event 6200001: stream=stream-0, seq=39710, ts=1747834229182, marker=false
+[Zero Copy] Published event 6300000: stream=stream-0, seq=8640, ts=1747834229404
+[Zero Copy] Subscriber 4 received event 6300001: stream=stream-0, seq=8640, ts=1747834229404, marker=true
+[Zero Copy] Subscriber 3 received event 6300001: stream=stream-0, seq=8640, ts=1747834229404, marker=true
+[Zero Copy] Subscriber 1 received event 6300001: stream=stream-0, seq=8640, ts=1747834229404, marker=true
+[Zero Copy] Subscriber 0 received event 6300001: stream=stream-0, seq=8640, ts=1747834229404, marker=true
+[Zero Copy] Subscriber 2 received event 6300001: stream=stream-0, seq=8640, ts=1747834229404, marker=true
+[Zero Copy] Published event 6400000: stream=stream-0, seq=43105, ts=1747834229625
+[Zero Copy] Subscriber 4 received event 6400001: stream=stream-0, seq=43105, ts=1747834229625, marker=false
+[Zero Copy] Subscriber 0 received event 6400001: stream=stream-0, seq=43105, ts=1747834229625, marker=false
+[Zero Copy] Subscriber 2 received event 6400001: stream=stream-0, seq=43105, ts=1747834229625, marker=false
+[Zero Copy] Subscriber 1 received event 6400001: stream=stream-0, seq=43105, ts=1747834229625, marker=false
+[Zero Copy] Subscriber 3 received event 6400001: stream=stream-0, seq=43105, ts=1747834229625, marker=false
+[Zero Copy] Published event 6500000: stream=stream-0, seq=12035, ts=1747834229844
+[Zero Copy] Subscriber 4 received event 6500001: stream=stream-0, seq=12035, ts=1747834229844, marker=false
+[Zero Copy] Subscriber 0 received event 6500001: stream=stream-0, seq=12035, ts=1747834229844, marker=false
+[Zero Copy] Subscriber 2 received event 6500001: stream=stream-0, seq=12035, ts=1747834229844, marker=false
+[Zero Copy] Subscriber 3 received event 6500001: stream=stream-0, seq=12035, ts=1747834229844, marker=false
+[Zero Copy] Subscriber 1 received event 6500001: stream=stream-0, seq=12035, ts=1747834229844, marker=false
+[Zero Copy] Published event 6600000: stream=stream-0, seq=46500, ts=1747834230066
+[Zero Copy] Subscriber 1 received event 6600001: stream=stream-0, seq=46500, ts=1747834230066, marker=true
+[Zero Copy] Subscriber 3 received event 6600001: stream=stream-0, seq=46500, ts=1747834230066, marker=true
+[Zero Copy] Subscriber 2 received event 6600001: stream=stream-0, seq=46500, ts=1747834230066, marker=true
+[Zero Copy] Subscriber 4 received event 6600001: stream=stream-0, seq=46500, ts=1747834230066, marker=true
+[Zero Copy] Subscriber 0 received event 6600001: stream=stream-0, seq=46500, ts=1747834230066, marker=true
+[Zero Copy] Published event 6700000: stream=stream-0, seq=15430, ts=1747834230290
+[Zero Copy] Subscriber 3 received event 6700001: stream=stream-0, seq=15430, ts=1747834230290, marker=false
+[Zero Copy] Subscriber 2 received event 6700001: stream=stream-0, seq=15430, ts=1747834230290, marker=false
+[Zero Copy] Subscriber 1 received event 6700001: stream=stream-0, seq=15430, ts=1747834230290, marker=false
+[Zero Copy] Subscriber 0 received event 6700001: stream=stream-0, seq=15430, ts=1747834230290, marker=false
+[Zero Copy] Subscriber 4 received event 6700001: stream=stream-0, seq=15430, ts=1747834230290, marker=false
+[Zero Copy] Published event 6800000: stream=stream-0, seq=49895, ts=1747834230508
+[Zero Copy] Subscriber 4 received event 6800001: stream=stream-0, seq=49895, ts=1747834230508, marker=false
+[Zero Copy] Subscriber 3 received event 6800001: stream=stream-0, seq=49895, ts=1747834230508, marker=false
+[Zero Copy] Subscriber 2 received event 6800001: stream=stream-0, seq=49895, ts=1747834230508, marker=false
+[Zero Copy] Subscriber 0 received event 6800001: stream=stream-0, seq=49895, ts=1747834230508, marker=false
+[Zero Copy] Subscriber 1 received event 6800001: stream=stream-0, seq=49895, ts=1747834230508, marker=false
+[Zero Copy] Published event 6900000: stream=stream-0, seq=18825, ts=1747834230728
+[Zero Copy] Subscriber 3 received event 6900001: stream=stream-0, seq=18825, ts=1747834230728, marker=true
+[Zero Copy] Subscriber 4 received event 6900001: stream=stream-0, seq=18825, ts=1747834230728, marker=true
+[Zero Copy] Subscriber 2 received event 6900001: stream=stream-0, seq=18825, ts=1747834230728, marker=true
+[Zero Copy] Subscriber 0 received event 6900001: stream=stream-0, seq=18825, ts=1747834230728, marker=true
+[Zero Copy] Subscriber 1 received event 6900001: stream=stream-0, seq=18825, ts=1747834230728, marker=true
+[Zero Copy] Published event 7000000: stream=stream-0, seq=53290, ts=1747834230948
+[Zero Copy] Subscriber 2 received event 7000001: stream=stream-0, seq=53290, ts=1747834230948, marker=false
+[Zero Copy] Subscriber 3 received event 7000001: stream=stream-0, seq=53290, ts=1747834230948, marker=false
+[Zero Copy] Subscriber 1 received event 7000001: stream=stream-0, seq=53290, ts=1747834230948, marker=false
+[Zero Copy] Subscriber 0 received event 7000001: stream=stream-0, seq=53290, ts=1747834230948, marker=false
+[Zero Copy] Subscriber 4 received event 7000001: stream=stream-0, seq=53290, ts=1747834230948, marker=false
+[Zero Copy] Published event 7100000: stream=stream-0, seq=22220, ts=1747834231171
+[Zero Copy] Subscriber 1 received event 7100001: stream=stream-0, seq=22220, ts=1747834231171, marker=false
+[Zero Copy] Subscriber 4 received event 7100001: stream=stream-0, seq=22220, ts=1747834231171, marker=false
+[Zero Copy] Subscriber 3 received event 7100001: stream=stream-0, seq=22220, ts=1747834231171, marker=false
+[Zero Copy] Subscriber 2 received event 7100001: stream=stream-0, seq=22220, ts=1747834231171, marker=false
+[Zero Copy] Subscriber 0 received event 7100001: stream=stream-0, seq=22220, ts=1747834231171, marker=false
+[Zero Copy] Published event 7200000: stream=stream-0, seq=56685, ts=1747834231391
+[Zero Copy] Subscriber 3 received event 7200001: stream=stream-0, seq=56685, ts=1747834231391, marker=true
+[Zero Copy] Subscriber 0 received event 7200001: stream=stream-0, seq=56685, ts=1747834231391, marker=true
+[Zero Copy] Subscriber 1 received event 7200001: stream=stream-0, seq=56685, ts=1747834231391, marker=true
+[Zero Copy] Subscriber 4 received event 7200001: stream=stream-0, seq=56685, ts=1747834231391, marker=true
+[Zero Copy] Subscriber 2 received event 7200001: stream=stream-0, seq=56685, ts=1747834231391, marker=true
+[Zero Copy] Published event 7300000: stream=stream-0, seq=25615, ts=1747834231616
+[Zero Copy] Subscriber 3 received event 7300001: stream=stream-0, seq=25615, ts=1747834231616, marker=false
+[Zero Copy] Subscriber 4 received event 7300001: stream=stream-0, seq=25615, ts=1747834231616, marker=false
+[Zero Copy] Subscriber 2 received event 7300001: stream=stream-0, seq=25615, ts=1747834231616, marker=false
+[Zero Copy] Subscriber 0 received event 7300001: stream=stream-0, seq=25615, ts=1747834231616, marker=false
+[Zero Copy] Subscriber 1 received event 7300001: stream=stream-0, seq=25615, ts=1747834231616, marker=false
+[Zero Copy] Published event 7400000: stream=stream-0, seq=60080, ts=1747834231837
+[Zero Copy] Subscriber 0 received event 7400001: stream=stream-0, seq=60080, ts=1747834231837, marker=false
+[Zero Copy] Subscriber 1 received event 7400001: stream=stream-0, seq=60080, ts=1747834231837, marker=false
+[Zero Copy] Subscriber 3 received event 7400001: stream=stream-0, seq=60080, ts=1747834231837, marker=false
+[Zero Copy] Subscriber 4 received event 7400001: stream=stream-0, seq=60080, ts=1747834231837, marker=false
+[Zero Copy] Subscriber 2 received event 7400001: stream=stream-0, seq=60080, ts=1747834231837, marker=false
+[Zero Copy] Published event 7500000: stream=stream-0, seq=29010, ts=1747834232065
+[Zero Copy] Subscriber 1 received event 7500001: stream=stream-0, seq=29010, ts=1747834232065, marker=true
+[Zero Copy] Subscriber 2 received event 7500001: stream=stream-0, seq=29010, ts=1747834232065, marker=true
+[Zero Copy] Subscriber 0 received event 7500001: stream=stream-0, seq=29010, ts=1747834232065, marker=true
+[Zero Copy] Subscriber 4 received event 7500001: stream=stream-0, seq=29010, ts=1747834232065, marker=true
+[Zero Copy] Subscriber 3 received event 7500001: stream=stream-0, seq=29010, ts=1747834232065, marker=true
+[Zero Copy] Published event 7600000: stream=stream-0, seq=63475, ts=1747834232292
+[Zero Copy] Subscriber 4 received event 7600001: stream=stream-0, seq=63475, ts=1747834232292, marker=false
+[Zero Copy] Subscriber 2 received event 7600001: stream=stream-0, seq=63475, ts=1747834232292, marker=false
+[Zero Copy] Subscriber 0 received event 7600001: stream=stream-0, seq=63475, ts=1747834232292, marker=false
+[Zero Copy] Subscriber 1 received event 7600001: stream=stream-0, seq=63475, ts=1747834232292, marker=false
+[Zero Copy] Subscriber 3 received event 7600001: stream=stream-0, seq=63475, ts=1747834232292, marker=false
+[Zero Copy] Published event 7700000: stream=stream-0, seq=32405, ts=1747834232518
+[Zero Copy] Subscriber 1 received event 7700001: stream=stream-0, seq=32405, ts=1747834232518, marker=false
+[Zero Copy] Subscriber 2 received event 7700001: stream=stream-0, seq=32405, ts=1747834232518, marker=false
+[Zero Copy] Subscriber 0 received event 7700001: stream=stream-0, seq=32405, ts=1747834232518, marker=false
+[Zero Copy] Subscriber 3 received event 7700001: stream=stream-0, seq=32405, ts=1747834232518, marker=false
+[Zero Copy] Subscriber 4 received event 7700001: stream=stream-0, seq=32405, ts=1747834232518, marker=false
+[Zero Copy] Published event 7800000: stream=stream-0, seq=1335, ts=1747834232737
+[Zero Copy] Subscriber 4 received event 7800001: stream=stream-0, seq=1335, ts=1747834232737, marker=true
+[Zero Copy] Subscriber 1 received event 7800001: stream=stream-0, seq=1335, ts=1747834232737, marker=true
+[Zero Copy] Subscriber 3 received event 7800001: stream=stream-0, seq=1335, ts=1747834232737, marker=true
+[Zero Copy] Subscriber 0 received event 7800001: stream=stream-0, seq=1335, ts=1747834232737, marker=true
+[Zero Copy] Subscriber 2 received event 7800001: stream=stream-0, seq=1335, ts=1747834232737, marker=true
+[Zero Copy] Published event 7900000: stream=stream-0, seq=35800, ts=1747834232967
+[Zero Copy] Subscriber 3 received event 7900001: stream=stream-0, seq=35800, ts=1747834232967, marker=false
+[Zero Copy] Subscriber 0 received event 7900001: stream=stream-0, seq=35800, ts=1747834232967, marker=false
+[Zero Copy] Subscriber 4 received event 7900001: stream=stream-0, seq=35800, ts=1747834232967, marker=false
+[Zero Copy] Subscriber 2 received event 7900001: stream=stream-0, seq=35800, ts=1747834232967, marker=false
+[Zero Copy] Subscriber 1 received event 7900001: stream=stream-0, seq=35800, ts=1747834232967, marker=false
+[Zero Copy] Published event 8000000: stream=stream-0, seq=4730, ts=1747834233201
+[Zero Copy] Subscriber 3 received event 8000001: stream=stream-0, seq=4730, ts=1747834233201, marker=false
+[Zero Copy] Subscriber 0 received event 8000001: stream=stream-0, seq=4730, ts=1747834233201, marker=false
+[Zero Copy] Subscriber 1 received event 8000001: stream=stream-0, seq=4730, ts=1747834233201, marker=false
+[Zero Copy] Subscriber 4 received event 8000001: stream=stream-0, seq=4730, ts=1747834233201, marker=false
+[Zero Copy] Subscriber 2 received event 8000001: stream=stream-0, seq=4730, ts=1747834233201, marker=false
+[Zero Copy] Published event 8100000: stream=stream-0, seq=39195, ts=1747834233421
+[Zero Copy] Subscriber 3 received event 8100001: stream=stream-0, seq=39195, ts=1747834233421, marker=true
+[Zero Copy] Subscriber 2 received event 8100001: stream=stream-0, seq=39195, ts=1747834233421, marker=true
+[Zero Copy] Subscriber 4 received event 8100001: stream=stream-0, seq=39195, ts=1747834233421, marker=true
+[Zero Copy] Subscriber 0 received event 8100001: stream=stream-0, seq=39195, ts=1747834233421, marker=true
+[Zero Copy] Subscriber 1 received event 8100001: stream=stream-0, seq=39195, ts=1747834233421, marker=true
+[Zero Copy] Published event 8200000: stream=stream-0, seq=8125, ts=1747834233644
+[Zero Copy] Subscriber 1 received event 8200001: stream=stream-0, seq=8125, ts=1747834233644, marker=false
+[Zero Copy] Subscriber 4 received event 8200001: stream=stream-0, seq=8125, ts=1747834233644, marker=false
+[Zero Copy] Subscriber 2 received event 8200001: stream=stream-0, seq=8125, ts=1747834233644, marker=false
+[Zero Copy] Subscriber 0 received event 8200001: stream=stream-0, seq=8125, ts=1747834233644, marker=false
+[Zero Copy] Subscriber 3 received event 8200001: stream=stream-0, seq=8125, ts=1747834233644, marker=false
+[Zero Copy] Published event 8300000: stream=stream-0, seq=42590, ts=1747834233869
+[Zero Copy] Subscriber 3 received event 8300001: stream=stream-0, seq=42590, ts=1747834233869, marker=false
+[Zero Copy] Subscriber 2 received event 8300001: stream=stream-0, seq=42590, ts=1747834233869, marker=false
+[Zero Copy] Subscriber 1 received event 8300001: stream=stream-0, seq=42590, ts=1747834233869, marker=false
+[Zero Copy] Subscriber 4 received event 8300001: stream=stream-0, seq=42590, ts=1747834233869, marker=false
+[Zero Copy] Subscriber 0 received event 8300001: stream=stream-0, seq=42590, ts=1747834233869, marker=false
+[Zero Copy] Published event 8400000: stream=stream-0, seq=11520, ts=1747834234105
+[Zero Copy] Subscriber 3 received event 8400001: stream=stream-0, seq=11520, ts=1747834234105, marker=true
+[Zero Copy] Subscriber 1 received event 8400001: stream=stream-0, seq=11520, ts=1747834234105, marker=true
+[Zero Copy] Subscriber 2 received event 8400001: stream=stream-0, seq=11520, ts=1747834234105, marker=true
+[Zero Copy] Subscriber 4 received event 8400001: stream=stream-0, seq=11520, ts=1747834234105, marker=true
+[Zero Copy] Subscriber 0 received event 8400001: stream=stream-0, seq=11520, ts=1747834234105, marker=true
+[Zero Copy] Published event 8500000: stream=stream-0, seq=45985, ts=1747834234334
+[Zero Copy] Subscriber 3 received event 8500001: stream=stream-0, seq=45985, ts=1747834234334, marker=false
+[Zero Copy] Subscriber 1 received event 8500001: stream=stream-0, seq=45985, ts=1747834234334, marker=false
+[Zero Copy] Subscriber 2 received event 8500001: stream=stream-0, seq=45985, ts=1747834234334, marker=false
+[Zero Copy] Subscriber 4 received event 8500001: stream=stream-0, seq=45985, ts=1747834234334, marker=false
+[Zero Copy] Subscriber 0 received event 8500001: stream=stream-0, seq=45985, ts=1747834234334, marker=false
+[Zero Copy] Published event 8600000: stream=stream-0, seq=14915, ts=1747834234564
+[Zero Copy] Subscriber 2 received event 8600001: stream=stream-0, seq=14915, ts=1747834234564, marker=false
+[Zero Copy] Subscriber 3 received event 8600001: stream=stream-0, seq=14915, ts=1747834234564, marker=false
+[Zero Copy] Subscriber 0 received event 8600001: stream=stream-0, seq=14915, ts=1747834234564, marker=false
+[Zero Copy] Subscriber 1 received event 8600001: stream=stream-0, seq=14915, ts=1747834234564, marker=false
+[Zero Copy] Subscriber 4 received event 8600001: stream=stream-0, seq=14915, ts=1747834234564, marker=false
+[Zero Copy] Published event 8700000: stream=stream-0, seq=49380, ts=1747834234792
+[Zero Copy] Subscriber 2 received event 8700001: stream=stream-0, seq=49380, ts=1747834234792, marker=true
+[Zero Copy] Subscriber 0 received event 8700001: stream=stream-0, seq=49380, ts=1747834234792, marker=true
+[Zero Copy] Subscriber 4 received event 8700001: stream=stream-0, seq=49380, ts=1747834234792, marker=true
+[Zero Copy] Subscriber 1 received event 8700001: stream=stream-0, seq=49380, ts=1747834234792, marker=true
+[Zero Copy] Subscriber 3 received event 8700001: stream=stream-0, seq=49380, ts=1747834234792, marker=true
+[Zero Copy] Published event 8800000: stream=stream-0, seq=18310, ts=1747834235017
+[Zero Copy] Subscriber 4 received event 8800001: stream=stream-0, seq=18310, ts=1747834235017, marker=false
+[Zero Copy] Subscriber 0 received event 8800001: stream=stream-0, seq=18310, ts=1747834235017, marker=false
+[Zero Copy] Subscriber 2 received event 8800001: stream=stream-0, seq=18310, ts=1747834235017, marker=false
+[Zero Copy] Subscriber 3 received event 8800001: stream=stream-0, seq=18310, ts=1747834235017, marker=false
+[Zero Copy] Subscriber 1 received event 8800001: stream=stream-0, seq=18310, ts=1747834235017, marker=false
+[Zero Copy] Published event 8900000: stream=stream-0, seq=52775, ts=1747834235237
+[Zero Copy] Subscriber 1 received event 8900001: stream=stream-0, seq=52775, ts=1747834235237, marker=false
+[Zero Copy] Subscriber 3 received event 8900001: stream=stream-0, seq=52775, ts=1747834235237, marker=false
+[Zero Copy] Subscriber 2 received event 8900001: stream=stream-0, seq=52775, ts=1747834235237, marker=false
+[Zero Copy] Subscriber 0 received event 8900001: stream=stream-0, seq=52775, ts=1747834235237, marker=false
+[Zero Copy] Subscriber 4 received event 8900001: stream=stream-0, seq=52775, ts=1747834235237, marker=false
+[Zero Copy] Published event 9000000: stream=stream-0, seq=21705, ts=1747834235469
+[Zero Copy] Subscriber 0 received event 9000001: stream=stream-0, seq=21705, ts=1747834235469, marker=true
+[Zero Copy] Subscriber 4 received event 9000001: stream=stream-0, seq=21705, ts=1747834235469, marker=true
+[Zero Copy] Subscriber 1 received event 9000001: stream=stream-0, seq=21705, ts=1747834235469, marker=true
+[Zero Copy] Subscriber 3 received event 9000001: stream=stream-0, seq=21705, ts=1747834235469, marker=true
+[Zero Copy] Subscriber 2 received event 9000001: stream=stream-0, seq=21705, ts=1747834235469, marker=true
+[Zero Copy] Published event 9100000: stream=stream-0, seq=56170, ts=1747834235703
+[Zero Copy] Subscriber 0 received event 9100001: stream=stream-0, seq=56170, ts=1747834235703, marker=false
+[Zero Copy] Subscriber 3 received event 9100001: stream=stream-0, seq=56170, ts=1747834235703, marker=false
+[Zero Copy] Subscriber 2 received event 9100001: stream=stream-0, seq=56170, ts=1747834235703, marker=false
+[Zero Copy] Subscriber 4 received event 9100001: stream=stream-0, seq=56170, ts=1747834235703, marker=false
+[Zero Copy] Subscriber 1 received event 9100001: stream=stream-0, seq=56170, ts=1747834235703, marker=false
+[Zero Copy] Published event 9200000: stream=stream-0, seq=25100, ts=1747834235934
+[Zero Copy] Subscriber 0 received event 9200001: stream=stream-0, seq=25100, ts=1747834235934, marker=false
+[Zero Copy] Subscriber 3 received event 9200001: stream=stream-0, seq=25100, ts=1747834235934, marker=false
+[Zero Copy] Subscriber 4 received event 9200001: stream=stream-0, seq=25100, ts=1747834235934, marker=false
+[Zero Copy] Subscriber 2 received event 9200001: stream=stream-0, seq=25100, ts=1747834235934, marker=false
+[Zero Copy] Subscriber 1 received event 9200001: stream=stream-0, seq=25100, ts=1747834235934, marker=false
+[Zero Copy] Published event 9300000: stream=stream-0, seq=59565, ts=1747834236162
+[Zero Copy] Subscriber 2 received event 9300001: stream=stream-0, seq=59565, ts=1747834236162, marker=true
+[Zero Copy] Subscriber 3 received event 9300001: stream=stream-0, seq=59565, ts=1747834236162, marker=true
+[Zero Copy] Subscriber 0 received event 9300001: stream=stream-0, seq=59565, ts=1747834236162, marker=true
+[Zero Copy] Subscriber 1 received event 9300001: stream=stream-0, seq=59565, ts=1747834236162, marker=true
+[Zero Copy] Subscriber 4 received event 9300001: stream=stream-0, seq=59565, ts=1747834236162, marker=true
+[Zero Copy] Published event 9400000: stream=stream-0, seq=28495, ts=1747834236391
+[Zero Copy] Subscriber 3 received event 9400001: stream=stream-0, seq=28495, ts=1747834236391, marker=false
+[Zero Copy] Subscriber 1 received event 9400001: stream=stream-0, seq=28495, ts=1747834236391, marker=false
+[Zero Copy] Subscriber 4 received event 9400001: stream=stream-0, seq=28495, ts=1747834236391, marker=false
+[Zero Copy] Subscriber 0 received event 9400001: stream=stream-0, seq=28495, ts=1747834236391, marker=false
+[Zero Copy] Subscriber 2 received event 9400001: stream=stream-0, seq=28495, ts=1747834236391, marker=false
+[Zero Copy] Published event 9500000: stream=stream-0, seq=62960, ts=1747834236608
+[Zero Copy] Subscriber 4 received event 9500001: stream=stream-0, seq=62960, ts=1747834236608, marker=false
+[Zero Copy] Subscriber 3 received event 9500001: stream=stream-0, seq=62960, ts=1747834236608, marker=false
+[Zero Copy] Subscriber 1 received event 9500001: stream=stream-0, seq=62960, ts=1747834236608, marker=false
+[Zero Copy] Subscriber 0 received event 9500001: stream=stream-0, seq=62960, ts=1747834236608, marker=false
+[Zero Copy] Subscriber 2 received event 9500001: stream=stream-0, seq=62960, ts=1747834236608, marker=false
+[Zero Copy] Published event 9600000: stream=stream-0, seq=31890, ts=1747834236831
+[Zero Copy] Subscriber 0 received event 9600001: stream=stream-0, seq=31890, ts=1747834236831, marker=true
+[Zero Copy] Subscriber 1 received event 9600001: stream=stream-0, seq=31890, ts=1747834236831, marker=true
+[Zero Copy] Subscriber 4 received event 9600001: stream=stream-0, seq=31890, ts=1747834236831, marker=true
+[Zero Copy] Subscriber 2 received event 9600001: stream=stream-0, seq=31890, ts=1747834236831, marker=true
+[Zero Copy] Subscriber 3 received event 9600001: stream=stream-0, seq=31890, ts=1747834236831, marker=true
+[Zero Copy] Published event 9700000: stream=stream-0, seq=820, ts=1747834237062
+[Zero Copy] Subscriber 4 received event 9700001: stream=stream-0, seq=820, ts=1747834237062, marker=false
+[Zero Copy] Subscriber 0 received event 9700001: stream=stream-0, seq=820, ts=1747834237062, marker=false
+[Zero Copy] Subscriber 3 received event 9700001: stream=stream-0, seq=820, ts=1747834237062, marker=false
+[Zero Copy] Subscriber 2 received event 9700001: stream=stream-0, seq=820, ts=1747834237062, marker=false
+[Zero Copy] Subscriber 1 received event 9700001: stream=stream-0, seq=820, ts=1747834237062, marker=false
+[Zero Copy] Published event 9800000: stream=stream-0, seq=35285, ts=1747834237292
+[Zero Copy] Subscriber 4 received event 9800001: stream=stream-0, seq=35285, ts=1747834237292, marker=false
+[Zero Copy] Subscriber 1 received event 9800001: stream=stream-0, seq=35285, ts=1747834237292, marker=false
+[Zero Copy] Subscriber 0 received event 9800001: stream=stream-0, seq=35285, ts=1747834237292, marker=false
+[Zero Copy] Subscriber 2 received event 9800001: stream=stream-0, seq=35285, ts=1747834237292, marker=false
+[Zero Copy] Subscriber 3 received event 9800001: stream=stream-0, seq=35285, ts=1747834237292, marker=false
+[Zero Copy] Published event 9900000: stream=stream-0, seq=4215, ts=1747834237522
+[Zero Copy] Subscriber 3 received event 9900001: stream=stream-0, seq=4215, ts=1747834237522, marker=true
+[Zero Copy] Subscriber 1 received event 9900001: stream=stream-0, seq=4215, ts=1747834237522, marker=true
+[Zero Copy] Subscriber 2 received event 9900001: stream=stream-0, seq=4215, ts=1747834237522, marker=true
+[Zero Copy] Subscriber 4 received event 9900001: stream=stream-0, seq=4215, ts=1747834237522, marker=true
+[Zero Copy] Subscriber 0 received event 9900001: stream=stream-0, seq=4215, ts=1747834237522, marker=true
+[Zero Copy] Published event 10000000: stream=stream-0, seq=38680, ts=1747834237755
+[Zero Copy] Subscriber 3 received event 10000001: stream=stream-0, seq=38680, ts=1747834237755, marker=false
+[Zero Copy] Subscriber 0 received event 10000001: stream=stream-0, seq=38680, ts=1747834237755, marker=false
+[Zero Copy] Subscriber 1 received event 10000001: stream=stream-0, seq=38680, ts=1747834237755, marker=false
+[Zero Copy] Subscriber 4 received event 10000001: stream=stream-0, seq=38680, ts=1747834237755, marker=false
+[Zero Copy] Subscriber 2 received event 10000001: stream=stream-0, seq=38680, ts=1747834237755, marker=false
+[Zero Copy] Published event 10100000: stream=stream-0, seq=7610, ts=1747834237987
+[Zero Copy] Subscriber 3 received event 10100001: stream=stream-0, seq=7610, ts=1747834237987, marker=false
+[Zero Copy] Subscriber 0 received event 10100001: stream=stream-0, seq=7610, ts=1747834237987, marker=false
+[Zero Copy] Subscriber 1 received event 10100001: stream=stream-0, seq=7610, ts=1747834237987, marker=false
+[Zero Copy] Subscriber 4 received event 10100001: stream=stream-0, seq=7610, ts=1747834237987, marker=false
+[Zero Copy] Subscriber 2 received event 10100001: stream=stream-0, seq=7610, ts=1747834237987, marker=false
+[Zero Copy] Published event 10200000: stream=stream-0, seq=42075, ts=1747834238217
+[Zero Copy] Subscriber 4 received event 10200001: stream=stream-0, seq=42075, ts=1747834238217, marker=true
+[Zero Copy] Subscriber 1 received event 10200001: stream=stream-0, seq=42075, ts=1747834238217, marker=true
+[Zero Copy] Subscriber 2 received event 10200001: stream=stream-0, seq=42075, ts=1747834238217, marker=true
+[Zero Copy] Subscriber 0 received event 10200001: stream=stream-0, seq=42075, ts=1747834238217, marker=true
+[Zero Copy] Subscriber 3 received event 10200001: stream=stream-0, seq=42075, ts=1747834238217, marker=true
+[Zero Copy] Published event 10300000: stream=stream-0, seq=11005, ts=1747834238440
+[Zero Copy] Subscriber 0 received event 10300001: stream=stream-0, seq=11005, ts=1747834238440, marker=false
+[Zero Copy] Subscriber 2 received event 10300001: stream=stream-0, seq=11005, ts=1747834238440, marker=false
+[Zero Copy] Subscriber 3 received event 10300001: stream=stream-0, seq=11005, ts=1747834238440, marker=false
+[Zero Copy] Subscriber 1 received event 10300001: stream=stream-0, seq=11005, ts=1747834238440, marker=false
+[Zero Copy] Subscriber 4 received event 10300001: stream=stream-0, seq=11005, ts=1747834238440, marker=false
+[Zero Copy] Published event 10400000: stream=stream-0, seq=45470, ts=1747834238661
+[Zero Copy] Subscriber 1 received event 10400001: stream=stream-0, seq=45470, ts=1747834238661, marker=false
+[Zero Copy] Subscriber 3 received event 10400001: stream=stream-0, seq=45470, ts=1747834238661, marker=false
+[Zero Copy] Subscriber 2 received event 10400001: stream=stream-0, seq=45470, ts=1747834238661, marker=false
+[Zero Copy] Subscriber 0 received event 10400001: stream=stream-0, seq=45470, ts=1747834238661, marker=false
+[Zero Copy] Subscriber 4 received event 10400001: stream=stream-0, seq=45470, ts=1747834238661, marker=false
+[Zero Copy] Published event 10500000: stream=stream-0, seq=14400, ts=1747834238885
+[Zero Copy] Subscriber 4 received event 10500001: stream=stream-0, seq=14400, ts=1747834238885, marker=true
+[Zero Copy] Subscriber 0 received event 10500001: stream=stream-0, seq=14400, ts=1747834238885, marker=true
+[Zero Copy] Subscriber 3 received event 10500001: stream=stream-0, seq=14400, ts=1747834238885, marker=true
+[Zero Copy] Subscriber 1 received event 10500001: stream=stream-0, seq=14400, ts=1747834238885, marker=true
+[Zero Copy] Subscriber 2 received event 10500001: stream=stream-0, seq=14400, ts=1747834238885, marker=true
+[Zero Copy] Published event 10600000: stream=stream-0, seq=48865, ts=1747834239104
+[Zero Copy] Subscriber 2 received event 10600001: stream=stream-0, seq=48865, ts=1747834239104, marker=false
+[Zero Copy] Subscriber 3 received event 10600001: stream=stream-0, seq=48865, ts=1747834239104, marker=false
+[Zero Copy] Subscriber 4 received event 10600001: stream=stream-0, seq=48865, ts=1747834239104, marker=false
+[Zero Copy] Subscriber 1 received event 10600001: stream=stream-0, seq=48865, ts=1747834239104, marker=false
+[Zero Copy] Subscriber 0 received event 10600001: stream=stream-0, seq=48865, ts=1747834239104, marker=false
+[Zero Copy] Published event 10700000: stream=stream-0, seq=17795, ts=1747834239326
+[Zero Copy] Subscriber 1 received event 10700001: stream=stream-0, seq=17795, ts=1747834239326, marker=false
+[Zero Copy] Subscriber 2 received event 10700001: stream=stream-0, seq=17795, ts=1747834239326, marker=false
+[Zero Copy] Subscriber 3 received event 10700001: stream=stream-0, seq=17795, ts=1747834239326, marker=false
+[Zero Copy] Subscriber 0 received event 10700001: stream=stream-0, seq=17795, ts=1747834239326, marker=false
+[Zero Copy] Subscriber 4 received event 10700001: stream=stream-0, seq=17795, ts=1747834239326, marker=false
+[Zero Copy] Published event 10800000: stream=stream-0, seq=52260, ts=1747834239546
+[Zero Copy] Subscriber 4 received event 10800001: stream=stream-0, seq=52260, ts=1747834239546, marker=true
+[Zero Copy] Subscriber 3 received event 10800001: stream=stream-0, seq=52260, ts=1747834239546, marker=true
+[Zero Copy] Subscriber 1 received event 10800001: stream=stream-0, seq=52260, ts=1747834239546, marker=true
+[Zero Copy] Subscriber 2 received event 10800001: stream=stream-0, seq=52260, ts=1747834239546, marker=true
+[Zero Copy] Subscriber 0 received event 10800001: stream=stream-0, seq=52260, ts=1747834239546, marker=true
+[Zero Copy] Published event 10900000: stream=stream-0, seq=21190, ts=1747834239764
+[Zero Copy] Subscriber 1 received event 10900001: stream=stream-0, seq=21190, ts=1747834239764, marker=false
+[Zero Copy] Subscriber 4 received event 10900001: stream=stream-0, seq=21190, ts=1747834239764, marker=false
+[Zero Copy] Subscriber 0 received event 10900001: stream=stream-0, seq=21190, ts=1747834239764, marker=false
+[Zero Copy] Subscriber 3 received event 10900001: stream=stream-0, seq=21190, ts=1747834239764, marker=false
+[Zero Copy] Subscriber 2 received event 10900001: stream=stream-0, seq=21190, ts=1747834239764, marker=false
+[Zero Copy] Published event 11000000: stream=stream-0, seq=55655, ts=1747834239983
+[Zero Copy] Subscriber 2 received event 11000001: stream=stream-0, seq=55655, ts=1747834239983, marker=false
+[Zero Copy] Subscriber 0 received event 11000001: stream=stream-0, seq=55655, ts=1747834239983, marker=false
+[Zero Copy] Subscriber 3 received event 11000001: stream=stream-0, seq=55655, ts=1747834239983, marker=false
+[Zero Copy] Subscriber 4 received event 11000001: stream=stream-0, seq=55655, ts=1747834239983, marker=false
+[Zero Copy] Subscriber 1 received event 11000001: stream=stream-0, seq=55655, ts=1747834239983, marker=false
+[Zero Copy] Published event 11100000: stream=stream-0, seq=24585, ts=1747834240202
+[Zero Copy] Subscriber 1 received event 11100001: stream=stream-0, seq=24585, ts=1747834240202, marker=true
+[Zero Copy] Subscriber 2 received event 11100001: stream=stream-0, seq=24585, ts=1747834240202, marker=true
+[Zero Copy] Subscriber 3 received event 11100001: stream=stream-0, seq=24585, ts=1747834240202, marker=true
+[Zero Copy] Subscriber 4 received event 11100001: stream=stream-0, seq=24585, ts=1747834240202, marker=true
+[Zero Copy] Subscriber 0 received event 11100001: stream=stream-0, seq=24585, ts=1747834240202, marker=true
+[Zero Copy] Published event 11200000: stream=stream-0, seq=59050, ts=1747834240421
+[Zero Copy] Subscriber 0 received event 11200001: stream=stream-0, seq=59050, ts=1747834240421, marker=false
+[Zero Copy] Subscriber 3 received event 11200001: stream=stream-0, seq=59050, ts=1747834240421, marker=false
+[Zero Copy] Subscriber 2 received event 11200001: stream=stream-0, seq=59050, ts=1747834240421, marker=false
+[Zero Copy] Subscriber 4 received event 11200001: stream=stream-0, seq=59050, ts=1747834240421, marker=false
+[Zero Copy] Subscriber 1 received event 11200001: stream=stream-0, seq=59050, ts=1747834240421, marker=false
+[Zero Copy] Published event 11300000: stream=stream-0, seq=27980, ts=1747834240640
+[Zero Copy] Subscriber 4 received event 11300001: stream=stream-0, seq=27980, ts=1747834240640, marker=false
+[Zero Copy] Subscriber 0 received event 11300001: stream=stream-0, seq=27980, ts=1747834240640, marker=false
+[Zero Copy] Subscriber 2 received event 11300001: stream=stream-0, seq=27980, ts=1747834240640, marker=false
+[Zero Copy] Subscriber 1 received event 11300001: stream=stream-0, seq=27980, ts=1747834240640, marker=false
+[Zero Copy] Subscriber 3 received event 11300001: stream=stream-0, seq=27980, ts=1747834240640, marker=false
+[Zero Copy] Published event 11400000: stream=stream-0, seq=62445, ts=1747834240860
+[Zero Copy] Subscriber 3 received event 11400001: stream=stream-0, seq=62445, ts=1747834240860, marker=true
+[Zero Copy] Subscriber 0 received event 11400001: stream=stream-0, seq=62445, ts=1747834240860, marker=true
+[Zero Copy] Subscriber 2 received event 11400001: stream=stream-0, seq=62445, ts=1747834240860, marker=true
+[Zero Copy] Subscriber 4 received event 11400001: stream=stream-0, seq=62445, ts=1747834240860, marker=true
+[Zero Copy] Subscriber 1 received event 11400001: stream=stream-0, seq=62445, ts=1747834240860, marker=true
+[Zero Copy] Published event 11500000: stream=stream-0, seq=31375, ts=1747834241081
+[Zero Copy] Subscriber 1 received event 11500001: stream=stream-0, seq=31375, ts=1747834241081, marker=false
+[Zero Copy] Subscriber 0 received event 11500001: stream=stream-0, seq=31375, ts=1747834241081, marker=false
+[Zero Copy] Subscriber 2 received event 11500001: stream=stream-0, seq=31375, ts=1747834241081, marker=false
+[Zero Copy] Subscriber 4 received event 11500001: stream=stream-0, seq=31375, ts=1747834241081, marker=false
+[Zero Copy] Subscriber 3 received event 11500001: stream=stream-0, seq=31375, ts=1747834241081, marker=false
+[Zero Copy] Published event 11600000: stream=stream-0, seq=305, ts=1747834241308
+[Zero Copy] Subscriber 0 received event 11600001: stream=stream-0, seq=305, ts=1747834241308, marker=false
+[Zero Copy] Subscriber 2 received event 11600001: stream=stream-0, seq=305, ts=1747834241308, marker=false
+[Zero Copy] Subscriber 3 received event 11600001: stream=stream-0, seq=305, ts=1747834241308, marker=false
+[Zero Copy] Subscriber 4 received event 11600001: stream=stream-0, seq=305, ts=1747834241308, marker=false
+[Zero Copy] Subscriber 1 received event 11600001: stream=stream-0, seq=305, ts=1747834241308, marker=false
+[Zero Copy] Published event 11700000: stream=stream-0, seq=34770, ts=1747834241531
+[Zero Copy] Subscriber 1 received event 11700001: stream=stream-0, seq=34770, ts=1747834241531, marker=true
+[Zero Copy] Subscriber 0 received event 11700001: stream=stream-0, seq=34770, ts=1747834241531, marker=true
+[Zero Copy] Subscriber 3 received event 11700001: stream=stream-0, seq=34770, ts=1747834241531, marker=true
+[Zero Copy] Subscriber 4 received event 11700001: stream=stream-0, seq=34770, ts=1747834241531, marker=true
+[Zero Copy] Subscriber 2 received event 11700001: stream=stream-0, seq=34770, ts=1747834241531, marker=true
+[Zero Copy] Published event 11800000: stream=stream-0, seq=3700, ts=1747834241754
+[Zero Copy] Subscriber 1 received event 11800001: stream=stream-0, seq=3700, ts=1747834241754, marker=false
+[Zero Copy] Subscriber 2 received event 11800001: stream=stream-0, seq=3700, ts=1747834241754, marker=false
+[Zero Copy] Subscriber 0 received event 11800001: stream=stream-0, seq=3700, ts=1747834241754, marker=false
+[Zero Copy] Subscriber 3 received event 11800001: stream=stream-0, seq=3700, ts=1747834241754, marker=false
+[Zero Copy] Subscriber 4 received event 11800001: stream=stream-0, seq=3700, ts=1747834241754, marker=false
+[Zero Copy] Published event 11900000: stream=stream-0, seq=38165, ts=1747834241977
+[Zero Copy] Subscriber 1 received event 11900001: stream=stream-0, seq=38165, ts=1747834241977, marker=false
+[Zero Copy] Subscriber 0 received event 11900001: stream=stream-0, seq=38165, ts=1747834241977, marker=false
+[Zero Copy] Subscriber 4 received event 11900001: stream=stream-0, seq=38165, ts=1747834241977, marker=false
+[Zero Copy] Subscriber 2 received event 11900001: stream=stream-0, seq=38165, ts=1747834241977, marker=false
+[Zero Copy] Subscriber 3 received event 11900001: stream=stream-0, seq=38165, ts=1747834241977, marker=false
+[Zero Copy] Published event 12000000: stream=stream-0, seq=7095, ts=1747834242207
+[Zero Copy] Subscriber 2 received event 12000001: stream=stream-0, seq=7095, ts=1747834242207, marker=true
+[Zero Copy] Subscriber 1 received event 12000001: stream=stream-0, seq=7095, ts=1747834242207, marker=true
+[Zero Copy] Subscriber 4 received event 12000001: stream=stream-0, seq=7095, ts=1747834242207, marker=true
+[Zero Copy] Subscriber 0 received event 12000001: stream=stream-0, seq=7095, ts=1747834242207, marker=true
+[Zero Copy] Subscriber 3 received event 12000001: stream=stream-0, seq=7095, ts=1747834242207, marker=true
+[Zero Copy] Published event 12100000: stream=stream-0, seq=41560, ts=1747834242431
+[Zero Copy] Subscriber 4 received event 12100001: stream=stream-0, seq=41560, ts=1747834242431, marker=false
+[Zero Copy] Subscriber 1 received event 12100001: stream=stream-0, seq=41560, ts=1747834242431, marker=false
+[Zero Copy] Subscriber 3 received event 12100001: stream=stream-0, seq=41560, ts=1747834242431, marker=false
+[Zero Copy] Subscriber 0 received event 12100001: stream=stream-0, seq=41560, ts=1747834242431, marker=false
+[Zero Copy] Subscriber 2 received event 12100001: stream=stream-0, seq=41560, ts=1747834242431, marker=false
+[Zero Copy] Published event 12200000: stream=stream-0, seq=10490, ts=1747834242650
+[Zero Copy] Subscriber 3 received event 12200001: stream=stream-0, seq=10490, ts=1747834242650, marker=false
+[Zero Copy] Subscriber 2 received event 12200001: stream=stream-0, seq=10490, ts=1747834242650, marker=false
+[Zero Copy] Subscriber 1 received event 12200001: stream=stream-0, seq=10490, ts=1747834242650, marker=false
+[Zero Copy] Subscriber 0 received event 12200001: stream=stream-0, seq=10490, ts=1747834242650, marker=false
+[Zero Copy] Subscriber 4 received event 12200001: stream=stream-0, seq=10490, ts=1747834242650, marker=false
+[Zero Copy] Published event 12300000: stream=stream-0, seq=44955, ts=1747834242872
+[Zero Copy] Subscriber 2 received event 12300001: stream=stream-0, seq=44955, ts=1747834242872, marker=true
+[Zero Copy] Subscriber 3 received event 12300001: stream=stream-0, seq=44955, ts=1747834242872, marker=true
+[Zero Copy] Subscriber 1 received event 12300001: stream=stream-0, seq=44955, ts=1747834242872, marker=true
+[Zero Copy] Subscriber 0 received event 12300001: stream=stream-0, seq=44955, ts=1747834242872, marker=true
+[Zero Copy] Subscriber 4 received event 12300001: stream=stream-0, seq=44955, ts=1747834242872, marker=true
+[Zero Copy] Published event 12400000: stream=stream-0, seq=13885, ts=1747834243093
+[Zero Copy] Subscriber 0 received event 12400001: stream=stream-0, seq=13885, ts=1747834243093, marker=false
+[Zero Copy] Subscriber 1 received event 12400001: stream=stream-0, seq=13885, ts=1747834243093, marker=false
+[Zero Copy] Subscriber 3 received event 12400001: stream=stream-0, seq=13885, ts=1747834243093, marker=false
+[Zero Copy] Subscriber 2 received event 12400001: stream=stream-0, seq=13885, ts=1747834243093, marker=false
+[Zero Copy] Subscriber 4 received event 12400001: stream=stream-0, seq=13885, ts=1747834243093, marker=false
+[Zero Copy] Published event 12500000: stream=stream-0, seq=48350, ts=1747834243315
+[Zero Copy] Subscriber 2 received event 12500001: stream=stream-0, seq=48350, ts=1747834243315, marker=false
+[Zero Copy] Subscriber 3 received event 12500001: stream=stream-0, seq=48350, ts=1747834243315, marker=false
+[Zero Copy] Subscriber 1 received event 12500001: stream=stream-0, seq=48350, ts=1747834243315, marker=false
+[Zero Copy] Subscriber 4 received event 12500001: stream=stream-0, seq=48350, ts=1747834243315, marker=false
+[Zero Copy] Subscriber 0 received event 12500001: stream=stream-0, seq=48350, ts=1747834243315, marker=false
+[Zero Copy] Published event 12600000: stream=stream-0, seq=17280, ts=1747834243536
+[Zero Copy] Subscriber 2 received event 12600001: stream=stream-0, seq=17280, ts=1747834243536, marker=true
+[Zero Copy] Subscriber 4 received event 12600001: stream=stream-0, seq=17280, ts=1747834243536, marker=true
+[Zero Copy] Subscriber 1 received event 12600001: stream=stream-0, seq=17280, ts=1747834243536, marker=true
+[Zero Copy] Subscriber 3 received event 12600001: stream=stream-0, seq=17280, ts=1747834243536, marker=true
+[Zero Copy] Subscriber 0 received event 12600001: stream=stream-0, seq=17280, ts=1747834243536, marker=true
+[Zero Copy] Published event 12700000: stream=stream-0, seq=51745, ts=1747834243754
+[Zero Copy] Subscriber 4 received event 12700001: stream=stream-0, seq=51745, ts=1747834243754, marker=false
+[Zero Copy] Subscriber 1 received event 12700001: stream=stream-0, seq=51745, ts=1747834243754, marker=false
+[Zero Copy] Subscriber 3 received event 12700001: stream=stream-0, seq=51745, ts=1747834243754, marker=false
+[Zero Copy] Subscriber 0 received event 12700001: stream=stream-0, seq=51745, ts=1747834243754, marker=false
+[Zero Copy] Subscriber 2 received event 12700001: stream=stream-0, seq=51745, ts=1747834243754, marker=false
+[Zero Copy] Published event 12800000: stream=stream-0, seq=20675, ts=1747834243974
+[Zero Copy] Subscriber 1 received event 12800001: stream=stream-0, seq=20675, ts=1747834243974, marker=false
+[Zero Copy] Subscriber 4 received event 12800001: stream=stream-0, seq=20675, ts=1747834243974, marker=false
+[Zero Copy] Subscriber 0 received event 12800001: stream=stream-0, seq=20675, ts=1747834243974, marker=false
+[Zero Copy] Subscriber 2 received event 12800001: stream=stream-0, seq=20675, ts=1747834243974, marker=false
+[Zero Copy] Subscriber 3 received event 12800001: stream=stream-0, seq=20675, ts=1747834243974, marker=false
+[Zero Copy] Published event 12900000: stream=stream-0, seq=55140, ts=1747834244192
+[Zero Copy] Subscriber 1 received event 12900001: stream=stream-0, seq=55140, ts=1747834244192, marker=true
+[Zero Copy] Subscriber 0 received event 12900001: stream=stream-0, seq=55140, ts=1747834244192, marker=true
+[Zero Copy] Subscriber 4 received event 12900001: stream=stream-0, seq=55140, ts=1747834244192, marker=true
+[Zero Copy] Subscriber 3 received event 12900001: stream=stream-0, seq=55140, ts=1747834244192, marker=true
+[Zero Copy] Subscriber 2 received event 12900001: stream=stream-0, seq=55140, ts=1747834244192, marker=true
+[Zero Copy] Published event 13000000: stream=stream-0, seq=24070, ts=1747834244412
+[Zero Copy] Subscriber 1 received event 13000001: stream=stream-0, seq=24070, ts=1747834244412, marker=false
+[Zero Copy] Subscriber 0 received event 13000001: stream=stream-0, seq=24070, ts=1747834244412, marker=false
+[Zero Copy] Subscriber 3 received event 13000001: stream=stream-0, seq=24070, ts=1747834244412, marker=false
+[Zero Copy] Subscriber 4 received event 13000001: stream=stream-0, seq=24070, ts=1747834244412, marker=false
+[Zero Copy] Subscriber 2 received event 13000001: stream=stream-0, seq=24070, ts=1747834244412, marker=false
+[Zero Copy] Published event 13100000: stream=stream-0, seq=58535, ts=1747834244632
+[Zero Copy] Subscriber 1 received event 13100001: stream=stream-0, seq=58535, ts=1747834244632, marker=false
+[Zero Copy] Subscriber 3 received event 13100001: stream=stream-0, seq=58535, ts=1747834244632, marker=false
+[Zero Copy] Subscriber 4 received event 13100001: stream=stream-0, seq=58535, ts=1747834244632, marker=false
+[Zero Copy] Subscriber 2 received event 13100001: stream=stream-0, seq=58535, ts=1747834244632, marker=false
+[Zero Copy] Subscriber 0 received event 13100001: stream=stream-0, seq=58535, ts=1747834244632, marker=false
+[Zero Copy] Published event 13200000: stream=stream-0, seq=27465, ts=1747834244851
+[Zero Copy] Subscriber 0 received event 13200001: stream=stream-0, seq=27465, ts=1747834244851, marker=true
+[Zero Copy] Subscriber 1 received event 13200001: stream=stream-0, seq=27465, ts=1747834244851, marker=true
+[Zero Copy] Subscriber 4 received event 13200001: stream=stream-0, seq=27465, ts=1747834244851, marker=true
+[Zero Copy] Subscriber 2 received event 13200001: stream=stream-0, seq=27465, ts=1747834244851, marker=true
+[Zero Copy] Subscriber 3 received event 13200001: stream=stream-0, seq=27465, ts=1747834244851, marker=true
+[Zero Copy] Published event 13300000: stream=stream-0, seq=61930, ts=1747834245068
+[Zero Copy] Subscriber 3 received event 13300001: stream=stream-0, seq=61930, ts=1747834245068, marker=false
+[Zero Copy] Subscriber 4 received event 13300001: stream=stream-0, seq=61930, ts=1747834245068, marker=false
+[Zero Copy] Subscriber 2 received event 13300001: stream=stream-0, seq=61930, ts=1747834245068, marker=false
+[Zero Copy] Subscriber 1 received event 13300001: stream=stream-0, seq=61930, ts=1747834245068, marker=false
+[Zero Copy] Subscriber 0 received event 13300001: stream=stream-0, seq=61930, ts=1747834245068, marker=false
+[Zero Copy] Published event 13400000: stream=stream-0, seq=30860, ts=1747834245284
+[Zero Copy] Subscriber 0 received event 13400001: stream=stream-0, seq=30860, ts=1747834245284, marker=false
+[Zero Copy] Subscriber 1 received event 13400001: stream=stream-0, seq=30860, ts=1747834245284, marker=false
+[Zero Copy] Subscriber 2 received event 13400001: stream=stream-0, seq=30860, ts=1747834245284, marker=false
+[Zero Copy] Subscriber 3 received event 13400001: stream=stream-0, seq=30860, ts=1747834245284, marker=false
+[Zero Copy] Subscriber 4 received event 13400001: stream=stream-0, seq=30860, ts=1747834245284, marker=false
+[Zero Copy] Publisher finished after sending 13467303 events
+[Zero Copy] TEST COMPLETE: Processed 67336515 total events at 2185724.96 events/sec over 30.81 seconds

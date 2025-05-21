@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc, Mutex};
 use tokio::time::timeout;
 use dashmap::DashMap;
+use async_trait::async_trait;
 
 /// Configuration for the event bus
 #[derive(Debug, Clone)]
@@ -484,5 +485,96 @@ impl<E: Event> Drop for PooledEvent<E> {
                 }
             });
         }
+    }
+}
+
+/// A strongly-typed event publisher backed by an EventBus.
+///
+/// This type provides a convenient interface for publishing events of a specific type.
+pub struct Publisher<E: Event> {
+    /// The event bus to publish to
+    event_bus: EventBus,
+    /// Phantom data to satisfy the type parameter
+    _phantom: std::marker::PhantomData<E>,
+}
+
+impl<E: Event> Publisher<E> {
+    /// Creates a new publisher for events of type E.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_bus` - The event bus to publish to
+    ///
+    /// # Returns
+    ///
+    /// A new `Publisher<E>` instance
+    pub fn new(event_bus: EventBus) -> Self {
+        Self {
+            event_bus,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+    
+    /// Publishes a single event.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The event to publish
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event was published successfully, or an error if publication fails
+    pub async fn publish(&self, event: E) -> EventResult<()> {
+        self.event_bus.publish(event).await
+    }
+    
+    /// Publishes a batch of events.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - A vector of events to publish
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all events were published successfully, or an error if any publication fails
+    pub async fn publish_batch(&self, events: Vec<E>) -> EventResult<()> {
+        self.event_bus.publish_batch(events).await
+    }
+}
+
+/// Factory for creating publishers for different event types.
+///
+/// This type provides a convenient way to create publishers for different event types
+/// that all use the same underlying event bus.
+pub struct PublisherFactory {
+    /// The event bus to create publishers for
+    event_bus: EventBus,
+}
+
+impl PublisherFactory {
+    /// Creates a new publisher factory.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_bus` - The event bus to create publishers for
+    ///
+    /// # Returns
+    ///
+    /// A new `PublisherFactory` instance
+    pub fn new(event_bus: EventBus) -> Self {
+        Self { event_bus }
+    }
+    
+    /// Creates a new publisher for events of type E.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `E` - The event type to create a publisher for
+    ///
+    /// # Returns
+    ///
+    /// A new `Publisher<E>` instance
+    pub fn create<E: Event>(&self) -> Publisher<E> {
+        Publisher::new(self.event_bus.clone())
     }
 } 

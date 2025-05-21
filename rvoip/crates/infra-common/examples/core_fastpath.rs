@@ -1,5 +1,7 @@
-use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
-use infra_common::events::publisher::FastPublisher;
+use infra_common::events::types::{Event, EventPriority, StaticEvent};
+use infra_common::events::bus::Publisher;
+use infra_common::events::registry::GlobalTypeRegistry;
+use infra_common::events::bus::EventBus;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
@@ -85,7 +87,7 @@ fn create_media_packet(id: u64) -> MediaPacketEvent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Static Event FastPublisher Performance Test");
+    println!("Static Event Publisher Performance Test");
     println!("==========================================");
     println!("Configuration:");
     println!(" - {} subscribers", SUBSCRIBER_COUNT);
@@ -93,8 +95,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" - {} second test duration", TEST_DURATION_SECS);
     println!(" - {} channel capacity\n", CHANNEL_CAPACITY);
     
-    // Create FastPublisher for our event type with specific capacity
-    let publisher = FastPublisher::<MediaPacketEvent>::with_capacity(CHANNEL_CAPACITY);
+    // Register MediaPacketEvent with the global registry
+    GlobalTypeRegistry::register_static_event_type::<MediaPacketEvent>();
+    GlobalTypeRegistry::register_with_capacity::<MediaPacketEvent>(CHANNEL_CAPACITY);
+    
+    // Create EventBus
+    let event_bus = EventBus::new();
+    
+    // Create Publisher for our event type
+    let publisher = Publisher::<MediaPacketEvent>::new(event_bus.clone());
     
     // Create stats collectors
     let collectors: Vec<Arc<StatsCollector>> = (0..SUBSCRIBER_COUNT)
@@ -104,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Subscribe to events for all collectors
     let mut receivers = Vec::new();
     for collector in &collectors {
-        let rx = publisher.subscribe();
+        let rx = event_bus.subscribe_broadcast::<MediaPacketEvent>().await?;
         let collector_clone = collector.clone();
         
         // Spawn a task to process events
@@ -138,8 +147,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create multiple publisher tasks
     let publisher_tasks: Vec<_> = (0..PUBLISHER_COUNT).map(|publisher_id| {
-        // Create a new publisher for each task (lightweight object)
-        let publisher = FastPublisher::<MediaPacketEvent>::with_capacity(CHANNEL_CAPACITY);
+        // Create a new publisher for each task
+        let publisher = Publisher::<MediaPacketEvent>::new(event_bus.clone());
         let events_counter = events_published.clone();
         let stop_flag = stop_publishing.clone();
         

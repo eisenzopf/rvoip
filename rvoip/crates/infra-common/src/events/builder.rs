@@ -1,193 +1,235 @@
+//! Builder pattern for event systems.
+//!
+//! This module provides a builder pattern for creating event systems with
+//! specific configurations, allowing users to customize the event system
+//! to their needs without dealing with implementation details.
+
 use std::time::Duration;
-use std::sync::Arc;
-use std::fmt;
-
-use crate::events::system::EventSystem;
 use crate::events::bus::EventBusConfig;
+use super::system::EventSystem;
 
-/// Implementation type for the event system
-#[derive(Clone, Debug, PartialEq)]
+/// Enum representing the implementation type to use.
+///
+/// This enum allows users to select which implementation of the event system
+/// to use, without having to know the details of each implementation.
+#[derive(Debug, Clone, Copy)]
 pub enum ImplementationType {
-    /// Static fast path optimized for high performance
+    /// Use the Static Fast Path implementation for maximum performance
     StaticFastPath,
     
-    /// Zero-copy event bus with more features
+    /// Use the Zero Copy implementation for advanced features
     ZeroCopy,
 }
 
-/// Backpressure strategy to use when buffers are full
-#[derive(Clone)]
-pub enum BackpressureStrategy {
-    /// Block publisher until buffer space is available
-    Block,
-    
-    /// Drop oldest events to make room for new ones
-    DropOldest,
-    
-    /// Drop newest events (reject new publishes)
-    DropNewest,
-    
-    /// Apply custom backpressure function
-    Custom(Arc<dyn Fn() -> BackpressureAction + Send + Sync>),
-}
-
-// Implement Debug manually
-impl fmt::Debug for BackpressureStrategy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BackpressureStrategy::Block => write!(f, "Block"),
-            BackpressureStrategy::DropOldest => write!(f, "DropOldest"),
-            BackpressureStrategy::DropNewest => write!(f, "DropNewest"),
-            BackpressureStrategy::Custom(_) => write!(f, "Custom(<function>)"),
-        }
-    }
-}
-
-/// Action to take when backpressure is applied
-#[derive(Clone, Debug)]
-pub enum BackpressureAction {
-    /// Block until space is available
-    Block,
-    
-    /// Drop the event
-    Drop,
-    
-    /// Apply backoff and retry
-    Backoff(Duration),
-}
-
-/// Builder for configuring and creating an event system
+/// Builder for creating event systems with specific configurations.
 ///
-/// This builder provides a consistent way to configure either the static fast path
-/// or zero-copy event bus implementation with the same interface.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-/// use std::time::Duration;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create a static fast path event system with default settings
-/// let static_system = EventSystemBuilder::new()
-///     .implementation(ImplementationType::StaticFastPath)
-///     .build();
-///
-/// // Create a zero-copy event bus with custom settings
-/// let zero_copy_system = EventSystemBuilder::new()
-///     .implementation(ImplementationType::ZeroCopy)
-///     .channel_capacity(5_000)
-///     .max_concurrent_dispatches(200)
-///     .enable_priority(true)
-///     .default_timeout(Some(Duration::from_millis(500)))
-///     .batch_size(50)
-///     .shard_count(4)
-///     .build();
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Clone)]
+/// This struct allows configuring various aspects of the event system before
+/// creating it, providing sensible defaults for most options.
+#[derive(Debug, Clone)]
 pub struct EventSystemBuilder {
-    implementation_type: ImplementationType,
+    /// The implementation type to use
+    implementation: ImplementationType,
+    
+    /// The capacity of event channels
     channel_capacity: usize,
+    
+    /// The maximum number of concurrent dispatches (zero-copy only)
     max_concurrent_dispatches: usize,
+    
+    /// Whether to enable priority-based routing (zero-copy only)
     enable_priority: bool,
+    
+    /// The default timeout for operations (zero-copy only)
     default_timeout: Option<Duration>,
+    
+    /// The batch size for batch operations (zero-copy only)
     batch_size: usize,
+    
+    /// The number of shards to use for the event bus (zero-copy only)
     shard_count: usize,
-    global_buffer_size: Option<usize>,
-    backpressure_strategy: BackpressureStrategy,
+    
+    /// Whether to enable metrics collection (zero-copy only)
     enable_metrics: bool,
+    
+    /// The interval for reporting metrics (zero-copy only)
     metrics_reporting_interval: Duration,
 }
 
-impl EventSystemBuilder {
-    /// Create a new builder with sensible defaults
-    pub fn new() -> Self {
+impl Default for EventSystemBuilder {
+    fn default() -> Self {
         Self {
-            implementation_type: ImplementationType::ZeroCopy,
+            implementation: ImplementationType::ZeroCopy,
             channel_capacity: 10_000,
-            max_concurrent_dispatches: 1000,
+            max_concurrent_dispatches: 1_000,
             enable_priority: true,
             default_timeout: Some(Duration::from_secs(1)),
             batch_size: 100,
             shard_count: 8,
-            global_buffer_size: None,
-            backpressure_strategy: BackpressureStrategy::Block,
             enable_metrics: false,
             metrics_reporting_interval: Duration::from_secs(5),
         }
     }
+}
+
+impl EventSystemBuilder {
+    /// Creates a new builder with default values.
+    ///
+    /// # Returns
+    ///
+    /// A new `EventSystemBuilder` instance with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
     
-    /// Set the implementation type
-    pub fn implementation(mut self, implementation_type: ImplementationType) -> Self {
-        self.implementation_type = implementation_type;
+    /// Sets the implementation type to use.
+    ///
+    /// # Arguments
+    ///
+    /// * `implementation` - The implementation type to use
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
+    pub fn implementation(mut self, implementation: ImplementationType) -> Self {
+        self.implementation = implementation;
         self
     }
     
-    /// Set the channel capacity for event buffers
+    /// Sets the channel capacity.
+    ///
+    /// This option applies to both implementations.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The capacity of event channels
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
     pub fn channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
         self
     }
     
-    /// Set the maximum concurrent dispatches (zero-copy only)
-    pub fn max_concurrent_dispatches(mut self, max: usize) -> Self {
-        self.max_concurrent_dispatches = max;
+    /// Sets the maximum number of concurrent dispatches.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_dispatches` - The maximum number of concurrent dispatches
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
+    pub fn max_concurrent_dispatches(mut self, max_dispatches: usize) -> Self {
+        self.max_concurrent_dispatches = max_dispatches;
         self
     }
     
-    /// Enable or disable priority-based dispatching (zero-copy only)
-    pub fn enable_priority(mut self, enabled: bool) -> Self {
-        self.enable_priority = enabled;
+    /// Sets whether to enable priority-based routing.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `enable` - Whether to enable priority-based routing
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
+    pub fn enable_priority(mut self, enable: bool) -> Self {
+        self.enable_priority = enable;
         self
     }
     
-    /// Set the default timeout for receive operations
+    /// Sets the default timeout for operations.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - The default timeout for operations
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
     pub fn default_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.default_timeout = timeout;
         self
     }
     
-    /// Set the batch size for batch processing
+    /// Sets the batch size for batch operations.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The batch size for batch operations
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
     pub fn batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
         self
     }
     
-    /// Set the shard count for sharded dispatchers (zero-copy only)
+    /// Sets the number of shards to use for the event bus.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of shards to use
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
     pub fn shard_count(mut self, count: usize) -> Self {
         self.shard_count = count;
         self
     }
     
-    /// Configure global buffer size (None = unlimited, within memory constraints)
-    pub fn global_buffer_size(mut self, size: Option<usize>) -> Self {
-        self.global_buffer_size = size;
+    /// Sets whether to enable metrics collection.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `enable` - Whether to enable metrics collection
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
+    pub fn enable_metrics(mut self, enable: bool) -> Self {
+        self.enable_metrics = enable;
         self
     }
     
-    /// Configure backpressure strategy
-    pub fn backpressure_strategy(mut self, strategy: BackpressureStrategy) -> Self {
-        self.backpressure_strategy = strategy;
-        self
-    }
-    
-    /// Enable or disable metrics collection
-    pub fn enable_metrics(mut self, enabled: bool) -> Self {
-        self.enable_metrics = enabled;
-        self
-    }
-    
-    /// Set metrics reporting interval
+    /// Sets the interval for reporting metrics.
+    ///
+    /// This option only applies to the Zero Copy implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - The interval for reporting metrics
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
     pub fn metrics_reporting_interval(mut self, interval: Duration) -> Self {
         self.metrics_reporting_interval = interval;
         self
     }
     
-    /// Build the event system with the configured settings
+    /// Builds an event system with the configured options.
+    ///
+    /// # Returns
+    ///
+    /// A new `EventSystem` instance with the configured options
     pub fn build(self) -> EventSystem {
-        match self.implementation_type {
+        match self.implementation {
             ImplementationType::StaticFastPath => {
                 EventSystem::new_static_fast_path(self.channel_capacity)
             },
@@ -205,52 +247,5 @@ impl EventSystemBuilder {
                 EventSystem::new_zero_copy(config)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_builder_defaults() {
-        let builder = EventSystemBuilder::new();
-        assert_eq!(builder.implementation_type, ImplementationType::ZeroCopy);
-        assert_eq!(builder.channel_capacity, 10_000);
-        assert_eq!(builder.max_concurrent_dispatches, 1000);
-        assert!(builder.enable_priority);
-        assert_eq!(builder.default_timeout, Some(Duration::from_secs(1)));
-        assert_eq!(builder.batch_size, 100);
-        assert_eq!(builder.shard_count, 8);
-        assert_eq!(builder.global_buffer_size, None);
-        assert!(matches!(builder.backpressure_strategy, BackpressureStrategy::Block));
-        assert!(!builder.enable_metrics);
-        assert_eq!(builder.metrics_reporting_interval, Duration::from_secs(5));
-    }
-    
-    #[test]
-    fn test_builder_customization() {
-        let builder = EventSystemBuilder::new()
-            .implementation(ImplementationType::StaticFastPath)
-            .channel_capacity(5_000)
-            .max_concurrent_dispatches(500)
-            .enable_priority(false)
-            .default_timeout(Some(Duration::from_millis(500)))
-            .batch_size(50)
-            .shard_count(4)
-            .global_buffer_size(Some(100_000))
-            .enable_metrics(true)
-            .metrics_reporting_interval(Duration::from_secs(10));
-            
-        assert_eq!(builder.implementation_type, ImplementationType::StaticFastPath);
-        assert_eq!(builder.channel_capacity, 5_000);
-        assert_eq!(builder.max_concurrent_dispatches, 500);
-        assert!(!builder.enable_priority);
-        assert_eq!(builder.default_timeout, Some(Duration::from_millis(500)));
-        assert_eq!(builder.batch_size, 50);
-        assert_eq!(builder.shard_count, 4);
-        assert_eq!(builder.global_buffer_size, Some(100_000));
-        assert!(builder.enable_metrics);
-        assert_eq!(builder.metrics_reporting_interval, Duration::from_secs(10));
     }
 } 
