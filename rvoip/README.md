@@ -50,17 +50,22 @@ rvoip follows a layered architecture inspired by established SIP stacks, with cl
 └──────────────────┬─────────────────┘ └─────────────┬───────────────┘ └───────────────────┬────────────────┘
                    │                                 │                                     │
                    ▼                                 ▼                                     │
-┌──────────────────────────────────┐     ┌────────────────────────────────┐               │
-│        transaction-core          │     │            rtp-core            │               │
-│      (SIP State Machine)         │     │      (RTP/RTCP Processing)     │               │
-│                                  │     │                                │               │
-│┌────────────────────────────────┐│     │┌──────────────────────────────┐│               │
-││    Transaction Processing      ││     ││      Packet Handling         ││               │
-│└────────────────────────────────┘│     │└──────────────────────────────┘│               │
-└──────────────────┬───────────────┘     └─────────────┬──────────────────┘               │
-                   │                                   │                                  │
-                   │                                   │                                  │
-┌──────────────────▼───────────────────────────────────▼──────────────────────────────────▼───────────────┐
+┌──────────────────────────────────┐     ┌────────────────────────────────┐     ┌────────────────────────────────┐
+│        transaction-core          │     │          ai-engine             │     │            rtp-core            │
+│      (SIP State Machine)         │     │    (Intelligent Services)      │     │      (RTP/RTCP Processing)     │
+│                                  │     │                                │     │                                │
+│┌────────────────────────────────┐│     │┌──────────────────────────────┐│     │┌──────────────────────────────┐│
+││    Transaction Processing      ││     ││     Speech Processing        ││     ││      Packet Handling         ││
+│└────────────────────────────────┘│     │└──────────────────────────────┘│     │└──────────────────────────────┘│
+└──────────────────┬───────────────┘     │┌──────────────────────────────┐│     └─────────────┬──────────────────┘
+                   │                      ││    Intelligent Routing      ││                    │
+                   │                      │└──────────────────────────────┘│                    │
+                   │                      │┌──────────────────────────────┐│                    │
+                   │                      ││    Media Intelligence        ││                    │
+                   │                      │└──────────────────────────────┘│                    │
+                   │                      └──────────────────┬─────────────┘                    │
+                   │                                         │                                  │
+┌──────────────────▼─────────────────────────────────────────▼──────────────────────────────────▼───────────────┐
 │                                                                                                         │
 │  ┌────────────────────────────────────┐      ┌────────────────────────────────┐     ┌─────────────────┐ │
 │  │          sip-transport             │      │        Media Transport          │     │     Storage     │ │
@@ -115,6 +120,7 @@ The project is organized into these primary crates:
 - **media-recorder**: Media recording, analysis, and standards compliance (SIPrec, vCon)
 - **storage-service**: Distributed storage for media recordings, metadata, and analytics
 - **call-engine**: Call routing, policy enforcement, application logic
+- **ai-engine**: AI agent framework for call assistance, routing intelligence, and media analysis
 - **sip-client**: High-level client library for SIP applications
 - **api-server**: External control API (REST/gRPC/WebSocket)
 - **infra-common**: Shared infrastructure for cross-cutting concerns (events, configuration, logging, lifecycle management)
@@ -148,6 +154,11 @@ The project is organized into these primary crates:
 
 - **transaction-core**: Implements the SIP transaction layer:
   - **Transaction Processing**: Handles client and server transactions according to the SIP specification.
+
+- **ai-engine**: Coordinates AI capabilities within the system:
+  - **Speech Processing**: Provides interfaces for speech recognition, transcription, and generation.
+  - **Intelligent Routing**: Makes context-aware routing decisions based on call analysis.
+  - **Media Intelligence**: Analyzes media for sentiment, intent detection, and conversation insights.
 
 - **rtp-core**: Handles RTP/RTCP packet processing:
   - **Packet Handling**: Processes RTP packets, RTCP reports, and provides media synchronization.
