@@ -11,7 +11,6 @@ Create a unified `EventSystem` API that provides a simple, consistent interface 
 - Maintain all existing functionality while simplifying the developer experience
 - Ensure performance optimizations are preserved in the abstraction
 - Provide clear upgrade paths for advanced use cases
-- Implement configurable backpressure handling to maintain system stability under load
 - Add comprehensive observability for performance monitoring and debugging
 
 ## Core Components
@@ -20,8 +19,7 @@ Create a unified `EventSystem` API that provides a simple, consistent interface 
 2. **EventSystem**: Main interface with common operations for both implementations
 3. **EventPublisher<E>**: Generic publisher for a specific event type
 4. **EventSubscriber<E>**: Generic subscriber for a specific event type
-5. **BufferManager**: Global buffer management and backpressure handling
-6. **EventMetrics**: System-wide event metrics collection and reporting
+5. **EventMetrics**: System-wide event metrics collection and reporting
 
 ## New Architecture: Separation of Concerns
 
@@ -93,28 +91,14 @@ pub struct EventSystemBuilder {
     default_timeout: Option<Duration>,
     batch_size: usize,
     shard_count: usize,
-    // New backpressure configuration options
-    global_buffer_size: Option<usize>,
-    backpressure_strategy: BackpressureStrategy,
     enable_metrics: bool,
     metrics_reporting_interval: Duration,
+    metrics_http_endpoint: Option<SocketAddr>,
 }
 
 pub enum ImplementationType {
     StaticFastPath,
     ZeroCopy,
-}
-
-// Backpressure strategy to use when buffers are full
-pub enum BackpressureStrategy {
-    // Block publisher until buffer space is available
-    Block,
-    // Drop oldest events to make room for new ones
-    DropOldest,
-    // Drop newest events (reject new publishes)
-    DropNewest,
-    // Apply custom backpressure function
-    Custom(Arc<dyn Fn() -> BackpressureAction + Send + Sync>),
 }
 
 impl EventSystemBuilder {
@@ -128,11 +112,9 @@ impl EventSystemBuilder {
             default_timeout: Some(Duration::from_secs(1)),
             batch_size: 100,
             shard_count: 8,
-            // New backpressure configuration options
-            global_buffer_size: None,
-            backpressure_strategy: BackpressureStrategy::Block,
             enable_metrics: false,
             metrics_reporting_interval: Duration::from_secs(5),
+            metrics_http_endpoint: None,
         }
     }
     
@@ -171,18 +153,6 @@ impl EventSystemBuilder {
         self
     }
     
-    // Configure global buffer size (None = unlimited, within memory constraints)
-    pub fn global_buffer_size(mut self, size: Option<usize>) -> Self {
-        self.global_buffer_size = size;
-        self
-    }
-    
-    // Configure backpressure strategy
-    pub fn backpressure_strategy(mut self, strategy: BackpressureStrategy) -> Self {
-        self.backpressure_strategy = strategy;
-        self
-    }
-    
     // Enable/disable metrics collection
     pub fn enable_metrics(mut self, enabled: bool) -> Self {
         self.enable_metrics = enabled;
@@ -192,6 +162,11 @@ impl EventSystemBuilder {
     // Set metrics reporting interval
     pub fn metrics_reporting_interval(mut self, interval: Duration) -> Self {
         self.metrics_reporting_interval = interval;
+        self
+    }
+    
+    pub fn metrics_http_endpoint(mut self, addr: Option<SocketAddr>) -> Self {
+        self.metrics_http_endpoint = addr;
         self
     }
     
@@ -397,49 +372,251 @@ impl<E: Event> EventSubscriber<E> {
 
 ✅ Update existing benchmarks to use new API
 
-### Phase 6: Buffer Management & Backpressure (TODO)
-
-- [ ] Design and implement buffer management system
-  - [ ] Create `BufferManager` to track global event buffering
-  - [ ] Define interface for buffer monitoring and control
-  - [ ] Implement configurable buffer size limits
-
-- [ ] Implement backpressure mechanism
-  - [ ] Define backpressure strategies (Block, DropOldest, DropNewest, Custom)
-  - [ ] Implement strategy selection in EventSystemBuilder
-  - [ ] Add backpressure hooks in publisher implementations
-  - [ ] Create adaptive backpressure algorithm based on system load
-
-- [ ] Update publisher interfaces for backpressure
-  - [ ] Add backpressure status reporting
-  - [ ] Implement backpressure-aware publish methods
-  - [ ] Add backpressure callbacks for publishers
-
-### Phase 7: Observability & Metrics (TODO)
+### Phase 6: Observability & Metrics (TODO)
 
 - [ ] Create comprehensive metrics collection
-  - [ ] Define core metrics (throughput, latency, queue sizes, drop rates)
+  - [ ] Define core metrics (throughput, latency, queue sizes, drop rates, events/second)
   - [ ] Implement MetricsCollector for event system
   - [ ] Add sampling capability for high-throughput systems
   - [ ] Create standardized metrics reporting format
+  - [ ] Add Prometheus integration for metrics export
 
-- [ ] Add tracing integration
-  - [ ] Implement trace points throughout event flow
-  - [ ] Create configurable tracing levels
-  - [ ] Add context propagation for end-to-end tracing
-  - [ ] Implement traceID propagation across event boundaries
+- [ ] Enhance metric structure
+  - [ ] Implement `EventBusMetrics` with detailed fields (published, delivered, errors, timeouts, overloads)
+  - [ ] Add per-event-type metrics in DashMap for lock-free access
+  - [ ] Track processing time for events using histograms
+  - [ ] Add buffer capacity percentage metrics
+  - [ ] Implement events/second throughput measurement
 
 - [ ] Implement health reporting
   - [ ] Create EventSystemStatus for health checks
   - [ ] Add diagnostic commands for troubleshooting
   - [ ] Implement periodic health reporting
   - [ ] Add alerting hooks for critical conditions
+  - [ ] Monitor event processing lag and buffer utilization
 
 - [ ] Create visualization tools
   - [ ] Design metrics dashboard components
-  - [ ] Implement metrics export to standard formats
+  - [ ] Implement metrics export to standard formats (Prometheus)
   - [ ] Create example visualization configurations
   - [ ] Add real-time monitoring capability
+  - [ ] Create HTTP endpoints for metrics and health status
+
+### Metrics Implementation Details
+
+```rust
+// Enhanced metrics structure with detailed tracking
+#[derive(Debug, Default)]
+struct EventBusMetrics {
+    // Global metrics
+    total_published: metrics::Counter,
+    total_delivered: metrics::Counter,
+    timeouts: metrics::Counter,
+    overloads: metrics::Counter,
+    
+    // Latency and throughput metrics
+    publish_latency: metrics::Histogram,
+    process_latency: metrics::Histogram,
+    events_per_second: metrics::Gauge,
+    
+    // Per-event type metrics stored in DashMap for lock-free access
+    per_type_metrics: DashMap<String, EventTypeMetrics>,
+    
+    // Last update timestamps for rate calculations
+    last_published_timestamp: AtomicU64,
+    last_published_count: AtomicU64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct EventTypeMetrics {
+    published: metrics::Counter,
+    delivered: metrics::Counter,
+    errors: metrics::Counter,
+    processing_time: metrics::Histogram,
+}
+
+// Metrics module with Prometheus export
+pub mod metrics {
+    use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+    use once_cell::sync::Lazy;
+    use std::net::SocketAddr;
+
+    /// Global Prometheus metrics handle
+    static METRICS: Lazy<PrometheusHandle> = Lazy::new(|| {
+        PrometheusBuilder::new()
+            .add_global_label("service", "rvoip_events")
+            .install_recorder()
+            .expect("failed to install Prometheus recorder")
+    });
+
+    /// Start a metrics server on the given address
+    pub fn start_metrics_server(addr: SocketAddr) -> std::io::Result<()> {
+        use hyper::{
+            service::{make_service_fn, service_fn},
+            Body, Request, Response, Server,
+        };
+        use std::convert::Infallible;
+
+        println!("Starting metrics server on {}", addr);
+        
+        // Route requests
+        async fn route(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+            match req.uri().path() {
+                "/metrics" => {
+                    let metrics = METRICS.render();
+                    Ok(Response::new(Body::from(metrics)))
+                },
+                "/health" => {
+                    Ok(Response::new(Body::from("healthy")))
+                },
+                _ => Ok(Response::builder()
+                         .status(404)
+                         .body(Body::from("Not found"))
+                         .unwrap()),
+            }
+        }
+
+        let make_svc = make_service_fn(|_conn| {
+            async { Ok::<_, Infallible>(service_fn(route)) }
+        });
+
+        let server = Server::bind(&addr).serve(make_svc);
+        tokio::spawn(async move {
+            if let Err(e) = server.await {
+                eprintln!("Metrics server error: {}", e);
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Update system health metrics
+    pub fn update_health_metrics(
+        buffer_capacity_pct: f64, 
+        event_processing_lag: f64,
+        error_rate: f64,
+        events_per_second: f64
+    ) {
+        metrics::gauge!("rvoip_events_buffer_capacity_pct", buffer_capacity_pct);
+        metrics::gauge!("rvoip_events_processing_lag", event_processing_lag);
+        metrics::gauge!("rvoip_events_error_rate", error_rate);
+        metrics::gauge!("rvoip_events_per_second", events_per_second);
+    }
+}
+
+// Method to calculate events per second
+fn calculate_events_per_second(&self) -> f64 {
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+        
+    let current_count = self.total_published.get_counter();
+    let last_time = self.last_published_timestamp.swap(current_time, Ordering::Relaxed);
+    let last_count = self.last_published_count.swap(current_count, Ordering::Relaxed);
+    
+    if last_time == 0 || last_count == 0 || current_time <= last_time {
+        return 0.0;
+    }
+    
+    let time_diff_seconds = (current_time - last_time) as f64 / 1000.0;
+    let count_diff = current_count - last_count;
+    
+    if time_diff_seconds > 0.0 {
+        count_diff as f64 / time_diff_seconds
+    } else {
+        0.0
+    }
+}
+
+// Health monitoring task
+async fn monitor_health(event_system: EventSystem, interval: Duration) {
+    let mut interval_timer = tokio::time::interval(interval);
+    
+    loop {
+        interval_timer.tick().await;
+        
+        // Get current metrics
+        let (published, delivered, timeouts, overloads) = event_system.metrics();
+        
+        // Calculate derived metrics
+        let error_rate = if published > 0 {
+            (timeouts + overloads) as f64 / published as f64 * 100.0
+        } else {
+            0.0
+        };
+        
+        let buffer_capacity_pct = event_system.calculate_buffer_usage() * 100.0;
+        let events_per_second = event_system.calculate_events_per_second();
+        
+        // Update health metrics
+        metrics::update_health_metrics(
+            buffer_capacity_pct,
+            overloads as f64, // Using overloads as processing lag indicator
+            error_rate,
+            events_per_second
+        );
+        
+        // Alert on critical conditions
+        if error_rate > 5.0 || buffer_capacity_pct > 80.0 {
+            log::warn!(
+                "Event system under stress: error_rate={}%, buffer_usage={}%, events_per_second={}",
+                error_rate,
+                buffer_capacity_pct,
+                events_per_second
+            );
+        }
+    }
+}
+```
+
+### Usage Example
+
+```rust
+use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use infra_common::events::metrics;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+async fn setup_observable_event_system() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure event system with observability
+    let system = EventSystemBuilder::new()
+        .implementation(ImplementationType::ZeroCopy)
+        .channel_capacity(10_000)
+        .max_concurrent_dispatches(1_000)
+        .enable_priority(true)
+        .enable_metrics(true)
+        .metrics_reporting_interval(Duration::from_secs(5))
+        .metrics_http_endpoint(Some("0.0.0.0:9000".parse::<SocketAddr>()?))
+        .build();
+    
+    // Start the event system
+    system.start().await?;
+    
+    // Start health monitoring
+    system.start_health_monitoring(Duration::from_secs(10)).await?;
+    
+    // Access metrics directly when needed
+    let (published, delivered, timeouts, overloads) = system.metrics();
+    println!("Events published: {}", published);
+    println!("Events delivered: {}", delivered);
+    println!("Current throughput: {} events/second", system.calculate_events_per_second());
+    
+    // Get detailed metrics by event type
+    let detailed_metrics = system.get_detailed_metrics();
+    for (event_type, metrics) in detailed_metrics {
+        println!("Event type: {}", event_type);
+        println!("  Published: {}", metrics.published.get_counter());
+        println!("  Delivered: {}", metrics.delivered.get_counter());
+        println!("  Errors: {}", metrics.errors.get_counter());
+        println!("  Avg processing time: {} μs", metrics.processing_time.mean());
+    }
+    
+    // Prometheus metrics are available at http://localhost:9000/metrics
+    // Health check endpoint is available at http://localhost:9000/health
+    
+    Ok(())
+}
 
 ## Migration Strategy (COMPLETED)
 
@@ -460,8 +637,7 @@ impl<E: Event> EventSubscriber<E> {
 - Phase 3 (Error Handling): ✅ COMPLETED
 - Phase 4 (Documentation & Examples): ✅ COMPLETED
 - Phase 5 (Testing & Validation): ✅ COMPLETED
-- Phase 6 (Buffer Management & Backpressure): 2 weeks
-- Phase 7 (Observability & Metrics): 2 weeks
+- Phase 6 (Observability & Metrics): 2 weeks
 - Migration: ✅ COMPLETED
 
 ## Example Artifacts
@@ -761,113 +937,6 @@ struct MetricsEvent {
 // Event trait implementations would go here in a real implementation
 ```
 
-### Backpressure Example
-
-```rust
-// Example showing backpressure configuration
-use infra_common::events::{EventSystem, EventSystemBuilder, ImplementationType, BackpressureStrategy};
-use std::time::Duration;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create an event system with custom backpressure configuration
-    let event_system = EventSystemBuilder::new()
-        .implementation(ImplementationType::ZeroCopy)
-        .channel_capacity(1000)
-        .global_buffer_size(Some(10_000_000)) // 10MB buffer limit
-        .backpressure_strategy(BackpressureStrategy::DropOldest)
-        .build();
-    
-    // Start the system
-    event_system.start().await?;
-    
-    // Create a publisher with backpressure awareness
-    let publisher = event_system.create_publisher::<LargeMediaEvent>();
-    
-    // Custom publishing with backpressure handling
-    for i in 0..1000 {
-        let event = LargeMediaEvent {
-            id: i,
-            data: vec![0u8; 10000], // 10KB payload
-        };
-        
-        match publisher.publish(event).await {
-            Ok(_) => println!("Published event {}", i),
-            Err(e) if e.is_backpressure() => {
-                // Handle backpressure condition
-                println!("Backpressure detected, slowing down");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                // Could retry or take other corrective action
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    
-    // Access metrics
-    if let Some(metrics) = event_system.metrics() {
-        println!("Events published: {}", metrics.total_published());
-        println!("Events dropped: {}", metrics.total_dropped());
-        println!("Current buffer utilization: {}%", metrics.buffer_utilization() * 100.0);
-    }
-    
-    Ok(())
-}
-```
-
-### Observability Example
-
-```rust
-// Example showing observability features
-use infra_common::events::{EventSystem, EventSystemBuilder, ImplementationType};
-use infra_common::events::metrics::{MetricsReporter, OutputFormat};
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create an event system with metrics enabled
-    let event_system = EventSystemBuilder::new()
-        .implementation(ImplementationType::StaticFastPath)
-        .enable_metrics(true)
-        .metrics_reporting_interval(Duration::from_secs(5))
-        .build();
-    
-    // Start the system with metrics reporting
-    event_system.start().await?;
-    
-    // Get metrics reporter
-    let metrics_reporter = event_system.metrics_reporter();
-    
-    // Configure metrics output
-    metrics_reporter.configure(|config| {
-        config
-            .add_output(OutputFormat::Json, "metrics.json")
-            .add_output(OutputFormat::Prometheus, "http://localhost:9091")
-            .set_detailed_view(true)
-            .enable_histogram(true)
-            .track_event_types(vec!["media_packet", "signaling_event"])
-    });
-    
-    // Start a metrics dashboard on a local port
-    metrics_reporter.start_dashboard(8080).await?;
-    
-    // Run your application...
-    
-    // Manually report metrics at key points
-    let snapshot = event_system.metrics().snapshot();
-    println!("System metrics: {:#?}", snapshot);
-    
-    // Get health status
-    let health = event_system.health_check().await?;
-    println!("System health: {}", if health.is_healthy() { "HEALTHY" } else { "UNHEALTHY" });
-    if !health.is_healthy() {
-        println!("Health issues: {:?}", health.issues());
-    }
-    
-    Ok(())
-}
-```
-
 # Event System Implementation Status
 
 ## Phase 1: Registry and Type-Safety Improvements (COMPLETED)
@@ -916,12 +985,10 @@ The API abstraction layer maintains full performance while providing a simplifie
 2. Implement a true static dispatch mechanism that avoids runtime type lookup
 3. Implement a derive macro for StaticEvent to help with registration
 4. Improve the batch publishing to work in both implementations
-5. Implement buffer management and backpressure mechanisms
-6. Add comprehensive observability and metrics functionality 
+5. Add comprehensive observability and metrics functionality
 
 
-buffer
-backpressure
+
 metrics
 observability
 
