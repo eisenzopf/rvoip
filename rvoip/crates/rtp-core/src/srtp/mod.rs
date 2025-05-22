@@ -278,4 +278,7 @@ mod tests {
         
         assert!(context.is_ok());
     }
-} 
+}
+
+#[cfg(test)]
+mod integration_tests; 
