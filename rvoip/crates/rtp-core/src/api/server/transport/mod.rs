@@ -25,6 +25,15 @@ pub mod server_transport_impl;
 // Re-export the implementation
 pub use server_transport_impl::DefaultMediaTransportServer;
 
+// Add all the submodules here at the top of the file
+mod core;
+mod media;
+mod rtcp;
+mod security;
+mod ssrc;
+mod stats;
+mod default; // Include the default implementation module
+
 /// Client information
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
