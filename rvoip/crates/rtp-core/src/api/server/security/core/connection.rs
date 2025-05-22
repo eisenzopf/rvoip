@@ -11,6 +11,7 @@ use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SrtpProfile};
 use crate::api::server::security::{ServerSecurityConfig, SocketHandle, ConnectionConfig, ConnectionRole};
 use crate::dtls::{DtlsConnection, DtlsConfig, DtlsRole};
+use crate::api::server::security::srtp::keys;
 
 /// Create a new DTLS connection with server role
 pub async fn create_server_connection(
@@ -22,7 +23,7 @@ pub async fn create_server_connection(
         version: crate::dtls::DtlsVersion::Dtls12,
         mtu: 1500,
         max_retransmissions: 5,
-        srtp_profiles: convert_profiles(&config.srtp_profiles),
+        srtp_profiles: keys::convert_profiles(&config.srtp_profiles),
     };
     
     // Create connection

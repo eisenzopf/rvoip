@@ -15,6 +15,7 @@ use crate::api::server::security::{ClientSecurityContext, ServerSecurityConfig, 
 use crate::dtls::{DtlsConnection};
 use crate::srtp::{SrtpContext};
 use crate::api::server::security::dtls::{handshake, transport};
+use crate::api::server::security::srtp::keys;
 
 /// Client security context managed by the server
 pub struct DefaultClientSecurityContext {
@@ -238,14 +239,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             fingerprint: None, // Will be filled by async get_fingerprint method
             fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
             crypto_suites: self.config.srtp_profiles.iter()
-                .map(|p| match p {
-                    SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                    SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                    SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                    SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-                    _ => "UNKNOWN",
-                })
-                .map(|s| s.to_string())
+                .map(|p| keys::profile_to_string(*p))
                 .collect(),
             key_params: None,
             srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),

@@ -11,6 +11,7 @@ use crate::api::common::error::SecurityError;
 use crate::api::server::security::{ClientSecurityContext, SocketHandle};
 use crate::dtls::{DtlsConnection, handshake::HandshakeStep};
 use crate::srtp::{SrtpContext};
+use crate::api::server::security::srtp::keys;
 
 /// Process DTLS handshake steps
 pub async fn process_handshake_step(
@@ -55,22 +56,13 @@ pub async fn process_handshake_step(
             if !*completed {
                 *completed = true;
                 
-                // Extract SRTP keys
-                match conn.extract_srtp_keys() {
-                    Ok(srtp_ctx) => {
-                        // Get server key (false = server)
-                        let server_key = srtp_ctx.get_key_for_role(false).clone();
-                        
-                        // Create SRTP context for server role
-                        match SrtpContext::new(srtp_ctx.profile, server_key) {
-                            Ok(ctx) => {
-                                // Store SRTP context
-                                let mut srtp_guard = srtp_context.lock().await;
-                                *srtp_guard = Some(ctx);
-                                debug!("Server successfully extracted SRTP keys for client {}", address);
-                            },
-                            Err(e) => warn!("Failed to create server SRTP context: {}", e)
-                        }
+                // Extract SRTP keys using the srtp module
+                match keys::extract_srtp_keys(conn, address, false).await {
+                    Ok(ctx) => {
+                        // Store SRTP context
+                        let mut srtp_guard = srtp_context.lock().await;
+                        *srtp_guard = Some(ctx);
+                        debug!("Server successfully extracted SRTP keys for client {}", address);
                     },
                     Err(e) => warn!("Failed to extract SRTP keys: {}", e)
                 }
@@ -119,51 +111,27 @@ pub async fn wait_for_handshake(
         Ok(_) => {
             debug!("DTLS handshake completed for client {}", address);
             
-            // Extract SRTP keys
+            // Extract SRTP keys using the srtp module
             let conn_guard = connection.lock().await;
             if let Some(conn) = conn_guard.as_ref() {
-                match conn.extract_srtp_keys() {
+                match keys::extract_srtp_keys(conn, address, false).await {
                     Ok(srtp_ctx) => {
-                        // Get the key for server role
-                        let server_key = srtp_ctx.get_key_for_role(false).clone();
-                        debug!("Extracted SRTP keys for client {}", address);
+                        debug!("Created SRTP context for client {}", address);
                         
-                        // Convert to SRTP profile
-                        let profile = match srtp_ctx.profile {
-                            crate::srtp::SrtpCryptoSuite { authentication: crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80, .. } => {
-                                crate::srtp::SRTP_AES128_CM_SHA1_80
-                            },
-                            _ => {
-                                error!("Unsupported SRTP profile for client {}", address);
-                                return Err(SecurityError::Configuration("Unsupported SRTP profile".to_string()));
-                            }
-                        };
+                        // Store SRTP context
+                        let mut srtp_guard = srtp_context.lock().await;
+                        *srtp_guard = Some(srtp_ctx);
                         
-                        // Create SRTP context
-                        match SrtpContext::new(profile, server_key) {
-                            Ok(srtp_ctx) => {
-                                debug!("Created SRTP context for client {}", address);
-                                
-                                // Store SRTP context
-                                let mut srtp_guard = srtp_context.lock().await;
-                                *srtp_guard = Some(srtp_ctx);
-                                
-                                // Set handshake completed flag
-                                let mut completed = handshake_completed.lock().await;
-                                *completed = true;
-                                
-                                debug!("DTLS handshake fully completed for client {}", address);
-                                Ok(())
-                            },
-                            Err(e) => {
-                                error!("Failed to create SRTP context for client {}: {}", address, e);
-                                Err(SecurityError::Internal(format!("Failed to create SRTP context: {}", e)))
-                            }
-                        }
+                        // Set handshake completed flag
+                        let mut completed = handshake_completed.lock().await;
+                        *completed = true;
+                        
+                        debug!("DTLS handshake fully completed for client {}", address);
+                        Ok(())
                     },
                     Err(e) => {
                         error!("Failed to extract SRTP keys for client {}: {}", address, e);
-                        Err(SecurityError::Internal(format!("Failed to extract SRTP keys: {}", e)))
+                        Err(e)
                     }
                 }
             } else {

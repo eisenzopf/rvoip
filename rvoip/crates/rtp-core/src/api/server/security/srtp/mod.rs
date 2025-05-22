@@ -1,7 +1,7 @@
 //! SRTP functionality
 //!
-//! This module contains components for handling SRTP key management.
+//! This module contains components for handling SRTP keys and crypto.
 
-mod keys;
+pub mod keys;
 
 pub use keys::*; 
