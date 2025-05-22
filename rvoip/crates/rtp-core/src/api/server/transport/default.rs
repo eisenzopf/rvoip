@@ -182,63 +182,435 @@ impl DefaultMediaTransportServer {
 
 #[async_trait]
 impl MediaTransportServer for DefaultMediaTransportServer {
-    /// Placeholder implementations for the MediaTransportServer trait
-    /// Full implementations will be added in future phases
-    
+    /// Start the server
+    ///
+    /// This binds to the configured address and starts listening for
+    /// incoming client connections.
     async fn start(&self) -> Result<(), MediaTransportError> {
-        todo!("Implement start")
+        // Check if already running
+        {
+            let running = self.running.read().await;
+            if *running {
+                return Ok(());
+            }
+        }
+        
+        // Set running flag
+        {
+            let mut running = self.running.write().await;
+            *running = true;
+        }
+        
+        // Initialize security if needed
+        super::security::init_security_if_needed(
+            &self.config, 
+            &self.security_context
+        ).await?;
+        
+        // Create main transport
+        let transport_config = RtpTransportConfig {
+            local_rtp_addr: self.config.local_address,
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: self.config.rtcp_mux,
+            session_id: Some(format!("media-server-main-{}", Uuid::new_v4())),
+            use_port_allocator: false, // Changed from true to false to use exact specified port
+        };
+        
+        debug!("Creating main transport with config: {:?}", transport_config);
+        
+        let transport = UdpRtpTransport::new(transport_config).await
+            .map_err(|e| MediaTransportError::Transport(format!("Failed to create main transport: {}", e)))?;
+        
+        // Log the actual bound address
+        let actual_addr = transport.local_rtp_addr()
+            .map_err(|e| MediaTransportError::Transport(format!("Failed to get local RTP address: {}", e)))?;
+            
+        info!("Server actually bound to: {}", actual_addr);
+            
+        let transport_arc = Arc::new(transport);
+        
+        // Store the socket in a thread-safe way using RwLock
+        {
+            let mut main_socket = self.main_socket.write().await;
+            *main_socket = Some(transport_arc.clone());
+        }
+        
+        // Subscribe to transport events
+        let mut transport_events = transport_arc.subscribe();
+        let clients_clone = self.clients.clone();
+        let sender_clone = self.frame_sender.clone();
+        let ssrc_demux_enabled_clone = self.ssrc_demultiplexing_enabled.clone();
+        
+        let task = tokio::spawn(async move {
+            debug!("Started transport event task");
+            while let Ok(event) = transport_events.recv().await {
+                match event {
+                    crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker } => {
+                        // Debug output to help diagnose issues
+                        debug!("RtpEvent::MediaReceived from {} - payload size={}", source, payload.len());
+                        
+                        // Parse the RTP packet to extract the SSRC and other header information
+                        debug!("Attempting to parse RTP packet from payload...");
+                        let packet_result = crate::packet::RtpPacket::parse(&payload);
+                        
+                        // Process the parsed packet or create a frame with available info
+                        let (frame, ssrc) = match packet_result {
+                            Ok(packet) => {
+                                // Successfully parsed the packet, use its header information
+                                debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
+                                       packet.header.ssrc, packet.header.sequence_number, 
+                                       packet.header.timestamp, packet.header.payload_type);
+                                
+                                let frame = crate::api::common::frame::MediaFrame {
+                                    frame_type: if packet.header.payload_type <= 34 {
+                                        crate::api::common::frame::MediaFrameType::Audio
+                                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                                        crate::api::common::frame::MediaFrameType::Video
+                                    } else {
+                                        crate::api::common::frame::MediaFrameType::Data
+                                    },
+                                    data: packet.payload.to_vec(),
+                                    timestamp: packet.header.timestamp,
+                                    sequence: packet.header.sequence_number,
+                                    marker: packet.header.marker,
+                                    payload_type: packet.header.payload_type,
+                                    ssrc: packet.header.ssrc,
+                                    csrcs: packet.header.csrc.clone(),
+                                };
+                                
+                                // Log payload data if it's text (helps with debugging)
+                                if let Ok(text) = std::str::from_utf8(&packet.payload) {
+                                    debug!("Packet payload (text): {}", text);
+                                }
+                                
+                                (frame, packet.header.ssrc)
+                            },
+                            Err(e) => {
+                                // If we couldn't parse the packet, create a MediaFrame with the available info
+                                debug!("Couldn't parse RTP packet, using available info: {}", e);
+                                
+                                // Attempt to dump the first few bytes for debugging
+                                if payload.len() >= 12 {
+                                    let mut header_bytes = [0u8; 12];
+                                    header_bytes.copy_from_slice(&payload[0..12]);
+                                    debug!("First 12 bytes of payload: {:?}", header_bytes);
+                                }
+                                
+                                // Generate a random sequence number and SSRC as fallback
+                                let sequence_number = rand::random::<u16>();
+                                let ssrc = rand::random::<u32>();
+                                
+                                let frame = crate::api::common::frame::MediaFrame {
+                                    frame_type: if payload_type <= 34 {
+                                        crate::api::common::frame::MediaFrameType::Audio
+                                    } else if payload_type >= 35 && payload_type <= 50 {
+                                        crate::api::common::frame::MediaFrameType::Video
+                                    } else {
+                                        crate::api::common::frame::MediaFrameType::Data
+                                    },
+                                    data: payload.to_vec(),
+                                    timestamp,
+                                    sequence: sequence_number,
+                                    marker,
+                                    payload_type,
+                                    ssrc,
+                                    csrcs: Vec::new(), // No CSRCs in fallback case
+                                };
+                                (frame, ssrc)
+                            }
+                        };
+                        
+                        // Check if SSRC demultiplexing is enabled
+                        let ssrc_demux_enabled = *ssrc_demux_enabled_clone.read().await;
+                        debug!("SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}", 
+                               ssrc_demux_enabled, ssrc);
+                        
+                        // Check if we already have a client for this address
+                        let clients = clients_clone.read().await;
+                        let client_exists = clients.values().any(|c| c.address == source);
+                        let client_id = if client_exists {
+                            // Find the client ID for this address
+                            clients.values()
+                                .find(|c| c.address == source)
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| format!("unknown-{}", source))
+                        } else {
+                            // No client ID yet
+                            format!("pending-{}", source)
+                        };
+                        drop(clients);
+                        
+                        // Forward directly to broadcast channel
+                        // This ensures frames are available immediately via the receive_frame method
+                        match sender_clone.send((client_id.clone(), frame)) {
+                            Ok(receivers) => {
+                                debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})", 
+                                        receivers, client_id, ssrc);
+                            },
+                            Err(e) => {
+                                debug!("No receivers for direct frame forwarding: {}", e);
+                            }
+                        }
+                        
+                        // Handle client creation if new
+                        if !client_exists {
+                            // New client - handle it
+                            debug!("New client detected at {}, handling...", source);
+                            let client_result = super::core::handle_client_static(
+                                source, 
+                                &clients_clone, 
+                                &sender_clone
+                            ).await;
+                            
+                            match client_result {
+                                Ok(client_id) => debug!("Successfully handled new client {} from {}", client_id, source),
+                                Err(e) => error!("Failed to handle new client from {}: {}", source, e),
+                            }
+                        } else {
+                            debug!("Existing client from {}, no new client creation needed", source);
+                        }
+                    },
+                    crate::traits::RtpEvent::RtcpReceived { source, .. } => {
+                        debug!("RtpEvent::RtcpReceived from {}", source);
+                    },
+                    crate::traits::RtpEvent::Error(e) => {
+                        error!("Transport error: {}", e);
+                    },
+                }
+            }
+            debug!("Transport event task ended");
+        });
+        
+        // Store task handle
+        let mut event_task = self.event_task.lock().await;
+        *event_task = Some(task);
+        
+        Ok(())
     }
     
+    /// Stop the server
+    ///
+    /// This stops listening for new connections and disconnects all
+    /// existing clients.
     async fn stop(&self) -> Result<(), MediaTransportError> {
-        todo!("Implement stop")
+        // Check if we're running
+        {
+            let running = self.running.read().await;
+            if !*running {
+                debug!("Server already stopped, no action needed");
+                return Ok(());
+            }
+        }
+
+        // Set not running
+        {
+            let mut running = self.running.write().await;
+            *running = false;
+        }
+        
+        debug!("Stopping server - aborting event task");
+        
+        // Stop event task first to prevent new client connections
+        {
+            let mut event_task = self.event_task.lock().await;
+            if let Some(task) = event_task.take() {
+                debug!("Aborting main event task");
+                task.abort();
+                // Try to wait for the task to finish (with timeout)
+                match tokio::time::timeout(Duration::from_millis(100), task).await {
+                    Ok(_) => debug!("Event task terminated gracefully"),
+                    Err(_) => debug!("Event task termination timed out"),
+                }
+            } else {
+                debug!("No event task to abort");
+            }
+        }
+        
+        debug!("Disconnecting all clients");
+        
+        // Disconnect all clients
+        let mut clients = self.clients.write().await;
+        debug!("Disconnecting {} clients", clients.len());
+        
+        for (id, client) in clients.iter_mut() {
+            debug!("Disconnecting client {}", id);
+            
+            // Abort task
+            if let Some(task) = client.task.take() {
+                debug!("Aborting client task for {}", id);
+                task.abort();
+                // Try to wait for the task to finish (with timeout)
+                match tokio::time::timeout(Duration::from_millis(100), task).await {
+                    Ok(_) => debug!("Client task for {} terminated gracefully", id),
+                    Err(_) => debug!("Client task termination for {} timed out", id),
+                }
+            }
+            
+            // Close session
+            debug!("Closing session for client {}", id);
+            let mut session = client.session.lock().await;
+            if let Err(e) = session.close().await {
+                warn!("Error closing client session {}: {}", id, e);
+            }
+            drop(session);
+            
+            // Close security context if present
+            if let Some(security_ctx) = &client.security {
+                debug!("Closing security for client {}", id);
+                if let Err(e) = security_ctx.close().await {
+                    warn!("Error closing client security {}: {}", id, e);
+                }
+            }
+            
+            // Mark as disconnected
+            client.connected = false;
+            
+            // Notify callbacks
+            debug!("Notifying disconnection callbacks for client {}", id);
+            let callbacks_guard = self.client_disconnected_callbacks.read().await;
+            let client_info = ClientInfo {
+                id: client.id.clone(),
+                address: client.address,
+                secure: client.security.is_some(),
+                security_info: None,
+                connected: false,
+            };
+            
+            for callback in &*callbacks_guard {
+                callback(client_info.clone());
+            }
+            drop(callbacks_guard);
+        }
+        
+        // Clear clients
+        debug!("Clearing client list");
+        clients.clear();
+        drop(clients);
+        
+        // Close main socket if available
+        debug!("Closing main socket");
+        let mut main_socket = self.main_socket.write().await;
+        if let Some(socket) = main_socket.take() {
+            debug!("Closing main transport socket");
+            if let Err(e) = socket.close().await {
+                warn!("Error closing main socket: {}", e);
+            }
+        } else {
+            debug!("No main socket to close");
+        }
+        
+        // Ensure we release broadcast channel resources
+        debug!("Ensuring broadcast channel resources are released");
+        // Create a temporary receiver and then immediately drop it to avoid any lingering receivers
+        {
+            let _temp_receiver = self.frame_sender.subscribe();
+            // Immediately drop the receiver
+        }
+        
+        debug!("Server stopped successfully");
+        Ok(())
     }
     
+    /// Receive a media frame from any client
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError> {
-        todo!("Implement receive_frame")
+        super::core::receive_frame(&self.frame_sender).await
     }
     
+    /// Get the local address currently bound to
     async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
-        todo!("Implement get_local_address")
+        let main_socket = self.main_socket.read().await;
+        if let Some(socket) = main_socket.as_ref() {
+            match socket.local_rtp_addr() {
+                Ok(addr) => Ok(addr),
+                Err(e) => Err(MediaTransportError::Transport(format!("Failed to get local address: {}", e))),
+            }
+        } else {
+            Err(MediaTransportError::Transport("No socket bound yet. Start server first.".to_string()))
+        }
     }
     
+    /// Send a media frame to a specific client
     async fn send_frame_to(&self, client_id: &str, frame: MediaFrame) -> Result<(), MediaTransportError> {
-        todo!("Implement send_frame_to")
+        super::core::send_frame_to(
+            client_id, 
+            frame, 
+            &self.clients,
+            &self.ssrc_demultiplexing_enabled,
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            &self.main_socket,
+        ).await
     }
     
+    /// Broadcast a media frame to all connected clients
     async fn broadcast_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
-        todo!("Implement broadcast_frame")
+        super::core::broadcast_frame(
+            frame, 
+            &self.clients,
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            &self.main_socket,
+        ).await
     }
     
+    /// Get a list of connected clients
     async fn get_clients(&self) -> Result<Vec<ClientInfo>, MediaTransportError> {
-        todo!("Implement get_clients")
+        super::core::get_clients_info(
+            &self.clients,
+            &self.config,
+        ).await
     }
     
+    /// Disconnect a specific client
     async fn disconnect_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
-        todo!("Implement disconnect_client")
+        super::core::disconnect_client(
+            client_id,
+            &self.clients,
+            &self.client_disconnected_callbacks,
+        ).await
     }
     
+    /// Register a callback for transport events
     async fn on_event(&self, callback: MediaEventCallback) -> Result<(), MediaTransportError> {
-        todo!("Implement on_event")
+        super::core::on_event(
+            callback,
+            &self.event_callbacks,
+        ).await
     }
     
+    /// Register a callback for client connection events
     async fn on_client_connected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        todo!("Implement on_client_connected")
+        super::core::on_client_connected(
+            callback,
+            &self.client_connected_callbacks,
+        ).await
     }
     
+    /// Register a callback for client disconnection events
     async fn on_client_disconnected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        todo!("Implement on_client_disconnected")
+        super::core::on_client_disconnected(
+            callback,
+            &self.client_disconnected_callbacks,
+        ).await
     }
     
+    /// Get statistics for all clients
     async fn get_stats(&self) -> Result<MediaStats, MediaTransportError> {
         todo!("Implement get_stats")
     }
     
+    /// Get statistics for a specific client
     async fn get_client_stats(&self, client_id: &str) -> Result<MediaStats, MediaTransportError> {
         todo!("Implement get_client_stats")
     }
     
+    /// Get security information for SDP exchange
     async fn get_security_info(&self) -> Result<SecurityInfo, MediaTransportError> {
-        todo!("Implement get_security_info")
+        super::security::get_security_info(
+            &self.config,
+            &self.security_context,
+        ).await
     }
     
     async fn send_rtcp_receiver_report(&self) -> Result<(), MediaTransportError> {
@@ -294,11 +666,20 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
-        todo!("Implement is_csrc_management_enabled")
+        Ok(*self.csrc_management_enabled.read().await)
     }
     
     async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
-        todo!("Implement enable_csrc_management")
+        // Check if already enabled
+        if *self.csrc_management_enabled.read().await {
+            return Ok(true);
+        }
+        
+        // Set enabled flag
+        *self.csrc_management_enabled.write().await = true;
+        
+        debug!("Enabled CSRC management on server");
+        Ok(true)
     }
     
     async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
@@ -326,11 +707,21 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
-        todo!("Implement is_header_extensions_enabled")
+        Ok(*self.header_extensions_enabled.read().await)
     }
     
     async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
-        todo!("Implement enable_header_extensions")
+        // Check if already enabled
+        if *self.header_extensions_enabled.read().await {
+            return Ok(true);
+        }
+        
+        // Set format and enabled flag
+        *self.header_extension_format.write().await = format;
+        *self.header_extensions_enabled.write().await = true;
+        
+        debug!("Enabled header extensions with format: {:?}", format);
+        Ok(true)
     }
     
     async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {

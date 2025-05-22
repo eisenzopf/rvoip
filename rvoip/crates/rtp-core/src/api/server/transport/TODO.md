@@ -74,13 +74,13 @@ src/api/server/transport/
   - [x] Create main mod.rs files for each subdirectory
   - [x] Create placeholders for all module files
 
-- [ ] **Phase 2: Core Implementation**
-  - [ ] Extract core structure and initialization to simplified server_transport_impl.rs
-  - [ ] Create placeholder for connection.rs with client connection management functionality
-  - [ ] Create placeholder for frame.rs with send/receive/broadcast frame logic
-  - [ ] Create placeholder for events.rs with event handling logic
-  - [ ] Implement delegate methods in server_transport_impl.rs that call into module functions
-  - [ ] Fix compatibility issues between the module interfaces and their usage
+- [x] **Phase 2: Core Implementation**
+  - [x] Extract core structure and initialization to simplified server_transport_impl.rs
+  - [x] Create connection.rs with client connection management functionality
+  - [x] Create frame.rs with send/receive/broadcast frame logic
+  - [x] Create events.rs with event handling logic
+  - [x] Implement delegate methods in default.rs that call into module functions
+  - [x] Fix compatibility issues between the module interfaces and their usage
 
 - [ ] **Phase 3: Media Implementation**
   - [ ] Create placeholder for mix.rs with media mixing logic
@@ -113,7 +113,7 @@ src/api/server/transport/
 
 ## Current Status
 
-Phase 1 has been completed. The directory structure has been created along with all necessary module files and placeholder implementations. The simplified server_transport_impl.rs now simply re-exports the DefaultMediaTransportServer from the default module, which has been created with the struct definition and trait implementation stubs.
+Phase 2 has been completed. The core functionality (connection management, frame handling, event subscription) has been implemented in their respective modules. The default.rs file now properly delegates method calls to these modules. The security module has also been implemented with basic functionality. The simplified server_transport_impl.rs file re-exports the DefaultMediaTransportServer from the default module.
 
 ## Implementation Strategy
 
@@ -125,16 +125,16 @@ Phase 1 has been completed. The directory structure has been created along with 
 
 ## Key Components to Extract
 
-1. **ClientConnection struct**: Move to core/connection.rs
+1. **ClientConnection struct**: Moved to core/connection.rs
 2. **DefaultMediaTransportServer struct**: Core structure stays in default.rs
-3. **handle_client method**: Move to core/connection.rs
-4. **CSRC management methods**: Move to media/csrc.rs
-5. **Header extension methods**: Move to media/extensions.rs
-6. **RTCP methods**: Split between rtcp/reports.rs and rtcp/app_packets.rs
-7. **Security initialization**: Move to security/server_security.rs
-8. **SSRC demultiplexing**: Move to ssrc/demux.rs
-9. **Quality estimation**: Move to stats/quality.rs
-10. **Frame broadcasting**: Move to core/frame.rs
+3. **handle_client method**: Moved to core/connection.rs
+4. **CSRC management methods**: To be moved to media/csrc.rs
+5. **Header extension methods**: To be moved to media/extensions.rs
+6. **RTCP methods**: To be split between rtcp/reports.rs and rtcp/app_packets.rs
+7. **Security initialization**: Moved to security/server_security.rs
+8. **SSRC demultiplexing**: To be moved to ssrc/demux.rs
+9. **Quality estimation**: To be moved to stats/quality.rs
+10. **Frame broadcasting**: Moved to core/frame.rs
 
 ## Benefits
 
