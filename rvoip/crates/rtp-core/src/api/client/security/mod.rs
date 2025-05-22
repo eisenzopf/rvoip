@@ -13,10 +13,15 @@ use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 use crate::api::server::security::SocketHandle;
 use crate::dtls::{DtlsConfig, DtlsRole};
 
-mod client_security_impl;
+// Export modules
+pub mod default;
+pub mod dtls;
+pub mod srtp;
+pub mod fingerprint;
+pub mod packet;
 
 // Re-export public implementation
-pub use client_security_impl::DefaultClientSecurityContext;
+pub use default::DefaultClientSecurityContext;
 
 /// Client security configuration
 #[derive(Debug, Clone)]
