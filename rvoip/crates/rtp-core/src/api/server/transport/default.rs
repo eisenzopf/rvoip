@@ -614,55 +614,102 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn send_rtcp_receiver_report(&self) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_receiver_report")
+        super::rtcp::send_rtcp_receiver_report(
+            &self.clients
+        ).await
     }
     
     async fn send_rtcp_sender_report(&self) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_sender_report")
+        super::rtcp::send_rtcp_sender_report(
+            &self.clients
+        ).await
     }
     
     async fn send_rtcp_receiver_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_receiver_report_to_client")
+        super::rtcp::send_rtcp_receiver_report_to_client(
+            client_id,
+            &self.clients
+        ).await
     }
     
     async fn send_rtcp_sender_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_sender_report_to_client")
+        super::rtcp::send_rtcp_sender_report_to_client(
+            client_id,
+            &self.clients
+        ).await
     }
     
     async fn get_rtcp_stats(&self) -> Result<RtcpStats, MediaTransportError> {
-        todo!("Implement get_rtcp_stats")
+        super::rtcp::get_rtcp_stats(
+            &self.clients
+        ).await
     }
     
     async fn get_client_rtcp_stats(&self, client_id: &str) -> Result<RtcpStats, MediaTransportError> {
-        todo!("Implement get_client_rtcp_stats")
+        super::rtcp::get_client_rtcp_stats(
+            client_id,
+            &self.clients
+        ).await
     }
     
     async fn set_rtcp_interval(&self, interval: Duration) -> Result<(), MediaTransportError> {
-        todo!("Implement set_rtcp_interval")
+        super::rtcp::set_rtcp_interval(
+            &self.clients,
+            interval
+        ).await
     }
     
     async fn send_rtcp_app(&self, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_app")
+        super::rtcp::send_rtcp_app(
+            &self.clients,
+            &self.main_socket,
+            name,
+            data
+        ).await
     }
     
     async fn send_rtcp_app_to_client(&self, client_id: &str, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_app_to_client")
+        super::rtcp::send_rtcp_app_to_client(
+            client_id,
+            &self.clients,
+            &self.main_socket,
+            name,
+            data
+        ).await
     }
     
     async fn send_rtcp_bye(&self, reason: Option<String>) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_bye")
+        super::rtcp::send_rtcp_bye(
+            &self.clients,
+            &self.main_socket,
+            reason
+        ).await
     }
     
     async fn send_rtcp_bye_to_client(&self, client_id: &str, reason: Option<String>) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_bye_to_client")
+        super::rtcp::send_rtcp_bye_to_client(
+            client_id,
+            &self.clients,
+            &self.main_socket,
+            reason
+        ).await
     }
     
     async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_xr_voip_metrics")
+        super::rtcp::send_rtcp_xr_voip_metrics(
+            &self.clients,
+            &self.main_socket,
+            metrics
+        ).await
     }
     
     async fn send_rtcp_xr_voip_metrics_to_client(&self, client_id: &str, metrics: VoipMetrics) -> Result<(), MediaTransportError> {
-        todo!("Implement send_rtcp_xr_voip_metrics_to_client")
+        super::rtcp::send_rtcp_xr_voip_metrics_to_client(
+            client_id,
+            &self.clients,
+            &self.main_socket,
+            metrics
+        ).await
     }
     
     async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
