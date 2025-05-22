@@ -177,7 +177,23 @@ impl DefaultMediaTransportServer {
         })
     }
 
-    // Other methods will be implemented in future phases
+    /// Get the frame type based on payload type
+    pub fn get_frame_type_from_payload_type(&self, payload_type: u8) -> crate::api::common::frame::MediaFrameType {
+        super::util::get_frame_type_from_payload_type(payload_type)
+    }
+
+    /// Create a new instance of ServerMetrics
+    pub async fn get_server_metrics(&self, server_start_time: std::time::Duration) -> Result<super::stats::ServerMetrics, MediaTransportError> {
+        // Get current media stats
+        let media_stats = self.get_stats().await?;
+        
+        // Create server metrics
+        super::stats::get_server_metrics(
+            &self.clients,
+            &media_stats,
+            server_start_time
+        ).await
+    }
 }
 
 #[async_trait]
@@ -929,4 +945,24 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             &self.clients
         ).await
     }
-} 
+
+    async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError> {
+        super::media::update_csrc_cname(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            original_ssrc,
+            cname
+        ).await
+    }
+
+    async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError> {
+        super::media::update_csrc_display_name(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            original_ssrc,
+            name
+        ).await
+    }
+}
+
+ 

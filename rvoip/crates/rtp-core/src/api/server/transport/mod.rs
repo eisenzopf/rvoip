@@ -28,6 +28,9 @@ mod rtcp;
 mod security;
 mod ssrc;
 mod stats;
+mod util;
+#[cfg(test)]
+mod tests;
 
 // Export implementations
 pub use server_transport_impl::DefaultMediaTransportServer;
@@ -419,4 +422,10 @@ pub trait MediaTransportServer: Send + Sync + Clone {
     
     /// Get all SSRCs for a client
     async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError>;
+    
+    /// Update the CNAME for a source
+    async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError>;
+    
+    /// Update the display name for a source
+    async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError>;
 } 

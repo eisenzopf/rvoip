@@ -142,8 +142,8 @@ pub async fn update_csrc_cname(
     }
     
     // Update CNAME in the manager
-    let mut csrc_manager_guard = csrc_manager.write().await;
-    let updated = csrc_manager_guard.update_cname(original_ssrc, cname.clone());
+    let mut csrc_manager = csrc_manager.write().await;
+    let updated = csrc_manager.update_cname(original_ssrc, cname.clone());
     
     if updated {
         debug!("Updated CNAME for SSRC {:08x}: {}", original_ssrc, cname);
@@ -165,8 +165,8 @@ pub async fn update_csrc_display_name(
     }
     
     // Update display name in the manager
-    let mut csrc_manager_guard = csrc_manager.write().await;
-    let updated = csrc_manager_guard.update_display_name(original_ssrc, name.clone());
+    let mut csrc_manager = csrc_manager.write().await;
+    let updated = csrc_manager.update_display_name(original_ssrc, name.clone());
     
     if updated {
         debug!("Updated display name for SSRC {:08x}: {}", original_ssrc, name);

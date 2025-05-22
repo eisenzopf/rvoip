@@ -3,7 +3,7 @@
 //! This module contains components for gathering and analyzing media statistics.
 
 mod quality;
-mod metrics;
+pub mod metrics;
 
 // Only export specific functions to avoid naming conflicts
 pub use quality::estimate_quality_level;
