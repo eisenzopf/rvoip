@@ -2,8 +2,8 @@
 //!
 //! This module contains components for handling the core security functionality.
 
-mod connection;
-mod context;
+pub mod connection;
+pub mod context;
 
 pub use connection::*;
 pub use context::*; 

@@ -22,6 +22,7 @@ mod util;
 
 // Re-export DefaultServerSecurityContext
 pub use default::DefaultServerSecurityContext;
+pub use client::context::DefaultClientSecurityContext;
 
 // DEPRECATED: Old implementation being phased out
 #[deprecated(note = "This module is being phased out as part of a refactoring effort. Use the new modular implementation instead.")]

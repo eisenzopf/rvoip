@@ -20,6 +20,7 @@ use crate::dtls::DtlsConnection;
 // Import our core modules
 use crate::api::server::security::core::connection;
 use crate::api::server::security::core::context;
+use crate::api::server::security::client::context::DefaultClientSecurityContext;
 
 /// Default implementation of the ServerSecurityContext
 #[derive(Clone)]
@@ -29,7 +30,7 @@ pub struct DefaultServerSecurityContext {
     /// Main DTLS connection template (for certificate/settings)
     connection_template: Arc<Mutex<Option<DtlsConnection>>>,
     /// Client security contexts
-    clients: Arc<RwLock<HashMap<SocketAddr, Arc<dyn ClientSecurityContext + Send + Sync>>>>,
+    clients: Arc<RwLock<HashMap<SocketAddr, Arc<DefaultClientSecurityContext>>>>,
     /// Main socket
     socket: Arc<Mutex<Option<SocketHandle>>>,
     /// Client security callbacks
@@ -104,23 +105,121 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     }
     
     async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext + Send + Sync>, SecurityError> {
-        // This method will be fully implemented in Phase 3
-        todo!("Implement create_client_context in Phase 3")
+        // First check if this client already exists, and if so, completely recreate it
+        {
+            let mut clients = self.clients.write().await;
+            if clients.contains_key(&addr) {
+                debug!("Client {} already exists, removing old connection for clean restart", addr);
+                clients.remove(&addr);
+            }
+        }
+        
+        // Create a new client context
+        debug!("Creating new security context for client {}", addr);
+        
+        // Create DTLS connection with server role
+        let dtls_config = crate::dtls::DtlsConfig {
+            role: crate::dtls::DtlsRole::Server,
+            version: crate::dtls::DtlsVersion::Dtls12,
+            mtu: 1500,
+            max_retransmissions: 5,
+            srtp_profiles: connection::convert_profiles(&self.config.srtp_profiles),
+        };
+        let mut connection = crate::dtls::DtlsConnection::new(dtls_config);
+        
+        // Set certificate
+        let cert = match self.connection_template.lock().await.as_ref() {
+            Some(conn) => match conn.local_certificate() {
+                Some(cert) => cert.clone(),
+                None => return Err(SecurityError::Configuration("No certificate in template".to_string())),
+            },
+            None => return Err(SecurityError::Configuration("No template connection".to_string())),
+        };
+        connection.set_certificate(cert);
+        
+        // Create socket for the client if needed
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.clone().ok_or_else(|| 
+            SecurityError::NotInitialized("Server socket not initialized".to_string()))?;
+        drop(socket_guard);
+        
+        // Create a transport specifically for this client
+        let transport = match connection::create_dtls_transport(&socket).await {
+            Ok(transport) => transport,
+            Err(e) => return Err(e),
+        };
+        
+        debug!("DTLS transport started for client {}", addr);
+        
+        // Set transport on the connection (clone the Arc)
+        connection.set_transport(transport.clone());
+        
+        // Create client context
+        let client_ctx = Arc::new(DefaultClientSecurityContext::new(
+            addr,
+            Some(connection),
+            Some(socket.clone()),
+            self.config.clone(),
+            Some(transport.clone()),
+        ));
+        
+        // Start a task to monitor the handshake
+        let client_ctx_clone = client_ctx.clone();
+        tokio::spawn(async move {
+            debug!("Starting handshake monitor task for client {}", addr);
+            
+            // Wait for handshake to complete (with timeout)
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client_ctx_clone.wait_for_handshake()
+            ).await {
+                Ok(Ok(_)) => {
+                    debug!("Server-side handshake completed successfully for client {}", addr);
+                },
+                Ok(Err(e)) => {
+                    warn!("Server-side handshake failed for client {}: {}", addr, e);
+                },
+                Err(_) => {
+                    warn!("Server-side handshake timed out for client {}", addr);
+                }
+            }
+        });
+        
+        // Store the client context
+        {
+            let mut clients = self.clients.write().await;
+            clients.insert(addr, client_ctx.clone());
+        }
+        
+        debug!("Created client security context for {} - ready for handshake", addr);
+        
+        Ok(client_ctx as Arc<dyn ClientSecurityContext + Send + Sync>)
     }
     
     async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext + Send + Sync>> {
-        // This method will be fully implemented in Phase 3
-        todo!("Implement get_client_contexts in Phase 3")
+        let clients = self.clients.read().await;
+        clients.values()
+            .map(|c| c.clone() as Arc<dyn ClientSecurityContext + Send + Sync>)
+            .collect()
     }
     
     async fn remove_client(&self, addr: SocketAddr) -> Result<(), SecurityError> {
-        // This method will be fully implemented in Phase 3
-        todo!("Implement remove_client in Phase 3")
+        let mut clients = self.clients.write().await;
+        
+        if let Some(client) = clients.remove(&addr) {
+            // Close the client security context
+            client.close().await?;
+            Ok(())
+        } else {
+            // Client not found, nothing to do
+            Ok(())
+        }
     }
     
     async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>) -> Result<(), SecurityError> {
-        // This method will be fully implemented in Phase 3
-        todo!("Implement on_client_secure in Phase 3")
+        let mut callbacks = self.client_secure_callbacks.lock().await;
+        callbacks.push(callback);
+        Ok(())
     }
     
     async fn get_supported_srtp_profiles(&self) -> Vec<SrtpProfile> {

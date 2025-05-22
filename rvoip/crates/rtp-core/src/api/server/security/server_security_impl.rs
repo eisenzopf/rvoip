@@ -284,7 +284,7 @@ pub struct DefaultServerSecurityContext {
     /// Main socket
     socket: Arc<Mutex<Option<SocketHandle>>>,
     /// Client security callbacks
-    client_secure_callbacks: Arc<Mutex<Vec<Box<dyn Fn(Arc<dyn ClientSecurityContext>) + Send + Sync>>>>,
+    client_secure_callbacks: Arc<Mutex<Vec<Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>>>>,
 }
 
 impl DefaultServerSecurityContext {
@@ -591,7 +591,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
         Ok(())
     }
     
-    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
+    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext + Send + Sync>, SecurityError> {
         // First check if this client already exists, and if so, completely recreate it
         {
             let mut clients = self.clients.write().await;
@@ -692,13 +692,13 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
         
         debug!("Created client security context for {} - ready for handshake", addr);
         
-        Ok(client_ctx as Arc<dyn ClientSecurityContext>)
+        Ok(client_ctx as Arc<dyn ClientSecurityContext + Send + Sync>)
     }
     
-    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext>> {
+    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext + Send + Sync>> {
         let clients = self.clients.read().await;
         clients.values()
-            .map(|c| c.clone() as Arc<dyn ClientSecurityContext>)
+            .map(|c| c.clone() as Arc<dyn ClientSecurityContext + Send + Sync>)
             .collect()
     }
     
@@ -715,7 +715,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
         }
     }
     
-    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext>) + Send + Sync>) -> Result<(), SecurityError> {
+    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>) -> Result<(), SecurityError> {
         let mut callbacks = self.client_secure_callbacks.lock().await;
         callbacks.push(callback);
         Ok(())

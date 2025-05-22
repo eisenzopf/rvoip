@@ -2,6 +2,6 @@
 //!
 //! This module contains components for managing client security contexts.
 
-mod context;
+pub mod context;
 
 pub use context::*; 
