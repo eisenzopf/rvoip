@@ -1,0 +1,64 @@
+# RTP-Core Examples TODO
+
+## Analysis Summary
+
+Based on the analysis of the examples output log, here's a breakdown of the ERROR and WARNING messages:
+
+- **Total ERROR and WARNING messages**: 282
+- **Frame-related error messages**: 123 (121 "Error receiving frame"/"No frame received"/"Server receive error" + 2 "Client connection timed out")
+- **Percentage of frame-related errors**: Approximately 44% of all ERROR and WARNING messages are directly related to sending and receiving frames.
+
+The vast majority of these frame-related errors are timeout issues, specifically:
+- "Error receiving frame: Timeout error: No frame received within timeout period"
+- "Server receive error: Timeout error: No frame received within timeout period"
+- "Client connection timed out after X seconds"
+
+These errors are concentrated in a few examples, particularly:
+- `api_ssrc_demultiplexing.rs`
+- `api_ssrc_demux.rs`
+- `api_basic.rs`
+- `api_srtp.rs`
+
+## Tasks by File
+
+### api_ssrc_demultiplexing.rs
+
+- [ ] Increase the timeout duration for frame receiving operations
+- [ ] Add synchronization mechanism to ensure server is ready before client attempts to send frames
+- [ ] Add explicit error handling for timeout scenarios
+- [ ] Add more robust event notification when frames are successfully received
+- [ ] Consider reducing the number of receive attempts to avoid excessive warnings
+
+### api_ssrc_demux.rs
+
+- [ ] Similar to above, increase timeout duration for receive operations
+- [ ] Add logging to verify the SSRC registration process is working correctly
+- [ ] Add confirmation when frames are actually sent to help diagnose if the issue is with sending or receiving
+- [ ] Ensure the server and client are properly synchronized before attempting communications
+- [ ] Consider implementing a retry mechanism with backoff instead of continuous polling
+
+### api_basic.rs
+
+- [ ] Fix the "Client connection timed out after 2 seconds" error by increasing the timeout or adding connection verification
+- [ ] Add proper error handling for timeout scenarios to make the example more robust
+- [ ] Add explicit synchronization between client and server to ensure both are ready
+- [ ] Consider adding a heartbeat mechanism to verify connection is alive
+- [ ] Add debug output to trace the exact communication flow
+
+### api_srtp.rs
+
+- [ ] Fix the "Client connection timed out after 2 seconds" error by increasing timeout duration
+- [ ] Ensure SRTP security parameters are correctly initialized before attempting communication
+- [ ] Add verification steps to confirm encryption/decryption is working properly
+- [ ] Add more detailed logging around the security handshake process
+- [ ] Consider simplifying the example to isolate and fix the timeout issues
+
+## General Improvements
+
+For all examples with timeout issues:
+
+- [ ] Consider standardizing the timeout handling across all examples
+- [ ] Add a configurable timeout parameter that can be adjusted for different environments
+- [ ] Implement proper cleanup of resources even when timeouts occur
+- [ ] Add better documentation explaining expected timeout behavior
+- [ ] Consider adding a debugging mode that shows more detailed communication information 

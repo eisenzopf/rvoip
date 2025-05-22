@@ -166,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 marker: true,
                 payload_type: 96,
                 ssrc: session_ssrc,
+                csrcs: Vec::new(),
             };
             
             // Send frame with default SSRC
@@ -189,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 marker: true,
                 payload_type: 96,
                 ssrc: AUDIO1_SSRC,
+                csrcs: Vec::new(),
             };
             
             client.send_frame(audio1_frame).await?;
@@ -206,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 marker: true,
                 payload_type: 97,
                 ssrc: VIDEO1_SSRC,
+                csrcs: Vec::new(),
             };
             
             client.send_frame(video1_frame).await?;

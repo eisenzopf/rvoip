@@ -252,7 +252,7 @@ impl UdpRtpTransport {
                                         payload_type: packet.header.payload_type,
                                         timestamp: packet.header.timestamp,
                                         marker: packet.header.marker,
-                                        payload: Bytes::copy_from_slice(&buffer[0..size]), // Use original buffer to preserve SSRC
+                                        payload: packet.payload.clone(), // Use the parsed payload
                                         source: addr,
                                     };
                                     

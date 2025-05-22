@@ -145,12 +145,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Create a simple frame
                 let frame = MediaFrame {
                     frame_type: MediaFrameType::Audio,
-                    data: format!("Test frame {}", i).into_bytes(),
+                    data: vec![1, 2, 3, 4, 5, 6, 7, 8],
                     timestamp: i * 160, // 20ms of 8kHz audio
-                    sequence: 0, // Will be set by the transport
+                    sequence: i as u16,
                     marker: i == 0, // First packet has marker bit
-                    payload_type: 0, // G.711 u-law
+                    payload_type: 8, // PCMA
                     ssrc: 0, // Will be set by the transport
+                    csrcs: Vec::new(),
                 };
                 
                 // Send frame from client to server

@@ -151,12 +151,13 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // Create test audio frame (very small data for testing)
     let audio_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: vec![1, 2, 3, 4, 5],
+        data: vec![1, 2, 3, 4, 5, 6, 7, 8],
         timestamp: 1000,
         sequence: 1,
         marker: false,
-        payload_type: 8, // G.711 µ-law
+        payload_type: 8, // PCMA
         ssrc: 12345,
+        csrcs: Vec::new(),
     };
     
     // Send frames

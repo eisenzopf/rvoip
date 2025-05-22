@@ -210,6 +210,7 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
         marker: true,
         payload_type: 8, // Audio
         ssrc: AUDIO_SSRC,
+        csrcs: Vec::new(),
     };
     
     match client.send_frame(audio_frame).await {
@@ -227,6 +228,7 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
         marker: true,
         payload_type: 96, // Video
         ssrc: VIDEO_SSRC,
+        csrcs: Vec::new(),
     };
     
     match client.send_frame(video_frame).await {

@@ -264,5 +264,6 @@ fn create_test_frame(sequence: u16) -> MediaFrame {
         marker: sequence == 0, // Mark first packet
         payload_type: 8, // G.711 μ-law
         ssrc: 12345,
+        csrcs: Vec::new(),
     }
 } 
