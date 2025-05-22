@@ -2,8 +2,8 @@
 //!
 //! This module contains components for handling DTLS handshakes and transports.
 
-mod handshake;
-mod transport;
+pub mod handshake;
+pub mod transport;
 
 pub use handshake::*;
 pub use transport::*; 

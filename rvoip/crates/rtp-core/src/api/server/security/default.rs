@@ -21,6 +21,7 @@ use crate::dtls::DtlsConnection;
 use crate::api::server::security::core::connection;
 use crate::api::server::security::core::context;
 use crate::api::server::security::client::context::DefaultClientSecurityContext;
+use crate::api::server::security::dtls::{handshake, transport};
 
 /// Default implementation of the ServerSecurityContext
 #[derive(Clone)]
@@ -253,18 +254,71 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     }
 
     async fn process_client_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<(), SecurityError> {
-        // This method will be fully implemented in Phase 4
-        todo!("Implement process_client_packet in Phase 4")
+        // Check if there's an existing client context for this address
+        let client_ctx = {
+            let clients = self.clients.read().await;
+            clients.get(&addr).cloned()
+        };
+        
+        // If client context exists, delegate to it
+        if let Some(client_ctx) = client_ctx {
+            debug!("Processing DTLS packet from existing client {}", addr);
+            client_ctx.process_dtls_packet(data).await
+        } else {
+            // No client context exists yet - create one
+            debug!("Creating new client context for {}", addr);
+            let client_ctx = self.create_client_context(addr).await?;
+            
+            // Start the handshake first - this initializes the server state machine
+            debug!("Starting server handshake with client {}", addr);
+            if let Err(e) = client_ctx.start_handshake_with_remote(addr).await {
+                warn!("Failed to start handshake with client {}: {}", addr, e);
+                return Err(e);
+            }
+            
+            // Now process the first packet - usually a ClientHello
+            debug!("Processing initial packet from client {}", addr);
+            client_ctx.process_dtls_packet(data).await
+        }
     }
 
     async fn start_packet_handler(&self) -> Result<(), SecurityError> {
-        // This method will be fully implemented in Phase 4
-        todo!("Implement start_packet_handler in Phase 4")
+        // Get the server socket
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.clone().ok_or_else(|| 
+            SecurityError::Configuration("No socket set for server security context".to_string()))?;
+        drop(socket_guard);
+        
+        // Create a handler function that captures self
+        let this = self.clone();
+        let handler = move |data: Vec<u8>, addr: SocketAddr| {
+            // This is a bit of a hack because we need to convert to an async call
+            // inside a sync closure - but it works because we use a separate task
+            let this_clone = this.clone();
+            let data_clone = data.clone();
+            
+            // Spawn a new task to handle the packet
+            tokio::spawn(async move {
+                if let Err(e) = this_clone.process_client_packet(addr, &data_clone).await {
+                    debug!("Error processing client packet: {:?}", e);
+                }
+            });
+            
+            // Return success immediately to the caller
+            Ok(())
+        };
+        
+        // Start the packet handler using the transport module
+        transport::start_packet_handler(&socket, handler).await
     }
 
     async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError> {
-        // This method will be fully implemented in Phase 4
-        todo!("Implement capture_initial_packet in Phase 4")
+        let socket_guard = self.socket.lock().await;
+        let socket = socket_guard.as_ref().ok_or_else(||
+            SecurityError::NotInitialized("No socket set for server security context".to_string()))?;
+        
+        // Use the transport module to capture the initial packet
+        transport::capture_initial_packet(socket, 2).await
     }
 
     async fn is_ready(&self) -> Result<bool, SecurityError> {
