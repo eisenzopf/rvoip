@@ -1,6 +1,6 @@
-//! Server transport API
+//! Server transport module
 //!
-//! This module provides the server-specific transport interface for media transport.
+//! This module contains the implementation of server-side transport logic.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,18 +21,15 @@ use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
 pub mod server_transport_impl;
-
-// Re-export the implementation
-pub use server_transport_impl::DefaultMediaTransportServer;
-
-// Add all the submodules here at the top of the file
+mod default;
 mod core;
 mod media;
 mod rtcp;
 mod security;
 mod ssrc;
-mod stats;
-mod default; // Include the default implementation module
+
+// Export implementations
+pub use server_transport_impl::DefaultMediaTransportServer;
 
 /// Client information
 #[derive(Debug, Clone)]
@@ -64,7 +61,7 @@ pub struct HeaderExtension {
 
 /// Server implementation of the media transport interface
 #[async_trait]
-pub trait MediaTransportServer: Send + Sync {
+pub trait MediaTransportServer: Send + Sync + Clone {
     /// Start the server
     ///
     /// This binds to the configured address and starts listening for
@@ -409,4 +406,16 @@ pub trait MediaTransportServer: Send + Sync {
     /// Returns the transport-wide sequence number if the extension is found
     async fn get_received_transport_cc(&self, client_id: &str)
         -> Result<Option<u16>, MediaTransportError>;
+    
+    /// Check if SSRC demultiplexing is enabled
+    async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Enable SSRC demultiplexing
+    async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Register a client SSRC
+    async fn register_client_ssrc(&self, client_id: &str, ssrc: u32) -> Result<bool, MediaTransportError>;
+    
+    /// Get all SSRCs for a client
+    async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError>;
 } 

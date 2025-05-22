@@ -96,9 +96,9 @@ src/api/server/transport/
   - [x] Update default.rs to delegate to RTCP module functions
 
 - [ ] **Phase 5: Security & SSRC Implementation**
-  - [ ] Create placeholder for server_security.rs with security context handling
-  - [ ] Create placeholder for demux.rs with SSRC demultiplexing
-  - [ ] Implement actual functionality in security and SSRC modules
+  - [x] Create placeholder for server_security.rs with security context handling
+  - [x] Create placeholder for demux.rs with SSRC demultiplexing
+  - [x] Implement actual functionality in security and SSRC modules
 
 - [ ] **Phase 6: Stats Implementation**
   - [ ] Create placeholder for quality.rs with quality estimation logic

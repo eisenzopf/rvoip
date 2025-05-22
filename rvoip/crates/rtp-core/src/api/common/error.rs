@@ -74,6 +74,10 @@ pub enum MediaTransportError {
     /// Buffer error
     #[error("Buffer error: {0}")]
     BufferError(String),
+    
+    /// Invalid input
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 /// Error related to security operations

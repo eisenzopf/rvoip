@@ -1,6 +1,5 @@
 //! Server transport implementation
 //!
-//! This file re-exports the DefaultMediaTransportServer implementation
-//! from the default module.
+//! This file contains the implementation of the MediaTransportServer trait.
 
 pub use crate::api::server::transport::default::DefaultMediaTransportServer; 

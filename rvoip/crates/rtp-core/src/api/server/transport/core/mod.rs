@@ -1,12 +1,11 @@
 //! Core functionality for the server transport implementation
 //!
-//! This module contains the core components of the server transport,
-//! including connection handling, frame processing, and event management.
+//! This module contains components for handling the core transport functionality.
 
-mod connection;
-mod frame;
+pub mod connection;
 mod events;
+mod frame;
 
 pub use connection::*;
-pub use frame::*;
-pub use events::*; 
+pub use events::*;
+pub use frame::*; 

@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
+use std::collections::HashMap;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
@@ -31,6 +33,8 @@ pub async fn init_security_if_needed(
             // Store it directly - no need for extra wrapping since it should already be an Arc<dyn ServerSecurityContext>
             let mut context_write = security_context.write().await;
             *context_write = Some(context);
+            
+            debug!("Created server security context with mode: {:?}", config.security_config.security_mode);
         }
     }
     
@@ -82,4 +86,37 @@ pub async fn get_security_info(
     } else {
         Err(MediaTransportError::Security("Security context not initialized".to_string()))
     }
+}
+
+/// Check if security is enabled
+pub async fn is_security_enabled(
+    config: &ServerConfig,
+) -> bool {
+    config.security_config.security_mode.is_enabled()
+}
+
+/// Get the security mode
+pub async fn get_security_mode(
+    config: &ServerConfig,
+) -> SecurityMode {
+    config.security_config.security_mode
+}
+
+/// Check if a client connection is secure
+pub async fn is_client_secure(
+    client_id: &str,
+    clients: &Arc<RwLock<HashMap<String, crate::api::server::transport::core::connection::ClientConnection>>>,
+) -> Result<bool, MediaTransportError> {
+    // Get the client
+    let clients_guard = clients.read().await;
+    let client = clients_guard.get(client_id)
+        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    
+    // Check if client is connected
+    if !client.connected {
+        return Err(MediaTransportError::ClientNotConnected(client_id.to_string()));
+    }
+    
+    // Check if security context exists
+    Ok(client.security.is_some())
 } 

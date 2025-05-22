@@ -896,4 +896,32 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     async fn get_received_transport_cc(&self, client_id: &str) -> Result<Option<u16>, MediaTransportError> {
         todo!("Implement get_received_transport_cc")
     }
+
+    async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError> {
+        super::ssrc::is_ssrc_demultiplexing_enabled(
+            &self.ssrc_demultiplexing_enabled
+        ).await
+    }
+
+    async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError> {
+        super::ssrc::enable_ssrc_demultiplexing(
+            &self.ssrc_demultiplexing_enabled
+        ).await
+    }
+
+    async fn register_client_ssrc(&self, client_id: &str, ssrc: u32) -> Result<bool, MediaTransportError> {
+        super::ssrc::register_client_ssrc(
+            client_id,
+            ssrc,
+            &self.ssrc_demultiplexing_enabled,
+            &self.clients
+        ).await
+    }
+
+    async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError> {
+        super::ssrc::get_client_ssrcs(
+            client_id,
+            &self.clients
+        ).await
+    }
 } 
