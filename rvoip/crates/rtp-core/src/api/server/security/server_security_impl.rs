@@ -1,3 +1,12 @@
+//! DEPRECATED: Server security implementation
+//!
+//! WARNING: This file is being phased out as part of a refactoring effort.
+//! The code is being moved to smaller, more maintainable modules.
+//! This file will be removed in a future version. Please use the refactored modules instead.
+//!
+//! See the directory structure under src/api/server/security/ for the new organization.
+
+// Original implementation follows:
 //! Server security implementation
 //!
 //! This file contains the implementation of the ServerSecurityContext trait.

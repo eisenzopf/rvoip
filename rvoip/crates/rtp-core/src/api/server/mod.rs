@@ -13,7 +13,7 @@ pub use config::{ServerConfig, ServerConfigBuilder};
 
 // Re-export implementation files
 pub use transport::DefaultMediaTransportServer;
-pub use security::server_security_impl::DefaultServerSecurityContext;
+pub use security::DefaultServerSecurityContext;
 
 // Import errors
 use crate::api::common::error::MediaTransportError;

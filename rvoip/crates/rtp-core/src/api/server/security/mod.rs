@@ -12,11 +12,20 @@ use tokio::sync::Mutex;
 use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 
-pub mod server_security_impl;
+// Import necessary modules
+mod default;
+mod core;
+mod client;
+mod dtls;
+mod srtp;
+mod util;
 
-// Re-export public implementation
-pub use server_security_impl::DefaultServerSecurityContext;
-pub use server_security_impl::DefaultClientSecurityContext as ServerClientSecurityContext;
+// Re-export DefaultServerSecurityContext
+pub use default::DefaultServerSecurityContext;
+
+// DEPRECATED: Old implementation being phased out
+#[deprecated(note = "This module is being phased out as part of a refactoring effort. Use the new modular implementation instead.")]
+pub mod server_security_impl;
 
 // Define our own types for API compatibility
 /// Socket handle for network operations
@@ -171,16 +180,16 @@ pub trait ServerSecurityContext: Send + Sync {
     async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError>;
     
     /// Create a security context for a new client
-    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext>, SecurityError>;
+    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext + Send + Sync>, SecurityError>;
     
     /// Get all client security contexts
-    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext>>;
+    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext + Send + Sync>>;
     
     /// Remove a client security context
     async fn remove_client(&self, addr: SocketAddr) -> Result<(), SecurityError>;
     
     /// Register a callback for clients that complete security setup
-    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext>) + Send + Sync>) -> Result<(), SecurityError>;
+    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>) -> Result<(), SecurityError>;
     
     /// Get the list of supported SRTP profiles
     async fn get_supported_srtp_profiles(&self) -> Vec<SrtpProfile>;
@@ -200,6 +209,6 @@ pub trait ServerSecurityContext: Send + Sync {
 }
 
 /// Create a new server security context
-pub async fn new(config: ServerSecurityConfig) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
+pub async fn new(config: ServerSecurityConfig) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
     DefaultServerSecurityContext::new(config).await
 } 
