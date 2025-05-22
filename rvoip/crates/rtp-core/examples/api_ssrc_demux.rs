@@ -26,6 +26,10 @@ use rvoip_rtp_core::api::{
     },
 };
 
+use rvoip_rtp_core::api::common::config::SecurityMode;
+use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
+use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
+
 // Constants for our streams
 const AUDIO1_SSRC: u32 = 0x1234A001;
 const AUDIO2_SSRC: u32 = 0x1234A002;
@@ -51,16 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(EXAMPLE_TIMEOUT_SECS),
         async {
             // Configure server with SSRC demultiplexing enabled
-            let server_config = ServerConfigBuilder::new()
+            let mut server_config = ServerConfigBuilder::new()
                 .local_address("127.0.0.1:0".parse().unwrap())
                 .rtcp_mux(true)
                 .ssrc_demultiplexing_enabled(true) // Enable SSRC demultiplexing
-                .security_config(rvoip_rtp_core::api::server::security::ServerSecurityConfig { 
-                    security_mode: rvoip_rtp_core::api::common::config::SecurityMode::None, 
-                    ..Default::default() 
-                })
                 .build()
                 .expect("Failed to build server config");
+            
+            // Explicitly disable security to avoid DTLS handshake issues
+            let mut server_security_config = ServerSecurityConfig::default();
+            server_security_config.security_mode = SecurityMode::None;
+            server_config.security_config = server_security_config;
             
             // Create server
             let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
@@ -108,15 +113,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             
             // Configure client with SSRC demultiplexing enabled
-            let client_config = ClientConfigBuilder::new()
+            let mut client_config = ClientConfigBuilder::new()
                 .remote_address(server_addr)
                 .rtcp_mux(true)
                 .ssrc_demultiplexing_enabled(true) // Enable SSRC demultiplexing
-                .security_config(rvoip_rtp_core::api::client::security::ClientSecurityConfig { 
-                    security_mode: rvoip_rtp_core::api::common::config::SecurityMode::None, 
-                    ..Default::default() 
-                })
                 .build();
+            
+            // Explicitly disable security to avoid DTLS handshake issues
+            let mut client_security_config = ClientSecurityConfig::default();
+            client_security_config.security_mode = SecurityMode::None;
+            client_config.security_config = client_security_config;
             
             // Create client
             let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;

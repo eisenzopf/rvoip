@@ -12,7 +12,7 @@ pub use security::{ClientSecurityContext, ClientSecurityConfig};
 pub use config::{ClientConfig, ClientConfigBuilder};
 
 // Re-export implementation files
-pub use transport::client_transport_impl::DefaultMediaTransportClient;
+pub use transport::default::DefaultMediaTransportClient;
 pub use security::DefaultClientSecurityContext;
 
 // Import errors

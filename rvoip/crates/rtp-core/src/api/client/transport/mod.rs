@@ -1,6 +1,7 @@
 //! Client transport API
 //!
 //! This module provides the client-specific transport interface for media transport.
+//! It has been refactored into smaller, more manageable components.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,7 +21,15 @@ use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 use crate::api::server::transport::HeaderExtension;
 use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
-pub mod client_transport_impl;
+// Export the implementation file 
+pub mod default;
+
+// Export the new modular components
+pub mod core;
+pub mod media;
+pub mod rtcp;
+pub mod security;
+pub mod buffer;
 
 /// Media Synchronization Information
 #[derive(Debug, Clone)]
@@ -435,7 +444,7 @@ pub trait MediaTransportClient: Send + Sync {
 }
 
 // Re-export the implementation
-pub use client_transport_impl::DefaultMediaTransportClient;
+pub use default::DefaultMediaTransportClient;
 
 /// RTCP Statistics 
 #[derive(Debug, Clone, Default)]
