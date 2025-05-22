@@ -100,10 +100,10 @@ src/api/server/transport/
   - [x] Create placeholder for demux.rs with SSRC demultiplexing
   - [x] Implement actual functionality in security and SSRC modules
 
-- [ ] **Phase 6: Stats Implementation**
-  - [ ] Create placeholder for quality.rs with quality estimation logic
-  - [ ] Create placeholder for metrics.rs with server metrics
-  - [ ] Implement actual functionality in stats modules
+- [x] **Phase 6: Stats Implementation**
+  - [x] Create placeholder for quality.rs with quality estimation logic
+  - [x] Create placeholder for metrics.rs with server metrics
+  - [x] Implement actual functionality in stats modules
 
 - [ ] **Phase 7: Integration & Testing**
   - [ ] Update server_transport_impl.rs to use all modules

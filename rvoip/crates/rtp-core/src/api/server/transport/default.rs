@@ -597,12 +597,17 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     
     /// Get statistics for all clients
     async fn get_stats(&self) -> Result<MediaStats, MediaTransportError> {
-        todo!("Implement get_stats")
+        super::stats::get_stats(
+            &self.clients
+        ).await
     }
     
     /// Get statistics for a specific client
     async fn get_client_stats(&self, client_id: &str) -> Result<MediaStats, MediaTransportError> {
-        todo!("Implement get_client_stats")
+        super::stats::get_client_stats(
+            client_id,
+            &self.clients
+        ).await
     }
     
     /// Get security information for SDP exchange

@@ -27,6 +27,7 @@ mod media;
 mod rtcp;
 mod security;
 mod ssrc;
+mod stats;
 
 // Export implementations
 pub use server_transport_impl::DefaultMediaTransportServer;
