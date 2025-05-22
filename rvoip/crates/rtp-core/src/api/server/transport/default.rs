@@ -683,27 +683,51 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
-        todo!("Implement add_csrc_mapping")
+        super::media::add_csrc_mapping(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            mapping
+        ).await
     }
     
     async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
-        todo!("Implement add_simple_csrc_mapping")
+        super::media::add_simple_csrc_mapping(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            original_ssrc,
+            csrc
+        ).await
     }
     
     async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
-        todo!("Implement remove_csrc_mapping_by_ssrc")
+        super::media::remove_csrc_mapping_by_ssrc(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            original_ssrc
+        ).await
     }
     
     async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
-        todo!("Implement get_csrc_mapping_by_ssrc")
+        super::media::get_csrc_mapping_by_ssrc(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            original_ssrc
+        ).await
     }
     
     async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
-        todo!("Implement get_all_csrc_mappings")
+        super::media::get_all_csrc_mappings(
+            &self.csrc_management_enabled,
+            &self.csrc_manager
+        ).await
     }
     
     async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
-        todo!("Implement get_active_csrcs")
+        super::media::get_active_csrcs(
+            &self.csrc_management_enabled,
+            &self.csrc_manager,
+            active_ssrcs
+        ).await
     }
     
     async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
@@ -725,27 +749,64 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
-        todo!("Implement configure_header_extension")
+        super::media::configure_header_extension(
+            &self.header_extensions_enabled,
+            &self.header_extension_format,
+            &self.header_extension_mappings,
+            id, 
+            uri
+        ).await
     }
     
     async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
-        todo!("Implement configure_header_extensions")
+        super::media::configure_header_extensions(
+            &self.header_extensions_enabled,
+            &self.header_extension_format,
+            &self.header_extension_mappings,
+            mappings
+        ).await
     }
     
     async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension) -> Result<(), MediaTransportError> {
-        todo!("Implement add_header_extension_for_client")
+        super::media::add_header_extension_for_client(
+            &self.header_extensions_enabled,
+            &self.clients,
+            &self.pending_extensions,
+            client_id,
+            extension
+        ).await
     }
     
     async fn add_header_extension_for_all_clients(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
-        todo!("Implement add_header_extension_for_all_clients")
+        super::media::add_header_extension_for_all_clients(
+            &self.header_extensions_enabled,
+            &self.clients,
+            &self.pending_extensions,
+            extension
+        ).await
     }
     
     async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
-        todo!("Implement add_audio_level_extension_for_client")
+        super::media::add_audio_level_extension_for_client(
+            &self.header_extensions_enabled,
+            &self.header_extension_mappings,
+            &self.clients,
+            &self.pending_extensions,
+            client_id,
+            voice_activity,
+            level
+        ).await
     }
     
     async fn add_audio_level_extension_for_all_clients(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
-        todo!("Implement add_audio_level_extension_for_all_clients")
+        super::media::add_audio_level_extension_for_all_clients(
+            &self.header_extensions_enabled,
+            &self.header_extension_mappings,
+            &self.clients,
+            &self.pending_extensions,
+            voice_activity,
+            level
+        ).await
     }
     
     async fn add_video_orientation_extension_for_client(&self, client_id: &str, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
@@ -765,11 +826,20 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn get_received_header_extensions(&self, client_id: &str) -> Result<Vec<HeaderExtension>, MediaTransportError> {
-        todo!("Implement get_received_header_extensions")
+        super::media::get_received_header_extensions(
+            &self.header_extensions_enabled,
+            &self.received_extensions,
+            client_id
+        ).await
     }
     
     async fn get_received_audio_level(&self, client_id: &str) -> Result<Option<(bool, u8)>, MediaTransportError> {
-        todo!("Implement get_received_audio_level")
+        super::media::get_received_audio_level(
+            &self.header_extensions_enabled,
+            &self.header_extension_mappings,
+            &self.received_extensions,
+            client_id
+        ).await
     }
     
     async fn get_received_video_orientation(&self, client_id: &str) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {

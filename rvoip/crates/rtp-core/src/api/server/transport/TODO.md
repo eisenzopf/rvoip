@@ -82,11 +82,12 @@ src/api/server/transport/
   - [x] Implement delegate methods in default.rs that call into module functions
   - [x] Fix compatibility issues between the module interfaces and their usage
 
-- [ ] **Phase 3: Media Implementation**
-  - [ ] Create placeholder for mix.rs with media mixing logic
-  - [ ] Create placeholder for csrc.rs with CSRC management
-  - [ ] Create placeholder for extensions.rs with header extension handling
-  - [ ] Implement actual functionality in media modules
+- [x] **Phase 3: Media Implementation**
+  - [x] Create mix.rs with media mixing logic
+  - [x] Create csrc.rs with CSRC management
+  - [x] Create extensions.rs with header extension handling
+  - [x] Implement actual functionality in media modules
+  - [x] Update default.rs to delegate to media module functions
 
 - [ ] **Phase 4: RTCP Implementation**
   - [ ] Create placeholder for reports.rs with RTCP report functionality
@@ -113,7 +114,13 @@ src/api/server/transport/
 
 ## Current Status
 
-Phase 2 has been completed. The core functionality (connection management, frame handling, event subscription) has been implemented in their respective modules. The default.rs file now properly delegates method calls to these modules. The security module has also been implemented with basic functionality. The simplified server_transport_impl.rs file re-exports the DefaultMediaTransportServer from the default module.
+Phase 3 has been completed. The media functionality (mixing, CSRC management, header extensions) has been implemented in their respective modules. The default.rs file now properly delegates to these modules. We've extracted and implemented:
+
+1. **Media mixing** functionality in mix.rs - including audio frame mixing and voice activity detection
+2. **CSRC management** functionality in csrc.rs - including adding, removing, updating, and retrieving CSRC mappings
+3. **Header extensions** functionality in extensions.rs - including configuring extensions, adding to clients, and retrieving received extensions
+
+Previously in Phase 2, we implemented core functionality, and in Phase 1 we set up the directory structure.
 
 ## Implementation Strategy
 
@@ -128,8 +135,8 @@ Phase 2 has been completed. The core functionality (connection management, frame
 1. **ClientConnection struct**: Moved to core/connection.rs
 2. **DefaultMediaTransportServer struct**: Core structure stays in default.rs
 3. **handle_client method**: Moved to core/connection.rs
-4. **CSRC management methods**: To be moved to media/csrc.rs
-5. **Header extension methods**: To be moved to media/extensions.rs
+4. **CSRC management methods**: Moved to media/csrc.rs
+5. **Header extension methods**: Moved to media/extensions.rs
 6. **RTCP methods**: To be split between rtcp/reports.rs and rtcp/app_packets.rs
 7. **Security initialization**: Moved to security/server_security.rs
 8. **SSRC demultiplexing**: To be moved to ssrc/demux.rs
