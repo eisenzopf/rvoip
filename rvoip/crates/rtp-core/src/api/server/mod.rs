@@ -12,7 +12,7 @@ pub use security::{ServerSecurityContext, ServerSecurityConfig};
 pub use config::{ServerConfig, ServerConfigBuilder};
 
 // Re-export implementation files
-pub use transport::server_transport_impl::DefaultMediaTransportServer;
+pub use transport::DefaultMediaTransportServer;
 pub use security::server_security_impl::DefaultServerSecurityContext;
 
 // Import errors

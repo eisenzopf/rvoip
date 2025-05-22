@@ -20,8 +20,7 @@ use crate::api::client::transport::VoipMetrics;
 use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
-pub mod server_transport_impl;
-mod default;
+pub mod default;
 mod core;
 mod media;
 mod rtcp;
@@ -33,7 +32,7 @@ mod util;
 mod tests;
 
 // Export implementations
-pub use server_transport_impl::DefaultMediaTransportServer;
+pub use default::DefaultMediaTransportServer;
 
 /// Client information
 #[derive(Debug, Clone)]
