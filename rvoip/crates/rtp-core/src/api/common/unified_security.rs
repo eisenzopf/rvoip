@@ -206,9 +206,24 @@ impl UnifiedSecurityContext {
             },
             KeyExchangeMethod::Zrtp => {
                 if let KeyExchangeConfig::Zrtp { enable_sas, cache_expiry } = &self.method_config {
-                    // Create ZRTP instance based on configuration
-                    // This is a placeholder - actual ZRTP implementation would go here
-                    return Err(SecurityError::Configuration("ZRTP implementation not yet complete".to_string()));
+                    // Create ZRTP configuration based on security config
+                    let zrtp_config = crate::security::zrtp::ZrtpConfig {
+                        ciphers: vec![crate::security::zrtp::ZrtpCipher::Aes1],
+                        hashes: vec![crate::security::zrtp::ZrtpHash::S256],
+                        auth_tags: vec![crate::security::zrtp::ZrtpAuthTag::HS80, crate::security::zrtp::ZrtpAuthTag::HS32],
+                        key_agreements: vec![crate::security::zrtp::ZrtpKeyAgreement::EC25],
+                        sas_types: if *enable_sas { 
+                            vec![crate::security::zrtp::ZrtpSasType::B32] 
+                        } else { 
+                            vec![] 
+                        },
+                        client_id: "RVOIP Unified Security".to_string(),
+                        srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
+                    };
+                    
+                    // Default to initiator role - would be determined by call setup in real usage
+                    let zrtp = crate::security::zrtp::Zrtp::new(zrtp_config, crate::security::zrtp::ZrtpRole::Initiator);
+                    Box::new(zrtp)
                 } else {
                     return Err(SecurityError::Configuration("Invalid ZRTP configuration".to_string()));
                 }
@@ -492,12 +507,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_zrtp_initialization_placeholder() {
-        // Test ZRTP initialization (currently returns error as placeholder)
+    async fn test_zrtp_initialization_success() {
+        // Test ZRTP initialization (now should work with real implementation)
         let context = SecurityContextFactory::create_zrtp_context().unwrap();
         
         let result = context.initialize().await;
-        assert!(result.is_err()); // Should error until ZRTP is fully implemented
+        assert!(result.is_ok()); // Should now succeed with actual ZRTP implementation
+        assert_eq!(context.get_state().await, SecurityState::Negotiating);
     }
 
     #[test]

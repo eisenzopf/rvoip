@@ -645,6 +645,105 @@ impl Zrtp {
             Err(Error::CryptoError("Missing shared secret for key derivation".into()))
         }
     }
+
+    /// Generate SAS (Short Authentication String) for user verification
+    pub fn generate_sas(&self) -> Result<String, Error> {
+        if !self.is_complete() {
+            return Err(Error::InvalidState("ZRTP exchange not complete".into()));
+        }
+
+        let shared_secret = self.shared_secret.as_ref()
+            .ok_or_else(|| Error::CryptoError("No shared secret available".into()))?;
+
+        let hello_hash_i = self.hello_hash.as_ref()
+            .ok_or_else(|| Error::CryptoError("Missing local Hello hash".into()))?;
+
+        let hello_hash_r = self.peer_hello_hash.as_ref()
+            .ok_or_else(|| Error::CryptoError("Missing peer Hello hash".into()))?;
+
+        // ZRTP SAS uses consistent ordering: shared_secret || Hello_hash_I || Hello_hash_R
+        // Where I is always initiator and R is always responder (not local/peer)
+        let mut sas_input = Vec::new();
+        sas_input.extend_from_slice(shared_secret);
+        
+        // Use consistent ordering based on role
+        match self.role {
+            ZrtpRole::Initiator => {
+                // For initiator: local=I, peer=R
+                sas_input.extend_from_slice(hello_hash_i);  // Our hello = initiator
+                sas_input.extend_from_slice(hello_hash_r);  // Peer hello = responder
+            },
+            ZrtpRole::Responder => {
+                // For responder: peer=I, local=R
+                sas_input.extend_from_slice(hello_hash_r);  // Peer hello = initiator  
+                sas_input.extend_from_slice(hello_hash_i);  // Our hello = responder
+            },
+        }
+
+        // Hash the SAS input
+        let mut hasher = Sha256::new();
+        hasher.update(&sas_input);
+        let sas_hash = hasher.finalize();
+
+        // Generate SAS based on selected type
+        let sas_type = self.selected_sas_type
+            .ok_or_else(|| Error::InvalidState("No SAS type selected".into()))?;
+
+        match sas_type {
+            ZrtpSasType::B32 => {
+                // Base 32 encoding - 4 characters, 20 bits from hash
+                let sas_value = u32::from_be_bytes([
+                    sas_hash[0], sas_hash[1], sas_hash[2], sas_hash[3]
+                ]) & 0x000FFFFF; // 20 bits
+
+                // Convert to base 32 (A-Z, 2-7)
+                let charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+                let mut sas = String::new();
+                let mut value = sas_value;
+                
+                for _ in 0..4 {
+                    let index = (value & 0x1F) as usize;
+                    sas.insert(0, charset.chars().nth(index).unwrap());
+                    value >>= 5;
+                }
+                
+                Ok(sas)
+            },
+            ZrtpSasType::B32E => {
+                // Base 32 extended - use first 20 bits for 4-character SAS
+                let sas_value = u32::from_be_bytes([
+                    sas_hash[0], sas_hash[1], sas_hash[2], sas_hash[3]
+                ]) & 0x000FFFFF; // 20 bits
+
+                // Convert to decimal for user display
+                Ok(format!("{:04}", sas_value % 10000))
+            },
+        }
+    }
+
+    /// Verify SAS matches what the user sees on both endpoints
+    pub fn verify_sas(&self, user_sas: &str) -> Result<bool, Error> {
+        let generated_sas = self.generate_sas()?;
+        Ok(generated_sas.eq_ignore_ascii_case(user_sas))
+    }
+
+    /// Get human-readable SAS display for the user
+    pub fn get_sas_display(&self) -> Result<String, Error> {
+        let sas = self.generate_sas()?;
+        let sas_type = self.selected_sas_type
+            .ok_or_else(|| Error::InvalidState("No SAS type selected".into()))?;
+
+        match sas_type {
+            ZrtpSasType::B32 => {
+                Ok(format!("SAS: {} (Read aloud: \"{}\")", sas, 
+                    sas.chars().map(|c| c.to_string()).collect::<Vec<String>>().join(" ")))
+            },
+            ZrtpSasType::B32E => {
+                Ok(format!("SAS: {} (Read as: \"{}\")", sas,
+                    sas.chars().map(|c| c.to_string()).collect::<Vec<String>>().join(" ")))
+            },
+        }
+    }
 }
 
 impl SecurityKeyExchange for Zrtp {
