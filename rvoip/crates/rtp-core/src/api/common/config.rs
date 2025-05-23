@@ -299,6 +299,15 @@ pub struct SecurityConfig {
     
     /// Remote fingerprint algorithm
     pub remote_fingerprint_algorithm: Option<String>,
+    
+    /// Certificate data in DER format (for MIKEY-PKE)
+    pub certificate_data: Option<Vec<u8>>,
+    
+    /// Private key data in PKCS#8 DER format (for MIKEY-PKE)
+    pub private_key_data: Option<Vec<u8>>,
+    
+    /// Peer certificate data in DER format (for MIKEY-PKE)
+    pub peer_certificate_data: Option<Vec<u8>>,
 }
 
 impl Default for SecurityConfig {
@@ -318,6 +327,9 @@ impl Default for SecurityConfig {
             require_client_certificate: false,
             remote_fingerprint: None,
             remote_fingerprint_algorithm: None,
+            certificate_data: None,
+            private_key_data: None,
+            peer_certificate_data: None,
         }
     }
 }
@@ -339,6 +351,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -356,6 +371,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -375,6 +393,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -395,6 +416,9 @@ impl SecurityConfig {
                     require_client_certificate: false, // Optional in most deployments
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -411,6 +435,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -427,6 +454,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -443,6 +473,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -459,6 +492,9 @@ impl SecurityConfig {
                     require_client_certificate: false,
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
+                    certificate_data: None,
+                    private_key_data: None,
+                    peer_certificate_data: None,
                 }
             },
             
@@ -556,5 +592,29 @@ impl SecurityConfig {
     pub fn with_optional_security(mut self) -> Self {
         self.required = false;
         self
+    }
+    
+    /// Set certificate data for PKE mode (DER format)
+    pub fn with_certificate_data(mut self, cert_data: Vec<u8>, private_key_data: Vec<u8>) -> Self {
+        self.certificate_data = Some(cert_data);
+        self.private_key_data = Some(private_key_data);
+        self
+    }
+    
+    /// Set peer certificate data for PKE mode (DER format)
+    pub fn with_peer_certificate_data(mut self, peer_cert_data: Vec<u8>) -> Self {
+        self.peer_certificate_data = Some(peer_cert_data);
+        self
+    }
+    
+    /// Create a MIKEY-PKE configuration with certificate data
+    pub fn mikey_pke_with_certificates(
+        cert_data: Vec<u8>, 
+        private_key_data: Vec<u8>, 
+        peer_cert_data: Vec<u8>
+    ) -> Self {
+        Self::mikey_pke()
+            .with_certificate_data(cert_data, private_key_data)
+            .with_peer_certificate_data(peer_cert_data)
     }
 } 

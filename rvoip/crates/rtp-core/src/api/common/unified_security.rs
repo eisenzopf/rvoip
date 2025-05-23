@@ -70,18 +70,31 @@ pub enum MikeyMode {
 
 /// Unified security context that can handle multiple key exchange methods
 pub struct UnifiedSecurityContext {
+    /// Security configuration
+    config: SecurityConfig,
+    /// Selected key exchange method
+    method: KeyExchangeMethod,
+    /// Method-specific configuration
+    method_config: KeyExchangeConfig,
     /// Current security state
     state: Arc<RwLock<SecurityState>>,
-    /// Key exchange method being used
-    method: KeyExchangeMethod,
-    /// Configuration for this context
-    config: SecurityConfig,
     /// The underlying key exchange implementation
     key_exchange: Arc<RwLock<Option<Box<dyn SecurityKeyExchange + Send + Sync>>>>,
     /// SRTP context once keys are established
     srtp_context: Arc<RwLock<Option<SrtpContext>>>,
-    /// Method-specific configuration
-    method_config: KeyExchangeConfig,
+}
+
+impl std::fmt::Debug for UnifiedSecurityContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnifiedSecurityContext")
+            .field("method", &self.method)
+            .field("config", &self.config)
+            .field("method_config", &self.method_config)
+            .field("state", &"<RwLock<SecurityState>>")
+            .field("key_exchange", &"<Box<dyn SecurityKeyExchange>>")
+            .field("srtp_context", &"<RwLock<Option<SrtpContext>>>")
+            .finish()
+    }
 }
 
 impl UnifiedSecurityContext {
@@ -197,9 +210,42 @@ impl UnifiedSecurityContext {
             },
             KeyExchangeMethod::Mikey => {
                 if let KeyExchangeConfig::Mikey { psk, identity, mode } = &self.method_config {
-                    // Create MIKEY instance based on configuration
-                    // This is a placeholder - actual MIKEY implementation would go here
-                    return Err(SecurityError::Configuration("MIKEY implementation not yet complete".to_string()));
+                    match mode {
+                        MikeyMode::Psk => {
+                            // Create MIKEY-PSK configuration
+                            let mikey_config = crate::security::mikey::MikeyConfig {
+                                method: crate::security::mikey::MikeyKeyExchangeMethod::Psk,
+                                psk: psk.clone(),
+                                srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
+                                ..Default::default()
+                            };
+                            
+                            // Default to initiator role - would be determined by call setup in real usage
+                            let mikey = crate::security::mikey::Mikey::new(
+                                mikey_config, 
+                                crate::security::mikey::MikeyRole::Initiator
+                            );
+                            Box::new(mikey)
+                        },
+                        MikeyMode::Pke => {
+                            // Create MIKEY-PKE configuration
+                            let mikey_config = crate::security::mikey::MikeyConfig {
+                                method: crate::security::mikey::MikeyKeyExchangeMethod::Pk,
+                                certificate: self.config.certificate_data.clone(),
+                                private_key: self.config.private_key_data.clone(),
+                                peer_certificate: self.config.peer_certificate_data.clone(),
+                                srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
+                                ..Default::default()
+                            };
+                            
+                            // Default to initiator role - would be determined by call setup in real usage
+                            let mikey = crate::security::mikey::Mikey::new(
+                                mikey_config, 
+                                crate::security::mikey::MikeyRole::Initiator
+                            );
+                            Box::new(mikey)
+                        },
+                    }
                 } else {
                     return Err(SecurityError::Configuration("Invalid MIKEY configuration".to_string()));
                 }

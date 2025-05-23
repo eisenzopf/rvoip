@@ -7,7 +7,8 @@ use crate::Error;
 use super::payloads::{
     PayloadType, CommonHeader, KeyDataPayload, 
     GeneralExtensionPayload, KeyValidationData,
-    SecurityPolicyPayload
+    SecurityPolicyPayload, CertificatePayload, SignaturePayload,
+    EncryptedPayload, PublicKeyPayload
 };
 
 /// MIKEY message types
@@ -96,13 +97,12 @@ impl MikeyMessage {
     
     /// Add security policy to the message
     pub fn add_security_policy(&mut self, policy: SecurityPolicyPayload) {
-        // Serialize security policy
         let mut data = Vec::new();
         
         // Policy number (1 byte)
         data.push(policy.policy_no);
         
-        // Policy type (1 byte)
+        // Policy type (1 byte) 
         data.push(policy.policy_type);
         
         // Policy parameters
@@ -115,8 +115,107 @@ impl MikeyMessage {
     pub fn add_mac(&mut self, mac: Vec<u8>) {
         self.payloads.push((PayloadType::Mac, mac));
     }
+
+    /// Add certificate to the message (PKE mode)
+    pub fn add_certificate(&mut self, cert: CertificatePayload) {
+        let mut data = Vec::new();
+        
+        // Certificate type (1 byte)
+        data.push(cert.cert_type as u8);
+        
+        // Certificate length (2 bytes)
+        let cert_len = cert.cert_data.len() as u16;
+        data.extend_from_slice(&cert_len.to_be_bytes());
+        
+        // Certificate data
+        data.extend_from_slice(&cert.cert_data);
+        
+        // Add certificate chain if present
+        for chain_cert in &cert.cert_chain {
+            // Chain certificate length (2 bytes)
+            let chain_len = chain_cert.len() as u16;
+            data.extend_from_slice(&chain_len.to_be_bytes());
+            
+            // Chain certificate data
+            data.extend_from_slice(chain_cert);
+        }
+        
+        self.payloads.push((PayloadType::Certificate, data));
+    }
     
-    /// Get the MAC from the message
+    /// Add signature to the message (PKE mode)
+    pub fn add_signature(&mut self, sig: SignaturePayload) {
+        let mut data = Vec::new();
+        
+        // Signature algorithm (1 byte)
+        data.push(sig.sig_algorithm as u8);
+        
+        // Signature length (2 bytes)
+        let sig_len = sig.signature.len() as u16;
+        data.extend_from_slice(&sig_len.to_be_bytes());
+        
+        // Signature data
+        data.extend_from_slice(&sig.signature);
+        
+        self.payloads.push((PayloadType::Signature, data));
+    }
+    
+    /// Add encrypted payload to the message (PKE mode)
+    pub fn add_encrypted(&mut self, enc: EncryptedPayload) {
+        let mut data = Vec::new();
+        
+        // Encryption algorithm (1 byte)
+        data.push(enc.enc_algorithm as u8);
+        
+        // IV length and data (if present)
+        if let Some(iv) = &enc.iv {
+            data.push(iv.len() as u8);
+            data.extend_from_slice(iv);
+        } else {
+            data.push(0); // No IV
+        }
+        
+        // Encrypted data length (2 bytes)
+        let enc_len = enc.encrypted_data.len() as u16;
+        data.extend_from_slice(&enc_len.to_be_bytes());
+        
+        // Encrypted data
+        data.extend_from_slice(&enc.encrypted_data);
+        
+        self.payloads.push((PayloadType::Encrypted, data));
+    }
+    
+    /// Add public key to the message (PKE mode)
+    pub fn add_public_key(&mut self, pubkey: PublicKeyPayload) {
+        let mut data = Vec::new();
+        
+        // Public key algorithm (1 byte)
+        data.push(pubkey.key_algorithm as u8);
+        
+        // Key parameters length and data (if present)
+        if let Some(params) = &pubkey.key_params {
+            data.push(params.len() as u8);
+            data.extend_from_slice(params);
+        } else {
+            data.push(0); // No parameters
+        }
+        
+        // Public key length (2 bytes)
+        let key_len = pubkey.key_data.len() as u16;
+        data.extend_from_slice(&key_len.to_be_bytes());
+        
+        // Public key data
+        data.extend_from_slice(&pubkey.key_data);
+        
+        self.payloads.push((PayloadType::PublicKey, data));
+    }
+    
+    /// Get timestamp from the message
+    pub fn get_timestamp(&self) -> Option<&u64> {
+        self.timestamp.as_ref()
+    }
+    
+    /// Get MAC from the message
     pub fn get_mac(&self) -> Option<&[u8]> {
         for (payload_type, data) in &self.payloads {
             if *payload_type == PayloadType::Mac {
@@ -126,12 +225,7 @@ impl MikeyMessage {
         None
     }
     
-    /// Get the timestamp from the message
-    pub fn get_timestamp(&self) -> Option<&u64> {
-        self.timestamp.as_ref()
-    }
-    
-    /// Get the key data from the message
+    /// Get key data from the message
     pub fn get_key_data(&self) -> Option<KeyDataPayload> {
         for (payload_type, data) in &self.payloads {
             if *payload_type == PayloadType::KeyData {
@@ -179,6 +273,211 @@ impl MikeyMessage {
                     key_data,
                     salt_data,
                     kv_data,
+                });
+            }
+        }
+        None
+    }
+    
+    /// Get certificate from the message (PKE mode)
+    pub fn get_certificate(&self) -> Option<CertificatePayload> {
+        for (payload_type, data) in &self.payloads {
+            if *payload_type == PayloadType::Certificate {
+                if data.len() < 3 {
+                    return None; // Too short
+                }
+                
+                // Certificate type (1 byte)
+                let cert_type = match data[0] {
+                    0 => super::payloads::CertificateType::X509,
+                    1 => super::payloads::CertificateType::X509Chain,
+                    2 => super::payloads::CertificateType::Pgp,
+                    _ => super::payloads::CertificateType::Reserved,
+                };
+                
+                // Certificate length (2 bytes)
+                let cert_len = u16::from_be_bytes([data[1], data[2]]) as usize;
+                
+                if data.len() < 3 + cert_len {
+                    return None; // Too short
+                }
+                
+                // Certificate data
+                let cert_data = data[3..3 + cert_len].to_vec();
+                
+                // Parse certificate chain (if present)
+                let mut cert_chain = Vec::new();
+                let mut pos = 3 + cert_len;
+                
+                while pos + 2 < data.len() {
+                    // Chain certificate length (2 bytes)
+                    let chain_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+                    pos += 2;
+                    
+                    if pos + chain_len <= data.len() {
+                        cert_chain.push(data[pos..pos + chain_len].to_vec());
+                        pos += chain_len;
+                    } else {
+                        break;
+                    }
+                }
+                
+                return Some(CertificatePayload {
+                    cert_type,
+                    cert_data,
+                    cert_chain,
+                });
+            }
+        }
+        None
+    }
+    
+    /// Get signature from the message (PKE mode)
+    pub fn get_signature(&self) -> Option<SignaturePayload> {
+        for (payload_type, data) in &self.payloads {
+            if *payload_type == PayloadType::Signature {
+                if data.len() < 3 {
+                    return None; // Too short
+                }
+                
+                // Signature algorithm (1 byte)
+                let sig_algorithm = match data[0] {
+                    0 => super::payloads::SignatureAlgorithm::RsaSha256,
+                    1 => super::payloads::SignatureAlgorithm::RsaSha512,
+                    2 => super::payloads::SignatureAlgorithm::EcdsaSha256,
+                    3 => super::payloads::SignatureAlgorithm::EcdsaSha512,
+                    4 => super::payloads::SignatureAlgorithm::RsaPssSha256,
+                    5 => super::payloads::SignatureAlgorithm::RsaPssSha512,
+                    _ => return None, // Unknown algorithm
+                };
+                
+                // Signature length (2 bytes)
+                let sig_len = u16::from_be_bytes([data[1], data[2]]) as usize;
+                
+                if data.len() < 3 + sig_len {
+                    return None; // Too short
+                }
+                
+                // Signature data
+                let signature = data[3..3 + sig_len].to_vec();
+                
+                return Some(SignaturePayload {
+                    sig_algorithm,
+                    signature,
+                });
+            }
+        }
+        None
+    }
+    
+    /// Get encrypted payload from the message (PKE mode)
+    pub fn get_encrypted(&self) -> Option<EncryptedPayload> {
+        for (payload_type, data) in &self.payloads {
+            if *payload_type == PayloadType::Encrypted {
+                if data.len() < 4 {
+                    return None; // Too short
+                }
+                
+                // Encryption algorithm (1 byte)
+                let enc_algorithm = match data[0] {
+                    0 => super::payloads::EncryptionAlgorithm::RsaPkcs1,
+                    1 => super::payloads::EncryptionAlgorithm::RsaOaepSha256,
+                    2 => super::payloads::EncryptionAlgorithm::Ecies,
+                    _ => return None, // Unknown algorithm
+                };
+                
+                // IV length (1 byte)
+                let iv_len = data[1] as usize;
+                let mut pos = 2;
+                
+                // IV data (if present)
+                let iv = if iv_len > 0 {
+                    if data.len() < pos + iv_len {
+                        return None; // Too short
+                    }
+                    let iv_data = data[pos..pos + iv_len].to_vec();
+                    pos += iv_len;
+                    Some(iv_data)
+                } else {
+                    None
+                };
+                
+                // Encrypted data length (2 bytes)
+                if data.len() < pos + 2 {
+                    return None; // Too short
+                }
+                let enc_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                
+                if data.len() < pos + enc_len {
+                    return None; // Too short
+                }
+                
+                // Encrypted data
+                let encrypted_data = data[pos..pos + enc_len].to_vec();
+                
+                return Some(EncryptedPayload {
+                    enc_algorithm,
+                    encrypted_data,
+                    iv,
+                });
+            }
+        }
+        None
+    }
+    
+    /// Get public key from the message (PKE mode)
+    pub fn get_public_key(&self) -> Option<PublicKeyPayload> {
+        for (payload_type, data) in &self.payloads {
+            if *payload_type == PayloadType::PublicKey {
+                if data.len() < 4 {
+                    return None; // Too short
+                }
+                
+                // Public key algorithm (1 byte)
+                let key_algorithm = match data[0] {
+                    0 => super::payloads::PublicKeyAlgorithm::Rsa,
+                    1 => super::payloads::PublicKeyAlgorithm::EcdsaP256,
+                    2 => super::payloads::PublicKeyAlgorithm::EcdsaP384,
+                    3 => super::payloads::PublicKeyAlgorithm::EcdsaP521,
+                    4 => super::payloads::PublicKeyAlgorithm::Ed25519,
+                    _ => return None, // Unknown algorithm
+                };
+                
+                // Key parameters length (1 byte)
+                let params_len = data[1] as usize;
+                let mut pos = 2;
+                
+                // Key parameters (if present)
+                let key_params = if params_len > 0 {
+                    if data.len() < pos + params_len {
+                        return None; // Too short
+                    }
+                    let params_data = data[pos..pos + params_len].to_vec();
+                    pos += params_len;
+                    Some(params_data)
+                } else {
+                    None
+                };
+                
+                // Public key length (2 bytes)
+                if data.len() < pos + 2 {
+                    return None; // Too short
+                }
+                let key_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                
+                if data.len() < pos + key_len {
+                    return None; // Too short
+                }
+                
+                // Public key data
+                let key_data = data[pos..pos + key_len].to_vec();
+                
+                return Some(PublicKeyPayload {
+                    key_algorithm,
+                    key_data,
+                    key_params,
                 });
             }
         }
