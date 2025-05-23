@@ -249,7 +249,26 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             &self.transport,
             &self.connect_callbacks,
             start_receive_task,
-        ).await
+        ).await?;
+        
+        // Initialize transmit buffer if high-performance buffers are enabled
+        if self.config.high_performance_buffers_enabled {
+            // Get SSRC from session
+            let session = self.session.lock().await;
+            let ssrc = session.get_ssrc();
+            drop(session); // Release the lock early
+            
+            // Initialize the transmit buffer
+            transmit::init_transmit_buffer(
+                &self.buffer_manager,
+                &self.packet_pool,
+                &self.transmit_buffer,
+                ssrc,
+                self.config.transmit_buffer_config.clone(),
+            ).await?;
+        }
+        
+        Ok(())
     }
     
     async fn disconnect(&self) -> Result<(), MediaTransportError> {
