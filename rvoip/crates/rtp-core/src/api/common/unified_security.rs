@@ -357,4 +357,188 @@ impl SecurityContextFactory {
         let config = SecurityConfig::srtp_with_key(key);
         Self::create_context(config)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::common::config::{SecurityConfig, SecurityProfile, SrtpProfile};
+
+    /// Test data for SRTP keys
+    fn test_srtp_key() -> Vec<u8> {
+        vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+             // Salt
+             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E]
+    }
+
+    #[tokio::test]
+    async fn test_create_psk_context() {
+        let key = test_srtp_key();
+        let context = SecurityContextFactory::create_psk_context(key).unwrap();
+        
+        assert_eq!(context.get_method(), KeyExchangeMethod::PreSharedKey);
+        assert_eq!(context.get_state().await, SecurityState::Initial);
+    }
+
+    #[tokio::test]
+    async fn test_psk_initialization() {
+        let key = test_srtp_key();
+        let context = SecurityContextFactory::create_psk_context(key).unwrap();
+        
+        // Initialize the PSK context
+        context.initialize().await.unwrap();
+        
+        // PSK should immediately establish security
+        assert!(context.is_established().await);
+        assert_eq!(context.get_state().await, SecurityState::Established);
+    }
+
+    #[test]
+    fn test_create_sdes_context() {
+        let context = SecurityContextFactory::create_sdes_context().unwrap();
+        assert_eq!(context.get_method(), KeyExchangeMethod::Sdes);
+    }
+
+    #[test]
+    fn test_create_mikey_context() {
+        let key = test_srtp_key();
+        let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
+        assert_eq!(context.get_method(), KeyExchangeMethod::Mikey);
+    }
+
+    #[test]
+    fn test_create_zrtp_context() {
+        let context = SecurityContextFactory::create_zrtp_context().unwrap();
+        assert_eq!(context.get_method(), KeyExchangeMethod::Zrtp);
+    }
+
+    #[test]
+    fn test_security_config_creation() {
+        // Test SDES config
+        let sdes_config = SecurityConfig::sdes_srtp();
+        assert_eq!(sdes_config.mode, SecurityMode::SdesSrtp);
+        assert_eq!(sdes_config.profile, SecurityProfile::SdesSrtp);
+
+        // Test MIKEY config
+        let mikey_config = SecurityConfig::mikey_psk();
+        assert_eq!(mikey_config.mode, SecurityMode::MikeySrtp);
+        assert_eq!(mikey_config.profile, SecurityProfile::MikeyPsk);
+
+        // Test ZRTP config
+        let zrtp_config = SecurityConfig::zrtp_p2p();
+        assert_eq!(zrtp_config.mode, SecurityMode::ZrtpSrtp);
+        assert_eq!(zrtp_config.profile, SecurityProfile::ZrtpP2P);
+    }
+
+    #[test]
+    fn test_key_exchange_method_properties() {
+        // Test method properties
+        assert!(KeyExchangeMethod::Sdes.requires_network_exchange());
+        assert!(KeyExchangeMethod::Sdes.uses_signaling_exchange());
+        assert!(!KeyExchangeMethod::Sdes.uses_media_exchange());
+
+        assert!(KeyExchangeMethod::Zrtp.requires_network_exchange());
+        assert!(!KeyExchangeMethod::Zrtp.uses_signaling_exchange());
+        assert!(KeyExchangeMethod::Zrtp.uses_media_exchange());
+
+        assert!(!KeyExchangeMethod::PreSharedKey.requires_network_exchange());
+        assert!(!KeyExchangeMethod::PreSharedKey.uses_signaling_exchange());
+        assert!(!KeyExchangeMethod::PreSharedKey.uses_media_exchange());
+    }
+
+    #[test]
+    fn test_security_mode_conversions() {
+        // Test mode to method conversion
+        assert_eq!(SecurityMode::SdesSrtp.key_exchange_method(), Some(KeyExchangeMethod::Sdes));
+        assert_eq!(SecurityMode::MikeySrtp.key_exchange_method(), Some(KeyExchangeMethod::Mikey));
+        assert_eq!(SecurityMode::ZrtpSrtp.key_exchange_method(), Some(KeyExchangeMethod::Zrtp));
+        assert_eq!(SecurityMode::None.key_exchange_method(), None);
+
+        // Test method to mode conversion
+        assert_eq!(KeyExchangeMethod::Sdes.to_security_mode(), SecurityMode::SdesSrtp);
+        assert_eq!(KeyExchangeMethod::Mikey.to_security_mode(), SecurityMode::MikeySrtp);
+        assert_eq!(KeyExchangeMethod::Zrtp.to_security_mode(), SecurityMode::ZrtpSrtp);
+    }
+
+    #[test]
+    fn test_invalid_psk_key() {
+        // Test with key that's too short
+        let short_key = vec![0x01, 0x02, 0x03]; // Only 3 bytes
+        let result = SecurityContextFactory::create_psk_context(short_key);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sdes_initialization_placeholder() {
+        // Test SDES initialization (should work once SDES is fully implemented)
+        let context = SecurityContextFactory::create_sdes_context().unwrap();
+        
+        // Currently SDES initialization should work since we have the core implementation
+        let result = context.initialize().await;
+        assert!(result.is_ok());
+        assert_eq!(context.get_state().await, SecurityState::Negotiating);
+    }
+
+    #[tokio::test]
+    async fn test_mikey_initialization_placeholder() {
+        // Test MIKEY initialization (currently returns error as placeholder)
+        let key = test_srtp_key();
+        let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
+        
+        let result = context.initialize().await;
+        assert!(result.is_err()); // Should error until MIKEY is fully implemented
+    }
+
+    #[tokio::test]
+    async fn test_zrtp_initialization_placeholder() {
+        // Test ZRTP initialization (currently returns error as placeholder)
+        let context = SecurityContextFactory::create_zrtp_context().unwrap();
+        
+        let result = context.initialize().await;
+        assert!(result.is_err()); // Should error until ZRTP is fully implemented
+    }
+
+    #[test]
+    fn test_method_config_creation() {
+        let key = test_srtp_key();
+        let config = SecurityConfig::srtp_with_key(key);
+        let context = UnifiedSecurityContext::new(config).unwrap();
+        
+        // Verify the method config was created correctly
+        assert_eq!(context.method, KeyExchangeMethod::PreSharedKey);
+        
+        // Check the internal method config
+        match &context.method_config {
+            KeyExchangeConfig::PreSharedKey { key, salt } => {
+                assert_eq!(key.len(), 16); // AES-128 key
+                assert_eq!(salt.len(), 14); // Standard SRTP salt
+            },
+            _ => panic!("Expected PreSharedKey config"),
+        }
+    }
+
+    #[test]
+    fn test_sip_scenario_configs() {
+        // Test predefined SIP scenario configurations
+        let enterprise = SecurityConfig::sip_enterprise();
+        assert_eq!(enterprise.mode, SecurityMode::MikeySrtp);
+
+        let operator = SecurityConfig::sip_operator();
+        assert_eq!(operator.mode, SecurityMode::SdesSrtp);
+
+        let p2p = SecurityConfig::sip_peer_to_peer();
+        assert_eq!(p2p.mode, SecurityMode::ZrtpSrtp);
+
+        let bridge = SecurityConfig::sip_webrtc_bridge();
+        assert_eq!(bridge.mode, SecurityMode::SdesSrtp); // Primary method
+    }
+
+    #[test]
+    fn test_multi_method_config() {
+        let methods = vec![KeyExchangeMethod::Sdes, KeyExchangeMethod::DtlsSrtp];
+        let config = SecurityConfig::multi_method(methods);
+        assert_eq!(config.mode, SecurityMode::SdesSrtp); // Should use first method
+    }
 } 

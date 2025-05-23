@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-use crate::api::common::config::{KeyExchangeMethod, SecurityConfig};
+use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode, SrtpProfile};
 use crate::api::common::error::SecurityError;
 use crate::api::common::unified_security::{UnifiedSecurityContext, SecurityState, SecurityContextFactory};
 use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
@@ -362,5 +362,190 @@ impl SecurityContextManager {
     pub async fn list_available_methods(&self) -> Vec<KeyExchangeMethod> {
         let contexts = self.contexts.read().await;
         contexts.keys().copied().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::common::config::{SecurityConfig, SecurityMode, SrtpProfile};
+
+    /// Test SRTP key for testing
+    fn test_srtp_key() -> Vec<u8> {
+        vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+             // Salt
+             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E]
+    }
+
+    #[tokio::test]
+    async fn test_create_security_manager() {
+        let config = SecurityConfig::sdes_srtp();
+        let manager = SecurityContextManager::new(config);
+
+        // Should start with no active method
+        assert_eq!(manager.get_active_method().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_manager() {
+        let mut config = SecurityConfig::srtp_with_key(test_srtp_key());
+        let manager = SecurityContextManager::new(config);
+
+        // Initialize should work
+        let result = manager.initialize().await;
+        assert!(result.is_ok());
+
+        // Should have at least PSK method available
+        let methods = manager.list_available_methods().await;
+        assert!(methods.contains(&KeyExchangeMethod::PreSharedKey));
+    }
+
+    #[tokio::test]
+    async fn test_custom_method_preference() {
+        let config = SecurityConfig::sdes_srtp();
+        let preference = vec![
+            KeyExchangeMethod::Sdes,
+            KeyExchangeMethod::PreSharedKey,
+            KeyExchangeMethod::DtlsSrtp,
+        ];
+        let manager = SecurityContextManager::with_method_preference(config, preference);
+
+        assert_eq!(manager.method_preference[0], KeyExchangeMethod::Sdes);
+        assert_eq!(manager.method_preference[1], KeyExchangeMethod::PreSharedKey);
+    }
+
+    #[tokio::test]
+    async fn test_method_detection() {
+        let config = SecurityConfig::sdes_srtp();
+        let manager = SecurityContextManager::new(config);
+
+        // Test SDES detection
+        let sdes_sdp = b"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:test";
+        let detected = manager.detect_method_from_signaling(sdes_sdp).unwrap();
+        assert_eq!(detected, KeyExchangeMethod::Sdes);
+
+        // Test MIKEY detection
+        let mikey_data = b"MIKEY message content";
+        let detected = manager.detect_method_from_signaling(mikey_data).unwrap();
+        assert_eq!(detected, KeyExchangeMethod::Mikey);
+
+        // Test ZRTP detection
+        let zrtp_data = b"zrtp-version: 1.10";
+        let detected = manager.detect_method_from_signaling(zrtp_data).unwrap();
+        assert_eq!(detected, KeyExchangeMethod::Zrtp);
+
+        // Test default detection
+        let unknown_data = b"random signaling data";
+        let detected = manager.detect_method_from_signaling(unknown_data).unwrap();
+        assert_eq!(detected, KeyExchangeMethod::Sdes); // Default
+    }
+
+    #[tokio::test]
+    async fn test_method_name_mapping() {
+        let config = SecurityConfig::sdes_srtp();
+        let manager = SecurityContextManager::new(config);
+
+        assert_eq!(manager.method_name(KeyExchangeMethod::DtlsSrtp), "DTLS-SRTP");
+        assert_eq!(manager.method_name(KeyExchangeMethod::Sdes), "SDES-SRTP");
+        assert_eq!(manager.method_name(KeyExchangeMethod::Mikey), "MIKEY-SRTP");
+        assert_eq!(manager.method_name(KeyExchangeMethod::Zrtp), "ZRTP-SRTP");
+        assert_eq!(manager.method_name(KeyExchangeMethod::PreSharedKey), "PSK-SRTP");
+    }
+
+    #[tokio::test]
+    async fn test_security_capabilities() {
+        let config = SecurityConfig::srtp_with_key(test_srtp_key());
+        let manager = SecurityContextManager::new(config);
+        manager.initialize().await.unwrap();
+
+        let capabilities = manager.get_capabilities().await;
+        
+        assert!(capabilities.can_offer);
+        assert!(capabilities.can_answer);
+        assert!(!capabilities.supported_methods.is_empty());
+        assert!(!capabilities.srtp_profiles.is_empty());
+    }
+
+    #[test]
+    fn test_negotiation_strategy_enum() {
+        // Test that all negotiation strategies exist
+        let _ = NegotiationStrategy::FirstAvailable;
+        let _ = NegotiationStrategy::PreferenceWithFallback;
+        let _ = NegotiationStrategy::Strict;
+        let _ = NegotiationStrategy::AutoDetect;
+    }
+
+    #[test]
+    fn test_security_context_type_variants() {
+        // Test that we can create different context types
+        use std::sync::Arc;
+        use crate::api::common::unified_security::{SecurityContextFactory};
+        
+        let unified_context = SecurityContextFactory::create_sdes_context().unwrap();
+        let _context_type = SecurityContextType::Unified(Arc::new(unified_context));
+        
+        // Test that the enum variants exist (can't easily create DTLS contexts in unit tests)
+        // but we can verify the types compile
+    }
+
+    #[tokio::test]
+    async fn test_psk_negotiation() {
+        let config = SecurityConfig::srtp_with_key(test_srtp_key());
+        let manager = SecurityContextManager::new(config);
+        manager.initialize().await.unwrap();
+
+        // Should be able to start PSK negotiation
+        let result = manager.start_negotiation(KeyExchangeMethod::PreSharedKey).await;
+        assert!(result.is_ok());
+
+        // Should now have an active method
+        assert_eq!(manager.get_active_method().await, Some(KeyExchangeMethod::PreSharedKey));
+    }
+
+    #[tokio::test]
+    async fn test_create_method_config() {
+        let config = SecurityConfig::sdes_srtp();
+        let manager = SecurityContextManager::new(config);
+
+        let method_config = manager.create_method_config(KeyExchangeMethod::Sdes).unwrap();
+        assert_eq!(method_config.mode, SecurityMode::SdesSrtp);
+    }
+
+    #[tokio::test]
+    async fn test_auto_negotiate_no_methods() {
+        // Create manager with no available methods
+        let config = SecurityConfig::sdes_srtp();
+        let manager = SecurityContextManager::with_method_preference(config, vec![]);
+
+        let result = manager.auto_negotiate(NegotiationStrategy::FirstAvailable).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_manager_initialization_warnings() {
+        // Test that manager handles initialization failures gracefully
+        let config = SecurityConfig::zrtp_p2p(); // This will fail to initialize
+        let manager = SecurityContextManager::new(config);
+
+        // Should not panic, just log warnings
+        let result = manager.initialize().await;
+        assert!(result.is_ok()); // Manager initialization should succeed even if contexts fail
+    }
+
+    #[test]
+    fn test_security_capabilities_struct() {
+        let capabilities = SecurityCapabilities {
+            supported_methods: vec![KeyExchangeMethod::Sdes],
+            can_offer: true,
+            can_answer: false,
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+        };
+
+        assert_eq!(capabilities.supported_methods.len(), 1);
+        assert!(capabilities.can_offer);
+        assert!(!capabilities.can_answer);
+        assert_eq!(capabilities.srtp_profiles.len(), 1);
     }
 } 
