@@ -118,6 +118,22 @@ pub enum SecurityError {
     /// Security timeout error
     #[error("Security timeout: {0}")]
     Timeout(String),
+    
+    /// Network connectivity error
+    #[error("Network error: {0}")]
+    Network(String),
+    
+    /// Authentication failure
+    #[error("Authentication failed: {0}")]
+    Authentication(String),
+    
+    /// Resource not found
+    #[error("Not found: {0}")]
+    NotFound(String),
+    
+    /// Security policy violation
+    #[error("Security policy violation: {0}")]
+    PolicyViolation(String),
 }
 
 /// Error types for buffer operations
