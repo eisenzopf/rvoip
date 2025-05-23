@@ -189,7 +189,7 @@ impl UnifiedSecurityContext {
                         crypto_suites: crypto_suites.clone(),
                         offer_count: *offer_count,
                     };
-                    let sdes = Sdes::new(sdes_config, crate::security::sdes::SdesRole::Offerer);
+                    let sdes = crate::security::sdes::Sdes::new(sdes_config, crate::security::sdes::SdesRole::Offerer);
                     Box::new(sdes)
                 } else {
                     return Err(SecurityError::Configuration("Invalid SDES configuration".to_string()));

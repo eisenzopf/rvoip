@@ -1,7 +1,8 @@
-//! SRTP functionality
+//! SRTP-related functionality for server security
 //!
-//! This module contains components for handling SRTP keys and crypto.
+//! This module contains components for SRTP key extraction and management.
 
 pub mod keys;
+pub mod sdes;
 
-pub use keys::*; 
+pub use sdes::{SdesServer, SdesServerSession, SdesServerConfig, SdesServerState}; 
