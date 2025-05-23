@@ -20,12 +20,12 @@ sdp = []  # Session Description Protocol support
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 # Serialization
-serde = { workspace = true, version = "1.0.219", features = ["derive"] }
-serde_json = { workspace = true, version = "1.0.128" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 serde_bytes = "0.11"
 # Utilities
 bytes = { workspace = true, features = ["serde"] }
-uuid = { workspace = true, version = "1.7", features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 base64 = "0.21"
 # Parsing
 nom = "7.1"
