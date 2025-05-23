@@ -207,5 +207,28 @@ pub trait ServerSecurityContext: Send + Sync {
 
 /// Create a new server security context
 pub async fn new(config: ServerSecurityConfig) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
-    DefaultServerSecurityContext::new(config).await
+    match config.security_mode {
+        SecurityMode::Srtp => {
+            // Use SRTP-only context for pre-shared keys (no DTLS handshake)
+            let srtp_ctx = srtp::SrtpServerSecurityContext::new(config).await?;
+            Ok(srtp_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::DtlsSrtp => {
+            // Use DTLS-SRTP context for handshake-based keys
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::SdesSrtp |
+        SecurityMode::MikeySrtp |
+        SecurityMode::ZrtpSrtp => {
+            // For now, treat these as DTLS-based (they would need specific implementations)
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::None => {
+            // For None, we could return a no-op security context, but for now use DTLS as fallback
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        }
+    }
 } 

@@ -5,4 +5,4 @@
 pub mod keys;
 pub mod sdes;
 
-pub use sdes::{SdesServer, SdesServerSession, SdesServerConfig, SdesServerState}; 
+pub use sdes::{SdesServer, SdesServerSession, SdesServerConfig, SdesServerState, SrtpServerSecurityContext, SrtpServerClientContext}; 

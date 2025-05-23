@@ -4,11 +4,16 @@
 //! It handles SDP crypto attribute parsing, key extraction, and SRTP context setup.
 
 use std::sync::Arc;
+use std::net::SocketAddr;
+use std::any::Any;
 use tokio::sync::RwLock;
+use async_trait::async_trait;
 use tracing::{info, debug, warn, error};
 
 use crate::api::common::error::SecurityError;
-use crate::api::common::config::{SrtpProfile, SecurityConfig};
+use crate::api::common::config::{SrtpProfile, SecurityConfig, SecurityInfo, SecurityMode};
+use crate::api::client::security::{ClientSecurityContext, ClientSecurityConfig};
+use crate::api::server::security::SocketHandle;
 use crate::security::{SecurityKeyExchange, sdes::{Sdes, SdesConfig, SdesRole, SdesCryptoAttribute}};
 use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32};
 use crate::srtp::crypto::SrtpCryptoKey;
@@ -285,5 +290,196 @@ impl SdesClient {
                 Err(SecurityError::CryptoError(format!("SDES offer generation failed: {}", e)))
             }
         }
+    }
+}
+
+/// SRTP-only client security context (no DTLS handshake)
+/// This implementation uses pre-shared keys negotiated through SIP/SDP
+pub struct SrtpClientSecurityContext {
+    /// Configuration
+    config: ClientSecurityConfig,
+    /// SDES client for key management
+    sdes_client: Arc<SdesClient>,
+    /// Remote address
+    remote_addr: Arc<RwLock<Option<SocketAddr>>>,
+    /// Socket handle
+    socket: Arc<RwLock<Option<SocketHandle>>>,
+    /// Handshake completed flag (always true for pre-shared keys)
+    handshake_completed: Arc<RwLock<bool>>,
+}
+
+impl SrtpClientSecurityContext {
+    /// Create a new SRTP-only client security context
+    pub async fn new(config: ClientSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        // Create SDES client config from security config
+        let sdes_config = SdesClientConfig {
+            supported_profiles: config.srtp_profiles.clone(),
+            strict_validation: true,
+            max_crypto_attributes: 8,
+        };
+        
+        let sdes_client = Arc::new(SdesClient::new(sdes_config));
+        
+        let ctx = Self {
+            config,
+            sdes_client,
+            remote_addr: Arc::new(RwLock::new(None)),
+            socket: Arc::new(RwLock::new(None)),
+            handshake_completed: Arc::new(RwLock::new(true)), // Pre-shared keys = no handshake needed
+        };
+        
+        info!("Created SRTP-only client security context (pre-shared keys)");
+        Ok(Arc::new(ctx))
+    }
+}
+
+#[async_trait]
+impl ClientSecurityContext for SrtpClientSecurityContext {
+    async fn initialize(&self) -> Result<(), SecurityError> {
+        debug!("Initializing SRTP-only client security context");
+        // No DTLS initialization needed for pre-shared keys
+        Ok(())
+    }
+    
+    async fn start_handshake(&self) -> Result<(), SecurityError> {
+        debug!("SRTP-only: No handshake needed for pre-shared keys");
+        // Pre-shared keys don't need a handshake
+        Ok(())
+    }
+    
+    async fn is_handshake_complete(&self) -> Result<bool, SecurityError> {
+        // Always complete for pre-shared keys
+        Ok(*self.handshake_completed.read().await)
+    }
+    
+    async fn wait_for_handshake(&self) -> Result<(), SecurityError> {
+        // No waiting needed for pre-shared keys
+        Ok(())
+    }
+    
+    async fn set_remote_address(&self, addr: SocketAddr) -> Result<(), SecurityError> {
+        let mut remote_addr = self.remote_addr.write().await;
+        *remote_addr = Some(addr);
+        debug!("SRTP-only: Set remote address to {}", addr);
+        Ok(())
+    }
+    
+    async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError> {
+        let mut socket_lock = self.socket.write().await;
+        *socket_lock = Some(socket.clone());
+        
+        // Set remote address if available
+        if let Some(remote_addr) = socket.remote_addr {
+            let mut remote_addr_guard = self.remote_addr.write().await;
+            *remote_addr_guard = Some(remote_addr);
+        }
+        
+        debug!("SRTP-only: Set socket handle");
+        Ok(())
+    }
+    
+    async fn set_remote_fingerprint(&self, _fingerprint: &str, _algorithm: &str) -> Result<(), SecurityError> {
+        debug!("SRTP-only: Fingerprint not used with pre-shared keys");
+        // Not needed for pre-shared key SRTP
+        Ok(())
+    }
+    
+    async fn complete_handshake(&self, remote_addr: SocketAddr, _remote_fingerprint: &str) -> Result<(), SecurityError> {
+        // Just set the remote address, no handshake needed
+        self.set_remote_address(remote_addr).await?;
+        debug!("SRTP-only: Complete handshake called - no handshake needed for pre-shared keys");
+        Ok(())
+    }
+    
+    async fn process_packet(&self, _data: &[u8]) -> Result<(), SecurityError> {
+        debug!("SRTP-only: No packet processing needed for pre-shared keys");
+        // No DTLS packet processing needed
+        Ok(())
+    }
+    
+    async fn start_packet_handler(&self) -> Result<(), SecurityError> {
+        debug!("SRTP-only: No packet handler needed for pre-shared keys");
+        // No DTLS packet handler needed
+        Ok(())
+    }
+    
+    async fn get_security_info(&self) -> Result<SecurityInfo, SecurityError> {
+        let crypto_suites = self.config.srtp_profiles.iter()
+            .map(|p| match p {
+                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
+                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
+                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
+            })
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        
+        Ok(SecurityInfo {
+            mode: SecurityMode::Srtp,
+            fingerprint: None, // No fingerprint for pre-shared keys
+            fingerprint_algorithm: None,
+            crypto_suites,
+            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
+            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+        })
+    }
+    
+    async fn close(&self) -> Result<(), SecurityError> {
+        debug!("SRTP-only: Closing security context");
+        let mut handshake_complete = self.handshake_completed.write().await;
+        *handshake_complete = false;
+        Ok(())
+    }
+    
+    fn is_secure(&self) -> bool {
+        true // Pre-shared key SRTP is secure
+    }
+    
+    fn get_security_info_sync(&self) -> SecurityInfo {
+        SecurityInfo {
+            mode: SecurityMode::Srtp,
+            fingerprint: None,
+            fingerprint_algorithm: None,
+            crypto_suites: vec!["AES_CM_128_HMAC_SHA1_80".to_string()],
+            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
+            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+        }
+    }
+
+    async fn get_fingerprint(&self) -> Result<String, SecurityError> {
+        Err(SecurityError::Configuration("Fingerprints not used with pre-shared key SRTP".to_string()))
+    }
+
+    async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError> {
+        Err(SecurityError::Configuration("Fingerprint algorithm not used with pre-shared key SRTP".to_string()))
+    }
+
+    async fn has_transport(&self) -> Result<bool, SecurityError> {
+        // For pre-shared keys, we don't need special DTLS transport
+        Ok(self.socket.read().await.is_some())
+    }
+
+    async fn is_ready(&self) -> Result<bool, SecurityError> {
+        // Check if socket is set and remote address is set
+        let socket_set = self.socket.read().await.is_some();
+        let remote_addr_set = self.remote_addr.read().await.is_some();
+        
+        let is_ready = socket_set && remote_addr_set;
+        
+        debug!("SRTP-only client security context ready: {}", is_ready);
+        debug!("  - Socket set: {}", socket_set);
+        debug!("  - Remote address set: {}", remote_addr_set);
+        
+        Ok(is_ready)
+    }
+
+    async fn process_dtls_packet(&self, _data: &[u8]) -> Result<(), SecurityError> {
+        debug!("SRTP-only: No DTLS packet processing needed for pre-shared keys");
+        // No DTLS processing for pre-shared keys
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 } 

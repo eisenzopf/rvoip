@@ -5,4 +5,4 @@
 pub mod keys;
 pub mod sdes;
 
-pub use sdes::{SdesClient, SdesClientConfig, SdesClientState}; 
+pub use sdes::{SdesClient, SdesClientConfig, SdesClientState, SrtpClientSecurityContext}; 

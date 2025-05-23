@@ -130,12 +130,38 @@ impl DefaultMediaTransportClient {
             
         // Create security context if enabled
         let security_context = if config.security_config.security_mode.is_enabled() {
-            let security_ctx = DefaultClientSecurityContext::new(
-                config.security_config.clone(),
-            ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create security context: {}", e)))?;
-            
-            // Store security context with explicit cast to trait object
-            Some(security_ctx as Arc<dyn ClientSecurityContext>)
+            match config.security_config.security_mode {
+                crate::api::common::config::SecurityMode::Srtp => {
+                    // Use SRTP-only context for pre-shared keys (no DTLS handshake)
+                    let srtp_ctx = crate::api::client::security::srtp::SrtpClientSecurityContext::new(
+                        config.security_config.clone(),
+                    ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create SRTP security context: {}", e)))?;
+                    
+                    Some(srtp_ctx as Arc<dyn ClientSecurityContext>)
+                },
+                crate::api::common::config::SecurityMode::DtlsSrtp => {
+                    // Use DTLS-SRTP context for handshake-based keys
+                    let dtls_ctx = DefaultClientSecurityContext::new(
+                        config.security_config.clone(),
+                    ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create DTLS security context: {}", e)))?;
+                    
+                    Some(dtls_ctx as Arc<dyn ClientSecurityContext>)
+                },
+                crate::api::common::config::SecurityMode::SdesSrtp |
+                crate::api::common::config::SecurityMode::MikeySrtp |
+                crate::api::common::config::SecurityMode::ZrtpSrtp => {
+                    // For now, treat these as DTLS-based (they would need specific implementations)
+                    let dtls_ctx = DefaultClientSecurityContext::new(
+                        config.security_config.clone(),
+                    ).await.map_err(|e| MediaTransportError::Security(format!("Failed to create DTLS security context: {}", e)))?;
+                    
+                    Some(dtls_ctx as Arc<dyn ClientSecurityContext>)
+                },
+                crate::api::common::config::SecurityMode::None => {
+                    // No security context
+                    None
+                }
+            }
         } else {
             None
         };

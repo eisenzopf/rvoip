@@ -89,15 +89,20 @@ pub async fn connect(
         security.start_handshake().await
             .map_err(|e| MediaTransportError::Security(format!("Failed to start handshake: {}", e)))?;
             
-        // Wait for handshake to complete
-        let handshake_timeout = Duration::from_secs(security_handshake_timeout_secs);
-        match tokio::time::timeout(handshake_timeout, wait_for_handshake_completion(security)).await {
-            Ok(result) => {
-                result.map_err(|e| MediaTransportError::Security(format!("Handshake failed: {}", e)))?;
-            },
-            Err(_) => {
-                return Err(MediaTransportError::Security(format!("Handshake timed out after {} seconds", security_handshake_timeout_secs)));
+        // Only wait for handshake completion if DTLS is required
+        if security_requires_dtls {
+            debug!("DTLS required - waiting for handshake completion");
+            let handshake_timeout = Duration::from_secs(security_handshake_timeout_secs);
+            match tokio::time::timeout(handshake_timeout, wait_for_handshake_completion(security)).await {
+                Ok(result) => {
+                    result.map_err(|e| MediaTransportError::Security(format!("Handshake failed: {}", e)))?;
+                },
+                Err(_) => {
+                    return Err(MediaTransportError::Security(format!("Handshake timed out after {} seconds", security_handshake_timeout_secs)));
+                }
             }
+        } else {
+            debug!("SRTP pre-shared keys - no handshake wait needed");
         }
     }
     
