@@ -73,9 +73,12 @@ pub fn string_to_security_mode(mode: &str) -> SecurityMode {
 /// Convert a SecurityMode enum to a string
 pub fn security_mode_to_string(mode: SecurityMode) -> &'static str {
     match mode {
-        SecurityMode::DtlsSrtp => "dtls-srtp",
+        SecurityMode::DtlsSrtp => "dtls_srtp",
         SecurityMode::Srtp => "srtp",
         SecurityMode::None => "none",
+        SecurityMode::SdesSrtp => "sdes_srtp",
+        SecurityMode::MikeySrtp => "mikey_srtp", 
+        SecurityMode::ZrtpSrtp => "zrtp_srtp",
     }
 }
 

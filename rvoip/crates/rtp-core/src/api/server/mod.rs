@@ -87,9 +87,9 @@ impl ServerConfigBuilder {
                     security_mode: crate::api::common::config::SecurityMode::Srtp,
                     fingerprint_algorithm: security_config.fingerprint_algorithm,
                     srtp_profiles: security_config.srtp_profiles,
-                    certificate_path: None, // Not used for SRTP mode 
+                    certificate_path: None, // Not used for SRTP mode
                     private_key_path: None, // Not used for SRTP mode
-                    require_client_certificate: false, // Not used for SRTP mode
+                    require_client_certificate: false,
                 };
                 
                 self = self.security_config(server_security_config);
@@ -113,6 +113,13 @@ impl ServerConfigBuilder {
                 };
                 
                 self = self.security_config(server_security_config);
+            },
+            crate::api::common::config::SecurityMode::SdesSrtp 
+            | crate::api::common::config::SecurityMode::MikeySrtp 
+            | crate::api::common::config::SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                // For now, these are handled through SecurityContextManager
+                // TODO: Implement direct server config support for these methods
             }
         }
         

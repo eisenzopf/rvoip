@@ -75,6 +75,10 @@ impl SecurityManager {
                     private_key_path: self.config.private_key_path.clone(),
                     require_client_certificate: self.config.require_client_certificate,
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -135,6 +139,10 @@ impl SecurityManager {
                     private_key_path: self.config.private_key_path.clone(),
                     require_client_certificate: self.config.require_client_certificate,
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -195,6 +203,10 @@ impl SecurityManager {
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -258,6 +270,10 @@ impl SecurityManager {
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         

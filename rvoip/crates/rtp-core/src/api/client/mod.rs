@@ -105,6 +105,13 @@ impl ClientConfigBuilder {
                 };
                 
                 self = self.security_config(client_security_config);
+            },
+            crate::api::common::config::SecurityMode::SdesSrtp 
+            | crate::api::common::config::SecurityMode::MikeySrtp 
+            | crate::api::common::config::SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                // For now, these are handled through SecurityContextManager
+                // TODO: Implement direct client config support for these methods
             }
         }
         

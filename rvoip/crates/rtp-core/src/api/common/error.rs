@@ -103,6 +103,14 @@ pub enum SecurityError {
     #[error("Security not initialized: {0}")]
     NotInitialized(String),
     
+    /// Invalid state error
+    #[error("Invalid security state: {0}")]
+    InvalidState(String),
+    
+    /// Cryptographic operation error
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
+    
     /// Internal security error
     #[error("Internal security error: {0}")]
     Internal(String),
