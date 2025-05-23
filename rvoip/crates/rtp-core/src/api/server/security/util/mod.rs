@@ -2,6 +2,6 @@
 //!
 //! This module contains helper functions used across the server security implementation.
 
-mod conversion;
+pub mod conversion;
 
 pub use conversion::*; 

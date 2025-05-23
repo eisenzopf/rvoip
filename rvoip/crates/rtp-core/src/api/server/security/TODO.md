@@ -50,7 +50,7 @@ src/api/server/security/
    - **keys.rs**: SRTP key extraction and management
 
 7. **util/**:
-   - **conversion.rs**: Conversion between API types and internal types
+   - **conversion.rs**: Type conversion utilities
 
 ## Progress
 
@@ -83,10 +83,10 @@ src/api/server/security/
   - [x] Implement actual functionality in SRTP module
   - [x] Update default.rs to delegate to SRTP module functions
 
-- [ ] **Phase 6: Utilities**
-  - [ ] Create conversion.rs with type conversion utilities
-  - [ ] Implement actual utility functions
-  - [ ] Update other modules to use utility functions
+- [x] **Phase 6: Utilities**
+  - [x] Create conversion.rs with type conversion utilities
+  - [x] Implement actual utility functions
+  - [x] Update other modules to use utility functions
 
 - [ ] **Phase 7: Integration & Testing**
   - [ ] Update mod.rs to export DefaultServerSecurityContext from default.rs
@@ -97,7 +97,7 @@ src/api/server/security/
 
 ## Current Status
 
-Phase 5 completed. SRTP functionality has been extracted to the srtp/keys.rs module, and all relevant components now use this module for SRTP operations. The DTLS handshake and client context implementations have been updated to use the SRTP module for key extraction and context creation. All code compiles successfully.
+Phase 6 completed. Utility functions have been extracted to a dedicated conversion.rs module. The DefaultServerSecurityContext, DefaultClientSecurityContext, and other modules now use these utilities to reduce code duplication and improve consistency. Duplicate code has been removed, and all components now use a consistent approach to type conversions and security information creation. All code compiles successfully.
 
 ## Implementation Strategy
 

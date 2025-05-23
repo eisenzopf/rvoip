@@ -23,6 +23,7 @@ use crate::api::server::security::core::context;
 use crate::api::server::security::client::context::DefaultClientSecurityContext;
 use crate::api::server::security::dtls::{handshake, transport};
 use crate::api::server::security::srtp::keys;
+use crate::api::server::security::util::conversion;
 
 /// Default implementation of the ServerSecurityContext
 #[derive(Clone)]
@@ -125,7 +126,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             version: crate::dtls::DtlsVersion::Dtls12,
             mtu: 1500,
             max_retransmissions: 5,
-            srtp_profiles: connection::convert_profiles(&self.config.srtp_profiles),
+            srtp_profiles: keys::convert_profiles(&self.config.srtp_profiles),
         };
         let mut connection = crate::dtls::DtlsConnection::new(dtls_config);
         
@@ -236,16 +237,12 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     
     fn get_security_info(&self) -> SecurityInfo {
         // Create a basic security info with what we know synchronously
-        SecurityInfo {
-            mode: self.config.security_mode,
-            fingerprint: None, // Will be filled by async get_fingerprint method
-            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
-            crypto_suites: self.config.srtp_profiles.iter()
-                .map(|p| keys::profile_to_string(*p))
-                .collect(),
-            key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
-        }
+        conversion::create_security_info(
+            self.config.security_mode,
+            None, // Will be filled by async get_fingerprint method
+            &self.config.fingerprint_algorithm,
+            &self.config.srtp_profiles
+        )
     }
 
     async fn process_client_packet(&self, addr: SocketAddr, data: &[u8]) -> Result<(), SecurityError> {

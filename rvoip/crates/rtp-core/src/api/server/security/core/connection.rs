@@ -12,6 +12,7 @@ use crate::api::common::config::{SrtpProfile};
 use crate::api::server::security::{ServerSecurityConfig, SocketHandle, ConnectionConfig, ConnectionRole};
 use crate::dtls::{DtlsConnection, DtlsConfig, DtlsRole};
 use crate::api::server::security::srtp::keys;
+use crate::api::server::security::util::conversion;
 
 /// Create a new DTLS connection with server role
 pub async fn create_server_connection(
@@ -19,7 +20,7 @@ pub async fn create_server_connection(
 ) -> Result<DtlsConnection, SecurityError> {
     // Create DTLS config with server role
     let dtls_config = DtlsConfig {
-        role: DtlsRole::Server,
+        role: conversion::role_to_dtls_role(ConnectionRole::Server),
         version: crate::dtls::DtlsVersion::Dtls12,
         mtu: 1500,
         max_retransmissions: 5,
@@ -150,18 +151,4 @@ pub async fn create_dtls_transport(
     
     // Wrap in Arc<Mutex<>>
     Ok(Arc::new(Mutex::new(transport)))
-}
-
-/// Convert API SRTP profiles to internal format
-pub fn convert_profiles(profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
-    profiles.iter()
-        .filter_map(|p| {
-            match p {
-                SrtpProfile::AesCm128HmacSha1_80 => Some(crate::srtp::SRTP_AES128_CM_SHA1_80),
-                SrtpProfile::AesCm128HmacSha1_32 => Some(crate::srtp::SRTP_AES128_CM_SHA1_32),
-                SrtpProfile::AesGcm128 => Some(crate::srtp::SRTP_AEAD_AES_128_GCM),
-                SrtpProfile::AesGcm256 => Some(crate::srtp::SRTP_AEAD_AES_256_GCM),
-            }
-        })
-        .collect()
 } 

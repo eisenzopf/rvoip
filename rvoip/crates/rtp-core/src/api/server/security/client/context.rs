@@ -16,6 +16,7 @@ use crate::dtls::{DtlsConnection};
 use crate::srtp::{SrtpContext};
 use crate::api::server::security::dtls::{handshake, transport};
 use crate::api::server::security::srtp::keys;
+use crate::api::server::security::util::conversion;
 
 /// Client security context managed by the server
 pub struct DefaultClientSecurityContext {
@@ -234,16 +235,12 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
     
     fn get_security_info(&self) -> SecurityInfo {
-        SecurityInfo {
-            mode: self.config.security_mode,
-            fingerprint: None, // Will be filled by async get_fingerprint method
-            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
-            crypto_suites: self.config.srtp_profiles.iter()
-                .map(|p| keys::profile_to_string(*p))
-                .collect(),
-            key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
-        }
+        conversion::create_security_info(
+            self.config.security_mode,
+            None, // Will be filled by async get_fingerprint method
+            &self.config.fingerprint_algorithm,
+            &self.config.srtp_profiles
+        )
     }
 
     async fn get_fingerprint(&self) -> Result<String, SecurityError> {
