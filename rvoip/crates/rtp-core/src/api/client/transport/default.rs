@@ -705,4 +705,88 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             priority,
         ).await
     }
+}
+
+// Additional methods not part of the MediaTransportClient trait
+impl DefaultMediaTransportClient {
+    /// Check if SSRC demultiplexing is enabled
+    pub async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError> {
+        Ok(crate::api::client::transport::media::ssrc::is_ssrc_demultiplexing_enabled(
+            &self.ssrc_demultiplexing_enabled
+        ))
+    }
+    
+    /// Register an SSRC for demultiplexing
+    pub async fn register_ssrc(&self, ssrc: u32) -> Result<bool, MediaTransportError> {
+        crate::api::client::transport::media::ssrc::register_ssrc(
+            ssrc,
+            &self.session,
+            &self.ssrc_demultiplexing_enabled
+        ).await
+    }
+    
+    /// Get the sequence number for a specific SSRC
+    pub async fn get_sequence_number(&self, ssrc: u32) -> Result<u16, MediaTransportError> {
+        crate::api::client::transport::media::ssrc::get_sequence_number(
+            ssrc,
+            &self.session,
+            &self.sequence_numbers
+        ).await
+    }
+    
+    /// Get all registered SSRCs
+    pub async fn get_all_ssrcs(&self) -> Result<Vec<u32>, MediaTransportError> {
+        crate::api::client::transport::media::ssrc::get_all_ssrcs(
+            &self.session
+        ).await
+    }
+    
+    /// Update CSRC CNAME for a specific SSRC
+    pub async fn update_csrc_cname(&self, ssrc: u32, cname: String) -> Result<(), MediaTransportError> {
+        // First check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get the csrc manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        
+        // Check if we already have a mapping
+        if csrc_manager.update_cname(ssrc, cname.clone()) {
+            // Mapping updated
+            return Ok(());
+        }
+        
+        // Create a new mapping if it doesn't exist
+        let csrc = (csrc_manager.len() as u32) % 15; // Use an available CSRC ID
+        let mapping = CsrcMapping::with_cname(ssrc, csrc, cname);
+        csrc_manager.add_mapping(mapping);
+        
+        Ok(())
+    }
+    
+    /// Update CSRC display name for a specific SSRC
+    pub async fn update_csrc_display_name(&self, ssrc: u32, name: String) -> Result<(), MediaTransportError> {
+        // First check if CSRC management is enabled
+        if !self.csrc_management_enabled.load(Ordering::SeqCst) {
+            return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        }
+        
+        // Get the csrc manager
+        let mut csrc_manager = self.csrc_manager.lock().await;
+        
+        // Check if we already have a mapping
+        if csrc_manager.update_display_name(ssrc, name.clone()) {
+            // Mapping updated
+            return Ok(());
+        }
+        
+        // Create a new mapping if it doesn't exist
+        let csrc = (csrc_manager.len() as u32) % 15; // Use an available CSRC ID
+        let mut mapping = CsrcMapping::new(ssrc, csrc);
+        mapping.display_name = Some(name);
+        csrc_manager.add_mapping(mapping);
+        
+        Ok(())
+    }
 } 

@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use tracing::Level;
 
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-use rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::transport::MediaTransportServer;
 use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
 use rvoip_rtp_core::api::common::config::SecurityMode;

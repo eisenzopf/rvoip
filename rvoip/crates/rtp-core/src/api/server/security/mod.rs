@@ -12,21 +12,17 @@ use tokio::sync::Mutex;
 use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 
-// Import necessary modules
-mod default;
-mod core;
-mod client;
-mod dtls;
-mod srtp;
-mod util;
+// Import necessary modules as public
+pub mod default;
+pub mod core;
+pub mod client;
+pub mod dtls;
+pub mod srtp;
+pub mod util;
 
 // Re-export DefaultServerSecurityContext
 pub use default::DefaultServerSecurityContext;
 pub use client::context::DefaultClientSecurityContext;
-
-// DEPRECATED: Old implementation being phased out
-#[deprecated(note = "This module is being phased out as part of a refactoring effort. Use the new modular implementation instead.")]
-pub mod server_security_impl;
 
 // Define our own types for API compatibility
 /// Socket handle for network operations

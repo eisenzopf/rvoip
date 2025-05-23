@@ -12,11 +12,11 @@ use tracing::{info, debug, warn};
 
 use rvoip_rtp_core::api::{
     client::{
-        transport::{MediaTransportClient, VoipMetrics},
+        transport::{MediaTransportClient, VoipMetrics, DefaultMediaTransportClient},
         config::{ClientConfig, ClientConfigBuilder},
     },
     server::{
-        transport::MediaTransportServer,
+        transport::{MediaTransportServer, DefaultMediaTransportServer},
         config::{ServerConfig, ServerConfigBuilder},
     },
     common::{
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Failed to build server config");
             
             // Create server
-            let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
+            let server = DefaultMediaTransportServer::new(server_config).await?;
             
             // Start server
             server.start().await?;
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build();
             
             // Create client
-            let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;
+            let client = DefaultMediaTransportClient::new(client_config).await?;
             
             // Create a shared state to track received events
             let received_events = Arc::new(Mutex::new(ReceivedEvents::default()));

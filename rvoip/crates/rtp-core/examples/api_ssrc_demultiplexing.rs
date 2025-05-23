@@ -10,21 +10,16 @@ use tokio::time;
 use tracing::{info, debug, warn};
 use rand::Rng;
 
-use rvoip_rtp_core::api::{
-    client::{
-        transport::{MediaTransportClient, MediaSyncInfo},
-        config::{ClientConfig, ClientConfigBuilder},
-    },
-    server::{
-        transport::MediaTransportServer,
-        config::{ServerConfig, ServerConfigBuilder},
-    },
-    common::{
-        frame::MediaFrame,
-        frame::MediaFrameType,
-        events::MediaTransportEvent,
-    },
-};
+use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
+use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
+use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
+use rvoip_rtp_core::api::server::transport::MediaTransportServer;
+use rvoip_rtp_core::api::client::transport::MediaTransportClient;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
+use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
+use rvoip_rtp_core::api::common::config::SecurityMode;
 
 // Constants for our streams
 const AUDIO1_SSRC: u32 = 0x1234A001;
@@ -63,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Failed to build server config");
             
             // Create server
-            let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
+            let server = rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer::new(server_config).await?;
             
             // Check if SSRC demultiplexing is enabled on the server
             let server_demux_enabled = server.is_ssrc_demultiplexing_enabled().await?;
@@ -119,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build();
             
             // Create client
-            let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;
+            let client = rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient::new(client_config).await?;
             
             // Connect client to server
             info!("Connecting client to server at {}", server_addr);

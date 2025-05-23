@@ -4,11 +4,13 @@
 //! - Media synchronization between streams
 //! - CSRC (Contributing Source) management
 //! - RTP header extensions
+//! - SSRC demultiplexing
 
 // Re-export modules
 pub mod sync;
 pub mod csrc;
 pub mod extensions;
+pub mod ssrc;
 
 // Re-export important types and functions
 pub use sync::{
@@ -31,4 +33,9 @@ pub use extensions::{
     add_video_orientation_extension, add_transport_cc_extension,
     get_received_header_extensions, get_received_audio_level,
     get_received_video_orientation, get_received_transport_cc
+};
+
+pub use ssrc::{
+    is_ssrc_demultiplexing_enabled, register_ssrc,
+    get_sequence_number, get_all_ssrcs
 }; 

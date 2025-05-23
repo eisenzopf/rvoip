@@ -14,12 +14,12 @@ use rvoip_rtp_core::api::common::stats::QualityLevel;
 use rvoip_rtp_core::api::common::config::SecurityMode;
 
 use rvoip_rtp_core::api::client::transport::{MediaTransportClient};
-use rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
 use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
 use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
 
 use rvoip_rtp_core::api::server::transport::{MediaTransportServer};
-use rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
 use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
 

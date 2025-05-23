@@ -25,6 +25,9 @@ use rvoip_rtp_core::api::{
     },
 };
 
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
+
 // Constants for our streams
 const AUDIO_SSRC: u32 = 0x1234ABCD;
 const VIDEO_SSRC: u32 = 0x5678DCBA;
@@ -60,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Failed to build server config");
             
             // Create server
-            let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
+            let server = DefaultMediaTransportServer::new(server_config).await?;
             
             // Start server
             server.start().await?;
@@ -81,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build();
             
             // Create client
-            let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;
+            let client = DefaultMediaTransportClient::new(client_config).await?;
             
             // Connect client to server
             info!("Connecting client to server");

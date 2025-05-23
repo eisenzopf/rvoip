@@ -30,6 +30,9 @@ use rvoip_rtp_core::{
     },
 };
 
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
+
 // Maximum duration for the example to run (in seconds)
 const MAX_RUNTIME_SECONDS: u64 = 10; // Reduced to 10 seconds for faster testing
 
@@ -86,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     
     // Create server
-    let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
+    let server = DefaultMediaTransportServer::new(server_config).await?;
     
     // Start server
     server.start().await?;
@@ -122,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
     
     // Create client
-    let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;
+    let client = DefaultMediaTransportClient::new(client_config).await?;
     
     // Connect client to server
     info!("Connecting client to server");
