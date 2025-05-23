@@ -20,7 +20,7 @@ use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
 use crate::api::common::stats::{MediaStats, QualityLevel, StreamStats, Direction};
-use crate::api::common::config::SecurityInfo;
+use crate::api::common::config::{SecurityInfo, SecurityMode};
 use crate::api::common::frame::MediaFrameType;
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::transport::{MediaTransportServer, ClientInfo, HeaderExtension};
@@ -28,8 +28,10 @@ use crate::api::server::security::{ServerSecurityContext, ClientSecurityContext,
 use crate::api::server::config::ServerConfig;
 use crate::api::client::transport::{RtcpStats, VoipMetrics};
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
-use crate::transport::{RtpTransportConfig, UdpRtpTransport, RtpTransport};
+use crate::transport::{RtpTransportConfig, UdpRtpTransport, RtpTransport, SecurityRtpTransport};
 use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
+use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::crypto::SrtpCryptoKey;
 
 use super::core::{ClientConnection, handle_client, handle_client_static};
 
@@ -45,19 +47,19 @@ pub struct DefaultMediaTransportServer {
     running: Arc<RwLock<bool>>,
     
     /// Main socket for the server
-    main_socket: Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
+    main_socket: Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     
     /// Socket
     socket: Arc<RwLock<Option<UdpSocket>>>,
     
     /// Main transport
-    transport: Arc<RwLock<Option<UdpRtpTransport>>>,
+    transport: Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     
     /// Client sockets
     client_sockets: Arc<RwLock<HashMap<String, UdpSocket>>>,
     
     /// Client transports
-    client_transports: Arc<RwLock<HashMap<String, UdpRtpTransport>>>,
+    client_transports: Arc<RwLock<HashMap<String, Arc<dyn RtpTransport>>>>,
     
     /// Security context for DTLS/SRTP
     security_context: Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
@@ -235,16 +237,64 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         
         debug!("Creating main transport with config: {:?}", transport_config);
         
-        let transport = UdpRtpTransport::new(transport_config).await
-            .map_err(|e| MediaTransportError::Transport(format!("Failed to create main transport: {}", e)))?;
+        // Create base UDP transport
+        let udp_transport = UdpRtpTransport::new(transport_config).await
+            .map_err(|e| MediaTransportError::Transport(format!("Failed to create UDP transport: {}", e)))?;
         
-        // Log the actual bound address
-        let actual_addr = transport.local_rtp_addr()
-            .map_err(|e| MediaTransportError::Transport(format!("Failed to get local RTP address: {}", e)))?;
-            
-        info!("Server actually bound to: {}", actual_addr);
-            
-        let transport_arc = Arc::new(transport);
+        // Create SecurityRtpTransport wrapper
+        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), true).await
+            .map_err(|e| MediaTransportError::Transport(format!("Failed to create SecurityRtpTransport: {}", e)))?;
+        
+        // Note: We don't start the UDP receiver here since SecurityRtpTransport handles packet reception
+        
+        let transport_arc: Arc<dyn RtpTransport> = Arc::new(transport);
+        
+        // Wire SRTP context if security is enabled
+        let security_guard = self.security_context.read().await;
+        if let Some(security_ctx) = security_guard.as_ref() {
+            // For now, we'll extract the SRTP key directly from the config
+            // In a full implementation, we'd access it through security_ctx.get_config()
+            if self.config.security_config.security_mode == SecurityMode::Srtp {
+                if let Some(srtp_key) = &self.config.security_config.srtp_key {
+                    debug!("Configuring server SRTP context with pre-shared keys");
+                    debug!("Creating server SRTP context from {} byte key", srtp_key.len());
+                    
+                    // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
+                    if srtp_key.len() >= 30 {
+                        let key = srtp_key[0..16].to_vec();
+                        let salt = srtp_key[16..30].to_vec();
+                        
+                        debug!("Creating server SrtpCryptoKey with key: {} bytes, salt: {} bytes", key.len(), salt.len());
+                        let crypto_key = SrtpCryptoKey::new(key, salt);
+                        
+                        match SrtpContext::new(SRTP_AES128_CM_SHA1_80, crypto_key) {
+                            Ok(srtp_context) => {
+                                debug!("Successfully created server SRTP context");
+                                
+                                // Set SRTP context on security transport
+                                if let Some(sec_transport) = transport_arc.as_any()
+                                    .downcast_ref::<SecurityRtpTransport>() {
+                                    sec_transport.set_srtp_context(srtp_context).await;
+                                    info!("SRTP context successfully configured on server transport");
+                                } else {
+                                    warn!("Failed to downcast to SecurityRtpTransport for server SRTP context setting");
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to create server SRTP context: {}", e);
+                                return Err(MediaTransportError::Security(format!("Server SRTP context creation failed: {}", e)));
+                            }
+                        }
+                    } else {
+                        error!("Server SRTP key too short: {} bytes (expected at least 30)", srtp_key.len());
+                        return Err(MediaTransportError::Security("Server SRTP key too short".to_string()));
+                    }
+                } else {
+                    warn!("SRTP mode enabled on server but no key provided");
+                }
+            }
+        }
+        drop(security_guard);
         
         // Store the socket in a thread-safe way using RwLock
         {
@@ -266,74 +316,111 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         // Debug output to help diagnose issues
                         debug!("RtpEvent::MediaReceived from {} - payload size={}", source, payload.len());
                         
-                        // Parse the RTP packet to extract the SSRC and other header information
-                        debug!("Attempting to parse RTP packet from payload...");
-                        let packet_result = crate::packet::RtpPacket::parse(&payload);
+                        // Smart detection: if the payload is small and looks like text/media data rather than RTP packet,
+                        // it's likely already processed by SecurityRtpTransport
+                        let is_processed_payload = payload.len() < 100 && 
+                            (payload.len() < 12 || // Too small for RTP header
+                             (payload.len() >= 1 && payload[0] != 0x80)); // First byte doesn't look like RTP version 2
                         
-                        // Process the parsed packet or create a frame with available info
-                        let (frame, ssrc) = match packet_result {
-                            Ok(packet) => {
-                                // Successfully parsed the packet, use its header information
-                                debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
-                                       packet.header.ssrc, packet.header.sequence_number, 
-                                       packet.header.timestamp, packet.header.payload_type);
-                                
-                                let frame = crate::api::common::frame::MediaFrame {
-                                    frame_type: if packet.header.payload_type <= 34 {
-                                        crate::api::common::frame::MediaFrameType::Audio
-                                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                                        crate::api::common::frame::MediaFrameType::Video
-                                    } else {
-                                        crate::api::common::frame::MediaFrameType::Data
-                                    },
-                                    data: packet.payload.to_vec(),
-                                    timestamp: packet.header.timestamp,
-                                    sequence: packet.header.sequence_number,
-                                    marker: packet.header.marker,
-                                    payload_type: packet.header.payload_type,
-                                    ssrc: packet.header.ssrc,
-                                    csrcs: packet.header.csrc.clone(),
-                                };
-                                
-                                // Log payload data if it's text (helps with debugging)
-                                if let Ok(text) = std::str::from_utf8(&packet.payload) {
-                                    debug!("Packet payload (text): {}", text);
+                        let (frame, ssrc) = if is_processed_payload {
+                            // This is already processed payload from SecurityRtpTransport - don't re-parse
+                            debug!("Detected processed payload from SecurityRtpTransport - using provided RTP info");
+                            
+                            // Use the RTP header information already provided in the event
+                            let frame = crate::api::common::frame::MediaFrame {
+                                frame_type: if payload_type <= 34 {
+                                    crate::api::common::frame::MediaFrameType::Audio
+                                } else if payload_type >= 35 && payload_type <= 50 {
+                                    crate::api::common::frame::MediaFrameType::Video
+                                } else {
+                                    crate::api::common::frame::MediaFrameType::Data
+                                },
+                                data: payload.to_vec(),
+                                timestamp,
+                                sequence: 0, // SecurityRtpTransport doesn't provide sequence in event
+                                marker,
+                                payload_type,
+                                ssrc: 0, // Will be determined from client mapping
+                                csrcs: Vec::new(),
+                            };
+                            
+                            // Log payload data if it's text (helps with debugging)
+                            if let Ok(text) = std::str::from_utf8(&payload) {
+                                debug!("Processed payload (text): {}", text);
+                            }
+                            
+                            // For processed payloads, we'll use the source address to determine SSRC
+                            let temp_ssrc = rand::random::<u32>();
+                            (frame, temp_ssrc)
+                        } else {
+                            // This looks like a raw RTP packet - parse it normally
+                            debug!("Attempting to parse raw RTP packet from payload...");
+                            let packet_result = crate::packet::RtpPacket::parse(&payload);
+                            
+                            match packet_result {
+                                Ok(packet) => {
+                                    // Successfully parsed the packet, use its header information
+                                    debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
+                                           packet.header.ssrc, packet.header.sequence_number, 
+                                           packet.header.timestamp, packet.header.payload_type);
+                                    
+                                    let frame = crate::api::common::frame::MediaFrame {
+                                        frame_type: if packet.header.payload_type <= 34 {
+                                            crate::api::common::frame::MediaFrameType::Audio
+                                        } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
+                                            crate::api::common::frame::MediaFrameType::Video
+                                        } else {
+                                            crate::api::common::frame::MediaFrameType::Data
+                                        },
+                                        data: packet.payload.to_vec(),
+                                        timestamp: packet.header.timestamp,
+                                        sequence: packet.header.sequence_number,
+                                        marker: packet.header.marker,
+                                        payload_type: packet.header.payload_type,
+                                        ssrc: packet.header.ssrc,
+                                        csrcs: packet.header.csrc.clone(),
+                                    };
+                                    
+                                    // Log payload data if it's text (helps with debugging)
+                                    if let Ok(text) = std::str::from_utf8(&packet.payload) {
+                                        debug!("Raw packet payload (text): {}", text);
+                                    }
+                                    
+                                    (frame, packet.header.ssrc)
+                                },
+                                Err(e) => {
+                                    // If we couldn't parse the packet, create a MediaFrame with the available info
+                                    debug!("Couldn't parse RTP packet, using available info: {}", e);
+                                    
+                                    // Attempt to dump the first few bytes for debugging
+                                    if payload.len() >= 12 {
+                                        let mut header_bytes = [0u8; 12];
+                                        header_bytes.copy_from_slice(&payload[0..12]);
+                                        debug!("First 12 bytes of payload: {:?}", header_bytes);
+                                    }
+                                    
+                                    // Generate a random sequence number and SSRC as fallback
+                                    let sequence_number = rand::random::<u16>();
+                                    let ssrc = rand::random::<u32>();
+                                    
+                                    let frame = crate::api::common::frame::MediaFrame {
+                                        frame_type: if payload_type <= 34 {
+                                            crate::api::common::frame::MediaFrameType::Audio
+                                        } else if payload_type >= 35 && payload_type <= 50 {
+                                            crate::api::common::frame::MediaFrameType::Video
+                                        } else {
+                                            crate::api::common::frame::MediaFrameType::Data
+                                        },
+                                        data: payload.to_vec(),
+                                        timestamp,
+                                        sequence: sequence_number,
+                                        marker,
+                                        payload_type,
+                                        ssrc,
+                                        csrcs: Vec::new(), // No CSRCs in fallback case
+                                    };
+                                    (frame, ssrc)
                                 }
-                                
-                                (frame, packet.header.ssrc)
-                            },
-                            Err(e) => {
-                                // If we couldn't parse the packet, create a MediaFrame with the available info
-                                debug!("Couldn't parse RTP packet, using available info: {}", e);
-                                
-                                // Attempt to dump the first few bytes for debugging
-                                if payload.len() >= 12 {
-                                    let mut header_bytes = [0u8; 12];
-                                    header_bytes.copy_from_slice(&payload[0..12]);
-                                    debug!("First 12 bytes of payload: {:?}", header_bytes);
-                                }
-                                
-                                // Generate a random sequence number and SSRC as fallback
-                                let sequence_number = rand::random::<u16>();
-                                let ssrc = rand::random::<u32>();
-                                
-                                let frame = crate::api::common::frame::MediaFrame {
-                                    frame_type: if payload_type <= 34 {
-                                        crate::api::common::frame::MediaFrameType::Audio
-                                    } else if payload_type >= 35 && payload_type <= 50 {
-                                        crate::api::common::frame::MediaFrameType::Video
-                                    } else {
-                                        crate::api::common::frame::MediaFrameType::Data
-                                    },
-                                    data: payload.to_vec(),
-                                    timestamp,
-                                    sequence: sequence_number,
-                                    marker,
-                                    payload_type,
-                                    ssrc,
-                                    csrcs: Vec::new(), // No CSRCs in fallback case
-                                };
-                                (frame, ssrc)
                             }
                         };
                         

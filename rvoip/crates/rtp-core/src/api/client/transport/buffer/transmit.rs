@@ -57,7 +57,7 @@ pub async fn send_frame_with_priority(
     priority: PacketPriority,
     high_performance_buffers_enabled: bool,
     transmit_buffer: &Arc<RwLock<Option<TransmitBuffer>>>,
-    transport: &Arc<tokio::sync::Mutex<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    transport: &Arc<tokio::sync::Mutex<Option<Arc<dyn RtpTransport>>>>,
     remote_address: std::net::SocketAddr,
     fallback_send_frame: impl Fn(MediaFrame) -> Result<(), MediaTransportError>,
 ) -> Result<(), MediaTransportError> {

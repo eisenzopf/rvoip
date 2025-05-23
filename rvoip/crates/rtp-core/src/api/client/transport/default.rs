@@ -27,7 +27,7 @@ use crate::api::client::transport::MediaSyncInfo;
 use crate::api::client::security::ClientSecurityContext;
 use crate::api::client::security::DefaultClientSecurityContext;
 use crate::session::{RtpSession, RtpSessionConfig};
-use crate::transport::UdpRtpTransport;
+use crate::transport::{UdpRtpTransport, RtpTransport};
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::transport::HeaderExtension;
 use crate::buffer::{
@@ -55,7 +55,7 @@ pub struct DefaultMediaTransportClient {
     security: Option<Arc<dyn ClientSecurityContext>>,
     
     /// Main RTP/RTCP transport socket
-    transport: Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     
     /// Connected flag
     connected: Arc<AtomicBool>,
@@ -260,10 +260,13 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         let session_clone = Arc::clone(&self.session);
         let frame_sender_clone = self.frame_sender.clone();
         let event_callbacks_clone = Arc::clone(&self.event_callbacks);
-        let start_receive_task = move |transport: Arc<UdpRtpTransport>| -> Result<(), MediaTransportError> {
+        let start_receive_task = move |transport: Arc<dyn RtpTransport>| -> Result<(), MediaTransportError> {
             // Start receive task implementation would be here
             Ok(())
         };
+        
+        // Extract SRTP key from config if available
+        let srtp_key = self.config.security_config.srtp_key.clone();
         
         connection::connect(
             self.config.remote_address,
@@ -275,6 +278,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             &self.transport,
             &self.connect_callbacks,
             start_receive_task,
+            srtp_key, // Pass the SRTP key
         ).await?;
         
         // Initialize transmit buffer if high-performance buffers are enabled

@@ -31,7 +31,7 @@ pub async fn send_frame(
     frame: MediaFrame,
     connected: &Arc<AtomicBool>,
     session: &Arc<Mutex<RtpSession>>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     config: &ClientConfig,
     sequence_numbers: &Arc<Mutex<HashMap<u32, u16>>>,
     remote_address: SocketAddr,

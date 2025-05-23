@@ -85,6 +85,8 @@ pub struct ServerSecurityConfig {
     pub srtp_profiles: Vec<SrtpProfile>,
     /// Whether to require client certificate
     pub require_client_certificate: bool,
+    /// Pre-shared SRTP key (for SRTP mode)
+    pub srtp_key: Option<Vec<u8>>,
 }
 
 impl Default for ServerSecurityConfig {
@@ -99,6 +101,7 @@ impl Default for ServerSecurityConfig {
                 SrtpProfile::AesGcm128,
             ],
             require_client_certificate: false,
+            srtp_key: None,
         }
     }
 }
@@ -203,6 +206,9 @@ pub trait ServerSecurityContext: Send + Sync {
     /// Check if the server is fully initialized and ready to process handshake messages
     /// This verifies that all prerequisites (socket, etc.) are set
     async fn is_ready(&self) -> Result<bool, SecurityError>;
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ServerSecurityConfig;
 }
 
 /// Create a new server security context

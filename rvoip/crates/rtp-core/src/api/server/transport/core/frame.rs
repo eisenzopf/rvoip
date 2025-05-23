@@ -26,7 +26,7 @@ pub async fn send_frame_to(
     ssrc_demultiplexing_enabled: &Arc<RwLock<bool>>,
     csrc_management_enabled: &Arc<RwLock<bool>>,
     csrc_manager: &Arc<RwLock<CsrcManager>>,
-    main_socket: &Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
 ) -> Result<(), MediaTransportError> {
     // Get client transport info
     let clients_guard = clients.read().await;
@@ -132,7 +132,7 @@ pub async fn broadcast_frame(
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
     csrc_management_enabled: &Arc<RwLock<bool>>, 
     csrc_manager: &Arc<RwLock<CsrcManager>>,
-    main_socket: &Arc<RwLock<Option<Arc<UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
 ) -> Result<(), MediaTransportError> {
     // Create a base header with frame info
     let mut base_header = crate::packet::RtpHeader::new(

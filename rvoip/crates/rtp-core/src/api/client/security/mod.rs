@@ -42,6 +42,8 @@ pub struct ClientSecurityConfig {
     pub certificate_path: Option<String>,
     /// Path to private key file (PEM format)
     pub private_key_path: Option<String>,
+    /// Pre-shared SRTP key (for SRTP mode)
+    pub srtp_key: Option<Vec<u8>>,
 }
 
 impl Default for ClientSecurityConfig {
@@ -58,6 +60,7 @@ impl Default for ClientSecurityConfig {
             ],
             certificate_path: None,
             private_key_path: None,
+            srtp_key: None,
         }
     }
 }
@@ -187,6 +190,9 @@ pub trait ClientSecurityContext: Send + Sync {
     
     /// Process a DTLS packet received from the server
     async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ClientSecurityConfig;
     
     /// Allow downcasting for internal implementation details
     fn as_any(&self) -> &dyn Any;

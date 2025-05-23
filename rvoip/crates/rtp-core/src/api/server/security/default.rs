@@ -317,4 +317,9 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
         // Delegate to the core context module
         context::is_security_context_ready(&self.socket, &self.connection_template).await
     }
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ServerSecurityConfig {
+        &self.config
+    }
 } 

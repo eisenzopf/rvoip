@@ -482,4 +482,9 @@ impl ClientSecurityContext for SrtpClientSecurityContext {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ClientSecurityConfig {
+        &self.config
+    }
 } 

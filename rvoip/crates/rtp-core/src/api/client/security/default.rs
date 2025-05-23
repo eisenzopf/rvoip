@@ -405,6 +405,11 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ClientSecurityConfig {
+        &self.config
+    }
 }
 
 /// Helper function to create a new DTLS connection

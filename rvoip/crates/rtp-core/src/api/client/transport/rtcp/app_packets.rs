@@ -22,7 +22,7 @@ use crate::transport::UdpRtpTransport;
 /// custom data to be exchanged between endpoints.
 pub async fn send_rtcp_app(
     session: &Arc<Mutex<RtpSession>>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     remote_address: std::net::SocketAddr,
     is_connected: bool,
     name: &str,
@@ -80,7 +80,7 @@ pub async fn send_rtcp_app(
 /// BYE packets are used to indicate that a source is no longer active.
 pub async fn send_rtcp_bye(
     session: &Arc<Mutex<RtpSession>>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     remote_address: std::net::SocketAddr,
     is_connected: bool,
     reason: Option<String>,
@@ -129,7 +129,7 @@ pub async fn send_rtcp_bye(
 /// available in standard Sender/Receiver Reports.
 pub async fn send_rtcp_xr_voip_metrics(
     session: &Arc<Mutex<RtpSession>>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     remote_address: std::net::SocketAddr,
     is_connected: bool,
     metrics: VoipMetrics,

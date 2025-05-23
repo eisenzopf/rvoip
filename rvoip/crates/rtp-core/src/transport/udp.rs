@@ -394,7 +394,7 @@ impl UdpRtpTransport {
     }
     
     /// Stop the receiver task
-    async fn stop_receiver(&self) -> Result<()> {
+    pub async fn stop_receiver(&self) -> Result<()> {
         // Set inactive state
         let mut active = self.active.lock().await;
         *active = false;

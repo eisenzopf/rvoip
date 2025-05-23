@@ -12,11 +12,13 @@ use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid;
 
-use crate::transport::{RtpTransport, UdpRtpTransport, RtpTransportConfig};
+use crate::transport::{RtpTransport, UdpRtpTransport, RtpTransportConfig, SecurityRtpTransport};
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::security::SocketHandle;
 use crate::api::client::security::ClientSecurityContext;
 use crate::api::common::config::SecurityMode;
+use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::crypto::SrtpCryptoKey;
 
 /// Check if the security mode requires DTLS
 pub fn requires_dtls(mode: SecurityMode) -> bool {
@@ -35,9 +37,10 @@ pub async fn connect(
     security_requires_dtls: bool,
     security_handshake_timeout_secs: u64,
     connected: &Arc<AtomicBool>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     connect_callbacks: &Arc<Mutex<Vec<Box<dyn Fn() + Send + Sync>>>>,
-    start_receive_task: impl Fn(Arc<UdpRtpTransport>) -> Result<(), MediaTransportError> + Send + 'static,
+    start_receive_task: impl Fn(Arc<dyn RtpTransport>) -> Result<(), MediaTransportError> + Send + 'static,
+    srtp_key: Option<Vec<u8>>,
 ) -> Result<(), MediaTransportError> {
     if connected.load(Ordering::SeqCst) {
         debug!("Already connected, returning early");
@@ -56,18 +59,75 @@ pub async fn connect(
         use_port_allocator: true,
     };
     
-    let transport_instance = UdpRtpTransport::new(transport_config).await
-        .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to create transport: {}", e)))?;
+    // Create base UDP transport
+    let udp_transport = UdpRtpTransport::new(transport_config).await
+        .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to create UDP transport: {}", e)))?;
     
-    let transport_instance = Arc::new(transport_instance);
+    // Determine if SRTP is enabled
+    let is_srtp_enabled = security.is_some();
+    
+    // Wrap with SecurityRtpTransport
+    let transport_instance = SecurityRtpTransport::new(Arc::new(udp_transport), is_srtp_enabled).await
+        .map_err(|e| MediaTransportError::ConnectionError(format!("Failed to create security transport: {}", e)))?;
+    
+    let transport_instance: Arc<dyn RtpTransport> = Arc::new(transport_instance);
     
     // Set the transport
     let mut transport_guard = transport.lock().await;
     *transport_guard = Some(transport_instance.clone());
     drop(transport_guard);
     
-    // Get socket handle
-    let socket_arc = transport_instance.get_socket();
+    // Wire SRTP context if security is enabled
+    if let Some(security_ctx) = security {
+        // Check if this is SRTP mode (not DTLS-SRTP) and we have keys
+        if security_ctx.get_security_info_sync().mode == SecurityMode::Srtp {
+            debug!("Configuring SRTP context with pre-shared keys");
+            
+            if let Some(combined_key) = &srtp_key {
+                debug!("Creating SRTP context from {} byte key", combined_key.len());
+                
+                // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
+                if combined_key.len() >= 30 {
+                    let key = combined_key[0..16].to_vec();
+                    let salt = combined_key[16..30].to_vec();
+                    
+                    debug!("Creating SrtpCryptoKey with key: {} bytes, salt: {} bytes", key.len(), salt.len());
+                    let crypto_key = SrtpCryptoKey::new(key, salt);
+                    
+                    match SrtpContext::new(SRTP_AES128_CM_SHA1_80, crypto_key) {
+                        Ok(srtp_context) => {
+                            debug!("Successfully created SRTP context");
+                            
+                            // Set SRTP context on security transport
+                            if let Some(sec_transport) = transport_instance.as_any()
+                                .downcast_ref::<SecurityRtpTransport>() {
+                                sec_transport.set_srtp_context(srtp_context).await;
+                                info!("SRTP context successfully configured on client transport");
+                            } else {
+                                warn!("Failed to downcast to SecurityRtpTransport for SRTP context setting");
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to create SRTP context: {}", e);
+                            return Err(MediaTransportError::Security(format!("SRTP context creation failed: {}", e)));
+                        }
+                    }
+                } else {
+                    error!("SRTP key too short: {} bytes (expected at least 30)", combined_key.len());
+                    return Err(MediaTransportError::Security("SRTP key too short".to_string()));
+                }
+            } else {
+                warn!("SRTP mode enabled but no key provided");
+            }
+        }
+    }
+    
+    // Get socket handle from the underlying UDP transport
+    let socket_arc = if let Some(sec_transport) = transport_instance.as_any().downcast_ref::<SecurityRtpTransport>() {
+        sec_transport.inner_transport().get_socket()
+    } else {
+        return Err(MediaTransportError::ConnectionError("Failed to get socket handle".to_string()));
+    };
 
     // Create a proper SocketHandle
     let socket_handle = SocketHandle {
@@ -142,7 +202,7 @@ async fn wait_for_handshake_completion(security: &Arc<dyn ClientSecurityContext>
 pub async fn disconnect(
     security: &Option<Arc<dyn ClientSecurityContext>>,
     connected: &Arc<AtomicBool>,
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
     disconnect_callbacks: &Arc<Mutex<Vec<Box<dyn Fn() + Send + Sync>>>>,
 ) -> Result<(), MediaTransportError> {
     if !connected.load(Ordering::SeqCst) {
@@ -181,7 +241,7 @@ pub async fn disconnect(
 /// This function returns the actual bound address of the transport, which may be
 /// different from the configured address if dynamic port allocation is used.
 pub async fn get_local_address(
-    transport: &Arc<Mutex<Option<Arc<UdpRtpTransport>>>>,
+    transport: &Arc<Mutex<Option<Arc<dyn RtpTransport>>>>,
 ) -> Result<SocketAddr, MediaTransportError> {
     let transport_guard = transport.lock().await;
     if let Some(transport) = transport_guard.as_ref() {

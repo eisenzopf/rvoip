@@ -90,6 +90,7 @@ impl ServerConfigBuilder {
                     certificate_path: None, // Not used for SRTP mode
                     private_key_path: None, // Not used for SRTP mode
                     require_client_certificate: false,
+                    srtp_key: security_config.srtp_key.clone(),
                 };
                 
                 self = self.security_config(server_security_config);
@@ -110,6 +111,7 @@ impl ServerConfigBuilder {
                     certificate_path: security_config.certificate_path,
                     private_key_path: security_config.private_key_path,
                     require_client_certificate: security_config.require_client_certificate,
+                    srtp_key: None, // Not used for DTLS-SRTP
                 };
                 
                 self = self.security_config(server_security_config);

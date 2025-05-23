@@ -123,6 +123,7 @@ async fn main() -> Result<(), ExampleError> {
         .local_address(local_addr)
         .security_config(ServerSecurityConfig {
             security_mode: SecurityMode::Srtp, // Use SRTP with pre-shared keys, NOT DTLS-SRTP
+            srtp_key: Some(combined.clone()), // 🔧 FIX: Pass the actual SRTP key!
             ..Default::default()
         })
         .build()?;
@@ -144,6 +145,7 @@ async fn main() -> Result<(), ExampleError> {
         .remote_address(server_addr)
         .security_config(ClientSecurityConfig {
             security_mode: SecurityMode::Srtp, // Use SRTP with pre-shared keys, NOT DTLS-SRTP
+            srtp_key: Some(combined.clone()), // 🔧 FIX: Pass the actual SRTP key!
             ..Default::default()
         })
         .build();
@@ -180,7 +182,7 @@ async fn main() -> Result<(), ExampleError> {
                 break;
             }
             
-            match time::timeout(Duration::from_millis(500), server_clone.receive_frame()).await {
+            match time::timeout(Duration::from_millis(1000), server_clone.receive_frame()).await {
                 Ok(Ok((client_id, frame))) => {
                     info!("Server received from {}: {} bytes of type {:?}", 
                           client_id, frame.data.len(), frame.frame_type);
@@ -208,6 +210,10 @@ async fn main() -> Result<(), ExampleError> {
             }
         }
     });
+    
+    // Give the server receive task time to start up and be ready
+    info!("Waiting for server receive task to be ready...");
+    tokio::time::sleep(Duration::from_millis(100)).await;
     
     // Send test frames from client to server - these will be SRTP encrypted!
     info!("Sending frames (will be SRTP encrypted in transit)...");

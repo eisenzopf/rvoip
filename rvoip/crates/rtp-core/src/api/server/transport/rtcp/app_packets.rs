@@ -18,7 +18,7 @@ use crate::transport::RtpTransport;
 /// Send RTCP APP packet to all clients
 pub async fn send_rtcp_app(
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     name: &str,
     data: Vec<u8>,
 ) -> Result<(), MediaTransportError> {
@@ -52,7 +52,7 @@ pub async fn send_rtcp_app(
 pub async fn send_rtcp_app_to_client(
     client_id: &str,
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     name: &str,
     data: Vec<u8>,
 ) -> Result<(), MediaTransportError> {
@@ -111,7 +111,7 @@ pub async fn send_rtcp_app_to_client(
 /// Send RTCP BYE packet to all clients
 pub async fn send_rtcp_bye(
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     reason: Option<String>,
 ) -> Result<(), MediaTransportError> {
     // Get all connected clients
@@ -143,7 +143,7 @@ pub async fn send_rtcp_bye(
 pub async fn send_rtcp_bye_to_client(
     client_id: &str,
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     reason: Option<String>,
 ) -> Result<(), MediaTransportError> {
     // Get client
@@ -193,7 +193,7 @@ pub async fn send_rtcp_bye_to_client(
 /// Send RTCP XR VoIP metrics packet to all clients
 pub async fn send_rtcp_xr_voip_metrics(
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     metrics: VoipMetrics,
 ) -> Result<(), MediaTransportError> {
     // Get all connected clients
@@ -225,7 +225,7 @@ pub async fn send_rtcp_xr_voip_metrics(
 pub async fn send_rtcp_xr_voip_metrics_to_client(
     client_id: &str,
     clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    main_socket: &Arc<RwLock<Option<Arc<crate::transport::UdpRtpTransport>>>>,
+    main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     metrics: VoipMetrics,
 ) -> Result<(), MediaTransportError> {
     // Get client

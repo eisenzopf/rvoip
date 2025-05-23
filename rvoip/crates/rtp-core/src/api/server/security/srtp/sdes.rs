@@ -535,6 +535,11 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
         
         Ok(socket_set)
     }
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ServerSecurityConfig {
+        &self.config
+    }
 }
 
 /// SRTP client context for server-side client handling
