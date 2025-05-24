@@ -47,6 +47,7 @@ pub mod session;     // New session module
 pub mod processing;  // New processing pipeline module
 pub mod quality;     // New quality monitoring module
 pub mod integration; // New integration module
+pub mod buffer;      // New buffer module
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -243,6 +244,19 @@ pub mod prelude {
         QualityAdjustment,
         AdaptationEngine,
         AdaptationStrategy,
+    };
+    
+    // Buffer components
+    pub use crate::buffer::{
+        JitterBuffer,
+        JitterBufferConfig,
+        JitterBufferStats,
+        AdaptiveBuffer,
+        AdaptiveConfig,
+        FrameBuffer,
+        FrameBufferConfig,
+        RingBuffer,
+        RingBufferError,
     };
     
     // Audio codec components
