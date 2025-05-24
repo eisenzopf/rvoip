@@ -224,4 +224,10 @@ impl SampleRate {
             _ => None,
         }
     }
+}
+
+impl Default for SampleRate {
+    fn default() -> Self {
+        Self::Rate8000 // Default to 8kHz (standard telephony)
+    }
 } 

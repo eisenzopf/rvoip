@@ -27,7 +27,7 @@
 //!     // Create media session for SIP dialog
 //!     let dialog_id = DialogId::new("call-123");
 //!     let params = MediaSessionParams::audio_only()
-//!         .with_preferred_codec(PayloadType::PCMU);
+//!         .with_preferred_codec(payload_types::PCMU);
 //!     let session = engine.create_media_session(dialog_id, params).await?;
 //!     
 //!     // Get codec capabilities for SDP negotiation
@@ -43,6 +43,7 @@
 pub mod error;
 pub mod types;
 pub mod engine;
+pub mod processing;  // New processing pipeline module
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -76,46 +77,6 @@ pub use relay::{
 
 /// Media sample type (raw audio data)
 pub type Sample = i16;
-
-/// PCM sample rate in Hz
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampleRate {
-    /// 8kHz (narrowband)
-    Rate8000 = 8000,
-    /// 16kHz (wideband)
-    Rate16000 = 16000,
-    /// 32kHz
-    Rate32000 = 32000,
-    /// 44.1kHz (CD quality)
-    Rate44100 = 44100,
-    /// 48kHz
-    Rate48000 = 48000,
-}
-
-impl SampleRate {
-    /// Get the sample rate in Hz
-    pub fn as_hz(&self) -> u32 {
-        *self as u32
-    }
-    
-    /// Create from a raw Hz value, defaulting to 8kHz if not recognized
-    pub fn from_hz(hz: u32) -> Self {
-        match hz {
-            8000 => Self::Rate8000,
-            16000 => Self::Rate16000,
-            32000 => Self::Rate32000,
-            44100 => Self::Rate44100,
-            48000 => Self::Rate48000,
-            _ => Self::Rate8000, // Default to 8kHz
-        }
-    }
-}
-
-impl Default for SampleRate {
-    fn default() -> Self {
-        Self::Rate8000 // Default to 8kHz (common for telephony)
-    }
-}
 
 /// Audio format (channels, bit depth, sample rate)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +178,17 @@ pub mod prelude {
         MediaSessionParams,
         MediaSessionHandle,
         EngineState,
+    };
+    
+    // Processing pipeline components
+    pub use crate::processing::{
+        ProcessingPipeline,
+        ProcessingConfig,
+        AudioProcessor,
+        AudioProcessingConfig,
+        VoiceActivityDetector,
+        FormatConverter,
+        ConversionParams,
     };
     
     // Payload type constants for convenience
