@@ -17,6 +17,7 @@ use crate::api::server::security::{ServerSecurityContext, ClientSecurityContext}
 use crate::api::server::config::ServerConfig;
 use crate::api::server::transport::ClientInfo;
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
+use crate::payload::registry;
 
 /// Client connection in the server
 pub struct ClientConnection {
@@ -118,13 +119,7 @@ pub async fn handle_client(
             match event {
                 RtpSessionEvent::PacketReceived(packet) => {
                     // Determine frame type from payload type
-                    let frame_type = if packet.header.payload_type <= 34 {
-                        crate::api::common::frame::MediaFrameType::Audio
-                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                        crate::api::common::frame::MediaFrameType::Video
-                    } else {
-                        crate::api::common::frame::MediaFrameType::Data
-                    };
+                    let frame_type = registry::get_media_frame_type(packet.header.payload_type);
                     
                     // Convert to MediaFrame
                     let frame = MediaFrame {
@@ -255,13 +250,7 @@ pub async fn handle_client_static(
                     packets_received += 1;
                     
                     // Determine frame type from payload type
-                    let frame_type = if packet.header.payload_type <= 34 {
-                        crate::api::common::frame::MediaFrameType::Audio
-                    } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                        crate::api::common::frame::MediaFrameType::Video
-                    } else {
-                        crate::api::common::frame::MediaFrameType::Data
-                    };
+                    let frame_type = registry::get_media_frame_type(packet.header.payload_type);
                     
                     // Log packet details
                     debug!("Client {}: Received packet #{} - PT: {}, Seq: {}, TS: {}, Size: {} bytes",

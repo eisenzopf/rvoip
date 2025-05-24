@@ -328,13 +328,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             
                             // Use the RTP header information already provided in the event
                             let frame = crate::api::common::frame::MediaFrame {
-                                frame_type: if payload_type <= 34 {
-                                    crate::api::common::frame::MediaFrameType::Audio
-                                } else if payload_type >= 35 && payload_type <= 50 {
-                                    crate::api::common::frame::MediaFrameType::Video
-                                } else {
-                                    crate::api::common::frame::MediaFrameType::Data
-                                },
+                                frame_type: crate::payload::registry::get_media_frame_type(payload_type),
                                 data: payload.to_vec(),
                                 timestamp,
                                 sequence: 0, // SecurityRtpTransport doesn't provide sequence in event
@@ -364,13 +358,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                            packet.header.timestamp, packet.header.payload_type);
                                     
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: if packet.header.payload_type <= 34 {
-                                            crate::api::common::frame::MediaFrameType::Audio
-                                        } else if packet.header.payload_type >= 35 && packet.header.payload_type <= 50 {
-                                            crate::api::common::frame::MediaFrameType::Video
-                                        } else {
-                                            crate::api::common::frame::MediaFrameType::Data
-                                        },
+                                        frame_type: crate::payload::registry::get_media_frame_type(packet.header.payload_type),
                                         data: packet.payload.to_vec(),
                                         timestamp: packet.header.timestamp,
                                         sequence: packet.header.sequence_number,
@@ -403,13 +391,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     let ssrc = rand::random::<u32>();
                                     
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: if payload_type <= 34 {
-                                            crate::api::common::frame::MediaFrameType::Audio
-                                        } else if payload_type >= 35 && payload_type <= 50 {
-                                            crate::api::common::frame::MediaFrameType::Video
-                                        } else {
-                                            crate::api::common::frame::MediaFrameType::Data
-                                        },
+                                        frame_type: crate::payload::registry::get_media_frame_type(payload_type),
                                         data: payload.to_vec(),
                                         timestamp,
                                         sequence: sequence_number,
