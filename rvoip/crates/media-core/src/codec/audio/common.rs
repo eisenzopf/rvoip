@@ -124,30 +124,6 @@ impl Default for AudioCodecParameters {
     }
 }
 
-/// Bitrate control mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BitrateMode {
-    /// Constant bitrate
-    Constant,
-    /// Variable bitrate
-    Variable,
-    /// Constrained variable bitrate
-    ConstrainedVariable,
-}
-
-/// Quality optimization mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QualityMode {
-    /// Optimize for voice
-    Voice,
-    /// Optimize for music
-    Music,
-    /// Balanced optimization
-    Balanced,
-    /// Low delay mode
-    LowDelay,
-}
-
 /// Channel layout
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelLayout {

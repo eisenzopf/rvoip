@@ -36,6 +36,10 @@ serde_json = "1.0"
 # Random generation
 rand = "0.8"
 
+# Missing dependencies needed for compilation
+uuid = { version = "1.0", features = ["v4"] }
+bytemuck = "1.0"
+
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency

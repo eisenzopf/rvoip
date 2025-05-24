@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 use tracing::{debug, error, info, warn};
+use std::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::session::{MediaSession, MediaSessionId, MediaType, MediaSessionConfig};

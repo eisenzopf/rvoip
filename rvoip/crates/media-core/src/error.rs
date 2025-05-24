@@ -1,4 +1,5 @@
 use std::io;
+use std::net::AddrParseError;
 use thiserror::Error;
 
 /// Result type for media operations
@@ -35,6 +36,10 @@ pub enum Error {
     #[error("SRTP error: {0}")]
     Srtp(String),
 
+    /// Security error
+    #[error("Security error: {0}")]
+    Security(String),
+
     /// DTLS error
     #[error("DTLS error: {0}")]
     Dtls(String),
@@ -50,6 +55,10 @@ pub enum Error {
     /// Invalid parameter
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
+
+    /// Invalid data
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 
     /// Timeout
     #[error("Timeout: {0}")]
@@ -67,9 +76,21 @@ pub enum Error {
     #[error("No codec selected")]
     NoCodec,
     
+    /// No codec selected (alias for compatibility)
+    #[error("No codec selected")]
+    NoCodecSelected,
+    
+    /// Codec not found
+    #[error("Codec not found: {0}")]
+    CodecNotFound(String),
+    
     /// Unsupported codec
     #[error("Unsupported codec: {0}")]
     UnsupportedCodec(String),
+    
+    /// Device not found
+    #[error("Device not found: {0}")]
+    DeviceNotFound(String),
     
     /// No remote address
     #[error("No remote address set")]
@@ -78,6 +99,18 @@ pub enum Error {
     /// Event channel full
     #[error("Event channel full")]
     EventChannelFull,
+    
+    /// Channel send error
+    #[error("Channel send error: {0}")]
+    ChannelSendError(String),
+    
+    /// Transport error
+    #[error("Transport error: {0}")]
+    TransportError(String),
+    
+    /// Not initialized
+    #[error("Not initialized: {0}")]
+    NotInitialized(String),
     
     /// RTP error
     #[error("RTP error: {0}")]
@@ -95,5 +128,11 @@ pub enum Error {
 impl From<&str> for Error {
     fn from(err: &str) -> Self {
         Error::Other(err.to_string())
+    }
+}
+
+impl From<AddrParseError> for Error {
+    fn from(err: AddrParseError) -> Self {
+        Error::InvalidParameter(format!("Invalid address: {}", err))
     }
 } 

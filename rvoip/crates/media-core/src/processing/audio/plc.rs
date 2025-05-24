@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::{Sample, SampleRate, AudioBuffer, AudioFormat};
-use super::common::AudioProcessor;
+use crate::processing::AudioProcessor;
 
 /// PLC algorithm type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

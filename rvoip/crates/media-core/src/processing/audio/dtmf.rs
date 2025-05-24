@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use crate::error::{Error, Result};
 use crate::{Sample, SampleRate, AudioBuffer, AudioFormat};
-use super::common::AudioProcessor;
+use crate::processing::AudioProcessor;
 
 /// DTMF digit representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,13 +12,19 @@ pub mod format;
 
 // Re-export commonly used types
 pub use audio::{
-    aec::EchoCanceller,
-    agc::GainControl,
+    aec::AcousticEchoCanceller,
+    agc::AutomaticGainControl,
     vad::VoiceActivityDetector,
-    ns::NoiseSupressor,
-    plc::PacketLossConcealor,
+    ns::NoiseSuppressor,
+    plc::PacketLossConcealer,
     dtmf::DtmfDetector,
 };
+
+// Alias the long names for convenience
+pub use audio::aec::AcousticEchoCanceller as EchoCanceller;
+pub use audio::agc::AutomaticGainControl as GainControl;
+pub use audio::ns::NoiseSuppressor as NoiseSupressor; // Note: keeping the typo for compatibility
+pub use audio::plc::PacketLossConcealer as PacketLossConcealor; // Note: keeping the typo for compatibility
 
 /// A pipeline of audio processing components
 pub mod pipeline;

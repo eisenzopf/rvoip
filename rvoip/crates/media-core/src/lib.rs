@@ -41,18 +41,20 @@ pub mod quality;
 pub mod rtp;
 pub mod security;
 pub mod sync;
-pub mod integration;
+pub mod relay;
+// pub mod integration; // TODO: Re-enable after core is stable
 
 // Re-export common types
 pub use error::{Error, Result};
 pub use codec::Codec;
-pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
+// Temporarily disabled until rtp-core integration is fixed
+// pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+// pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
 // Re-export rtp-core types for convenience
-pub use security::{
-    SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-    SrtpCryptoSuite, DtlsVersion
-};
+// pub use security::{
+//     SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
+//     SrtpCryptoSuite, DtlsVersion
+// };
 
 use std::net::SocketAddr;
 use std::io;
@@ -188,12 +190,12 @@ pub mod prelude {
     };
     
     pub use crate::codec::Codec;
-    pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-    pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
-    pub use crate::security::{
-        SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-        SrtpCryptoSuite, DtlsVersion
-    };
+    // pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
+    // pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
+    // pub use crate::security::{
+    //     SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
+    //     SrtpCryptoSuite, DtlsVersion
+    // };
     
     // These will be available once the modules are implemented
     // pub use crate::session::{

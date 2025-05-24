@@ -4,7 +4,7 @@
 //! including G.711 (PCMU/PCMA), G.722, Opus, and others.
 
 // Common types and utilities for audio codecs
-mod common;
+pub mod common;
 pub use common::*;
 
 // G.711 µ-law codec (PCMU)

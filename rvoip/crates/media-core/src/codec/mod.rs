@@ -91,11 +91,11 @@ pub enum CodecType {
     G729,
 }
 
-//! Codec Framework
-//!
-//! This module provides the codec framework for media encoding and decoding.
-//! It defines traits for audio and video codecs, and includes implementations
-//! for common codecs used in VoIP applications.
+// Codec Framework
+//
+// This module provides the codec framework for media encoding and decoding.
+// It defines traits for audio and video codecs, and includes implementations
+// for common codecs used in VoIP applications.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -112,7 +112,7 @@ pub mod traits;
 pub use audio::g711::G711Codec;
 pub use audio::opus::OpusCodec;
 pub use audio::g722::G722Codec;
-pub use audio::ilbc::IlbcCodec;
+// pub use audio::ilbc::IlbcCodec; // TODO: Implement iLBC codec
 
 // Re-export traits
 pub use traits::{Codec, AudioCodec, VideoCodec};

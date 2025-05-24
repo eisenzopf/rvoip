@@ -37,10 +37,12 @@ pub mod conversion {
             bit_depth,
         };
         
-        Ok(AudioBuffer::new(
-            packet.payload().clone(),
-            format
-        ))
+        let buffer = AudioBuffer::new(
+            packet.payload.clone(),
+            format,
+        );
+        
+        Ok(buffer)
     }
     
     /// Convert an audio buffer to an RTP packet
@@ -63,7 +65,7 @@ pub mod conversion {
             .with_padding(false)
             .with_extension(false)
             .with_marker(marker)
-            .with_payload_type(PayloadType::new(payload_type))
+            .with_payload_type(PayloadType::from_u8(payload_type))
             .with_sequence(sequence)
             .with_timestamp(timestamp)
             .with_ssrc(ssrc)
