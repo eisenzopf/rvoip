@@ -186,22 +186,29 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Try to receive frames on server
-    println!("\n[DEBUG] Testing server.receive_frame()...");
+    println!("\n[DEBUG] Testing server.get_frame_receiver()...");
     println!("[DEBUG] Attempting to receive frames on server (this should get frames from the broadcast channel)...");
     
     let mut frames_received = 0;
     let start_time = std::time::Instant::now();
     
+    // Get a persistent frame receiver instead of calling receive_frame() repeatedly
+    let mut frame_receiver = server.get_frame_receiver();
+    
     while frames_received < 3 && start_time.elapsed() < Duration::from_secs(1) {
-        match server.receive_frame().await {
-            Ok((client_id, frame)) => {
+        match tokio::time::timeout(Duration::from_millis(200), frame_receiver.recv()).await {
+            Ok(Ok((client_id, frame))) => {
                 frames_received += 1;
                 println!("[SUCCESS] Server received frame #{} from client {}: seq={}, ts={}",
                          frames_received, client_id, frame.sequence, frame.timestamp);
             },
-            Err(e) => {
-                println!("[DEBUG] receive_frame() returned error: {}", e);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(Err(e)) => {
+                println!("[DEBUG] Broadcast channel error: {}", e);
+                break;
+            },
+            Err(_) => {
+                // Timeout - continue waiting
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
     }

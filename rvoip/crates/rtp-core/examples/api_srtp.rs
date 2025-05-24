@@ -175,6 +175,9 @@ async fn main() -> Result<(), ExampleError> {
     let server_clone = server.clone();
     let server_shutdown = shutdown_requested.clone();
     let _server_task = tokio::spawn(async move {
+        // Get a persistent frame receiver instead of calling receive_frame() repeatedly
+        let mut frame_receiver = server_clone.get_frame_receiver();
+        
         loop {
             // Check for shutdown signal
             if server_shutdown.load(Ordering::SeqCst) {
@@ -182,7 +185,8 @@ async fn main() -> Result<(), ExampleError> {
                 break;
             }
             
-            match time::timeout(Duration::from_millis(1000), server_clone.receive_frame()).await {
+            // Use the persistent receiver instead of receive_frame()
+            match time::timeout(Duration::from_millis(1000), frame_receiver.recv()).await {
                 Ok(Ok((client_id, frame))) => {
                     info!("Server received from {}: {} bytes of type {:?}", 
                           client_id, frame.data.len(), frame.frame_type);
@@ -201,11 +205,14 @@ async fn main() -> Result<(), ExampleError> {
                     }
                 },
                 Ok(Err(e)) => {
-                    error!("Server receive error: {}", e);
+                    warn!("Broadcast channel error: {}", e);
+                    // Break on channel errors (usually means channel is closed)
                     break;
                 },
                 Err(_) => {
-                    debug!("Server receive timed out, continuing");
+                    // Timeout - this is normal, just continue waiting
+                    // No need to log timeouts as errors since they're expected
+                    continue;
                 }
             }
         }

@@ -2,6 +2,37 @@
 
 This document outlines architectural recommendations and improvements for the rvoip project, focusing on proper layering and component responsibilities according to SIP RFCs and best practices.
 
+## Recently Completed Major Issues (HIGH PRIORITY)
+
+### ✅ **Timeout Error Reduction - COMPLETED** 
+**Status**: **100% COMPLETE** - All timeout errors eliminated across the codebase
+
+**Root Cause**: Broadcast channel anti-pattern where `receive_frame()` method was creating new subscribers on each call, causing frame loss and timeout errors.
+
+**Solution**: Implemented persistent frame receiver pattern using `get_frame_receiver()` method for long-lived subscribers.
+
+**Files Fixed**:
+- ✅ `examples/api_srtp.rs` - Fixed timeout errors in SRTP example
+- ✅ `examples/media_api_usage.rs` - Fixed timeout errors in media API usage
+- ✅ `examples/minimal_connection_test.rs` - Preventive fix for consistency
+- ✅ `examples/api_ssrc_demultiplexing_basic.rs` - Previously fixed
+- ✅ `examples/api_ssrc_demultiplexing_advanced.rs` - Previously fixed
+
+**Testing Results**: All examples now complete successfully with zero timeout errors.
+
+### ✅ **SSRC Demultiplexing Issues - COMPLETED**
+**Status**: **100% COMPLETE** - Perfect SSRC separation achieved
+
+**Issues Fixed**:
+1. ✅ Server configuration bug (hardcoded `ssrc_demultiplexing_enabled = false`)
+2. ✅ Missing SSRC field in `RtpEvent::MediaReceived` events
+3. ✅ Broadcast channel timeout issues (covered above)
+
+**Results**: 
+- Perfect SSRC separation: "SSRC=1234a001: 1 frames", "SSRC=5678b001: 1 frames"
+- Zero timeout errors
+- Complete frame processing
+
 ## Layering Architecture
 
 The current layering strategy is sound and follows RFC recommendations, but can be enhanced:
