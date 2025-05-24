@@ -147,7 +147,7 @@ impl DefaultMediaTransportServer {
         let csrc_management_enabled = config.csrc_management_enabled;
         let header_extensions_enabled = config.header_extensions_enabled;
         let header_extension_format = config.header_extension_format;
-        let ssrc_demultiplexing_enabled = false; // Disabled by default
+        let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false); // Read from config, default to false if not specified
         
         // Create broadcast channel for frames with buffer size 16
         let (sender, _) = broadcast::channel(16);
@@ -166,7 +166,7 @@ impl DefaultMediaTransportServer {
             event_callbacks: Arc::new(RwLock::new(Vec::new())),
             client_connected_callbacks: Arc::new(RwLock::new(Vec::new())),
             client_disconnected_callbacks: Arc::new(RwLock::new(Vec::new())),
-            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(false)),
+            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(ssrc_demultiplexing_enabled)),
             csrc_management_enabled: Arc::new(RwLock::new(csrc_management_enabled)),
             csrc_manager: Arc::new(RwLock::new(CsrcManager::new())),
             header_extension_format: Arc::new(RwLock::new(header_extension_format)),
@@ -312,9 +312,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             debug!("Started transport event task");
             while let Ok(event) = transport_events.recv().await {
                 match event {
-                    crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker } => {
+                    crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker, ssrc } => {
                         // Debug output to help diagnose issues
-                        debug!("RtpEvent::MediaReceived from {} - payload size={}", source, payload.len());
+                        debug!("RtpEvent::MediaReceived from {} - SSRC={:08x}, payload size={}", source, ssrc, payload.len());
                         
                         // Smart detection: if the payload is small and looks like text/media data rather than RTP packet,
                         // it's likely already processed by SecurityRtpTransport
@@ -322,9 +322,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             (payload.len() < 12 || // Too small for RTP header
                              (payload.len() >= 1 && payload[0] != 0x80)); // First byte doesn't look like RTP version 2
                         
-                        let (frame, ssrc) = if is_processed_payload {
-                            // This is already processed payload from SecurityRtpTransport - don't re-parse
-                            debug!("Detected processed payload from SecurityRtpTransport - using provided RTP info");
+                        let (frame, final_ssrc) = if is_processed_payload {
+                            // This is already processed payload from SecurityRtpTransport - use event SSRC
+                            debug!("Detected processed payload from SecurityRtpTransport - using event SSRC={:08x}", ssrc);
                             
                             // Use the RTP header information already provided in the event
                             let frame = crate::api::common::frame::MediaFrame {
@@ -340,7 +340,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 sequence: 0, // SecurityRtpTransport doesn't provide sequence in event
                                 marker,
                                 payload_type,
-                                ssrc: 0, // Will be determined from client mapping
+                                ssrc, // Use the SSRC from the event!
                                 csrcs: Vec::new(),
                             };
                             
@@ -349,9 +349,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 debug!("Processed payload (text): {}", text);
                             }
                             
-                            // For processed payloads, we'll use the source address to determine SSRC
-                            let temp_ssrc = rand::random::<u32>();
-                            (frame, temp_ssrc)
+                            // Use the event SSRC directly
+                            (frame, ssrc)
                         } else {
                             // This looks like a raw RTP packet - parse it normally
                             debug!("Attempting to parse raw RTP packet from payload...");
@@ -427,7 +426,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         // Check if SSRC demultiplexing is enabled
                         let ssrc_demux_enabled = *ssrc_demux_enabled_clone.read().await;
                         debug!("SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}", 
-                               ssrc_demux_enabled, ssrc);
+                               ssrc_demux_enabled, final_ssrc);
                         
                         // Check if we already have a client for this address
                         let clients = clients_clone.read().await;
@@ -449,7 +448,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         match sender_clone.send((client_id.clone(), frame)) {
                             Ok(receivers) => {
                                 debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})", 
-                                        receivers, client_id, ssrc);
+                                        receivers, client_id, final_ssrc);
                             },
                             Err(e) => {
                                 debug!("No receivers for direct frame forwarding: {}", e);
@@ -618,6 +617,11 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     /// Receive a media frame from any client
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError> {
         super::core::receive_frame(&self.frame_sender).await
+    }
+    
+    /// Get a persistent frame receiver for receiving multiple frames
+    fn get_frame_receiver(&self) -> broadcast::Receiver<(String, MediaFrame)> {
+        self.frame_sender.subscribe()
     }
     
     /// Get the local address currently bound to

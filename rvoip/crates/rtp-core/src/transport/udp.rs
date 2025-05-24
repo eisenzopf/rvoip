@@ -254,6 +254,7 @@ impl UdpRtpTransport {
                                         marker: packet.header.marker,
                                         payload: packet.payload.clone(), // Use the parsed payload
                                         source: addr,
+                                        ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
                                     };
                                     
                                     // Only log errors if there are receivers
@@ -300,6 +301,7 @@ impl UdpRtpTransport {
                                         marker: fallback_marker,
                                         payload: raw_payload,
                                         source: addr,
+                                        ssrc: 0, // Use 0 for non-RTP packets as we can't extract SSRC
                                     };
                                     
                                     // Send the event

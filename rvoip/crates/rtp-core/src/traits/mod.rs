@@ -54,6 +54,9 @@ pub enum RtpEvent {
         
         /// Source address
         source: SocketAddr,
+        
+        /// SSRC (Synchronization Source)
+        ssrc: u32,
     },
     
     /// RTCP packet received (raw bytes for now)

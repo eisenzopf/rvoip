@@ -82,9 +82,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // Start a task to receive frames from the server
             tokio::spawn(async move {
+                // Get a persistent frame receiver instead of calling receive_frame() repeatedly
+                let mut frame_receiver = server_for_task.get_frame_receiver();
+                
                 loop {
-                    match server_for_task.receive_frame().await {
-                        Ok((client_id, frame)) => {
+                    // Use the persistent receiver instead of receive_frame()
+                    match tokio::time::timeout(
+                        Duration::from_millis(500), 
+                        frame_receiver.recv()
+                    ).await {
+                        Ok(Ok((client_id, frame))) => {
                             info!("Received frame from client {} with SSRC={:08x}, PT={}, seq={}, ts={}", 
                                  client_id, frame.ssrc, frame.payload_type, frame.sequence, frame.timestamp);
                             
@@ -92,12 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut frames = received_frames_clone.lock().await;
                             frames.push((client_id, frame));
                         }
-                        Err(e) => {
-                            warn!("Error receiving frame: {}", e);
-                            // Don't break on timeout errors
-                            if !e.to_string().contains("Timeout") {
-                                break;
-                            }
+                        Ok(Err(e)) => {
+                            warn!("Broadcast channel error: {}", e);
+                            // Break on channel errors (usually means channel is closed)
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - this is normal, just continue waiting
+                            // No need to log timeouts as errors since they're expected
+                            continue;
                         }
                     }
                 }

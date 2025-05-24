@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use std::time::Duration;
 use std::collections::HashMap;
+use tokio::sync::broadcast;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
@@ -99,6 +100,13 @@ pub trait MediaTransportServer: Send + Sync + Clone {
     ///
     /// This returns the client ID and the frame received.
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError>;
+    
+    /// Get a persistent frame receiver for receiving multiple frames
+    ///
+    /// This returns a receiver that can be used multiple times without creating
+    /// new broadcast subscribers. This is more efficient than calling receive_frame()
+    /// repeatedly.
+    fn get_frame_receiver(&self) -> broadcast::Receiver<(String, MediaFrame)>;
     
     /// Get a list of connected clients
     async fn get_clients(&self) -> Result<Vec<ClientInfo>, MediaTransportError>;

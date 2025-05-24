@@ -102,6 +102,7 @@ impl SecurityRtpTransport {
                                             marker: decrypted_packet.header.marker,
                                             payload: decrypted_packet.payload.clone(),
                                             source: addr,
+                                            ssrc: decrypted_packet.header.ssrc,
                                         };
                                         
                                         debug!("Successfully decrypted and parsed: SSRC={:08x}, PT={}, seq={}, payload={} bytes", 
@@ -144,6 +145,7 @@ impl SecurityRtpTransport {
                                         marker: rtp_packet.header.marker,
                                         payload: rtp_packet.payload.clone(),
                                         source: addr,
+                                        ssrc: rtp_packet.header.ssrc,
                                     };
                                     
                                     if let Err(e) = event_tx.send(rtp_event) {
@@ -160,6 +162,7 @@ impl SecurityRtpTransport {
                                         marker: false,
                                         payload: Bytes::copy_from_slice(packet_data),
                                         source: addr,
+                                        ssrc: 0,
                                     };
                                     
                                     if let Err(e) = event_tx.send(fallback_event) {
