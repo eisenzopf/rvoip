@@ -20,6 +20,7 @@
 //! - `rtcp`: RTCP packet definitions and processing
 //! - `dtls`: DTLS support
 //! - `api`: New API module with client/server separation
+//! - `feedback`: Advanced RTCP feedback mechanisms for real-time adaptation
 //!
 //! ## New API Structure
 //!
@@ -30,6 +31,19 @@
 //! - `api::common`: Shared types and utilities used by both client and server
 //!
 //! This structure makes the library easier to use for higher-level components like media-core.
+//!
+//! ## Advanced RTCP Feedback
+//!
+//! The `feedback` module provides intelligent RTCP feedback generation for optimal media quality:
+//!
+//! - Picture Loss Indication (PLI) and Full Intra Request (FIR) for video recovery
+//! - Receiver Estimated Max Bitrate (REMB) for bandwidth adaptation
+//! - Transport-wide Congestion Control feedback for network optimization
+//! - Google Congestion Control (GCC) algorithm implementation
+//! - Quality-based feedback decisions using multiple network metrics
+//! - Configurable feedback generation with rate limiting and priority handling
+//!
+//! This enables WebRTC-compatible adaptive streaming with automatic quality optimization.
 //!
 //! ## Buffer Management
 //!
@@ -63,6 +77,7 @@ pub mod dtls;
 pub mod sync;
 pub mod api;
 pub mod security;
+pub mod feedback;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -126,6 +141,24 @@ pub use csrc::{CsrcMapping, CsrcManager, MAX_CSRC_COUNT};
 pub use sync::{MediaSync};
 pub use sync::mapping::TimestampMapper;
 pub use sync::clock::MediaClock;
+
+// Re-export feedback types for RTCP feedback mechanisms
+pub use feedback::{
+    FeedbackContext, FeedbackConfig, FeedbackDecision, FeedbackPriority, 
+    QualityDegradation, CongestionState, FeedbackGenerator, FeedbackGeneratorFactory
+};
+pub use feedback::packets::{
+    FeedbackPacket, PliPacket, FirPacket, SliPacket, TstoPacket, 
+    RembPacket, TransportCcPacket, RTCP_HEADER_SIZE
+};
+pub use feedback::generators::{
+    LossFeedbackGenerator, CongestionFeedbackGenerator, QualityFeedbackGenerator, 
+    ComprehensiveFeedbackGenerator
+};
+pub use feedback::algorithms::{
+    GoogleCongestionControl, SimpleBandwidthEstimator, QualityAssessment, 
+    QualityMetrics, PacketFeedback
+};
 
 // Re-export the new API components for easier access
 pub use api::client::{MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder};
