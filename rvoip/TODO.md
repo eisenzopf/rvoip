@@ -227,12 +227,16 @@ This document outlines architectural recommendations and improvements for the rv
 
 ### **🚀 Ready for Phase 2: Additional RTP Header Extensions**
 
-### **🚀 Advanced Feature Development - DETAILED IMPLEMENTATION PLAN**
+### **🚀 Advanced Feature Development - ARCHITECTURAL REDISTRIBUTION**
 **Status**: **CURRENT PRIORITY** - Core functionality stable, ready for advanced WebRTC/enterprise features
 
-**Implementation Strategy**: Both Core and API layers required for each feature
-- **Core Layer**: Protocol-specific parsing, algorithm implementation, low-level processing
-- **API Layer**: Simplified configuration, application-friendly interfaces, event notifications
+**⚠️ ARCHITECTURAL CORRECTION**: The original plan incorrectly assigned all features to `rtp-core`. 
+Proper separation of concerns requires distributing these features across multiple crates:
+
+- **`rtp-core`**: Packet-level processing, protocol parsing, transport mechanisms
+- **`media-core`**: Media processing, codec adaptation, stream management
+- **`session-core`**: Session coordination, multi-stream management, signaling integration
+- **`call-engine`**: High-level APIs, service orchestration, application integration
 
 ---
 
@@ -240,8 +244,14 @@ This document outlines architectural recommendations and improvements for the rv
 **Goal**: Advanced RTP metadata for modern WebRTC features
 **Timeline**: 2 weeks  
 **WebRTC Impact**: Critical for advanced streaming features
+**Primary Crate**: **`rtp-core`** ✅
 
-### **Core Layer Implementation** (`/packet/`, `/header_extensions/`)
+### **`rtp-core` Responsibilities**
+- [ ] Add proper SRTP keying and security
+- [ ] Handle RTP/RTCP transport security
+- [ ] Implement secure media transport protocols
+
+### **`rtp-core` Implementation** (`/header_extensions/`)
 - [ ] **Extension Registry System** (`/header_extensions/registry.rs`)
   - [ ] Audio Level Extensions (RFC 6464)
   - [ ] Video Orientation Extensions (RFC 7742)
@@ -262,16 +272,11 @@ This document outlines architectural recommendations and improvements for the rv
   - [ ] Extension negotiation support
   - [ ] Extension priority handling
 
-### **API Layer Implementation** (`/api/common/config.rs`)
+### **`rtp-core` API Layer** (`/api/common/`)
 - [ ] **Extension Configuration**
   - [ ] `HeaderExtensionConfig` with enable/disable options
   - [ ] Extension-specific parameter configuration
-  - [ ] Automatic extension negotiation settings
-
-- [ ] **Stream Management**
-  - [ ] RID-based stream identification
-  - [ ] Multi-stream extension coordination
-  - [ ] Extension-aware stream routing
+  - [ ] RID-based stream identification support
 
 ### **Testing & Examples**
 - [ ] **Core Examples**
@@ -279,7 +284,6 @@ This document outlines architectural recommendations and improvements for the rv
   - [ ] `rid_stream_identification.rs` - RID-based routing
 - [ ] **API Examples**
   - [ ] `api_header_extensions_webrtc.rs` - WebRTC-compatible setup
-  - [ ] `api_multi_stream_extensions.rs` - Multiple stream handling
 
 ---
 
@@ -287,44 +291,53 @@ This document outlines architectural recommendations and improvements for the rv
 **Goal**: Dynamic network-aware quality adaptation
 **Timeline**: 2 weeks
 **WebRTC Impact**: Essential for mobile and variable network conditions
+**Multi-Crate Feature**: **`rtp-core` + `media-core` + `session-core`**
 
-### **Core Layer Implementation** (`/congestion/`, `/rate_control/`)
-- [ ] **Bandwidth Estimation** (`/congestion/estimation.rs`)
-  - [ ] Google Congestion Control (GCC) algorithm
+### **`rtp-core` Responsibilities** (`/congestion/`, `/estimation/`)
+- [ ] **Network Measurement** (`/congestion/measurement.rs`)
+  - [ ] Enhanced Google Congestion Control (GCC) algorithm
   - [ ] Transport-wide congestion control implementation
   - [ ] Loss-based bandwidth estimation
   - [ ] Delay-based congestion detection
   - [ ] Hybrid estimation algorithms
 
-- [ ] **Rate Control** (`/rate_control/`)
+- [ ] **RTCP Integration** (`/congestion/rtcp.rs`)
+  - [ ] Enhanced REMB generation and parsing
+  - [ ] Transport CC feedback processing
+  - [ ] Network condition reporting to upper layers
+
+### **`media-core` Responsibilities** (`/adaptation/`, `/pipeline/`)
+- [ ] **Rate Control Engine** (`/adaptation/rate_control.rs`)
   - [ ] Target bitrate calculation algorithms
-  - [ ] Quality scaling decision logic
-  - [ ] Keyframe request scheduling
+  - [ ] Quality scaling decision logic (resolution vs framerate)
   - [ ] Encoder parameter recommendation
+  - [ ] Codec adaptation strategies
 
-- [ ] **Probing Mechanisms** (`/congestion/probing.rs`)
-  - [ ] Active bandwidth probing
-  - [ ] Probe packet generation and scheduling
-  - [ ] Probe response analysis
+- [ ] **Media Pipeline Integration** (`/pipeline/adaptive.rs`)
+  - [ ] Real-time encoder parameter adjustment
+  - [ ] Quality level management
+  - [ ] Transcoding adaptation
+  - [ ] Media format switching
 
-### **API Layer Implementation** (`/api/common/`)
-- [ ] **Bitrate Configuration**
-  - [ ] `AdaptiveBitrateConfig` with min/max/target rates
-  - [ ] Adaptation policy configuration (aggressive/conservative)
-  - [ ] Quality preference settings (resolution vs framerate)
+### **`session-core` Responsibilities** (`/adaptation/`, `/coordination/`)
+- [ ] **Session-Level Coordination** (`/adaptation/session.rs`)
+  - [ ] Multi-stream bandwidth allocation
+  - [ ] Cross-stream adaptation policies
+  - [ ] SDP renegotiation for quality changes
 
-- [ ] **Adaptation Events**
-  - [ ] `BitrateAdaptation { old_rate, new_rate, reason }`
-  - [ ] `QualityRecommendation { resolution, framerate, bitrate }`
-  - [ ] `NetworkConditionChange { bandwidth, rtt, loss_rate }`
+### **Integration APIs**
+- [ ] **Cross-Crate Events**
+  - [ ] `NetworkConditionChange` events (rtp-core → media-core)
+  - [ ] `BitrateAdaptation` events (media-core → session-core)
+  - [ ] `QualityRecommendation` events (session-core → call-engine)
 
 ### **Testing & Examples**
-- [ ] **Core Examples**
+- [ ] **`rtp-core` Examples**
   - [ ] `bandwidth_estimation.rs` - Core estimation algorithms
-  - [ ] `rate_control_algorithms.rs` - Rate adaptation logic
-- [ ] **API Examples**
-  - [ ] `api_adaptive_streaming.rs` - End-to-end adaptation
-  - [ ] `api_network_adaptation.rs` - Network condition response
+- [ ] **`media-core` Examples**
+  - [ ] `adaptive_pipeline.rs` - Media adaptation logic
+- [ ] **Integration Examples**
+  - [ ] `end_to_end_adaptation.rs` - Full adaptation chain
 
 ---
 
@@ -332,43 +345,46 @@ This document outlines architectural recommendations and improvements for the rv
 **Goal**: Multiple stream multiplexing for efficient transport
 **Timeline**: 2 weeks
 **WebRTC Impact**: Required for Bundle support and NAT optimization
+**Multi-Crate Feature**: **`rtp-core` + `session-core` + `call-engine`**
 
-### **Core Layer Implementation** (`/transport/`, `/session/`)
-- [ ] **Stream Multiplexing** (`/transport/multiplexer.rs`)
-  - [ ] RID-based stream identification and routing
+### **`rtp-core` Responsibilities** (`/transport/`, `/multiplexing/`)
+- [ ] **Transport Multiplexing** (`/transport/multiplexer.rs`)
+  - [ ] RID-based packet routing and identification
   - [ ] Enhanced SSRC collision detection and resolution
   - [ ] Dynamic SSRC allocation management
-  - [ ] Stream priority and bandwidth sharing
+  - [ ] Single-port multi-stream packet handling
 
 - [ ] **Bundle Transport** (`/transport/bundle.rs`)
-  - [ ] Single-port multi-stream transport
-  - [ ] Connection state management for bundled streams
-  - [ ] ICE integration for bundled connections
-  - [ ] Stream lifecycle coordination
+  - [ ] Bundle packet demultiplexing
+  - [ ] Transport-level stream coordination
+  - [ ] Efficient packet routing
 
-- [ ] **Session Management** (`/session/`)
+### **`session-core` Responsibilities** (`/multiplexing/`, `/coordination/`)
+- [ ] **Session Multiplexing** (`/multiplexing/session.rs`)
   - [ ] Multi-stream session coordination
-  - [ ] Stream dependency management
+  - [ ] Stream lifecycle management
   - [ ] Cross-stream synchronization
+  - [ ] Bundle negotiation and management
 
-### **API Layer Implementation** (`/api/server/`, `/api/common/`)
-- [ ] **Stream Management API**
+- [ ] **Stream Dependencies** (`/coordination/streams.rs`)
+  - [ ] Stream dependency tracking
+  - [ ] Resource allocation coordination
+  - [ ] Session-level bundle configuration
+
+### **`call-engine` Responsibilities** (`/stream_management/`)
+- [ ] **High-Level Stream APIs** (`/stream_management/api.rs`)
   - [ ] `add_stream(config: StreamConfig) -> StreamId`
   - [ ] `remove_stream(stream_id: StreamId)`
   - [ ] `configure_bundle(bundle_config: BundleConfig)`
-
-- [ ] **Stream Configuration**
-  - [ ] Per-stream codec and quality settings
-  - [ ] Stream priority and resource allocation
-  - [ ] RID assignment and management
+  - [ ] Service-level stream orchestration
 
 ### **Testing & Examples**
-- [ ] **Core Examples**
-  - [ ] `rtp_multiplexing_core.rs` - Low-level multiplexing
-  - [ ] `bundle_transport.rs` - Bundle transport handling
-- [ ] **API Examples**
-  - [ ] `api_bundle_streams.rs` - Multi-stream bundling
-  - [ ] `api_stream_management.rs` - Dynamic stream control
+- [ ] **`rtp-core` Examples**
+  - [ ] `bundle_transport.rs` - Low-level multiplexing
+- [ ] **`session-core` Examples**
+  - [ ] `multi_stream_coordination.rs` - Session management
+- [ ] **Integration Examples**
+  - [ ] `webrtc_bundle_demo.rs` - Full bundle support
 
 ---
 
@@ -376,68 +392,75 @@ This document outlines architectural recommendations and improvements for the rv
 **Goal**: Advanced scalable video streaming
 **Timeline**: 3 weeks
 **WebRTC Impact**: Required for conference optimization and device adaptation
+**Multi-Crate Feature**: **`rtp-core` + `media-core` + `session-core`**
 
-### **Core Layer Implementation** (`/packet/`, `/scalability/`)
-- [ ] **Simulcast Support** (`/scalability/simulcast.rs`)
-  - [ ] Multiple encoding stream management
-  - [ ] RID-based simulcast identification
-  - [ ] Dynamic stream selection algorithms
-  - [ ] Bandwidth-aware stream switching
-
-- [ ] **SVC Support** (`/scalability/svc.rs`)
-  - [ ] Temporal layer parsing and handling
-  - [ ] Spatial layer dependency tracking
-  - [ ] Quality layer management
-  - [ ] Layer dependency graph computation
-
-- [ ] **Packet Processing** (`/packet/`)
+### **`rtp-core` Responsibilities** (`/packet/`, `/scalability/`)
+- [ ] **Packet-Level SVC** (`/scalability/svc_packets.rs`)
   - [ ] SVC header parsing (VP9, AV1)
   - [ ] Temporal ID extraction and validation
-  - [ ] Layer dependency validation
+  - [ ] Layer dependency validation at packet level
   - [ ] Frame completion detection
 
-### **API Layer Implementation** (`/api/common/`, `/api/server/`)
-- [ ] **Simulcast Configuration**
-  - [ ] `SimulcastConfig` with multiple stream definitions
-  - [ ] Per-stream encoding parameters
-  - [ ] Automatic stream selection policies
+- [ ] **Simulcast Identification** (`/scalability/simulcast_routing.rs`)
+  - [ ] RID-based simulcast stream identification
+  - [ ] Multiple encoding stream packet routing
+  - [ ] Transport-level simulcast handling
 
-- [ ] **SVC Configuration**
-  - [ ] Temporal/spatial/quality layer configuration
-  - [ ] Layer dependency specification
+### **`media-core` Responsibilities** (`/simulcast/`, `/svc/`)
+- [ ] **Simulcast Management** (`/simulcast/stream_manager.rs`)
+  - [ ] Dynamic stream selection algorithms
+  - [ ] Bandwidth-aware stream switching
+  - [ ] Quality layer management
+  - [ ] Encoder-specific simulcast configuration
+
+- [ ] **SVC Processing** (`/svc/layer_manager.rs`)
+  - [ ] Temporal/spatial/quality layer management
+  - [ ] Layer dependency graph computation
   - [ ] Adaptive layer selection
+  - [ ] Media pipeline SVC integration
+
+### **`session-core` Responsibilities** (`/simulcast/`, `/svc/`)
+- [ ] **Session-Level Coordination** (`/simulcast/session.rs`)
+  - [ ] Multi-stream simulcast session management
+  - [ ] Simulcast negotiation and configuration
+  - [ ] Cross-stream simulcast coordination
+
+### **Integration & Configuration**
+- [ ] **Cross-Crate Configuration**
+  - [ ] Unified simulcast/SVC configuration API
+  - [ ] Stream selection policy coordination
+  - [ ] Quality adaptation event flow
 
 ### **Testing & Examples**
-- [ ] **Core Examples**
-  - [ ] `simulcast_core.rs` - Multi-stream simulcast
-  - [ ] `svc_layers.rs` - SVC layer handling
-- [ ] **API Examples**
-  - [ ] `api_simulcast_conference.rs` - Conference simulcast
-  - [ ] `api_svc_adaptation.rs` - SVC layer adaptation
+- [ ] **`rtp-core` Examples**
+  - [ ] `svc_packet_processing.rs` - Packet-level SVC
+- [ ] **`media-core` Examples**
+  - [ ] `simulcast_pipeline.rs` - Stream management
+- [ ] **Integration Examples**
+  - [ ] `conference_simulcast.rs` - Full simulcast system
 
 ---
 
-## **🎯 Implementation Order & Dependencies**
+## **🎯 Revised Implementation Order & Dependencies**
 
-### **Phase Dependencies**:
-1. **Phase 1 (RTCP Feedback)** → **Phase 3 (Adaptive Bitrate)** (feedback enables adaptation)
-2. **Phase 2 (Header Extensions)** → **Phase 4 (Multiplexing)** (RID extensions enable multiplexing)
-3. **Phase 4 (Multiplexing)** → **Phase 5 (Simulcast/SVC)** (multiplexing enables multiple streams)
+### **Phase Dependencies with Crate Coordination**:
+1. **Phase 2** (`rtp-core` only) → **Phase 3** (coordination setup)
+2. **Phase 3** (establishes cross-crate patterns) → **Phase 4** (extends patterns)
+3. **Phase 4** (multi-stream foundation) → **Phase 5** (advanced multi-stream)
 
-### **Success Metrics**:
-- **Phase 1**: Working PLI/FIR/REMB with quality improvement demonstrations
-- **Phase 2**: All WebRTC-required extensions working with browser compatibility
-- **Phase 3**: Demonstrated bandwidth adaptation with 50% improvement in variable networks
-- **Phase 4**: Bundle support with multiple simultaneous streams
-- **Phase 5**: Working simulcast/SVC with conference-style demonstrations
+### **Cross-Crate Integration Patterns**:
+- **Event-Driven Communication**: Use `infra-common` event bus for cross-crate coordination
+- **Trait-Based APIs**: Define traits in lower crates, implement in higher crates
+- **Configuration Hierarchy**: Layer-specific configs with cross-layer coordination
+- **Async Message Passing**: Use channels for real-time coordination
 
-### **WebRTC Compliance Goals**:
-- [ ] Chrome/Firefox/Safari browser compatibility
-- [ ] Standards-compliant extension negotiation
-- [ ] Interoperability with existing WebRTC implementations
-- [ ] Performance suitable for production deployment
+### **Success Metrics per Crate**:
+- **`rtp-core`**: Packet processing performance, protocol compliance
+- **`media-core`**: Adaptation quality, encoder efficiency
+- **`session-core`**: Multi-stream coordination, signaling integration
+- **Integration**: End-to-end feature functionality, WebRTC compatibility
 
-**🌟 Target Outcome**: Complete WebRTC-compatible media transport system with enterprise-grade adaptive streaming capabilities
+**🌟 Target Outcome**: Properly architected, multi-crate WebRTC-compatible media transport system with clean separation of concerns and efficient cross-layer coordination
 
 ## Layering Architecture
 
@@ -565,38 +588,101 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Handle multiple concurrent dialogs properly
 - [ ] Implement RFC 6665 event subscription/notification framework
 
-### Media Stack
+### Media Stack - **MULTI-CRATE RESPONSIBILITIES**
 
+#### **`session-core` Responsibilities**
 - [ ] Ensure proper synchronization between SIP signaling and media setup
-- [ ] Implement fallback mechanisms for ICE failures
-- [ ] Support multiple media types and codec negotiation
-- [ ] Add proper SRTP keying and security
+- [ ] Coordinate media session establishment and teardown
+- [ ] Handle SDP negotiation and renegotiation
+- [ ] Manage session-level media state transitions
 
-## Testing Strategy
+#### **`media-core` Responsibilities** 
+- [ ] Support multiple media types and codec negotiation
+- [ ] Implement media processing pipelines
+- [ ] Handle codec conversion and transcoding
+- [ ] Manage media quality adaptation
+
+#### **`ice-core` Responsibilities**
+- [ ] Implement fallback mechanisms for ICE failures
+- [ ] Handle NAT traversal and connectivity establishment
+- [ ] Manage STUN/TURN server interactions
+
+#### **`rtp-core` Responsibilities**
+- [ ] Add proper SRTP keying and security
+- [ ] Handle RTP/RTCP transport security
+- [ ] Implement secure media transport protocols
+
+## Testing Strategy - **CROSS-CRATE COORDINATION**
 
 - [ ] Create integration tests spanning multiple layers
 - [ ] Implement conformance tests against RFC requirements
 - [ ] Add interoperability tests with common SIP implementations
 - [ ] Create scenario-based tests for common call flows
+- [ ] **Add cross-crate integration testing framework**
+- [ ] **Test event flow between crates**
+- [ ] **Validate proper dependency isolation**
 
-## Documentation Needs
+## Documentation Needs - **MULTI-CRATE SCOPE**
 
-- [ ] Document layer boundaries and responsibilities
-- [ ] Create architectural diagrams
+- [ ] Document clear layer boundaries and responsibilities
+- [ ] Create architectural diagrams showing crate interactions
 - [ ] Document key extension points for customization
 - [ ] Provide usage examples for each layer
-- [ ] Create visual state machine diagrams for all transaction types
-- [ ] Document transaction timer behavior and configuration options
-- [ ] Add examples of common transaction scenarios and patterns
-- [ ] Create troubleshooting guides for transaction-related issues
-- [ ] Document transaction manager's API contract
+- [ ] **Document cross-crate communication patterns**
+- [ ] **Create crate-specific integration guides**
+- [ ] **Document event flow between components**
 
-## Performance Considerations
+### Transaction Layer (`transaction-core`) - **SPECIFIC ASSIGNMENTS**
 
+## Transaction Core Major Issues
+
+- [x] Fix trait object safety issue: async methods in Transaction trait (original_request, last_response, send_command) can't be used in trait objects
+- [ ] Transaction structs and TransactionData field mismatches (timer_manager, cmd_rx fields)
+- [ ] TransactionEvent enum variant mismatches (Response, Timeout, Terminated)
+- [x] Implement proper TypedHeader access for Request/Response methods (via, header, etc.)
+- [x] Fix TransactionKey::new implementation to match the expected parameters
+- [x] Address error propagation issues in client.rs handle_transport_message function
+- [ ] Fix the AtomicTransactionState usage in ClientNonInviteTransaction
+- [ ] Fix RequestBuilder.build() handling - it should return a Result<Request, Error>
+
+## Transaction Core Improvements
+
+- [x] Create comprehensive documentation in README.md explaining architecture and usage
+- [x] Implement RFC 3261 compliant timer management system
+- [x] Add proper support for both Send and Sync in Transaction trait
+- [x] Migrate from std::sync::Mutex to tokio::sync::Mutex for better async support
+- [x] Fix ClientNonInviteTransaction implementation
+- [x] Add utils.rs with create_ack_from_invite helper function
+- [x] Fix Error enum to use struct variants consistently
+- [x] Update Transaction trait interface with async original_request and last_response methods
+- [x] Fix transaction references to avoid borrowing issues with boxed trait objects
+- [x] Fix TransportEvent handling to match the current API
+- [ ] Redesign the trait hierarchy to avoid async methods in trait objects
+- [ ] Add proper client transaction test for full transaction lifecycle
+- [ ] Add proper server transaction test for full transaction lifecycle
+- [ ] Fix bug with ACK handling in InviteServerTransaction after 2xx response
+- [ ] Improve transaction reference handling in manager.rs (use Arc<RwLock> for transaction storage)
+- [ ] Add metrics and telemetry for monitoring transaction states
+- [ ] Add support for transaction termination and cleanup in the manager
+
+## Transaction Core Missing Features
+
+- [ ] Implement CANCEL method support with proper handling and matching
+- [ ] Add support for reliability extensions (RFC 3262/PRACK)
+- [ ] Implement forking support for handling multiple responses
+- [ ] Improve transport failure handling and recovery
+- [ ] Add dialog integration points for transaction layer
+- [ ] Implement UPDATE method support (RFC 3311)
+- [ ] Add error recovery and resilience mechanisms
+- [ ] Provide operational metrics for transaction states
+- [ ] Fix server transaction creation issues evident in integration tests
+- [ ] Add performance benchmarks and optimizations
+
+## Performance Considerations - **CRATE-SPECIFIC FOCUS**
+
+### **`transaction-core` Performance**
 - [ ] Benchmark transaction processing capacity
 - [ ] Monitor and optimize memory usage, particularly in long-running transactions
-- [ ] Ensure proper connection pooling at transport layer
-- [ ] Consider scale-out strategies for high volume deployments
 - [ ] Analyze and optimize transaction timer overhead
 - [ ] Measure and reduce lock contention in transaction hot paths
 - [ ] Implement efficient transaction lookup with optimized data structures
@@ -604,7 +690,19 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Add performance testing framework with reproducible load tests
 - [ ] Implement load shedding mechanisms for overload protection
 
-## General Architecture
+### **Transport Layer Performance (`sip-transport`)**
+- [ ] Ensure proper connection pooling at transport layer
+- [ ] Consider scale-out strategies for high volume deployments
+- [ ] Optimize network I/O operations
+- [ ] Implement efficient connection lifecycle management
+
+### **Cross-Crate Performance Considerations**
+- [ ] **Minimize cross-crate communication overhead**
+- [ ] **Optimize event passing between crates**
+- [ ] **Profile end-to-end latency across layers**
+- [ ] **Implement performance monitoring at crate boundaries**
+
+## General Architecture - **MULTI-CRATE COORDINATION**
 
 - [ ] Define clear module boundaries and public interfaces (API separation)
 - [ ] Create diagrams for key data flow paths
@@ -618,8 +716,14 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Add thorough error handling with context
 - [ ] Standardize configuration approach
 - [ ] Add comprehensive integration tests
+- [ ] **Establish cross-crate dependency management**
+- [ ] **Define inter-crate API contracts**
+- [ ] **Implement unified configuration system**
+- [ ] **Create common error handling patterns**
 
-## SIP Core 
+## Crate-Specific Layer Improvements
+
+### SIP Core (`sip-core`)
 
 - [ ] Split parser into smaller, more focused components
 - [ ] Benchmark and optimize header parsing
@@ -629,7 +733,7 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Optimize memory usage for message parsing/serialization
 - [ ] Add validation for header values
 
-## Transport Layer
+### Transport Layer (`sip-transport`)
 
 - [ ] Implement connection pooling for TCP
 - [ ] Add TLS support with proper certificate handling
@@ -640,14 +744,14 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Implement keep-alive mechanisms for persistent connections
 - [x] Successfully integrate sip-transport with transaction-core
 
-## Dialog Layer
+### Dialog Layer (`session-core`)
 - [ ] Design core dialog state management
 - [ ] Implement dialog creation, modification, termination
 - [ ] Create dialog matching for in-dialog requests
 - [ ] Design proper Route/Record-Route handling
 - [ ] Implement target refresh handling
 
-## Control Layer / User Agent
+### Control Layer / User Agent (`call-engine`)
 - [ ] Define API for application integration
 - [ ] Implement registration handling
 - [ ] Create call control interface
@@ -655,6 +759,56 @@ The Transaction User (TU) functionality should be properly distributed:
 - [ ] Implement re-INVITE support for media changes
 - [ ] Create subscription/notification framework
 
+### Media Processing (`media-core`)
+- [ ] Implement codec management and negotiation
+- [ ] Create media pipeline framework
+- [ ] Add transcoding capabilities
+- [ ] Implement media mixing and routing
+- [ ] Support multiple media formats
+- [ ] Add media quality monitoring
+
+### RTP Transport (`rtp-core`)
+- [ ] Optimize packet processing performance
+- [ ] Implement advanced RTCP feedback (✅ **COMPLETED**)
+- [ ] Add comprehensive security support
+- [ ] Support multiple transport modes
+- [ ] Implement efficient buffer management
+
+### ICE Connectivity (`ice-core`)
+- [ ] Implement complete ICE state machine
+- [ ] Add STUN/TURN client implementations
+- [ ] Support multiple network interfaces
+- [ ] Implement connectivity monitoring
+- [ ] Add NAT type detection
+
+### Infrastructure (`infra-common`)
+- [ ] **Implement high-performance event bus for cross-crate communication**
+- [ ] **Create unified configuration management system**
+- [ ] **Add distributed logging and tracing framework**
+- [ ] **Implement health monitoring and metrics collection**
+- [ ] **Create service discovery and registration system**
+
 ---
 
-These recommendations aim to strengthen the current architectural approach while ensuring adherence to SIP standards and scalability requirements. 
+## **🎯 Cross-Crate Integration Strategy**
+
+### **Communication Patterns**
+1. **Event-Driven**: Use `infra-common` event bus for loose coupling
+2. **Trait-Based**: Lower crates define traits, higher crates implement
+3. **Message Passing**: Async channels for real-time data flow
+4. **Shared State**: Minimal, well-defined shared data structures
+
+### **Development Workflow**
+1. **Phase 2**: Establish patterns in single crate (`rtp-core`)
+2. **Phase 3**: Extend patterns across 3 crates with event coordination
+3. **Phase 4**: Scale patterns to complex multi-crate features
+4. **Phase 5**: Advanced features with full architectural maturity
+
+### **Quality Assurance**
+- **Unit Tests**: Per-crate functionality
+- **Integration Tests**: Cross-crate communication
+- **End-to-End Tests**: Full system scenarios
+- **Performance Tests**: Scalability and latency
+- **Compliance Tests**: Protocol conformance
+
+These recommendations aim to strengthen the current architectural approach while ensuring adherence to SIP standards, proper separation of concerns, and scalability requirements across the entire RVOIP ecosystem. 
