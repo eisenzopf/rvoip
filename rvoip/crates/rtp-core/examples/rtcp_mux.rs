@@ -82,10 +82,10 @@ async fn run_example() {
         
         loop {
             match events1.recv().await {
-                Ok(RtpEvent::MediaReceived { payload_type, timestamp, marker, payload, source }) => {
+                Ok(RtpEvent::MediaReceived { payload_type, timestamp, marker, payload, source, ssrc }) => {
                     rtp_count += 1;
-                    println!("Endpoint 1 received RTP packet: PT={}, TS={}, Marker={}, Size={}, From={}",
-                            payload_type, timestamp, marker, payload.len(), source);
+                    println!("Endpoint 1 received RTP packet: PT={}, TS={}, Marker={}, Size={}, SSRC={:08x}, From={}",
+                            payload_type, timestamp, marker, payload.len(), ssrc, source);
                             
                     if rtp_count >= 3 {
                         // Send some RTCP packets back
@@ -153,10 +153,10 @@ async fn run_example() {
         
         loop {
             match events2.recv().await {
-                Ok(RtpEvent::MediaReceived { payload_type, timestamp, marker, payload, source }) => {
+                Ok(RtpEvent::MediaReceived { payload_type, timestamp, marker, payload, source, ssrc }) => {
                     rtp_count += 1;
-                    println!("Endpoint 2 received RTP packet: PT={}, TS={}, Marker={}, Size={}, From={}",
-                            payload_type, timestamp, marker, payload.len(), source);
+                    println!("Endpoint 2 received RTP packet: PT={}, TS={}, Marker={}, Size={}, SSRC={:08x}, From={}",
+                            payload_type, timestamp, marker, payload.len(), ssrc, source);
                 },
                 Ok(RtpEvent::RtcpReceived { data, source }) => {
                     rtcp_count += 1;
