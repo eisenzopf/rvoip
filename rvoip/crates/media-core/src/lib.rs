@@ -267,6 +267,16 @@ pub mod prelude {
         OpusCodec,
         OpusConfig,
         OpusApplication,
+        G729Codec,
+        G729Config,
+        G729Annexes,
+    };
+    
+    // Codec transcoding components
+    pub use crate::codec::{
+        Transcoder,
+        TranscodingPath,
+        TranscodingStats,
     };
     
     // Payload type constants for convenience

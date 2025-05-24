@@ -4,12 +4,16 @@
 //! It focuses on G.711 codec support (PCMU/PCMA) for basic voice over IP.
 
 pub mod audio;
+pub mod transcoding;  // Add transcoding module
 
 // Re-export audio codec types
 pub use audio::common::*;
 
 // Re-export G.711 codecs from our relay module
 pub use crate::relay::{G711PcmuCodec, G711PcmaCodec};
+
+// Re-export transcoding types
+pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
 
 /// Basic codec trait for RTP payload processing
 pub trait Codec: Send + Sync {

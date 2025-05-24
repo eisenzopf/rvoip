@@ -4,6 +4,7 @@
 pub mod common;
 pub mod g711;  // G.711 codec implementation
 pub mod opus;  // Opus codec implementation
+pub mod g729;  // Add G.729 codec
 
 pub use common::*;
 
@@ -18,6 +19,9 @@ pub mod payload_type {
     /// G.722 (16kHz)
     pub const G722: u8 = 9;
     
+    /// G.729 (8kHz, 8kbps)
+    pub const G729: u8 = 18;
+    
     /// Telephone-event (DTMF) RFC 4733
     pub const TELEPHONE_EVENT: u8 = 101;
 }
@@ -26,4 +30,7 @@ pub mod payload_type {
 pub use g711::{G711Codec, G711Config, G711Variant};
 
 // Re-export Opus codec types
-pub use opus::{OpusCodec, OpusConfig, OpusApplication}; 
+pub use opus::{OpusCodec, OpusConfig, OpusApplication};
+
+// Re-export G.729 codec types
+pub use g729::{G729Codec, G729Config, G729Annexes}; 
