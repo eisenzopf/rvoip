@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use rand::Rng;
+use tracing::debug;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
@@ -168,12 +169,9 @@ impl DefaultMediaTransportClient {
         
         // Initialize media sync if enabled in config
         let media_sync_enabled = config.media_sync_enabled.unwrap_or(false);
-        let media_sync = if media_sync_enabled {
-            // Create media sync context
-            Some(crate::sync::MediaSync::new())
-        } else {
-            None
-        };
+        
+        // Note: We don't create a separate MediaSync context here.
+        // Instead, we'll use the session's MediaSync context which gets updated with RTCP data.
         
         // Initialize SSRC demultiplexing if enabled in config
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false);
@@ -207,7 +205,7 @@ impl DefaultMediaTransportClient {
             event_callbacks: Arc::new(Mutex::new(Vec::new())),
             connect_callbacks: Arc::new(Mutex::new(Vec::new())),
             disconnect_callbacks: Arc::new(Mutex::new(Vec::new())),
-            media_sync: Arc::new(RwLock::new(media_sync)),
+            media_sync: Arc::new(RwLock::new(None)),
             media_sync_enabled: Arc::new(AtomicBool::new(media_sync_enabled)),
             ssrc_demultiplexing_enabled: Arc::new(AtomicBool::new(ssrc_demultiplexing_enabled)),
             sequence_numbers: Arc::new(Mutex::new(HashMap::new())),
@@ -507,90 +505,204 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     // Media synchronization
     
     async fn enable_media_sync(&self) -> Result<bool, MediaTransportError> {
-        // Get session to get SSRC and clock rate
-        let session = self.session.lock().await;
-        let ssrc = session.get_ssrc();
-        let clock_rate = self.config.clock_rate; // Use from config since session doesn't expose this
+        // Enable media sync on the session which creates the MediaSync context
+        let session_media_sync = {
+            let mut session = self.session.lock().await;
+            session.enable_media_sync()
+        };
         
-        sync::enable_media_sync(
-            &self.media_sync_enabled,
-            &self.media_sync,
-            ssrc,
-            clock_rate,
-        ).await
+        // Set our enabled flag
+        self.media_sync_enabled.store(true, std::sync::atomic::Ordering::SeqCst);
+        
+        // Store reference to session's MediaSync context (but this creates a type mismatch)
+        // Instead, we'll access it directly in each method call
+        
+        Ok(true)
     }
     
     async fn is_media_sync_enabled(&self) -> Result<bool, MediaTransportError> {
-        Ok(sync::is_media_sync_enabled(&self.media_sync_enabled))
+        // Check if session has media sync enabled
+        let session = self.session.lock().await;
+        let has_session_sync = session.media_sync().is_some();
+        
+        Ok(has_session_sync || self.media_sync_enabled.load(std::sync::atomic::Ordering::SeqCst))
     }
     
     async fn register_sync_stream(&self, ssrc: u32, clock_rate: u32) -> Result<(), MediaTransportError> {
-        sync::register_sync_stream(
-            &self.media_sync,
-            ssrc,
-            clock_rate,
-        ).await
+        // Get session's MediaSync context and register stream
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(mut sync) = session_media_sync.write() {
+                sync.register_stream(ssrc, clock_rate);
+                debug!("Registered sync stream: SSRC={:08x}, clock_rate={}", ssrc, clock_rate);
+                Ok(())
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync write lock".to_string()))
+            }
+        } else {
+            // Enable media sync first
+            drop(session);
+            self.enable_media_sync().await?;
+            self.register_sync_stream(ssrc, clock_rate).await
+        }
     }
     
     async fn set_sync_reference_stream(&self, ssrc: u32) -> Result<(), MediaTransportError> {
-        sync::set_sync_reference_stream(
-            &self.media_sync,
-            ssrc,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(mut sync) = session_media_sync.write() {
+                sync.set_reference_stream(ssrc);
+                debug!("Set sync reference stream: SSRC={:08x}", ssrc);
+                Ok(())
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync write lock".to_string()))
+            }
+        } else {
+            Err(MediaTransportError::ConfigError("Media synchronization not enabled".to_string()))
+        }
     }
     
     async fn get_sync_info(&self, ssrc: u32) -> Result<Option<MediaSyncInfo>, MediaTransportError> {
-        sync::get_sync_info(
-            &self.media_sync,
-            ssrc,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                // Get the stream data from core MediaSync
+                let streams = sync.get_streams();
+                if let Some(stream_data) = streams.get(&ssrc) {
+                    // Convert core StreamSyncData to API MediaSyncInfo
+                    let sync_info = MediaSyncInfo {
+                        ssrc: stream_data.ssrc,
+                        clock_rate: stream_data.clock_rate,
+                        last_ntp: stream_data.last_ntp,
+                        last_rtp: stream_data.last_rtp,
+                        clock_drift_ppm: stream_data.clock_drift_ppm,
+                    };
+                    debug!("Retrieved sync info for SSRC={:08x}: drift={:.2} PPM", ssrc, sync_info.clock_drift_ppm);
+                    Ok(Some(sync_info))
+                } else {
+                    debug!("No sync info found for SSRC={:08x}", ssrc);
+                    Ok(None)
+                }
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(None)
+        }
     }
     
     async fn get_all_sync_info(&self) -> Result<HashMap<u32, MediaSyncInfo>, MediaTransportError> {
-        sync::get_all_sync_info(
-            &self.media_sync,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let mut result = HashMap::new();
+                
+                // Convert all streams from core MediaSync to API MediaSyncInfo
+                for (ssrc, stream_data) in sync.get_streams() {
+                    let sync_info = MediaSyncInfo {
+                        ssrc: *ssrc,
+                        clock_rate: stream_data.clock_rate,
+                        last_ntp: stream_data.last_ntp,
+                        last_rtp: stream_data.last_rtp,
+                        clock_drift_ppm: stream_data.clock_drift_ppm,
+                    };
+                    result.insert(*ssrc, sync_info);
+                }
+                
+                debug!("Retrieved sync info for {} registered streams", result.len());
+                Ok(result)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(HashMap::new())
+        }
     }
     
     async fn convert_timestamp(&self, from_ssrc: u32, to_ssrc: u32, rtp_ts: u32) -> Result<Option<u32>, MediaTransportError> {
-        sync::convert_timestamp(
-            &self.media_sync,
-            from_ssrc,
-            to_ssrc,
-            rtp_ts,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let result = sync.convert_timestamp(from_ssrc, to_ssrc, rtp_ts);
+                if result.is_some() {
+                    debug!("Converted timestamp {} from SSRC={:08x} to SSRC={:08x}: result={:?}", 
+                           rtp_ts, from_ssrc, to_ssrc, result);
+                } else {
+                    debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data", 
+                           rtp_ts, from_ssrc, to_ssrc);
+                }
+                Ok(result)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(None)
+        }
     }
     
     async fn rtp_to_ntp(&self, ssrc: u32, rtp_ts: u32) -> Result<Option<crate::packet::rtcp::NtpTimestamp>, MediaTransportError> {
-        sync::rtp_to_ntp(
-            &self.media_sync,
-            ssrc,
-            rtp_ts,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let result = sync.rtp_to_ntp(ssrc, rtp_ts);
+                debug!("Converted RTP timestamp {} to NTP for SSRC={:08x}: success={}", 
+                       rtp_ts, ssrc, result.is_some());
+                Ok(result)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(None)
+        }
     }
     
     async fn ntp_to_rtp(&self, ssrc: u32, ntp: crate::packet::rtcp::NtpTimestamp) -> Result<Option<u32>, MediaTransportError> {
-        sync::ntp_to_rtp(
-            &self.media_sync,
-            ssrc,
-            ntp,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let result = sync.ntp_to_rtp(ssrc, ntp);
+                debug!("Converted NTP timestamp to RTP for SSRC={:08x}: success={}", 
+                       ssrc, result.is_some());
+                Ok(result)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(None)
+        }
     }
     
     async fn get_clock_drift_ppm(&self, ssrc: u32) -> Result<Option<f64>, MediaTransportError> {
-        sync::get_clock_drift_ppm(
-            &self.media_sync,
-            ssrc,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let drift = sync.get_clock_drift_ppm(ssrc);
+                if let Some(drift_val) = drift {
+                    debug!("Clock drift for SSRC={:08x}: {:.2} PPM", ssrc, drift_val);
+                }
+                Ok(drift)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(None)
+        }
     }
     
     async fn are_streams_synchronized(&self, ssrc1: u32, ssrc2: u32, tolerance_ms: f64) -> Result<bool, MediaTransportError> {
-        sync::are_streams_synchronized(
-            &self.media_sync,
-            ssrc1,
-            ssrc2,
-            tolerance_ms,
-        ).await
+        let session = self.session.lock().await;
+        if let Some(session_media_sync) = session.media_sync() {
+            if let Ok(sync) = session_media_sync.read() {
+                let synchronized = sync.are_synchronized(ssrc1, ssrc2, tolerance_ms);
+                debug!("Streams synchronized check: SSRC1={:08x}, SSRC2={:08x}, tolerance={}ms, result={}", 
+                       ssrc1, ssrc2, tolerance_ms, synchronized);
+                Ok(synchronized)
+            } else {
+                Err(MediaTransportError::ConfigError("Failed to acquire MediaSync read lock".to_string()))
+            }
+        } else {
+            Ok(false)
+        }
     }
     
     // CSRC management

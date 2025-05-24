@@ -1105,6 +1105,16 @@ impl RtpSession {
             }
         }
         
+        // **FIX: Update our own MediaSync context with the SR data we're sending**
+        // This ensures our own timing data flows into MediaSync for API access
+        if let Some(media_sync) = &self.media_sync {
+            if let Ok(mut sync) = media_sync.write() {
+                sync.update_from_sr(self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
+                debug!("Updated MediaSync with our own SR: SSRC={:08x}, NTP={:?}, RTP={}", 
+                       self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
+            }
+        }
+        
         // Create RTCP packet
         let rtcp_packet = crate::packet::rtcp::RtcpPacket::SenderReport(sr);
         
