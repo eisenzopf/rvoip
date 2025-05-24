@@ -87,6 +87,12 @@ pub enum CodecError {
     
     #[error("Transcoding not supported: {from_codec} to {to_codec}")]
     TranscodingUnsupported { from_codec: String, to_codec: String },
+    
+    #[error("Codec initialization failed: {reason}")]
+    InitializationFailed { reason: String },
+    
+    #[error("Invalid frame size: expected {expected}, got {actual}")]
+    InvalidFrameSize { expected: usize, actual: usize },
 }
 
 /// Audio processing errors

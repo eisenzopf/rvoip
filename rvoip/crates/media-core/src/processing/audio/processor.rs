@@ -10,6 +10,7 @@ use tracing::{debug, warn, error};
 use crate::error::{Result, AudioProcessingError};
 use crate::types::{AudioFrame, SampleRate};
 use super::vad::{VoiceActivityDetector, VadConfig, VadResult};
+use super::agc::{AutomaticGainControl, AgcConfig, AgcResult};
 
 /// Configuration for audio processing
 #[derive(Debug, Clone)]
@@ -18,10 +19,12 @@ pub struct AudioProcessingConfig {
     pub enable_vad: bool,
     /// VAD configuration
     pub vad_config: VadConfig,
+    /// Enable automatic gain control
+    pub enable_agc: bool,
+    /// AGC configuration
+    pub agc_config: AgcConfig,
     /// Target sample rate for processing
     pub target_sample_rate: SampleRate,
-    /// Enable automatic gain control (future)
-    pub enable_agc: bool,
     /// Enable echo cancellation (future)
     pub enable_aec: bool,
     /// Enable noise suppression (future)
@@ -33,8 +36,9 @@ impl Default for AudioProcessingConfig {
         Self {
             enable_vad: true,
             vad_config: VadConfig::default(),
+            enable_agc: false,  // Disabled by default (can be aggressive)
+            agc_config: AgcConfig::default(),
             target_sample_rate: SampleRate::Rate8000,
-            enable_agc: false,  // Disabled for Phase 2
             enable_aec: false,  // Disabled for Phase 2
             enable_noise_suppression: false,  // Disabled for Phase 2
         }
@@ -48,6 +52,8 @@ pub struct AudioProcessingResult {
     pub frame: AudioFrame,
     /// Voice activity detection result
     pub vad_result: Option<VadResult>,
+    /// Automatic gain control result
+    pub agc_result: Option<AgcResult>,
     /// Processing metrics
     pub metrics: AudioProcessingMetrics,
 }
@@ -69,6 +75,8 @@ pub struct AudioProcessor {
     config: AudioProcessingConfig,
     /// Voice activity detector
     vad: Option<Arc<RwLock<VoiceActivityDetector>>>,
+    /// Automatic gain control
+    agc: Option<Arc<RwLock<AutomaticGainControl>>>,
     /// Processing statistics
     stats: RwLock<AudioProcessingStats>,
 }
@@ -84,6 +92,10 @@ struct AudioProcessingStats {
     voice_frames: u64,
     /// Frames without voice activity
     silence_frames: u64,
+    /// Frames processed by AGC
+    agc_processed_frames: u64,
+    /// Average gain applied by AGC
+    avg_agc_gain: f32,
 }
 
 impl AudioProcessor {
@@ -99,9 +111,18 @@ impl AudioProcessor {
             None
         };
         
+        // Initialize AGC if enabled
+        let agc = if config.enable_agc {
+            let agc_processor = AutomaticGainControl::new(config.agc_config.clone())?;
+            Some(Arc::new(RwLock::new(agc_processor)))
+        } else {
+            None
+        };
+        
         Ok(Self {
             config,
             vad,
+            agc,
             stats: RwLock::new(AudioProcessingStats::default()),
         })
     }
@@ -117,26 +138,38 @@ impl AudioProcessor {
         let mut processed_frame = input.clone();
         let mut frame_modified = false;
         let mut vad_result = None;
+        let mut agc_result = None;
         
-        // Run VAD if enabled
+        // Step 1: Run AGC first (on capture path, process before VAD for better detection)
+        if let Some(agc) = &self.agc {
+            let mut agc_processor = agc.write().await;
+            let result = agc_processor.process_frame(&processed_frame)?;
+            
+            // Apply the gain to the samples
+            agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
+            agc_result = Some(result);
+            frame_modified = true;
+        }
+        
+        // Step 2: Run VAD on the processed audio
         if let Some(vad) = &self.vad {
             let mut vad_detector = vad.write().await;
             vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
         }
         
         // TODO: Add more processing stages in Phase 3:
-        // - Automatic Gain Control (AGC)
-        // - Noise Suppression (NS)
         // - Echo Cancellation (AEC) reference signal processing
+        // - Noise Suppression (NS)
         
         let processing_time = start_time.elapsed();
         
         // Update statistics
-        self.update_stats(&processed_frame, &vad_result, processing_time).await;
+        self.update_stats(&processed_frame, &vad_result, &agc_result, processing_time).await;
         
         Ok(AudioProcessingResult {
             frame: processed_frame,
             vad_result,
+            agc_result,
             metrics: AudioProcessingMetrics {
                 processing_time_us: processing_time.as_micros() as u64,
                 frame_modified,
@@ -154,7 +187,19 @@ impl AudioProcessor {
         
         // For playback, we mainly do format conversion and output processing
         let mut processed_frame = input.clone();
-        let frame_modified = false;
+        let mut frame_modified = false;
+        let mut agc_result = None;
+        
+        // Apply AGC on playback path for output level control
+        if let Some(agc) = &self.agc {
+            let mut agc_processor = agc.write().await;
+            let result = agc_processor.process_frame(&processed_frame)?;
+            
+            // Apply the gain to the samples
+            agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
+            agc_result = Some(result);
+            frame_modified = true;
+        }
         
         // TODO: Add playback processing in Phase 3:
         // - Echo Cancellation (AEC) playback signal processing
@@ -166,6 +211,7 @@ impl AudioProcessor {
         Ok(AudioProcessingResult {
             frame: processed_frame,
             vad_result: None, // No VAD on playback
+            agc_result,
             metrics: AudioProcessingMetrics {
                 processing_time_us: processing_time.as_micros() as u64,
                 frame_modified,
@@ -213,6 +259,7 @@ impl AudioProcessor {
         &self,
         frame: &AudioFrame,
         vad_result: &Option<VadResult>,
+        agc_result: &Option<AgcResult>,
         processing_time: std::time::Duration,
     ) {
         let mut stats = self.stats.write().await;
@@ -225,6 +272,13 @@ impl AudioProcessor {
             } else {
                 stats.silence_frames += 1;
             }
+        }
+        
+        if let Some(agc) = agc_result {
+            stats.agc_processed_frames += 1;
+            // Update running average of AGC gain
+            let frame_count = stats.agc_processed_frames as f32;
+            stats.avg_agc_gain = ((stats.avg_agc_gain * (frame_count - 1.0)) + agc.applied_gain) / frame_count;
         }
     }
 } 

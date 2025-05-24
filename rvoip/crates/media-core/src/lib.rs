@@ -44,6 +44,7 @@ pub mod error;
 pub mod types;
 pub mod engine;
 pub mod processing;  // New processing pipeline module
+pub mod quality;  // New quality monitoring module
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -187,8 +188,29 @@ pub mod prelude {
         AudioProcessor,
         AudioProcessingConfig,
         VoiceActivityDetector,
+        AutomaticGainControl,
+        AcousticEchoCanceller,
         FormatConverter,
         ConversionParams,
+    };
+    
+    // Quality monitoring components
+    pub use crate::quality::{
+        QualityMonitor,
+        QualityMonitorConfig,
+        QualityMetrics,
+        SessionMetrics,
+        OverallMetrics,
+        QualityAdjustment,
+        AdaptationEngine,
+        AdaptationStrategy,
+    };
+    
+    // Audio codec components
+    pub use crate::codec::audio::{
+        OpusCodec,
+        OpusConfig,
+        OpusApplication,
     };
     
     // Payload type constants for convenience

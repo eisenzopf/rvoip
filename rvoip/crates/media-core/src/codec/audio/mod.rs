@@ -2,6 +2,8 @@
 
 // Common types and utilities for audio codecs
 pub mod common;
+pub mod opus;  // Opus codec implementation
+
 pub use common::*;
 
 /// Payload type constants for static audio codecs
@@ -17,4 +19,7 @@ pub mod payload_type {
     
     /// Telephone-event (DTMF) RFC 4733
     pub const TELEPHONE_EVENT: u8 = 101;
-} 
+}
+
+// Re-export Opus codec types
+pub use opus::{OpusCodec, OpusConfig, OpusApplication}; 

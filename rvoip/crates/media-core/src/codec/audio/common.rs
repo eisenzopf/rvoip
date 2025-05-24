@@ -2,6 +2,35 @@
 
 use crate::{AudioBuffer, AudioFormat, SampleRate};
 use crate::error::Result;
+use crate::types::AudioFrame;
+
+/// Audio codec trait for encoding and decoding
+pub trait AudioCodec: Send {
+    /// Encode an audio frame to compressed data
+    fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>>;
+    
+    /// Decode compressed data to an audio frame
+    fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame>;
+    
+    /// Get codec information
+    fn get_info(&self) -> CodecInfo;
+    
+    /// Reset codec state
+    fn reset(&mut self);
+}
+
+/// Codec information
+#[derive(Debug, Clone)]
+pub struct CodecInfo {
+    /// Codec name
+    pub name: String,
+    /// Sample rate in Hz
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u8,
+    /// Bitrate in bits per second
+    pub bitrate: u32,
+}
 
 /// Standard audio codec frame sizes in milliseconds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
