@@ -356,4 +356,28 @@ pub trait RtpSessionCoordinator {
 4. **Integration Testing** - Test with session-core and rtp-core early and often
 5. **Iterative Development** - Build incrementally with continuous testing
 
-**Target**: Production-ready media-core within 10-12 weeks, fully integrated with the RVOIP stack. 
+**Target**: Production-ready media-core within 10-12 weeks, fully integrated with the RVOIP stack.
+
+---
+
+## 📏 **Coding Standards & Guidelines**
+
+### **File Size Limits**
+- **🚫 Maximum 200 lines per file**: All library files (`.rs`) must not exceed 200 lines of code
+- **⚠️ Refactoring Required**: When a file reaches 200 lines, it MUST be refactored into smaller, focused modules
+- **✅ Exceptions**: Only `lib.rs` files with extensive re-exports may exceed this limit
+- **🎯 Target**: Aim for 50-150 lines per file for optimal readability
+
+### **Refactoring Strategies**
+- **Split by Functionality**: Break large modules into logical sub-modules
+- **Extract Traits**: Move trait definitions to separate files
+- **Separate Implementations**: Move `impl` blocks to dedicated files
+- **Create Sub-modules**: Use `mod.rs` files to organize related functionality
+
+### **Code Organization Principles**
+- **Single Responsibility**: Each file should have one clear purpose
+- **Clear Naming**: File names should immediately convey their purpose
+- **Logical Grouping**: Related functionality should be grouped together
+- **Minimal Dependencies**: Reduce cross-file dependencies where possible
+
+**Rationale**: Small, focused files are easier to review, test, maintain, and understand. They promote better code organization and reduce cognitive load. 

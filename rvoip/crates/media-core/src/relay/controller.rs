@@ -54,24 +54,45 @@ pub struct MediaSessionInfo {
     pub status: MediaSessionStatus,
     /// Media configuration
     pub config: MediaConfig,
+    /// RTP port allocated for this session
+    pub rtp_port: Option<u16>,
     /// Session statistics
     pub stats: Option<RelayStats>,
     /// Creation time
     pub created_at: std::time::Instant,
 }
 
+impl Default for MediaSessionInfo {
+    fn default() -> Self {
+        Self {
+            dialog_id: String::new(),
+            relay_session_ids: None,
+            status: MediaSessionStatus::Creating,
+            config: MediaConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                remote_addr: None,
+                preferred_codec: None,
+                parameters: HashMap::new(),
+            },
+            rtp_port: None,
+            stats: None,
+            created_at: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Events emitted by the media session controller
 #[derive(Debug, Clone)]
 pub enum MediaSessionEvent {
-    /// Media session started
-    SessionStarted {
+    /// Media session created
+    SessionCreated {
         dialog_id: DialogId,
-        local_addr: SocketAddr,
+        session_id: DialogId,
     },
-    /// Media session ended
-    SessionEnded {
+    /// Media session destroyed
+    SessionDestroyed {
         dialog_id: DialogId,
-        reason: String,
+        session_id: DialogId,
     },
     /// Media session failed
     SessionFailed {
@@ -87,8 +108,8 @@ pub enum MediaSessionEvent {
 
 /// Media Session Controller for managing media sessions
 pub struct MediaSessionController {
-    /// Underlying media relay
-    relay: Arc<MediaRelay>,
+    /// Underlying media relay (optional)
+    relay: Option<Arc<MediaRelay>>,
     /// Active media sessions indexed by dialog ID
     sessions: RwLock<HashMap<DialogId, MediaSessionInfo>>,
     /// Port allocator for media sessions
@@ -121,22 +142,25 @@ impl PortAllocator {
         }
     }
     
-    fn allocate(&mut self, dialog_id: &str) -> Option<u16> {
+    fn allocate_port(&mut self) -> Option<u16> {
         // Find next available even port (RTP uses even ports)
         while self.next_port <= self.max_port {
             let port = self.next_port;
             self.next_port += 2; // Skip odd port (reserved for RTCP)
             
             if !self.allocated.values().any(|&p| p == port) {
-                self.allocated.insert(dialog_id.to_string(), port);
                 return Some(port);
             }
         }
         None
     }
     
-    fn release(&mut self, dialog_id: &str) {
-        self.allocated.remove(dialog_id);
+    fn release_port(&mut self, port: u16) {
+        self.allocated.retain(|_, &mut p| p != port);
+    }
+    
+    fn assign_port(&mut self, dialog_id: &str, port: u16) {
+        self.allocated.insert(dialog_id.to_string(), port);
     }
     
     fn get_port(&self, dialog_id: &str) -> Option<u16> {
@@ -150,7 +174,7 @@ impl MediaSessionController {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         
         Self {
-            relay: Arc::new(MediaRelay::new()),
+            relay: None,
             sessions: RwLock::new(HashMap::new()),
             port_allocator: RwLock::new(PortAllocator::new(10000, 20000)),
             event_tx,
@@ -163,7 +187,7 @@ impl MediaSessionController {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         
         Self {
-            relay: Arc::new(MediaRelay::new()),
+            relay: None,
             sessions: RwLock::new(HashMap::new()),
             port_allocator: RwLock::new(PortAllocator::new(base_port, max_port)),
             event_tx,
@@ -175,82 +199,83 @@ impl MediaSessionController {
     pub async fn start_media(&self, dialog_id: DialogId, config: MediaConfig) -> Result<()> {
         info!("Starting media session for dialog: {}", dialog_id);
         
-        // Check if session already exists
+        // Check if media session already exists for this dialog
         {
             let sessions = self.sessions.read().await;
             if sessions.contains_key(&dialog_id) {
-                return Err(Error::InvalidState(format!("Media session already exists for dialog: {}", dialog_id)));
+                return Err(Error::config(format!("Media session already exists for dialog: {}", dialog_id)));
             }
         }
-        
-        // Allocate a local port
-        let local_port = {
+
+        // Allocate RTP ports
+        let rtp_port = {
             let mut allocator = self.port_allocator.write().await;
-            allocator.allocate(&dialog_id)
-                .ok_or_else(|| Error::Other("No available ports for media session".to_string()))?
+            allocator.allocate_port()
+                .ok_or_else(|| Error::config("No available ports for media session"))?
         };
         
-        // Create local address
-        let local_addr = SocketAddr::new(config.local_addr.ip(), local_port);
-        
-        // Create session info
+        // Create media session info
         let session_info = MediaSessionInfo {
             dialog_id: dialog_id.clone(),
-            relay_session_ids: None, // Will be set when we have a peer
-            status: MediaSessionStatus::Creating,
-            config: MediaConfig {
-                local_addr,
-                ..config
-            },
+            status: MediaSessionStatus::Active,
+            config: config.clone(),
+            rtp_port: Some(rtp_port),
+            relay_session_ids: None,
             stats: None,
             created_at: std::time::Instant::now(),
         };
-        
+
+        // Assign port to dialog
+        {
+            let mut allocator = self.port_allocator.write().await;
+            allocator.assign_port(&dialog_id, rtp_port);
+        }
+
         // Store session
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(dialog_id.clone(), session_info);
         }
-        
-        // Emit event
-        let _ = self.event_tx.send(MediaSessionEvent::SessionStarted {
+
+        // Send event
+        let _ = self.event_tx.send(MediaSessionEvent::SessionCreated {
             dialog_id: dialog_id.clone(),
-            local_addr,
+            session_id: dialog_id.clone(),
         });
-        
-        info!("Media session started for dialog {} on {}", dialog_id, local_addr);
+
         Ok(())
     }
     
-    /// Stop a media session
-    pub async fn stop_media(&self, dialog_id: DialogId) -> Result<()> {
+    /// Stop media session for a dialog
+    pub async fn stop_media(&self, dialog_id: String) -> Result<()> {
         info!("Stopping media session for dialog: {}", dialog_id);
-        
-        // Get session info
+
+        // Remove session and get info for cleanup
         let session_info = {
             let mut sessions = self.sessions.write().await;
             sessions.remove(&dialog_id)
-                .ok_or_else(|| Error::SessionNotFound(dialog_id.clone()))?
+                .ok_or_else(|| Error::session_not_found(dialog_id.clone()))?
         };
-        
-        // Remove relay session if it exists
-        if let Some((session_a, session_b)) = session_info.relay_session_ids {
-            self.relay.remove_session_pair(&session_a, &session_b).await?;
+
+        // Clean up relay if exists
+        if let Some((session_a, session_b)) = &session_info.relay_session_ids {
+            if let Some(relay) = &self.relay {
+                let _ = relay.remove_session_pair(session_a, session_b).await;
+            }
         }
-        
+
         // Release port
-        {
+        if let Some(port) = session_info.rtp_port {
             let mut allocator = self.port_allocator.write().await;
-            allocator.release(&dialog_id);
+            allocator.release_port(port);
         }
-        
-        // Emit event
-        let _ = self.event_tx.send(MediaSessionEvent::SessionEnded {
+
+        // Send event
+        let _ = self.event_tx.send(MediaSessionEvent::SessionDestroyed {
             dialog_id: dialog_id.clone(),
-            reason: "Session stopped".to_string(),
+            session_id: dialog_id.clone(),
         });
-        
-        info!("Media session stopped for dialog: {}", dialog_id);
+
         Ok(())
     }
     
@@ -260,7 +285,7 @@ impl MediaSessionController {
         
         let mut sessions = self.sessions.write().await;
         let session_info = sessions.get_mut(&dialog_id)
-            .ok_or_else(|| Error::SessionNotFound(dialog_id.clone()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.clone()))?;
         
         // Update configuration
         let old_remote = session_info.config.remote_addr;
@@ -280,17 +305,19 @@ impl MediaSessionController {
         Ok(())
     }
     
-    /// Create a media relay between two dialogs (for call routing)
-    pub async fn create_relay(&self, dialog_a: DialogId, dialog_b: DialogId) -> Result<()> {
-        info!("Creating media relay between dialogs: {} <-> {}", dialog_a, dialog_b);
-        
-        let mut sessions = self.sessions.write().await;
-        
-        // Get both session infos
-        let session_a = sessions.get(&dialog_a)
-            .ok_or_else(|| Error::SessionNotFound(dialog_a.clone()))?;
-        let session_b = sessions.get(&dialog_b)
-            .ok_or_else(|| Error::SessionNotFound(dialog_b.clone()))?;
+    /// Create relay between two dialogs
+    pub async fn create_relay(&self, dialog_a: String, dialog_b: String) -> Result<()> {
+        info!("Creating relay between dialogs: {} <-> {}", dialog_a, dialog_b);
+
+        // Verify both sessions exist and get their configs
+        let (session_a_config, session_b_config) = {
+            let sessions = self.sessions.read().await;
+            let session_a = sessions.get(&dialog_a)
+                .ok_or_else(|| Error::session_not_found(dialog_a.clone()))?;
+            let session_b = sessions.get(&dialog_b)
+                .ok_or_else(|| Error::session_not_found(dialog_b.clone()))?;
+            (session_a.config.clone(), session_b.config.clone())
+        };
         
         // Generate relay session IDs
         let relay_session_a = generate_session_id();
@@ -300,22 +327,26 @@ impl MediaSessionController {
         let relay_config = create_relay_config(
             relay_session_a.clone(),
             relay_session_b.clone(),
-            session_a.config.local_addr,
-            session_b.config.local_addr,
+            session_a_config.local_addr,
+            session_b_config.local_addr,
         );
         
-        // Create the relay session pair
-        self.relay.create_session_pair(relay_config).await?;
-        
-        // Update session infos with relay session IDs
-        if let Some(session_a) = sessions.get_mut(&dialog_a) {
-            session_a.relay_session_ids = Some((relay_session_a.clone(), relay_session_b.clone()));
-            session_a.status = MediaSessionStatus::Active;
+        // Create the relay session pair if relay is available
+        if let Some(relay) = &self.relay {
+            relay.create_session_pair(relay_config).await?;
         }
         
-        if let Some(session_b) = sessions.get_mut(&dialog_b) {
-            session_b.relay_session_ids = Some((relay_session_b, relay_session_a));
-            session_b.status = MediaSessionStatus::Active;
+        // Update session infos with relay session IDs
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session_a_info) = sessions.get_mut(&dialog_a) {
+                session_a_info.relay_session_ids = Some((relay_session_a.clone(), relay_session_b.clone()));
+                session_a_info.status = MediaSessionStatus::Active;
+            }
+            if let Some(session_b_info) = sessions.get_mut(&dialog_b) {
+                session_b_info.relay_session_ids = Some((relay_session_b, relay_session_a));
+                session_b_info.status = MediaSessionStatus::Active;
+            }
         }
         
         info!("Media relay created between dialogs: {} <-> {}", dialog_a, dialog_b);
@@ -341,8 +372,8 @@ impl MediaSessionController {
     }
     
     /// Get media relay reference (for advanced usage)
-    pub fn relay(&self) -> &Arc<MediaRelay> {
-        &self.relay
+    pub fn relay(&self) -> Option<&Arc<MediaRelay>> {
+        self.relay.as_ref()
     }
 }
 

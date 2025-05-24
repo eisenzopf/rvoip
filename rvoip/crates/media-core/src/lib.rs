@@ -1,55 +1,75 @@
 //! # Media Core library for the RVOIP project
 //! 
-//! `media-core` provides basic media relay functionality for SIP servers.
-//! It handles RTP packet forwarding and basic codec support for voice over IP.
+//! `media-core` provides comprehensive media processing capabilities for SIP servers.
+//! It focuses exclusively on media processing, codec management, and media session
+//! coordination while integrating cleanly with `session-core` and `rtp-core`.
 //!
-//! This crate provides:
+//! ## Core Components
 //! 
-//! - Media session management for SIP dialogs
-//! - Basic G.711 codec support (PCMU/PCMA)
-//! - RTP packet relay between endpoints
-//! - Port allocation for media sessions
-//! - Media session event monitoring
+//! - **MediaEngine**: Central orchestrator for all media processing
+//! - **MediaSession**: Per-dialog media management
+//! - **Codec Framework**: Audio codec support (G.711, Opus, etc.)
+//! - **Audio Processing**: AEC, AGC, VAD, noise suppression
+//! - **Quality Monitoring**: Real-time quality metrics and adaptation
 //!
 //! ## Quick Start
 //!
 //! ```rust
 //! use rvoip_media_core::prelude::*;
 //! 
-//! // Create a media session controller
-//! let controller = MediaSessionController::with_port_range(10000, 20000);
-//! 
-//! // Start media sessions for SIP dialogs
-//! controller.start_media(dialog_id, media_config).await?;
-//! 
-//! // Create relay between two calls
-//! controller.create_relay(dialog_a, dialog_b).await?;
-//! 
-//! // Stop media sessions
-//! controller.stop_media(dialog_id).await?;
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     // Create and start media engine
+//!     let config = MediaEngineConfig::default();
+//!     let engine = MediaEngine::new(config).await?;
+//!     engine.start().await?;
+//!     
+//!     // Create media session for SIP dialog
+//!     let dialog_id = DialogId::new("call-123");
+//!     let params = MediaSessionParams::audio_only()
+//!         .with_preferred_codec(PayloadType::PCMU);
+//!     let session = engine.create_media_session(dialog_id, params).await?;
+//!     
+//!     // Get codec capabilities for SDP negotiation
+//!     let capabilities = engine.get_supported_codecs();
+//!     
+//!     // Clean shutdown
+//!     engine.stop().await?;
+//!     Ok(())
+//! }
 //! ```
 
-// Error handling
+// Core modules
 pub mod error;
+pub mod types;
+pub mod engine;
 
-// Working modules
+// Working modules from old implementation (to be refactored)
 pub mod codec;
 pub mod relay;
 
-// Re-export common types
+// Re-export core types
 pub use error::{Error, Result};
-pub use codec::{Codec, CodecRegistry};
+pub use types::*;
 
-// Re-export relay types for session-core integration
+// Re-export engine components
+pub use engine::{
+    MediaEngine, 
+    MediaEngineConfig, 
+    EngineCapabilities,
+    MediaSessionParams,
+    MediaSessionHandle,
+    EngineState,
+};
+
+// Legacy exports (will be replaced in Phase 2)
+pub use codec::{Codec, CodecRegistry};
 pub use relay::{
     MediaSessionController,
     MediaConfig,
     MediaSessionStatus,
     MediaSessionInfo,
     MediaSessionEvent,
-    DialogId,
-    PacketForwarder,
-    ForwarderConfig,
     G711PcmuCodec,
     G711PcmaCodec,
 };
@@ -175,28 +195,33 @@ impl AudioBuffer {
 
 /// Prelude module with commonly used types
 pub mod prelude {
+    // Core types
     pub use crate::{
         Error, 
         Result,
-        Sample,
+        DialogId,
+        MediaSessionId,
+        PayloadType,
+        AudioFrame,
+        MediaPacket,
+        MediaType,
+        MediaDirection,
         SampleRate,
-        AudioFormat,
-        AudioBuffer,
-        Codec,
-        CodecRegistry,
     };
     
-    // Media session controller types
-    pub use crate::relay::{
-        MediaSessionController,
-        MediaConfig,
-        MediaSessionStatus,
-        MediaSessionInfo,
-        MediaSessionEvent,
-        DialogId,
-        PacketForwarder,
-        ForwarderConfig,
-        G711PcmuCodec,
-        G711PcmaCodec,
+    // Engine components
+    pub use crate::engine::{
+        MediaEngine,
+        MediaEngineConfig,
+        EngineCapabilities,
+        MediaSessionParams,
+        MediaSessionHandle,
+        EngineState,
     };
+    
+    // Payload type constants for convenience
+    pub use crate::types::payload_types;
+    
+    // Legacy types (temporary)
+    pub use crate::codec::{Codec, CodecRegistry};
 } 
