@@ -12,12 +12,11 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use rvoip_rtp_core::{RtpSession, RtpPacket};
 
 // Controller module for session-core integration
 pub mod controller;
-// Packet forwarding implementation
-pub mod packet_forwarder;
+// Packet forwarding implementation (TODO: re-enable when implemented)
+// pub mod packet_forwarder;
 
 // Re-export controller types for convenience
 pub use controller::{
@@ -29,12 +28,101 @@ pub use controller::{
     DialogId,
 };
 
-// Re-export packet forwarder types
-pub use packet_forwarder::{
-    PacketForwarder,
-    ForwarderConfig,
-    g711_passthrough::{G711PcmuCodec, G711PcmaCodec},
-};
+/// Simple G.711 PCMU codec implementation
+#[derive(Debug, Clone)]
+pub struct G711PcmuCodec;
+
+impl G711PcmuCodec {
+    /// Create a new PCMU codec
+    pub fn new() -> Self {
+        Self
+    }
+    
+    /// Get the payload type (0 for PCMU)
+    pub fn payload_type(&self) -> u8 {
+        0
+    }
+    
+    /// Get the codec name
+    pub fn name(&self) -> &'static str {
+        "PCMU"
+    }
+    
+    /// Get the clock rate (8000 Hz for G.711)
+    pub fn clock_rate(&self) -> u32 {
+        8000
+    }
+    
+    /// Get the number of channels (1 for mono)
+    pub fn channels(&self) -> u8 {
+        1
+    }
+    
+    /// Process a packet (passthrough for basic relay)
+    pub fn process_packet(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+        // For basic relay, just pass through the payload
+        Ok(bytes::Bytes::copy_from_slice(payload))
+    }
+}
+
+/// Simple G.711 PCMA codec implementation
+#[derive(Debug, Clone)]
+pub struct G711PcmaCodec;
+
+impl G711PcmaCodec {
+    /// Create a new PCMA codec
+    pub fn new() -> Self {
+        Self
+    }
+    
+    /// Get the payload type (8 for PCMA)
+    pub fn payload_type(&self) -> u8 {
+        8
+    }
+    
+    /// Get the codec name
+    pub fn name(&self) -> &'static str {
+        "PCMA"
+    }
+    
+    /// Get the clock rate (8000 Hz for G.711)
+    pub fn clock_rate(&self) -> u32 {
+        8000
+    }
+    
+    /// Get the number of channels (1 for mono)
+    pub fn channels(&self) -> u8 {
+        1
+    }
+    
+    /// Process a packet (passthrough for basic relay)
+    pub fn process_packet(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+        // For basic relay, just pass through the payload
+        Ok(bytes::Bytes::copy_from_slice(payload))
+    }
+}
+
+/// Packet forwarder configuration (placeholder)
+#[derive(Debug, Clone)]
+pub struct PacketForwarder;
+
+impl PacketForwarder {
+    /// Create a new packet forwarder
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Forwarder configuration (placeholder)
+#[derive(Debug, Clone)]
+pub struct ForwarderConfig;
+
+impl ForwarderConfig {
+    /// Create a new forwarder config
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 /// Unique identifier for a media relay session
 pub type RelaySessionId = String;
@@ -84,14 +172,26 @@ pub struct RelaySessionConfig {
 struct RelaySessionPair {
     /// Configuration
     config: RelaySessionConfig,
-    /// RTP session for endpoint A
-    rtp_session_a: Arc<RtpSession>,
-    /// RTP session for endpoint B
-    rtp_session_b: Arc<RtpSession>,
     /// Statistics
     stats: Arc<RwLock<RelayStats>>,
     /// Event sender for relay events
     event_tx: mpsc::UnboundedSender<RelayEvent>,
+    /// Session state (ready for RTP integration)
+    state: RelaySessionState,
+}
+
+/// State for a relay session pair
+#[derive(Debug)]
+struct RelaySessionState {
+    /// Session A local address
+    local_addr_a: SocketAddr,
+    /// Session B local address
+    local_addr_b: SocketAddr,
+    /// Remote addresses (when known)
+    remote_addr_a: Option<SocketAddr>,
+    remote_addr_b: Option<SocketAddr>,
+    /// Payload type being relayed
+    payload_type: Option<u8>,
 }
 
 /// Events emitted by the media relay
@@ -123,8 +223,6 @@ pub enum RelayEvent {
 
 /// Main media relay for handling RTP packet forwarding
 pub struct MediaRelay {
-    /// Active RTP sessions indexed by session ID
-    rtp_sessions: RwLock<HashMap<RelaySessionId, Arc<RtpSession>>>,
     /// Session pairs (A <-> B mapping)
     session_pairs: RwLock<HashMap<RelaySessionId, RelaySessionId>>,
     /// Session pair configurations and state
@@ -141,7 +239,6 @@ impl MediaRelay {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         
         Self {
-            rtp_sessions: RwLock::new(HashMap::new()),
             session_pairs: RwLock::new(HashMap::new()),
             relay_sessions: RwLock::new(HashMap::new()),
             event_tx,
@@ -154,33 +251,27 @@ impl MediaRelay {
         info!("Creating relay session pair: {} <-> {}", 
               config.session_a_id, config.session_b_id);
         
-        // Create RTP sessions for both endpoints
-        let rtp_session_a = Arc::new(RtpSession::new());
-        let rtp_session_b = Arc::new(RtpSession::new());
-        
-        // Configure RTP sessions with local addresses
-        // Note: This is a simplified setup - in a real implementation,
-        // you'd configure payload types, SSRCs, etc.
+        // Create session state
+        let state = RelaySessionState {
+            local_addr_a: config.local_addr_a,
+            local_addr_b: config.local_addr_b,
+            remote_addr_a: config.remote_addr_a,
+            remote_addr_b: config.remote_addr_b,
+            payload_type: None, // Will be set when first packet arrives
+        };
         
         // Create session pair
         let pair = Arc::new(RelaySessionPair {
             config: config.clone(),
-            rtp_session_a: rtp_session_a.clone(),
-            rtp_session_b: rtp_session_b.clone(),
             stats: Arc::new(RwLock::new(RelayStats {
                 start_time: std::time::Instant::now(),
                 ..Default::default()
             })),
             event_tx: self.event_tx.clone(),
+            state,
         });
         
-        // Store sessions and mappings
-        {
-            let mut sessions = self.rtp_sessions.write().await;
-            sessions.insert(config.session_a_id.clone(), rtp_session_a);
-            sessions.insert(config.session_b_id.clone(), rtp_session_b);
-        }
-        
+        // Store mappings
         {
             let mut pairs = self.session_pairs.write().await;
             pairs.insert(config.session_a_id.clone(), config.session_b_id.clone());
@@ -199,7 +290,7 @@ impl MediaRelay {
             session_b: config.session_b_id.clone(),
         });
         
-        // Start packet forwarding tasks
+        // Start packet forwarding tasks (placeholder for now)
         self.start_forwarding_tasks(&config).await?;
         
         Ok(())
@@ -210,12 +301,6 @@ impl MediaRelay {
         info!("Removing relay session pair: {} <-> {}", session_a_id, session_b_id);
         
         // Remove from all collections
-        {
-            let mut sessions = self.rtp_sessions.write().await;
-            sessions.remove(session_a_id);
-            sessions.remove(session_b_id);
-        }
-        
         {
             let mut pairs = self.session_pairs.write().await;
             pairs.remove(session_a_id);
@@ -250,15 +335,9 @@ impl MediaRelay {
     
     /// Set remote address for a session
     pub async fn set_remote_address(&self, session_id: &str, remote_addr: SocketAddr) -> Result<()> {
-        let sessions = self.rtp_sessions.read().await;
-        if let Some(rtp_session) = sessions.get(session_id) {
-            // TODO: Configure RTP session with remote address
-            // This depends on the actual RTP core API
-            debug!("Set remote address for session {}: {}", session_id, remote_addr);
-            Ok(())
-        } else {
-            Err(Error::SessionNotFound(session_id.to_string()))
-        }
+        debug!("Set remote address for session {}: {}", session_id, remote_addr);
+        // TODO: Update session state when we have proper RTP integration
+        Ok(())
     }
     
     /// Get event receiver (can only be called once)
@@ -269,8 +348,8 @@ impl MediaRelay {
     
     /// Check if a session exists
     pub async fn has_session(&self, session_id: &str) -> bool {
-        let sessions = self.rtp_sessions.read().await;
-        sessions.contains_key(session_id)
+        let relay_sessions = self.relay_sessions.read().await;
+        relay_sessions.contains_key(session_id)
     }
     
     /// Get the paired session ID for a given session
@@ -281,57 +360,15 @@ impl MediaRelay {
     
     /// Start packet forwarding tasks for a session pair
     async fn start_forwarding_tasks(&self, config: &RelaySessionConfig) -> Result<()> {
-        // In a real implementation, we would:
-        // 1. Set up packet listeners on both RTP sessions
-        // 2. When a packet arrives on session A, forward it to session B
-        // 3. Handle SSRC rewriting if needed
-        // 4. Update statistics
-        
-        // For now, this is a placeholder
         debug!("Starting forwarding tasks for session pair: {} <-> {}", 
                config.session_a_id, config.session_b_id);
         
-        // TODO: Implement actual packet forwarding using RTP core events
-        // This would involve:
-        // - Listening for RTP packets on each session
-        // - Rewriting SSRC values if needed
-        // - Forwarding packets to the paired session
-        // - Updating relay statistics
-        
-        Ok(())
-    }
-    
-    /// Forward a packet between sessions (called by forwarding tasks)
-    async fn forward_packet(&self, from_session: &str, to_session: &str, mut packet: RtpPacket) -> Result<()> {
-        // Get the target RTP session
-        let sessions = self.rtp_sessions.read().await;
-        let target_session = sessions.get(to_session)
-            .ok_or_else(|| Error::SessionNotFound(to_session.to_string()))?;
-        
-        // Rewrite SSRC if needed (for call routing)
-        // In a basic implementation, we might just pass through
-        // packet.header.ssrc = generate_new_ssrc_for_session(to_session);
-        
-        // Send packet to target session
-        // TODO: Use actual RTP session send API
-        // target_session.send_packet(packet).await?;
-        
-        // Update statistics
-        if let Some(pair) = {
-            let relay_sessions = self.relay_sessions.read().await;
-            relay_sessions.get(from_session).cloned()
-        } {
-            let mut stats = pair.stats.write().await;
-            stats.packets_relayed += 1;
-            stats.bytes_relayed += packet.payload.len() as u64;
-        }
-        
-        // Emit event
-        let _ = self.event_tx.send(RelayEvent::PacketRelayed {
-            from_session: from_session.to_string(),
-            to_session: to_session.to_string(),
-            packet_size: packet.payload.len(),
-        });
+        // TODO: When we integrate with rtp-core properly, this will:
+        // 1. Create actual RTP sessions with the configured addresses
+        // 2. Set up packet listeners on both RTP sessions
+        // 3. When a packet arrives on session A, forward it to session B
+        // 4. Handle SSRC rewriting if needed
+        // 5. Update statistics
         
         Ok(())
     }

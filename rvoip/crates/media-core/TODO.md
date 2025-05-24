@@ -1,217 +1,359 @@
-# Media Core Implementation Plan - CRITICAL FIXES & BASIC SIP
+# Media Core Library Design - SIP Best Practices & Clean Architecture
 
-**UPDATE**: media-core compilation errors reduced from 109 → 213. Core architecture fixed! This plan focuses on:
-1. **COMPLETED**: Fixed foundational compilation issues ✅
-2. **CURRENT**: Implement basic media relay for SIP server (BASIC_SIP_TODO.md Priority 4)
-3. **FUTURE**: Complete advanced media processing features
+## 🎯 **Vision & Scope**
 
-## 🚨 **CRITICAL - Phase 0: Fix Compilation (PRIORITY 1)**
-**Status**: **MOSTLY COMPLETE** ✅ - Reduced from 109 to 213 errors, core functionality working
-**Timeline**: ~~2-3 days~~ **COMPLETED**
+**media-core** is the media processing engine for the RVOIP stack. It focuses exclusively on media processing, codec management, and media session coordination while integrating cleanly with:
 
-### **0.1 Fix Missing Dependencies** ✅ COMPLETED
-- [x] **Add missing dependencies to Cargo.toml** ✅
-  ```toml
-  uuid = { version = "1.0", features = ["v4"] }
-  bytemuck = "1.0"
-  ```
-- [x] **Fix conditional codec imports** ✅ - Commented out missing codecs
-- [x] **Add missing std imports** ✅ - Added `std::sync::Mutex` imports where needed
+- **session-core**: SIP signaling and dialog management  
+- **rtp-core**: RTP transport and packet handling
 
-### **0.2 Fix Module Structure Issues** ✅ COMPLETED
-- [x] **Make common modules public** ✅ - Fixed `codec::audio::common` module privacy
-- [x] **Fix import/export mismatches** ✅ - Aligned module exports with implementations
-- [x] **Remove duplicate derives** ✅ - Fixed duplicate trait implementations
-- [x] **Fix trait definition mismatches** ✅ - Codec traits now align
+### **Core Responsibilities**
+✅ **Media Processing**: Codec encode/decode, audio processing (AEC, AGC, VAD, NS)  
+✅ **Media Session Management**: Coordinate media flows for SIP dialogs  
+✅ **Quality Management**: Monitor and adapt media quality  
+✅ **Format Conversion**: Sample rate conversion, channel mixing  
+✅ **Codec Management**: Registry, negotiation, transcoding  
 
-### **0.3 Fix Async/Sync Pattern Issues** ✅ COMPLETED 
-- [x] **Remove .await from sync functions** ✅ - Fixed `RwLock` usage patterns
-- [x] **Fix async functions** ✅ - Made functions using `.await` properly `async`
-- [x] **Add missing error variants** ✅ - Added Security, InvalidArgument, etc.
-
-### **0.4 Fix Type Resolution Issues** 🔄 PARTIALLY COMPLETE
-- [x] **Add missing type imports** ✅ - Fixed major import issues
-- [x] **Fix rtp-core integration** ✅ - Use correct PayloadType::from_u8, etc.
-- [ ] **Resolve remaining trait errors** 📝 - ~50 remaining errors, mostly API mismatches
+### **NOT Responsibilities** (Delegated)
+❌ **RTP Transport**: Handled by rtp-core  
+❌ **SIP Signaling**: Handled by session-core  
+❌ **Network I/O**: Handled by rtp-core  
+❌ **SDP Negotiation**: Handled by session-core (media-core provides capabilities)  
 
 ---
 
-## 🎉 **COMPLETED - Priority 4: Basic Media Relay (BASIC_SIP_TODO.md)** ✅
-**Status**: **COMPLETED** 🎉 - All BASIC_SIP_TODO.md Priority 4 requirements satisfied!
-**Timeline**: ~~1 week~~ **COMPLETED IN 2 DAYS**
+## 🏗️ **Architecture Overview**
 
-### **✅ RTP Packet Forwarding** - **COMPLETED**
-- [x] **Simple RTP Relay** (`src/relay/packet_forwarder.rs`) ✅
-  - [x] Basic RTP packet forwarding between endpoints ✅
-  - [x] Use existing rtp-core for packet processing ✅
-  - [x] Handle bidirectional media flow ✅
-  - [x] Basic SSRC rewriting for call routing ✅
-
-### **✅ Media Session Integration** - **COMPLETED**
-- [x] **MediaSessionController** (`src/relay/controller.rs`) ✅
-  - [x] Link with session-core Dialog management ✅
-  - [x] Coordinate RTP ports with SDP negotiation ✅
-  - [x] Handle media session setup and teardown ✅
-  - [x] Basic media statistics collection ✅
-
-### **✅ Codec Support** - **COMPLETED**
-- [x] **Basic Codec Handling** (`src/relay/packet_forwarder.rs`) ✅
-  - [x] Support G.711 μ-law/A-law passthrough ✅
-  - [x] Basic codec parameter handling ✅
-  - [x] No transcoding needed (passthrough mode) ✅
-  - [x] Coordinate with SDP offer/answer ✅
-
-### **🚀 BONUS Features Delivered:**
-- [x] **Complete Infrastructure** - MediaRelay + MediaSessionController + PacketForwarder ✅
-- [x] **Advanced Statistics** - Comprehensive relay metrics ✅
-- [x] **Event System** - Real-time media session monitoring ✅
-- [x] **Error Handling** - Production-ready error management ✅
-- [x] **Unit Tests** - Comprehensive test coverage ✅
-- [x] **Documentation** - Complete API documentation and examples ✅
-
-### **📦 Ready for session-core Integration:**
-```rust
-use rvoip_media_core::prelude::*;
-
-// session-core can now:
-let controller = MediaSessionController::with_port_range(10000, 20000);
-controller.start_media(dialog_id, media_config).await?;
-controller.create_relay(dialog_a, dialog_b).await?;
-controller.stop_media(dialog_id).await?;
+```
+┌─────────────────┐    Media Capabilities    ┌─────────────────┐
+│                 │ ◄──────────────────────── │                 │
+│  session-core   │                           │   media-core    │
+│ (SIP Signaling) │ ──────────────────────► │ (Processing)    │
+│                 │    Media Session Mgmt     │                 │
+└─────────────────┘                           └─────────────────┘
+                                                       │
+                                                       │ Media Streams
+                                                       ▼
+                                              ┌─────────────────┐
+                                              │    rtp-core     │
+                                              │  (Transport)    │
+                                              └─────────────────┘
 ```
 
-**🎯 ACHIEVEMENT**: **Priority 4 Media Relay COMPLETE** - Ready for BASIC_SIP_TODO.md integration!
+### **Integration Patterns**
 
-### **Priority 4 Complete (BASIC_SIP_TODO.md)** ✅ **COMPLETED**
-- [x] MediaSessionController provides clean interface for session-core ✅
-- [x] RTP packet forwarding with SSRC rewriting ✅  
-- [x] G.711 PCMU/PCMA codec passthrough support ✅
-- [x] Bidirectional media flow handling ✅
-- [x] Media session integration with Dialog management ✅
-- [x] Basic media statistics collection ✅
-- [x] Production-ready error handling ✅
-- [x] Complete API documentation and examples ✅
+1. **session-core → media-core**: Request media capabilities, create/destroy media sessions
+2. **media-core → session-core**: Provide codec capabilities, report media session events  
+3. **rtp-core → media-core**: Deliver incoming media packets for processing
+4. **media-core → rtp-core**: Send processed media packets for transmission
 
 ---
 
-## 🔧 **SHORT-TERM - Phase 2: Clean Architecture (PRIORITY 3)**
-**Status**: Required for maintainable codebase  
-**Timeline**: 2 weeks after Phase 1
+## 📁 **Directory Structure**
 
-### **2.1 Remove Duplicate Functionality**
-- [ ] **Remove DTLS/SRTP implementation** - Use rtp-core exclusively
-  - [ ] Delete `src/security/dtls.rs` and `src/security/srtp.rs`
-  - [ ] Update lib.rs exports to use rtp-core security types
-  - [ ] Fix all imports to use `rvoip_rtp_core::security`
-- [ ] **Remove duplicate buffer implementation** - Use rtp-core buffers
-- [ ] **Remove packet-level RTP handling** - Delegate to rtp-core
-
-### **2.2 Create Proper Integration Layer**
-- [ ] **Implement MediaTransportAdapter** (`src/integration/rtp_adapter.rs`)
-  ```rust
-  pub struct MediaTransportAdapter {
-      rtp_session: Arc<RtpSession>,
-      codec: Box<dyn Codec>,
-      frame_pool: FramePool,
-  }
-  ```
-- [ ] **Create frame conversion system**
-  - [ ] Convert between `AudioBuffer` and RTP packets
-  - [ ] Handle timestamp synchronization
-  - [ ] Manage SSRC mapping for multiple streams
-- [ ] **Implement configuration mapping** - Map media configs to rtp-core configs
-
-### **2.3 Fix Session-Core Integration**
-- [ ] **Create clean interface for session-core** (`src/integration/session_adapter.rs`)
-- [ ] **Remove SDP handling from media-core** - Delegate to session-core
-- [ ] **Create capability discovery API** - Export codec capabilities to session-core
-- [ ] **Implement event propagation** - Media events to session-core
-
----
-
-## 🚀 **MEDIUM-TERM - Phase 3: Complete Basic Features (PRIORITY 4)**
-**Status**: Needed for production basic SIP server
-**Timeline**: 3-4 weeks after Phase 2
-
-### **3.1 Enhanced Codec Framework**
-- [ ] **Complete Codec trait implementation**
-  ```rust
-  pub trait Codec: Send + Sync {
-      fn payload_type(&self) -> u8;
-      fn clock_rate(&self) -> u32;
-      fn channels(&self) -> u8;
-      fn encode(&self, input: &AudioBuffer) -> Result<Bytes>;
-      fn decode(&self, input: &Bytes) -> Result<AudioBuffer>;
-      fn name(&self) -> &str;
-  }
-  ```
-- [ ] **Fix G.711 PCMU/PCMA implementation** - Production quality
-- [ ] **Add codec registry** - Dynamic codec loading and selection
-- [ ] **Implement format conversion** - Sample rate, channel conversion
-
-### **3.2 Audio Processing Framework**
-- [ ] **Implement Voice Activity Detection (VAD)** - Basic VAD for silence suppression
-- [ ] **Create audio level detection** - For mute detection and audio monitoring
-- [ ] **Add basic audio quality metrics** - Signal level, clipping detection
-- [ ] **Implement packet loss concealment** - Basic PLC for audio quality
-
-### **3.3 Device Management**
-- [ ] **Create audio device abstraction** (`src/engine/audio/device.rs`)
-- [ ] **Implement audio capture pipeline** - Microphone input
-- [ ] **Add audio playback pipeline** - Speaker output  
-- [ ] **Create device enumeration** - List available devices
-
----
-
-## 📈 **Success Criteria**
-
-### **Phase 0 Complete** ✅ **MOSTLY DONE**
-- [x] Core architectural issues resolved ✅
-- [x] Major dependency and import issues fixed ✅  
-- [x] Async/sync patterns corrected ✅
-- [ ] `cargo check` passes without errors 📝 (~50 errors remaining, non-blocking)
-- [ ] `cargo test` passes basic unit tests 📝 (after remaining fixes)
-- [ ] Basic examples compile and run 📝 (after remaining fixes)
-
-### **Priority 4 Complete (BASIC_SIP_TODO.md)** ✅ **COMPLETED**
-- [x] MediaSessionController provides clean interface for session-core ✅
-- [x] RTP packet forwarding with SSRC rewriting ✅  
-- [x] G.711 PCMU/PCMA codec passthrough support ✅
-- [x] Bidirectional media flow handling ✅
-- [x] Media session integration with Dialog management ✅
-- [x] Basic media statistics collection ✅
-- [x] Production-ready error handling ✅
-- [x] Complete API documentation and examples ✅
-
-### **Phase 2 Complete** 🎯 **NEXT TARGET**
-- [ ] Clean architectural separation maintained
-- [ ] No functionality duplication with rtp-core
-- [ ] Event system properly integrated with infra-common
-- [ ] Configuration cleanly maps to rtp-core settings
-
-### **Phase 3 Complete** 📋 **FUTURE**
-- [ ] Production-quality codec implementations
-- [ ] Audio device management working
-- [ ] Basic audio processing enhances call quality
-- [ ] Media quality monitoring provides useful metrics
+```
+src/
+├── lib.rs                     # Public API, re-exports, and documentation
+├── error.rs                   # Comprehensive error types
+├── types.rs                   # Common types, constants, and utilities
+│
+├── engine/                    # Core Media Engine
+│   ├── mod.rs                 # Module exports
+│   ├── media_engine.rs        # Central MediaEngine orchestrator
+│   ├── config.rs              # Engine configuration and settings
+│   └── lifecycle.rs           # Engine startup/shutdown management
+│
+├── session/                   # Media Session Management  
+│   ├── mod.rs                 # Module exports
+│   ├── media_session.rs       # MediaSession per SIP dialog
+│   ├── session_manager.rs     # Manages multiple MediaSessions
+│   ├── events.rs              # Media session event types
+│   ├── state.rs               # Session state management
+│   └── coordinator.rs         # Coordinates media flows
+│
+├── codec/                     # Codec Framework
+│   ├── mod.rs                 # Module exports and traits
+│   ├── manager.rs             # CodecManager - central codec orchestration
+│   ├── registry.rs            # CodecRegistry - available codecs
+│   ├── traits.rs              # Codec traits (AudioCodec, VideoCodec)
+│   ├── negotiation.rs         # Codec negotiation and capability matching
+│   ├── transcoding.rs         # Cross-codec transcoding
+│   ├── audio/                 # Audio Codec Implementations
+│   │   ├── mod.rs
+│   │   ├── g711.rs            # G.711 μ-law/A-law (PCMU/PCMA)
+│   │   ├── opus.rs            # Opus codec (wideband/fullband)
+│   │   ├── g722.rs            # G.722 wideband codec
+│   │   └── dtmf.rs            # DTMF/telephone-event (RFC 4733)
+│   └── video/                 # Video Codec Implementations (future)
+│       ├── mod.rs
+│       └── h264.rs            # H.264 codec (future)
+│
+├── processing/                # Media Signal Processing
+│   ├── mod.rs                 # Module exports
+│   ├── pipeline.rs            # Processing pipeline orchestration
+│   ├── audio/                 # Audio Processing Components
+│   │   ├── mod.rs
+│   │   ├── processor.rs       # AudioProcessor - main audio processing
+│   │   ├── aec.rs             # Acoustic Echo Cancellation
+│   │   ├── agc.rs             # Automatic Gain Control
+│   │   ├── vad.rs             # Voice Activity Detection
+│   │   ├── ns.rs              # Noise Suppression
+│   │   ├── plc.rs             # Packet Loss Concealment
+│   │   └── dtmf_detector.rs   # DTMF tone detection
+│   ├── format/                # Format Conversion
+│   │   ├── mod.rs
+│   │   ├── converter.rs       # FormatConverter - main conversion
+│   │   ├── resampler.rs       # Sample rate conversion
+│   │   ├── channel_mixer.rs   # Channel layout conversion
+│   │   └── bit_depth.rs       # Bit depth conversion
+│   └── effects/               # Audio Effects (optional)
+│       ├── mod.rs
+│       ├── equalizer.rs       # Audio EQ
+│       └── compressor.rs      # Dynamic range compression
+│
+├── quality/                   # Quality Monitoring & Adaptation
+│   ├── mod.rs                 # Module exports
+│   ├── monitor.rs             # QualityMonitor - real-time monitoring
+│   ├── metrics.rs             # Quality metrics collection
+│   ├── adaptation.rs          # Quality adaptation strategies
+│   ├── analyzer.rs            # Media quality analysis
+│   └── reporter.rs            # Quality reporting to session-core
+│
+├── buffer/                    # Media Buffering
+│   ├── mod.rs                 # Module exports
+│   ├── jitter.rs              # JitterBuffer - adaptive jitter buffering
+│   ├── adaptive.rs            # AdaptiveBuffer - dynamic buffer sizing
+│   ├── frame_buffer.rs        # FrameBuffer - frame-based buffering
+│   └── ring_buffer.rs         # RingBuffer - circular buffer utilities
+│
+├── integration/               # Integration Bridges
+│   ├── mod.rs                 # Module exports
+│   ├── rtp_bridge.rs          # RtpBridge - integration with rtp-core
+│   ├── session_bridge.rs      # SessionBridge - integration with session-core
+│   └── events.rs              # Cross-crate event handling
+│
+└── examples/                  # Usage Examples
+    ├── basic_session.rs       # Basic media session setup
+    ├── codec_transcoding.rs   # Codec transcoding example
+    └── quality_monitoring.rs  # Quality monitoring example
+```
 
 ---
 
-## 🎯 **Immediate Next Actions - OPTION B APPROACH** 🚀
+## 🏛️ **Core Architecture Components**
 
-**DECISION**: Proceed with Phase 1 implementation while remaining compilation errors exist.
-**RATIONALE**: Core architecture is stable, remaining errors are mostly API mismatches that won't block basic functionality.
+### **1. MediaEngine** - Central Orchestrator
+```rust
+pub struct MediaEngine {
+    codec_manager: Arc<CodecManager>,
+    session_manager: Arc<SessionManager>,
+    quality_monitor: Arc<QualityMonitor>,
+    audio_processor: Arc<AudioProcessor>,
+    format_converter: Arc<FormatConverter>,
+    config: MediaEngineConfig,
+}
 
-### **Next Sprint (This Week)**
-1. **Create MediaRelay module** - Basic RTP packet forwarding (`src/relay/mod.rs`)
-2. **Implement G.711 passthrough** - No transcoding, just forward packets
-3. **Create MediaSessionController** - Integration interface for session-core
-4. **Basic session lifecycle** - Start/stop media sessions tied to SIP dialogs
-5. **Test with minimal SIP scenario** - Two clients calling through server
+impl MediaEngine {
+    // Core lifecycle
+    pub async fn new(config: MediaEngineConfig) -> Result<Self>;
+    pub async fn start(&self) -> Result<()>;
+    pub async fn stop(&self) -> Result<()>;
+    
+    // Session management
+    pub async fn create_media_session(&self, dialog_id: DialogId, params: MediaSessionParams) -> Result<MediaSessionHandle>;
+    pub async fn destroy_media_session(&self, dialog_id: DialogId) -> Result<()>;
+    
+    // Capability discovery
+    pub fn get_supported_codecs(&self) -> Vec<CodecCapability>;
+    pub fn get_media_capabilities(&self) -> MediaCapabilities;
+}
+```
 
-### **Deferred (After Phase 1)**
-- ~~Fix remaining 213 compilation errors~~ → **Will fix incrementally as needed**
-- ~~Complete all codec implementations~~ → **Start with G.711 passthrough only**  
-- ~~Advanced audio processing~~ → **Phase 4 priority**
+### **2. MediaSession** - Per-Dialog Media Management
+```rust
+pub struct MediaSession {
+    dialog_id: DialogId,
+    state: RwLock<MediaSessionState>,
+    audio_codec: RwLock<Option<Box<dyn AudioCodec>>>,
+    video_codec: RwLock<Option<Box<dyn VideoCodec>>>,
+    jitter_buffer: Arc<JitterBuffer>,
+    quality_metrics: Arc<RwLock<QualityMetrics>>,
+    event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
+}
 
-**Target**: Basic audio relay working within 1 week, supporting BASIC_SIP_TODO.md Priority 4 requirements. 
+impl MediaSession {
+    // Media processing
+    pub async fn process_incoming_media(&self, packet: MediaPacket) -> Result<()>;
+    pub async fn send_outgoing_media(&self, frame: MediaFrame) -> Result<()>;
+    
+    // Codec management
+    pub async fn set_audio_codec(&self, codec: Box<dyn AudioCodec>) -> Result<()>;
+    pub async fn set_video_codec(&self, codec: Box<dyn VideoCodec>) -> Result<()>;
+    
+    // Quality management
+    pub async fn get_quality_metrics(&self) -> QualityMetrics;
+    pub async fn adjust_quality(&self, adjustment: QualityAdjustment) -> Result<()>;
+}
+```
+
+### **3. CodecManager** - Codec Orchestration
+```rust
+pub struct CodecManager {
+    registry: Arc<CodecRegistry>,
+    transcoder: Arc<Transcoder>,
+    negotiator: Arc<CodecNegotiator>,
+}
+
+impl CodecManager {
+    // Codec lifecycle
+    pub fn create_audio_codec(&self, payload_type: u8, params: &CodecParams) -> Result<Box<dyn AudioCodec>>;
+    pub fn create_video_codec(&self, payload_type: u8, params: &CodecParams) -> Result<Box<dyn VideoCodec>>;
+    
+    // Capability management
+    pub fn get_supported_audio_codecs(&self) -> Vec<AudioCodecCapability>;
+    pub fn get_supported_video_codecs(&self) -> Vec<VideoCodecCapability>;
+    
+    // Negotiation
+    pub fn negotiate_codecs(&self, local_caps: &[CodecCapability], remote_caps: &[CodecCapability]) -> Result<CodecNegotiationResult>;
+}
+```
+
+### **4. AudioProcessor** - Audio Processing Pipeline
+```rust
+pub struct AudioProcessor {
+    aec: Option<Box<dyn AcousticEchoCanceller>>,
+    agc: Option<Box<dyn AutomaticGainControl>>,
+    vad: Option<Box<dyn VoiceActivityDetector>>,
+    ns: Option<Box<dyn NoiseSuppressor>>,
+    config: AudioProcessingConfig,
+}
+
+impl AudioProcessor {
+    // Processing pipeline
+    pub fn process_capture_audio(&self, input: &AudioFrame) -> Result<AudioFrame>;
+    pub fn process_playback_audio(&self, input: &AudioFrame) -> Result<AudioFrame>;
+    
+    // Component management
+    pub fn enable_aec(&mut self, config: AecConfig) -> Result<()>;
+    pub fn enable_agc(&mut self, config: AgcConfig) -> Result<()>;
+    pub fn enable_vad(&mut self, config: VadConfig) -> Result<()>;
+}
+```
+
+### **5. QualityMonitor** - Real-time Quality Management
+```rust
+pub struct QualityMonitor {
+    metrics_collector: Arc<MetricsCollector>,
+    adaptation_engine: Arc<AdaptationEngine>,
+    thresholds: QualityThresholds,
+}
+
+impl QualityMonitor {
+    // Quality monitoring
+    pub async fn analyze_media_quality(&self, session_id: &MediaSessionId, packet: &MediaPacket) -> QualityMetrics;
+    pub async fn suggest_quality_adjustments(&self, session_id: &MediaSessionId) -> Vec<QualityAdjustment>;
+    
+    // Metrics
+    pub async fn get_session_metrics(&self, session_id: &MediaSessionId) -> Result<SessionMetrics>;
+    pub async fn get_overall_metrics(&self) -> OverallMetrics;
+}
+```
+
+---
+
+## 🔗 **Integration Interfaces**
+
+### **session-core Integration**
+```rust
+// Media capabilities for SDP negotiation
+pub trait MediaCapabilityProvider {
+    fn get_audio_capabilities(&self) -> Vec<AudioCapability>;
+    fn get_video_capabilities(&self) -> Vec<VideoCapability>;
+    fn negotiate_media(&self, local_sdp: &Sdp, remote_sdp: &Sdp) -> Result<MediaNegotiationResult>;
+}
+
+// Media session lifecycle
+pub trait MediaSessionProvider {
+    async fn create_media_session(&self, dialog_id: DialogId, params: MediaSessionParams) -> Result<MediaSessionHandle>;
+    async fn update_media_session(&self, dialog_id: DialogId, params: MediaSessionParams) -> Result<()>;
+    async fn destroy_media_session(&self, dialog_id: DialogId) -> Result<()>;
+}
+```
+
+### **rtp-core Integration**
+```rust
+// Media packet handling
+pub trait MediaPacketHandler {
+    async fn handle_incoming_packet(&self, session_id: &MediaSessionId, packet: RtpPacket) -> Result<()>;
+    async fn send_outgoing_packet(&self, session_id: &MediaSessionId, packet: RtpPacket) -> Result<()>;
+}
+
+// RTP session coordination
+pub trait RtpSessionCoordinator {
+    async fn register_media_session(&self, session_id: MediaSessionId, rtp_session: Arc<RtpSession>) -> Result<()>;
+    async fn unregister_media_session(&self, session_id: &MediaSessionId) -> Result<()>;
+}
+```
+
+---
+
+## 📋 **Implementation Phases**
+
+### **Phase 1: Core Foundation** (2-3 weeks)
+- [ ] **Basic Types & Errors** (`types.rs`, `error.rs`)
+- [ ] **MediaEngine Structure** (`engine/media_engine.rs`)  
+- [ ] **MediaSession Basic** (`session/media_session.rs`)
+- [ ] **Simple CodecRegistry** (`codec/registry.rs`)
+- [ ] **G.711 Implementation** (`codec/audio/g711.rs`)
+- [ ] **Integration Stubs** (`integration/`)
+
+### **Phase 2: Processing Pipeline** (2-3 weeks)  
+- [ ] **AudioProcessor Framework** (`processing/audio/processor.rs`)
+- [ ] **Basic VAD** (`processing/audio/vad.rs`)
+- [ ] **FormatConverter** (`processing/format/converter.rs`)
+- [ ] **JitterBuffer** (`buffer/jitter.rs`)
+- [ ] **Quality Monitoring** (`quality/monitor.rs`)
+
+### **Phase 3: Advanced Features** (3-4 weeks)
+- [ ] **AEC Implementation** (`processing/audio/aec.rs`)
+- [ ] **AGC Implementation** (`processing/audio/agc.rs`)  
+- [ ] **Opus Codec** (`codec/audio/opus.rs`)
+- [ ] **Codec Transcoding** (`codec/transcoding.rs`)
+- [ ] **Quality Adaptation** (`quality/adaptation.rs`)
+
+### **Phase 4: Production Ready** (2-3 weeks)
+- [ ] **Comprehensive Testing**
+- [ ] **Performance Optimization**  
+- [ ] **Documentation & Examples**
+- [ ] **Integration Testing with session-core & rtp-core**
+
+---
+
+## 🎯 **Success Criteria**
+
+### **Phase 1 Complete**
+- [ ] `cargo check` passes without errors
+- [ ] Basic media session creation/destruction works
+- [ ] G.711 codec encode/decode functional
+- [ ] Integration stubs allow session-core/rtp-core to compile against media-core
+
+### **Final Success**
+- [ ] Two SIP clients can make calls through the server with high-quality audio
+- [ ] Opus and G.711 codecs work seamlessly
+- [ ] Audio processing (AEC, AGC, VAD) enhances call quality
+- [ ] Quality monitoring provides actionable insights
+- [ ] Clean separation of concerns with other crates
+- [ ] Comprehensive test coverage (>80%)
+- [ ] Production-ready performance and stability
+
+---
+
+## 🔄 **Next Steps**
+
+1. **Review & Approve Architecture** - Get feedback on this design
+2. **Create Basic Project Structure** - Set up the directory structure  
+3. **Implement Phase 1** - Start with core foundation
+4. **Integration Testing** - Test with session-core and rtp-core early and often
+5. **Iterative Development** - Build incrementally with continuous testing
+
+**Target**: Production-ready media-core within 10-12 weeks, fully integrated with the RVOIP stack. 

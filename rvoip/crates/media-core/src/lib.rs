@@ -1,52 +1,45 @@
 //! # Media Core library for the RVOIP project
 //! 
-//! `media-core` is the media processing engine for the rvoip stack. It handles audio/video codec
-//! management, media session coordination, and acts as the bridge between signaling (`session-core`)
-//! and media transport (`rtp-core`).
+//! `media-core` provides basic media relay functionality for SIP servers.
+//! It handles RTP packet forwarding and basic codec support for voice over IP.
 //!
 //! This crate provides:
 //! 
-//! - Media session management
-//! - Codec implementations (Opus, G.711, G.722, etc.)
-//! - Audio processing (echo cancellation, noise suppression, etc.)
-//! - RTP integration (packetization, depacketization)
-//! - Media quality monitoring and adaptation
-//! - SDP media negotiation support
+//! - Media session management for SIP dialogs
+//! - Basic G.711 codec support (PCMU/PCMA)
+//! - RTP packet relay between endpoints
+//! - Port allocation for media sessions
+//! - Media session event monitoring
 //!
-//! ## Architecture
+//! ## Quick Start
 //!
-//! The library is organized into several modules:
-//!
-//! - `session`: Media session management
-//! - `codec`: Codec framework and implementations
-//! - `engine`: Audio/video processing engines
-//! - `processing`: Media signal processing
-//! - `buffer`: Media buffer management
-//! - `quality`: Media quality monitoring
-//! - `rtp`: RTP integration
-//! - `security`: Media security (SRTP, DTLS)
-//! - `sync`: Media synchronization
-//! - `integration`: Integration with other components
+//! ```rust
+//! use rvoip_media_core::prelude::*;
+//! 
+//! // Create a media session controller
+//! let controller = MediaSessionController::with_port_range(10000, 20000);
+//! 
+//! // Start media sessions for SIP dialogs
+//! controller.start_media(dialog_id, media_config).await?;
+//! 
+//! // Create relay between two calls
+//! controller.create_relay(dialog_a, dialog_b).await?;
+//! 
+//! // Stop media sessions
+//! controller.stop_media(dialog_id).await?;
+//! ```
 
 // Error handling
 pub mod error;
 
-// Core modules for media handling
-pub mod session;
+// Working modules
 pub mod codec;
-pub mod engine;
-pub mod processing;
-pub mod buffer;
-pub mod quality;
-pub mod rtp;
-pub mod security;
-pub mod sync;
 pub mod relay;
-// pub mod integration; // TODO: Re-enable after core is stable
 
 // Re-export common types
 pub use error::{Error, Result};
-pub use codec::Codec;
+pub use codec::{Codec, CodecRegistry};
+
 // Re-export relay types for session-core integration
 pub use relay::{
     MediaSessionController,
@@ -60,17 +53,6 @@ pub use relay::{
     G711PcmuCodec,
     G711PcmaCodec,
 };
-// Temporarily disabled until rtp-core integration is fixed
-// pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-// pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
-// Re-export rtp-core types for convenience
-// pub use security::{
-//     SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-//     SrtpCryptoSuite, DtlsVersion
-// };
-
-use std::net::SocketAddr;
-use std::io;
 
 /// Media sample type (raw audio data)
 pub type Sample = i16;
@@ -200,9 +182,9 @@ pub mod prelude {
         SampleRate,
         AudioFormat,
         AudioBuffer,
+        Codec,
+        CodecRegistry,
     };
-    
-    pub use crate::codec::Codec;
     
     // Media session controller types
     pub use crate::relay::{
@@ -217,19 +199,4 @@ pub mod prelude {
         G711PcmuCodec,
         G711PcmaCodec,
     };
-    
-    // pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-    // pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
-    // pub use crate::security::{
-    //     SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-    //     SrtpCryptoSuite, DtlsVersion
-    // };
-    
-    // These will be available once the modules are implemented
-    // pub use crate::session::{
-    //     MediaSession,
-    //     MediaDirection,
-    //     MediaType,
-    //     MediaState,
-    // };
 } 

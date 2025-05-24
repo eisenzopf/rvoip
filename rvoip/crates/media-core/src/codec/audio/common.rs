@@ -1,5 +1,6 @@
+//! Common audio codec types and utilities
+
 use crate::{AudioBuffer, AudioFormat, SampleRate};
-use crate::codec::{AudioCodec, CodecParameters};
 use crate::error::Result;
 
 /// Standard audio codec frame sizes in milliseconds
@@ -80,8 +81,6 @@ impl Default for BitrateMode {
     }
 }
 
-/// Common audio codec parameters and types
-
 /// Audio codec parameters
 #[derive(Debug, Clone)]
 pub struct AudioCodecParameters {
@@ -110,203 +109,17 @@ pub struct AudioCodecParameters {
 impl Default for AudioCodecParameters {
     fn default() -> Self {
         Self {
-            sample_rate: 48000,
+            sample_rate: 8000,  // Default to 8kHz for telephony
             channels: 1,
-            bitrate: 32000,
+            bitrate: 64000,     // 64kbps for G.711
             complexity: 5,
-            bitrate_mode: BitrateMode::Variable,
+            bitrate_mode: BitrateMode::Constant,
             quality_mode: QualityMode::Voice,
-            fec_enabled: true,
-            dtx_enabled: true,
+            fec_enabled: false,
+            dtx_enabled: false,
             frame_duration_ms: 20,
             packet_loss_percentage: 0.0,
         }
-    }
-}
-
-/// Channel layout
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelLayout {
-    /// Mono (1 channel)
-    Mono,
-    /// Stereo (2 channels)
-    Stereo,
-    /// 2.1 channels (left, right, LFE)
-    TwoPointOne,
-    /// 5.1 channels (front L/C/R, surround L/R, LFE)
-    FivePointOne,
-    /// 7.1 channels
-    SevenPointOne,
-    /// Custom channel layout
-    Custom(u8),
-}
-
-impl ChannelLayout {
-    /// Get the number of channels in this layout
-    pub fn channel_count(&self) -> u8 {
-        match self {
-            Self::Mono => 1,
-            Self::Stereo => 2,
-            Self::TwoPointOne => 3,
-            Self::FivePointOne => 6,
-            Self::SevenPointOne => 8,
-            Self::Custom(count) => *count,
-        }
-    }
-    
-    /// Create a channel layout from a channel count
-    pub fn from_count(count: u8) -> Self {
-        match count {
-            1 => Self::Mono,
-            2 => Self::Stereo,
-            3 => Self::TwoPointOne,
-            6 => Self::FivePointOne,
-            8 => Self::SevenPointOne,
-            _ => Self::Custom(count),
-        }
-    }
-}
-
-/// Audio sample rate in Hz
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampleRate {
-    /// 8 kHz (narrowband)
-    NarrowBand,
-    /// 16 kHz (wideband)
-    WideBand,
-    /// 32 kHz (super-wideband)
-    SuperWideBand,
-    /// 48 kHz (fullband)
-    FullBand,
-    /// Custom sample rate
-    Custom(u32),
-}
-
-impl SampleRate {
-    /// Get the sample rate in Hz
-    pub fn as_hz(&self) -> u32 {
-        match self {
-            Self::NarrowBand => 8000,
-            Self::WideBand => 16000,
-            Self::SuperWideBand => 32000,
-            Self::FullBand => 48000,
-            Self::Custom(rate) => *rate,
-        }
-    }
-    
-    /// Create a sample rate from Hz value
-    pub fn from_hz(hz: u32) -> Self {
-        match hz {
-            8000 => Self::NarrowBand,
-            16000 => Self::WideBand,
-            32000 => Self::SuperWideBand,
-            48000 => Self::FullBand,
-            _ => Self::Custom(hz),
-        }
-    }
-}
-
-/// Audio format descriptor
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioFormat {
-    /// Sample rate
-    pub sample_rate: SampleRate,
-    /// Channel layout
-    pub channels: ChannelLayout,
-    /// Sample format
-    pub format: SampleFormat,
-}
-
-impl AudioFormat {
-    /// Create a new audio format descriptor
-    pub fn new(sample_rate: SampleRate, channels: ChannelLayout, format: SampleFormat) -> Self {
-        Self {
-            sample_rate,
-            channels,
-            format,
-        }
-    }
-    
-    /// Create a common PCM format (16-bit, 48kHz, stereo)
-    pub fn pcm_stereo() -> Self {
-        Self {
-            sample_rate: SampleRate::FullBand,
-            channels: ChannelLayout::Stereo,
-            format: SampleFormat::S16,
-        }
-    }
-    
-    /// Create a common PCM format for telephony (16-bit, 8kHz, mono)
-    pub fn pcm_telephony() -> Self {
-        Self {
-            sample_rate: SampleRate::NarrowBand,
-            channels: ChannelLayout::Mono,
-            format: SampleFormat::S16,
-        }
-    }
-    
-    /// Get the byte size of one sample
-    pub fn bytes_per_sample(&self) -> usize {
-        self.format.bytes_per_sample()
-    }
-    
-    /// Get the number of channels
-    pub fn channel_count(&self) -> u8 {
-        self.channels.channel_count()
-    }
-    
-    /// Calculate bytes per frame (for a given duration)
-    pub fn bytes_per_frame(&self, duration_ms: u32) -> usize {
-        let samples = (self.sample_rate.as_hz() as u64 * duration_ms as u64) / 1000;
-        samples as usize * self.channel_count() as usize * self.bytes_per_sample()
-    }
-}
-
-/// Audio sample format
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampleFormat {
-    /// Unsigned 8-bit
-    U8,
-    /// Signed 16-bit
-    S16,
-    /// Signed 24-bit
-    S24,
-    /// Signed 32-bit
-    S32,
-    /// 32-bit float
-    F32,
-    /// 64-bit float
-    F64,
-}
-
-impl SampleFormat {
-    /// Get the number of bytes per sample
-    pub fn bytes_per_sample(&self) -> usize {
-        match self {
-            Self::U8 => 1,
-            Self::S16 => 2,
-            Self::S24 => 3,
-            Self::S32 => 4,
-            Self::F32 => 4,
-            Self::F64 => 8,
-        }
-    }
-    
-    /// Get the bit depth
-    pub fn bit_depth(&self) -> u8 {
-        match self {
-            Self::U8 => 8,
-            Self::S16 => 16,
-            Self::S24 => 24,
-            Self::S32 => 32,
-            Self::F32 => 32,
-            Self::F64 => 64,
-        }
-    }
-    
-    /// Check if the format is floating point
-    pub fn is_float(&self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
     }
 }
 
