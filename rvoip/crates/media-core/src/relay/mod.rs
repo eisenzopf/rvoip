@@ -14,11 +14,33 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use rvoip_rtp_core::{RtpSession, RtpPacket};
 
+// Controller module for session-core integration
+pub mod controller;
+// Packet forwarding implementation
+pub mod packet_forwarder;
+
+// Re-export controller types for convenience
+pub use controller::{
+    MediaSessionController,
+    MediaConfig,
+    MediaSessionStatus,
+    MediaSessionInfo,
+    MediaSessionEvent,
+    DialogId,
+};
+
+// Re-export packet forwarder types
+pub use packet_forwarder::{
+    PacketForwarder,
+    ForwarderConfig,
+    g711_passthrough::{G711PcmuCodec, G711PcmaCodec},
+};
+
 /// Unique identifier for a media relay session
 pub type RelaySessionId = String;
 
 /// Media relay statistics
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct RelayStats {
     /// Total packets relayed
     pub packets_relayed: u64,
@@ -28,6 +50,17 @@ pub struct RelayStats {
     pub packets_dropped: u64,
     /// Session start time
     pub start_time: std::time::Instant,
+}
+
+impl Default for RelayStats {
+    fn default() -> Self {
+        Self {
+            packets_relayed: 0,
+            bytes_relayed: 0,
+            packets_dropped: 0,
+            start_time: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Configuration for a relay session
@@ -48,7 +81,6 @@ pub struct RelaySessionConfig {
 }
 
 /// Represents a paired relay session between two endpoints
-#[derive(Debug)]
 struct RelaySessionPair {
     /// Configuration
     config: RelaySessionConfig,

@@ -47,6 +47,19 @@ pub mod relay;
 // Re-export common types
 pub use error::{Error, Result};
 pub use codec::Codec;
+// Re-export relay types for session-core integration
+pub use relay::{
+    MediaSessionController,
+    MediaConfig,
+    MediaSessionStatus,
+    MediaSessionInfo,
+    MediaSessionEvent,
+    DialogId,
+    PacketForwarder,
+    ForwarderConfig,
+    G711PcmuCodec,
+    G711PcmaCodec,
+};
 // Temporarily disabled until rtp-core integration is fixed
 // pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
 // pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
@@ -190,6 +203,21 @@ pub mod prelude {
     };
     
     pub use crate::codec::Codec;
+    
+    // Media session controller types
+    pub use crate::relay::{
+        MediaSessionController,
+        MediaConfig,
+        MediaSessionStatus,
+        MediaSessionInfo,
+        MediaSessionEvent,
+        DialogId,
+        PacketForwarder,
+        ForwarderConfig,
+        G711PcmuCodec,
+        G711PcmaCodec,
+    };
+    
     // pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
     // pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
     // pub use crate::security::{

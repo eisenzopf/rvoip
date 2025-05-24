@@ -123,6 +123,30 @@ pub enum Error {
     /// Other errors
     #[error("{0}")]
     Other(String),
+    
+    /// Invalid argument
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+    
+    /// Stream not found
+    #[error("Stream not found: {0}")]
+    StreamNotFound(String),
+    
+    /// Unsupported format
+    #[error("Unsupported format: {0}")]
+    UnsupportedFormat(String),
+    
+    /// Insufficient data
+    #[error("Insufficient data: {0}")]
+    InsufficientData(String),
+    
+    /// Format mismatch
+    #[error("Format mismatch: {0}")]
+    FormatMismatch(String),
+    
+    /// Encoding failed
+    #[error("Encoding failed: {0}")]
+    EncodingFailed(String),
 }
 
 impl From<&str> for Error {

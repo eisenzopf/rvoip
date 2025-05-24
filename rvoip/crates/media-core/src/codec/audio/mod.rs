@@ -9,11 +9,11 @@ pub use common::*;
 
 // G.711 µ-law codec (PCMU)
 #[cfg(feature = "pcmu")]
-pub mod pcmu;
+// pub mod pcmu;
 
 // G.711 A-law codec (PCMA)
 #[cfg(feature = "pcma")]
-pub mod pcma;
+// pub mod pcma;
 
 // G.722 wideband codec
 #[cfg(feature = "g722")]
