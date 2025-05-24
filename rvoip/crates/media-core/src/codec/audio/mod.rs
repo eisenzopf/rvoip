@@ -2,6 +2,7 @@
 
 // Common types and utilities for audio codecs
 pub mod common;
+pub mod g711;  // G.711 codec implementation
 pub mod opus;  // Opus codec implementation
 
 pub use common::*;
@@ -20,6 +21,9 @@ pub mod payload_type {
     /// Telephone-event (DTMF) RFC 4733
     pub const TELEPHONE_EVENT: u8 = 101;
 }
+
+// Re-export G.711 codec types
+pub use g711::{G711Codec, G711Config, G711Variant};
 
 // Re-export Opus codec types
 pub use opus::{OpusCodec, OpusConfig, OpusApplication}; 

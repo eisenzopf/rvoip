@@ -43,8 +43,10 @@
 pub mod error;
 pub mod types;
 pub mod engine;
+pub mod session;     // New session module
 pub mod processing;  // New processing pipeline module
-pub mod quality;  // New quality monitoring module
+pub mod quality;     // New quality monitoring module
+pub mod integration; // New integration module
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -64,6 +66,25 @@ pub use engine::{
     EngineState,
 };
 
+// Re-export session components
+pub use session::{
+    MediaSession,
+    MediaSessionConfig,
+    MediaSessionState,
+    MediaSessionEvent as SessionEvent, // Rename to avoid conflict
+    MediaSessionEventType,
+};
+
+// Re-export integration components
+pub use integration::{
+    RtpBridge,
+    RtpBridgeConfig,
+    SessionBridge,
+    SessionBridgeConfig,
+    IntegrationEvent,
+    IntegrationEventType,
+};
+
 // Legacy exports (will be replaced in Phase 2)
 pub use codec::{Codec, CodecRegistry};
 pub use relay::{
@@ -71,7 +92,6 @@ pub use relay::{
     MediaConfig,
     MediaSessionStatus,
     MediaSessionInfo,
-    MediaSessionEvent,
     G711PcmuCodec,
     G711PcmaCodec,
 };
@@ -181,6 +201,25 @@ pub mod prelude {
         EngineState,
     };
     
+    // Session components
+    pub use crate::session::{
+        MediaSession,
+        MediaSessionConfig,
+        MediaSessionState,
+        MediaSessionEvent as SessionEvent, // Rename to avoid conflict
+        MediaSessionEventType,
+    };
+    
+    // Integration components
+    pub use crate::integration::{
+        RtpBridge,
+        RtpBridgeConfig,
+        SessionBridge,
+        SessionBridgeConfig,
+        IntegrationEvent,
+        IntegrationEventType,
+    };
+    
     // Processing pipeline components
     pub use crate::processing::{
         ProcessingPipeline,
@@ -208,6 +247,9 @@ pub mod prelude {
     
     // Audio codec components
     pub use crate::codec::audio::{
+        G711Codec,
+        G711Config,
+        G711Variant,
         OpusCodec,
         OpusConfig,
         OpusApplication,
