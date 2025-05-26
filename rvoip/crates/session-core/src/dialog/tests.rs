@@ -253,7 +253,7 @@ async fn create_mock_transaction_manager(should_fail: bool) -> (Arc<TransactionM
 
 // Helper to create a dialog manager for testing
 async fn create_test_dialog_manager(should_fail: bool) -> (Arc<DialogManager>, mpsc::Receiver<TransactionEvent>) {
-    let event_bus = EventBus::new(100);
+    let event_bus = EventBus::new(100).await.expect("Failed to create event bus");
     
     // Create the transaction manager with our mock transport
     let (tx_manager, tx_rx) = create_mock_transaction_manager(should_fail).await;

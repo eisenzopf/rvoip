@@ -184,7 +184,7 @@ mod tests {
     
     #[test]
     fn test_event_channel_creation() {
-        let (tx, rx) = TransportFactory::create_event_channel(TransportProtocol::Udp);
+        let (tx, mut rx) = TransportFactory::create_event_channel(TransportProtocol::Udp);
         
         // Test that we can send and receive
         let rt = tokio::runtime::Runtime::new().unwrap();

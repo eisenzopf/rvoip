@@ -1704,7 +1704,7 @@ mod tests {
     
     // Helper to create a test dialog manager with custom transport options
     async fn create_test_dialog_manager_with_options(should_fail_send: bool) -> Arc<DialogManager> {
-        let event_bus = EventBus::new(100);
+        let event_bus = EventBus::new(100).await.expect("Failed to create event bus");
         
         // Create a channel for transport events
         let (transport_tx, transport_rx) = mpsc::channel::<rvoip_sip_transport::TransportEvent>(10);
