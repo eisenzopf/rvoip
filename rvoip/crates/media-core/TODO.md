@@ -408,7 +408,7 @@ pub trait RtpSessionCoordinator {
 
 ### **Phase 4: Production Ready** ❌ **NOT STARTED** (0/4 tasks done)
 - ⚠️ **Comprehensive Testing** - **PARTIALLY COMPLETE**
-  - 14 unit tests + 1 doc test passing
+  - 66 unit tests + 1 doc test passing
   - All examples working (processing_demo, aec_demo, quality_demo)
   - **NEED**: Integration tests, stress tests, edge case testing
 
@@ -426,6 +426,191 @@ pub trait RtpSessionCoordinator {
   - **CRITICAL**: End-to-end testing with other crates
   - **NEED**: SIP call flow testing
   - **NEED**: Real network testing
+
+### **📋 DETAILED INTEGRATION TESTING PLAN**
+
+#### **🔗 RTP-Core Integration Tests** (Priority: CRITICAL)
+
+Based on analysis of rtp-core's API structure, we need these specific integration tests:
+
+1. **Basic RTP Transport Integration**
+   ```rust
+   // Test: media-core ↔ rtp-core basic packet flow
+   - MediaTransportClient creation and configuration
+   - MediaFrame encoding/decoding with our codec system
+   - RtpBridge packet routing verification
+   - Payload format compatibility (G.711, G.729, Opus)
+   ```
+
+2. **Advanced RTP Features Integration**  
+   ```rust
+   // Test: Advanced rtp-core features with media-core
+   - SRTP encryption with our media sessions
+   - DTLS handshake integration
+   - RTCP feedback integration with QualityMonitor
+   - Adaptive jitter buffer coordination
+   - Transport-wide congestion control feedback
+   ```
+
+3. **Multi-Codec RTP Testing**
+   ```rust
+   // Test: Codec transcoding over RTP
+   - Real-time G.711 ↔ G.729 ↔ Opus transcoding over RTP
+   - Dynamic payload type negotiation
+   - Codec switching during active calls
+   - RTP timestamp mapping across different codecs
+   ```
+
+4. **RTP Session Management**
+   ```rust
+   // Test: Session lifecycle with rtp-core
+   - MediaSession creation triggering RTP session setup
+   - SSRC coordination and conflict resolution
+   - Multiple concurrent RTP sessions
+   - Session cleanup and resource management
+   ```
+
+#### **📞 Session-Core Integration Tests** (Priority: CRITICAL)
+
+Based on analysis of session-core's API, we need these specific integration tests:
+
+1. **SIP Dialog ↔ Media Session Integration**
+   ```rust
+   // Test: SIP dialog lifecycle with media sessions
+   - INVITE → MediaSession creation via SessionBridge
+   - SDP negotiation using our codec capabilities
+   - Media session state tracking with SIP dialog state
+   - BYE → MediaSession cleanup coordination
+   ```
+
+2. **Codec Negotiation Integration**
+   ```rust  
+   // Test: Real SDP codec negotiation
+   - MediaCapabilities generation from our codec registry
+   - Codec parameter negotiation (bitrate, frame size)
+   - Fallback codec selection (Opus → G.711 → G.729)
+   - Codec re-negotiation during calls (re-INVITE)
+   ```
+
+3. **Call Flow Integration**
+   ```rust
+   // Test: Complete SIP call flows
+   - Outgoing call: session-core → media-core → rtp-core
+   - Incoming call: rtp-core → media-core → session-core  
+   - Call hold/resume with media session pause/resume
+   - Call transfer with media session handover
+   ```
+
+4. **Media-Enhanced SIP Features**
+   ```rust
+   // Test: SIP features enhanced by media-core
+   - Quality adaptation affecting SIP re-negotiation
+   - DTMF detection integration with SIP INFO
+   - Media quality metrics affecting call routing
+   - Voice activity detection for SIP optimization
+   ```
+
+#### **🔄 End-to-End Integration Tests** (Priority: HIGH)
+
+1. **Complete Call Scenario Testing**
+   ```rust
+   // Test: Full VoIP call simulation
+   - SIP client A calls SIP client B through server
+   - Different codecs on each end (transcoding test)
+   - Media quality monitoring throughout call
+   - Graceful call termination
+   ```
+
+2. **Multi-Party Call Testing**
+   ```rust
+   // Test: Conference call scenarios
+   - Multiple concurrent MediaSessions
+   - Audio mixing requirements (future)
+   - Resource scaling verification
+   - Session isolation verification
+   ```
+
+3. **Network Condition Testing**
+   ```rust
+   // Test: Real network conditions
+   - Packet loss simulation with PLC
+   - Jitter simulation with adaptive buffering
+   - Bandwidth constraints with quality adaptation
+   - Network handoff scenarios
+   ```
+
+4. **Load Testing**
+   ```rust
+   // Test: Production load scenarios
+   - 100+ concurrent sessions
+   - High transcoding load (mixed codecs)
+   - Memory usage under sustained load
+   - CPU usage with multiple processing pipelines
+   ```
+
+#### **🧪 Specific Test Implementation Steps**
+
+**STEP 1: RTP-Core Integration Setup (Week 1)**
+```rust
+// File: tests/integration_rtp_core.rs
+- Set up MediaTransportClient with media-core MediaSession
+- Test basic audio frame → RTP packet → audio frame flow  
+- Verify codec payload format compatibility
+- Test RtpBridge event routing
+```
+
+**STEP 2: Session-Core Integration Setup (Week 1)**
+```rust  
+// File: tests/integration_session_core.rs
+- Set up SessionManager with media-core integration
+- Test SIP INVITE → MediaSession creation flow
+- Test codec negotiation with real SDP
+- Test SessionBridge event coordination
+```
+
+**STEP 3: End-to-End Call Testing (Week 2)**
+```rust
+// File: tests/integration_e2e.rs  
+- Create mock SIP clients using session-core
+- Establish complete call with media-core processing
+- Test codec transcoding in real call scenario
+- Verify quality monitoring integration
+```
+
+**STEP 4: Performance Integration Testing (Week 2)**
+```rust
+// File: tests/integration_performance.rs
+- Test concurrent sessions with rtp-core/session-core
+- Verify real-time performance under integration load
+- Test memory/CPU usage in integrated scenarios
+- Benchmark transcoding performance in full stack
+```
+
+#### **✅ Integration Test Success Criteria**
+
+**RTP-Core Integration:**
+- ✅ MediaTransportClient successfully sends/receives MediaFrames
+- ✅ All 4 codecs work correctly over RTP transport
+- ✅ SRTP encryption/decryption works with media sessions
+- ✅ Quality monitoring integrates with RTCP feedback
+
+**Session-Core Integration:**  
+- ✅ SIP dialogs correctly create/destroy MediaSessions
+- ✅ Codec negotiation selects optimal codec from our registry
+- ✅ Real SDP offer/answer works with our capabilities
+- ✅ Call state changes properly coordinate with media state
+
+**End-to-End:**
+- ✅ Complete SIP calls with high-quality audio
+- ✅ Codec transcoding works in production call scenarios  
+- ✅ Quality adaptation affects both media and SIP layers
+- ✅ Performance targets met under realistic load
+
+**Performance Targets:**
+- ✅ 100+ concurrent integrated sessions
+- ✅ <1ms transcoding latency including RTP/SIP overhead
+- ✅ <50MB memory usage for 100 sessions
+- ✅ 99.9% media session reliability
 
 ### **🆕 NEW TASKS IDENTIFIED**
 
@@ -486,22 +671,62 @@ Our current codec implementations use the following frame characteristics:
 
 ## 🔄 **Next Priority Tasks**
 
-### **Immediate (Week 1-2):**
-1. **Phase 4: Production Ready** - Focus on production readiness and optimization
-2. **Comprehensive Testing** - Integration tests, stress tests, edge case testing  
-3. **Performance Optimization** - Production performance profiling and optimization
+### **🚨 Immediate (Week 1):**
+1. **RTP-Core Integration Testing** - CRITICAL for media transport
+   - Create `tests/integration_rtp_core.rs` 
+   - Test MediaTransportClient ↔ MediaSession integration
+   - Verify codec compatibility with RTP payload formats
+   - Test RtpBridge event routing and packet flow
 
-### **Short Term (Week 3-4):**  
-4. **End-to-End Integration Testing** - Full system validation with session-core and rtp-core
-5. **Documentation** - API documentation and integration guides
-6. **Performance Benchmarking** - Production performance documentation
+2. **Session-Core Integration Testing** - CRITICAL for SIP coordination  
+   - Create `tests/integration_session_core.rs`
+   - Test SessionManager ↔ MediaSession lifecycle
+   - Test real SDP codec negotiation with our capabilities
+   - Test SessionBridge dialog coordination
 
-### **Medium Term (Week 5-6):**
-7. **Optional Enhancements** - Noise suppression, packet loss concealment, DTMF detection
-8. **Final Production Testing** - Real network testing and validation
-9. **Production Deployment** - Production-ready release preparation
+3. **Integration Infrastructure Setup**
+   - Set up integration test framework with rtp-core and session-core deps
+   - Create mock SIP clients and RTP transports for testing
+   - Establish CI/CD pipeline for integration tests
 
-**Updated Target**: Production-ready media-core within 3-4 weeks (accelerated due to Phase 1-3 completion).
+### **📈 Short Term (Week 2):**  
+4. **End-to-End Call Testing** - Full system validation
+   - Create `tests/integration_e2e.rs` for complete call flows
+   - Test codec transcoding in real call scenarios
+   - Verify quality monitoring integration across all layers
+   - Test SRTP/DTLS integration with media sessions
+
+5. **Performance Integration Testing**
+   - Create `tests/integration_performance.rs` for load testing
+   - Test concurrent sessions (target: 100+ sessions)
+   - Benchmark integrated transcoding performance
+   - Memory/CPU usage validation under full stack load
+
+6. **Advanced Integration Features**
+   - RTCP feedback integration with QualityMonitor
+   - Transport-wide congestion control coordination
+   - Dynamic codec switching during active calls
+
+### **🔧 Medium Term (Week 3-4):**
+7. **Production Hardening** - Real-world deployment prep
+   - Network condition testing (packet loss, jitter, bandwidth limits)
+   - Error handling validation in integration scenarios
+   - Resource leak detection in long-running integrated tests
+   - Production monitoring setup across all crates
+
+8. **Enhanced Integration Testing**
+   - Multi-party call scenarios (conference calling foundation)
+   - Call transfer and hold/resume integration
+   - Quality adaptation affecting SIP re-negotiation
+   - Real network testing with actual SIP clients
+
+9. **Documentation & Examples**
+   - Integration testing documentation
+   - End-to-end usage examples
+   - Performance benchmarks documentation
+   - Deployment guides for integrated system
+
+**Updated Target**: Production-ready integrated media-core within **2-3 weeks** (accelerated with detailed plan).
 
 ---
 

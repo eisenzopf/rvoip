@@ -14,7 +14,6 @@ warnings = "allow"
 rvoip-sip-core = { path = "../sip-core" }
 rvoip-transaction-core = { path = "../transaction-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-media-core = { path = "../media-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
 
 # Async runtime

@@ -2580,7 +2580,6 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand",
- "rvoip-media-core",
  "rvoip-rtp-core",
  "rvoip-sip-core",
  "rvoip-sip-transport",
