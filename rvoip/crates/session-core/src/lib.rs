@@ -23,6 +23,7 @@ pub mod media;
 pub mod sdp;
 pub mod helpers;
 pub mod metrics;
+pub mod api;
 
 // Re-export important types for convenience
 pub use dialog::{Dialog, DialogId, DialogState};
@@ -66,161 +67,12 @@ pub use helpers::{
     accept_update_request,
 };
 
-/// Production-ready client implementation
-pub mod client {
-    //! Client-specific components and factories
-
-    use crate::{
-        session::{SessionManager, SessionConfig, SessionDirection},
-        events::{EventBus, SessionEvent},
-        Error
-    };
-    use std::sync::Arc;
-    use rvoip_transaction_core::TransactionManager;
-
-    /// Client configuration
-    #[derive(Debug, Clone)]
-    pub struct ClientConfig {
-        /// Display name for outgoing calls
-        pub display_name: String,
-        
-        /// Default SIP URI
-        pub uri: String,
-        
-        /// Default contact address
-        pub contact: String,
-        
-        /// Authentication username
-        pub auth_user: Option<String>,
-        
-        /// Authentication password
-        pub auth_password: Option<String>,
-        
-        /// Registration interval (in seconds)
-        pub registration_interval: Option<u32>,
-        
-        /// Session configuration
-        pub session_config: SessionConfig,
-    }
-
-    impl Default for ClientConfig {
-        fn default() -> Self {
-            Self {
-                display_name: "RVOIP Client".to_string(),
-                uri: "sip:user@example.com".to_string(),
-                contact: "sip:user@127.0.0.1:5060".to_string(),
-                auth_user: None,
-                auth_password: None,
-                registration_interval: Some(3600),
-                session_config: SessionConfig::default(),
-            }
-        }
-    }
-
-    /// Create a session manager configured for client use
-    pub async fn create_client_session_manager(
-        transaction_manager: Arc<TransactionManager>,
-        config: ClientConfig
-    ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
-        let event_bus = EventBus::new(100).await?;
-        
-        let session_manager = SessionManager::new(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ).await?;
-        
-        Ok(Arc::new(session_manager))
-    }
-    
-    /// Create a session manager configured for client use (synchronous)
-    pub fn create_client_session_manager_sync(
-        transaction_manager: Arc<TransactionManager>,
-        config: ClientConfig
-    ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new_simple(100);
-        
-        Arc::new(SessionManager::new_sync(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ))
-    }
-}
-
-/// Production-ready server implementation
-pub mod server {
-    //! Server-specific components and factories
-
-    use crate::{
-        session::{SessionManager, SessionConfig, SessionDirection},
-        events::{EventBus, SessionEvent},
-        Error
-    };
-    use std::sync::Arc;
-    use rvoip_transaction_core::TransactionManager;
-
-    /// Server configuration
-    #[derive(Debug, Clone)]
-    pub struct ServerConfig {
-        /// Server name
-        pub server_name: String,
-        
-        /// Domain name
-        pub domain: String,
-        
-        /// Maximum sessions allowed
-        pub max_sessions: usize,
-        
-        /// Session timeout (in seconds)
-        pub session_timeout: u32,
-        
-        /// Session configuration
-        pub session_config: SessionConfig,
-    }
-
-    impl Default for ServerConfig {
-        fn default() -> Self {
-            Self {
-                server_name: "RVOIP Server".to_string(),
-                domain: "example.com".to_string(),
-                max_sessions: 10000,
-                session_timeout: 3600,
-                session_config: SessionConfig::default(),
-            }
-        }
-    }
-
-    /// Create a session manager configured for server use
-    pub async fn create_server_session_manager(
-        transaction_manager: Arc<TransactionManager>,
-        config: ServerConfig
-    ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
-        let event_bus = EventBus::new(1000).await?;
-        
-        let session_manager = SessionManager::new(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ).await?;
-        
-        Ok(Arc::new(session_manager))
-    }
-    
-    /// Create a session manager configured for server use (synchronous)
-    pub fn create_server_session_manager_sync(
-        transaction_manager: Arc<TransactionManager>,
-        config: ServerConfig
-    ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new_simple(1000);
-        
-        Arc::new(SessionManager::new_sync(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ))
-    }
-}
+// Re-export API modules for convenience
+pub use api::{
+    client, server,
+    ApiCapabilities, ApiConfig, get_api_capabilities, is_feature_supported,
+    API_VERSION, SUPPORTED_SIP_VERSIONS, DEFAULT_USER_AGENT,
+};
 
 /// Re-export types from dependent crates that are used in our public API
 pub mod prelude {
@@ -253,8 +105,10 @@ pub mod prelude {
         AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent,
         // Transfer types
         TransferId, TransferState, TransferType, TransferContext,
-        // Convenience modules
-        client, server,
+        // API modules
+        api, client, server,
+        // API types
+        ApiCapabilities, ApiConfig, get_api_capabilities, is_feature_supported,
         // Following SDPs are not fully implemented yet or need to be imported differently
         // SessionDescription, MediaDescription, MediaFormat, MediaDirection,
     };
