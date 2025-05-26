@@ -12,7 +12,7 @@ rvoip is a 100% pure Rust implementation of a SIP/VoIP stack designed to handle,
 
 ## Current Architecture
 
-rvoip follows a layered architecture with **session-core as the central integration layer**:
+rvoip follows a **session-centric architecture** with `session-core` as the central coordination layer:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -21,8 +21,11 @@ rvoip follows a layered architecture with **session-core as the central integrat
 │  sip-client                    │  call-engine               │
 │  (High-level API)              │  (Call orchestration)     │
 ├─────────────────────────────────────────────────────────────┤
-│                session-core                                 │
-│           (SIP Sessions + RTP Media Coordination)           │
+│                 *** session-core ***                        │
+│           (Session Manager - Central Coordinator)           │
+│      • SIP Session Management    • Media Coordination       │
+│      • Dialog Lifecycle          • RTP Stream Management    │  
+│      • Public API for SIP/Media  • Unified Event System     │
 ├─────────────────────────────────────────────────────────────┤
 │         Processing Layer                                    │
 │  transaction-core              │  media-core               │
@@ -36,6 +39,134 @@ rvoip follows a layered architecture with **session-core as the central integrat
 │                    sip-core                                 │
 │                (Message parsing)                            │
 └─────────────────────────────────────────────────────────────┘
+```
+
+## Session Manager Design
+
+### Core Concept: **Session Manager as Central Coordinator**
+
+**session-core** provides a `SessionManager` that serves as the primary interface for both SIP clients and servers. It coordinates between SIP signaling (dialogs, transactions) and RTP media streams, providing a unified API that maintains proper separation of concerns across layers.
+
+### Key Design Principles
+
+1. **Single Source of Truth**: SessionManager maintains the authoritative state for all active sessions
+2. **Layer Coordination**: Bridges SIP signaling layer with media processing layer
+3. **Event-Driven**: Uses a unified event system for loose coupling between components
+4. **Clean Public API**: Exposes high-level operations while hiding protocol complexity
+
+### Session Manager Public Interface
+
+```rust
+// High-level session management
+pub struct SessionManager {
+    // Creates and manages SIP sessions with integrated media
+    pub async fn create_outgoing_session(&self) -> Result<Arc<Session>, Error>;
+    pub async fn create_incoming_session(&self, invite: Request) -> Result<Arc<Session>, Error>;
+    
+    // Session lifecycle management
+    pub async fn start(&self) -> Result<(), Error>;
+    pub async fn stop(&self) -> Result<(), Error>;
+    pub async fn terminate_session(&self, session_id: &SessionId, reason: &str) -> Result<(), Error>;
+    
+    // Session discovery and management
+    pub fn get_session(&self, session_id: &SessionId) -> Result<Arc<Session>, Error>;
+    pub async fn session_count(&self) -> usize;
+    pub fn find_session_by_dialog(&self, dialog_id: &DialogId) -> Result<Arc<Session>, Error>;
+    
+    // Integrated dialog management
+    pub fn dialog_manager(&self) -> &Arc<DialogManager>;
+    pub fn set_default_dialog(&self, session_id: &SessionId, dialog_id: &DialogId) -> Result<(), Error>;
+}
+
+// Individual session management
+pub struct Session {
+    // Session state management
+    pub async fn state(&self) -> SessionState;
+    pub async fn set_state(&self, state: SessionState) -> Result<(), Error>;
+    
+    // SIP dialog integration
+    pub async fn dialog(&self) -> Option<Dialog>;
+    pub async fn set_dialog(&self, dialog: Option<Dialog>);
+    
+    // Media coordination (integrated with RTP core)
+    pub async fn start_media(&self) -> Result<(), Error>;
+    pub async fn stop_media(&self) -> Result<(), Error>;
+    
+    // Transaction tracking for SIP coordination
+    pub async fn track_transaction(&self, tx_id: TransactionKey, tx_type: SessionTransactionType);
+}
+
+// High-level convenience API (helpers.rs)
+pub async fn make_call(session_manager: &Arc<SessionManager>, destination: Uri) -> Result<Arc<Session>, Error>;
+pub async fn answer_call(session: &Arc<Session>) -> Result<(), Error>;
+pub async fn end_call(session: &Arc<Session>) -> Result<(), Error>;
+
+// SIP + Media coordination helpers  
+pub async fn create_dialog_from_invite(dialog_manager: &Arc<DialogManager>, 
+    tx_id: &TransactionKey, request: &Request, response: &Response, 
+    session_id: &SessionId, is_initiator: bool) -> Result<DialogId, Error>;
+
+pub async fn update_dialog_media(dialog_manager: &Arc<DialogManager>, 
+    dialog_id: &DialogId, new_sdp: SessionDescription) -> Result<TransactionKey, Error>;
+
+pub fn get_dialog_media_config(dialog_manager: &Arc<DialogManager>, 
+    dialog_id: &DialogId) -> Result<MediaConfig, Error>;
+
+// SIP dialog management
+pub async fn put_call_on_hold(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<TransactionKey, Error>;
+pub async fn resume_held_call(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<TransactionKey, Error>;
+pub async fn refresh_dialog(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<(), Error>;
+```
+
+### Usage Examples
+
+#### SIP Server Implementation
+```rust
+// Create session manager with integrated SIP and media coordination
+let session_manager = Arc::new(SessionManager::new(
+    transaction_manager.clone(),
+    SessionConfig::default(),
+    event_bus.clone()
+));
+
+// Start the session manager
+session_manager.start().await?;
+
+// Handle incoming INVITE
+let session = session_manager.create_incoming_session(invite_request).await?;
+
+// Session manager automatically:
+// - Creates and manages SIP dialog
+// - Handles SDP negotiation
+// - Coordinates with media-core for RTP streams
+// - Manages transaction lifecycle
+// - Provides unified event notifications
+
+// Answer the call (automatically coordinates SIP response + media setup)
+answer_call(&session).await?;
+```
+
+#### SIP Client Implementation  
+```rust
+// Make an outgoing call
+let session = make_call(&session_manager, destination_uri).await?;
+
+// Session manager coordinates:
+// - INVITE transaction creation
+// - Dialog establishment  
+// - SDP offer/answer negotiation
+// - Media stream setup
+// - Event propagation
+
+// Put call on hold (SIP re-INVITE + media direction change)
+let dialog_id = session.dialog().await.unwrap().id;
+put_call_on_hold(&session_manager.dialog_manager(), &dialog_id).await?;
+
+// Resume call
+resume_held_call(&session_manager.dialog_manager(), &dialog_id).await?;
+
+// End call (BYE transaction + media cleanup)
+end_call(&session).await?;
 ```
 
 ## Current Library Structure
