@@ -15,6 +15,8 @@ rvoip-sip-core = { path = "../sip-core" }
 rvoip-transaction-core = { path = "../transaction-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-media-core = { path = "../media-core" }
+infra-common = { path = "../infra-common" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

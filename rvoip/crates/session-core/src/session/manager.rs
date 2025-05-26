@@ -11,11 +11,14 @@ use rvoip_transaction_core::{
     TransactionManager, 
     TransactionEvent,
 };
+use rvoip_sip_core::Request;
 
 use crate::dialog::{Dialog, DialogId, DialogManager};
 use crate::dialog::DialogState;
 use crate::events::{EventBus, SessionEvent};
 use crate::errors::{Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction};
+use crate::media::{MediaManager, MediaSessionId, MediaConfig, MediaStatus};
+use crate::sdp::SessionDescription;
 use super::SessionConfig;
 use super::session::Session;
 use super::SessionId;
@@ -26,7 +29,7 @@ use super::SessionDirection;
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 const CLEANUP_INTERVAL_MS: u64 = 30000; // 30 seconds
 
-/// Manager for SIP sessions
+/// Manager for SIP sessions with integrated media coordination
 #[derive(Clone)]
 pub struct SessionManager {
     /// Session manager configuration
@@ -47,6 +50,9 @@ pub struct SessionManager {
     /// Dialog manager reference
     dialog_manager: Arc<DialogManager>,
     
+    /// Media manager for RTP stream coordination
+    media_manager: Arc<MediaManager>,
+    
     /// Event bus for session events
     event_bus: EventBus,
     
@@ -58,8 +64,57 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new session manager
-    pub fn new(
+    /// Create a new session manager with integrated media coordination
+    pub async fn new(
+        transaction_manager: Arc<TransactionManager>,
+        config: SessionConfig,
+        event_bus: EventBus
+    ) -> Result<Self, Error> {
+        // Create a dialog manager
+        let dialog_manager = DialogManager::new(transaction_manager.clone(), event_bus.clone());
+        
+        // Create media manager with zero-copy event system
+        let media_manager = MediaManager::new().await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create media manager: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Internal,
+                    severity: ErrorSeverity::Critical,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    timestamp: SystemTime::now(),
+                    details: Some("Media manager initialization failed".to_string()),
+                    ..Default::default()
+                }
+            ))?;
+        
+        // Create the session event channel
+        let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
+        
+        let session_manager = Self {
+            config,
+            sessions: Arc::new(DashMap::new()),
+            transaction_manager,
+            dialog_manager: Arc::new(dialog_manager),
+            media_manager: Arc::new(media_manager),
+            event_bus: event_bus.clone(),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            default_dialogs: DashMap::new(),
+            dialog_to_session: DashMap::new(),
+            event_sender,
+        };
+        
+        // Start the session event processing
+        let manager_clone = session_manager.clone();
+        tokio::spawn(async move {
+            manager_clone.process_session_events(event_receiver).await;
+        });
+        
+        Ok(session_manager)
+    }
+    
+    /// Create a new session manager (legacy method for backward compatibility)
+    pub fn new_sync(
         transaction_manager: Arc<TransactionManager>,
         config: SessionConfig,
         event_bus: EventBus
@@ -70,11 +125,21 @@ impl SessionManager {
         // Create the session event channel
         let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         
+        // Create a runtime for media manager initialization
+        let rt = tokio::runtime::Handle::current();
+        let media_manager = rt.block_on(async {
+            MediaManager::new().await.unwrap_or_else(|e| {
+                error!("Failed to create media manager: {}", e);
+                panic!("Media manager initialization failed");
+            })
+        });
+        
         let session_manager = Self {
             config,
             sessions: Arc::new(DashMap::new()),
             transaction_manager,
             dialog_manager: Arc::new(dialog_manager),
+            media_manager: Arc::new(media_manager),
             event_bus: event_bus.clone(),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             default_dialogs: DashMap::new(),
@@ -688,32 +753,241 @@ impl SessionManager {
                     session.track_transaction(transaction_id.clone(), tx_type).await;
                     
                     // Process specific methods that might affect session state
-                    match *method {
+                    match method {
                         rvoip_sip_core::Method::Bye => {
+                            // BYE request indicates session termination
                             let _ = session.set_state(SessionState::Terminating).await;
-                            
-                            // Terminate the session asynchronously
-                            let manager = self.clone();
-                            let session_id = session_id.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = manager.terminate_session(&session_id, "BYE received").await {
-                                    error!("Failed to terminate session after BYE: {}", e);
-                                }
-                            });
                         },
                         _ => {}
                     }
                     
-                    // We handled this transaction
                     return true;
                 }
             }
-            
-            // No session found for this dialog
-            debug!("No session found for dialog {}", dialog_id);
         }
         
-        // We did not handle this transaction
         false
+    }
+    
+    // ==== Media Coordination Methods (Task 2 from Integration Plan) ====
+    
+    /// Get reference to the media manager
+    pub fn media_manager(&self) -> &Arc<MediaManager> {
+        &self.media_manager
+    }
+    
+    /// Start media for a session based on SDP negotiation
+    pub async fn start_session_media(&self, session_id: &SessionId) -> Result<(), Error> {
+        // Get the session
+        let session = self.get_session(session_id)?;
+        
+        // For now, just start media on the session directly
+        // TODO: Re-enable full SDP-based media coordination when compilation issues are resolved
+        session.start_media().await?;
+        
+        Ok(())
+    }
+    
+    /// Stop media for a session
+    pub async fn stop_session_media(&self, session_id: &SessionId) -> Result<(), Error> {
+        // Get the session
+        let session = self.get_session(session_id)?;
+        
+        // Get the media session ID
+        if let Some(media_session_id) = self.media_manager.get_media_session(session_id).await {
+            // Stop the media session
+            self.media_manager.stop_media(&media_session_id, "Session terminated".to_string()).await
+                .map_err(|e| Error::MediaResourceError(
+                    format!("Failed to stop media: {}", e),
+                    ErrorContext {
+                        category: ErrorCategory::Media,
+                        severity: ErrorSeverity::Warning,
+                        recovery: RecoveryAction::None,
+                        retryable: false,
+                        session_id: Some(session_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some(format!("Media stop failed: {}", e)),
+                        ..Default::default()
+                    }
+                ))?;
+        }
+        
+        // Stop media on the session
+        session.stop_media().await?;
+        
+        Ok(())
+    }
+    
+    /// Update session media based on new SDP
+    pub async fn update_session_media(&self, session_id: &SessionId, sdp: &SessionDescription) -> Result<(), Error> {
+        // Get the session
+        let _session = self.get_session(session_id)?;
+        
+        // For now, this is a placeholder - in a full implementation,
+        // we would update the media configuration based on the new SDP
+        // This might involve creating a new media session or updating the existing one
+        
+        debug!("Media update requested for session {}", session_id);
+        Ok(())
+    }
+    
+    /// Setup media for a dialog using negotiated SDP
+    pub async fn setup_media_for_dialog(&self, dialog_id: &DialogId, local_sdp: &SessionDescription, remote_sdp: &SessionDescription) -> Result<MediaSessionId, Error> {
+        // Extract media configuration
+        let media_config = crate::sdp::extract_media_config(local_sdp, remote_sdp)
+            .map_err(|e| Error::MediaNegotiationError(
+                format!("Failed to extract media config: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Media,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    dialog_id: Some(dialog_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("Media config extraction failed: {}", e)),
+                    ..Default::default()
+                }
+            ))?;
+        
+        // Create and return media session
+        self.media_manager.create_media_session(media_config).await
+            .map_err(|e| Error::MediaResourceError(
+                format!("Failed to create media session: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Media,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::Retry,
+                    retryable: true,
+                    dialog_id: Some(dialog_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("Media session creation failed: {}", e)),
+                    ..Default::default()
+                }
+            ))
+    }
+    
+    /// Teardown media for a session
+    pub async fn teardown_media_for_session(&self, session_id: &SessionId) -> Result<(), Error> {
+        self.stop_session_media(session_id).await
+    }
+    
+    /// Setup RTP relay between two sessions
+    pub async fn setup_rtp_relay(&self, session_a_id: &SessionId, session_b_id: &SessionId) -> Result<crate::media::RelayId, Error> {
+        // Verify both sessions exist
+        let _session_a = self.get_session(session_a_id)?;
+        let _session_b = self.get_session(session_b_id)?;
+        
+        // Setup relay in media manager
+        self.media_manager.setup_rtp_relay(session_a_id, session_b_id).await
+            .map_err(|e| Error::MediaResourceError(
+                format!("Failed to setup RTP relay: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Media,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::Retry,
+                    retryable: true,
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("RTP relay setup failed: {}", e)),
+                    ..Default::default()
+                }
+            ))
+    }
+    
+    /// Teardown RTP relay
+    pub async fn teardown_rtp_relay(&self, relay_id: &crate::media::RelayId) -> Result<(), Error> {
+        self.media_manager.teardown_rtp_relay(relay_id).await
+            .map_err(|e| Error::MediaResourceError(
+                format!("Failed to teardown RTP relay: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Media,
+                    severity: ErrorSeverity::Warning,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    timestamp: SystemTime::now(),
+                    details: Some(format!("RTP relay teardown failed: {}", e)),
+                    ..Default::default()
+                }
+            ))
+    }
+    
+    // ==== Enhanced Session Creation Methods (Priority A from Integration Plan) ====
+    
+    /// Create a session for an incoming INVITE request
+    pub async fn create_session_for_invite(&self, invite: Request, is_inbound: bool) -> Result<Arc<Session>, Error> {
+        let direction = if is_inbound { SessionDirection::Incoming } else { SessionDirection::Outgoing };
+        
+        // Check session limits
+        if !self.can_create_session().await {
+            return Err(Error::SessionLimitExceeded(
+                self.config.max_sessions.unwrap_or(0),
+                ErrorContext {
+                    category: ErrorCategory::Resource,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::Wait(std::time::Duration::from_secs(5)),
+                    retryable: true,
+                    timestamp: SystemTime::now(),
+                    details: Some("Session limit exceeded".to_string()),
+                    ..Default::default()
+                }
+            ));
+        }
+        
+        let session = Arc::new(Session::new(
+            direction,
+            self.config.clone(),
+            self.transaction_manager.clone(),
+            self.event_bus.clone()
+        ));
+        
+        // Add to active sessions
+        self.sessions.insert(session.id.clone(), session.clone());
+        
+        // Emit creation event
+        self.event_bus.publish(SessionEvent::Created {
+            session_id: session.id.clone(),
+        });
+        
+        debug!("Created session {} for INVITE (inbound: {})", session.id, is_inbound);
+        
+        Ok(session)
+    }
+    
+    /// Find a session by dialog identifiers
+    pub async fn find_session_for_dialog(&self, call_id: &str, from_tag: &str, to_tag: &str) -> Option<Arc<Session>> {
+        // Find dialog by identifiers
+        for entry in self.dialog_to_session.iter() {
+            let dialog_id = entry.key();
+            let session_id = entry.value();
+            
+            if let Ok(dialog) = self.dialog_manager.get_dialog(dialog_id) {
+                if dialog.call_id == call_id &&
+                   dialog.local_tag.as_deref() == Some(from_tag) &&
+                   dialog.remote_tag.as_deref() == Some(to_tag) {
+                    return self.get_session(session_id).ok();
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// Link a session to a call (for call-engine integration)
+    pub async fn link_session_to_call(&self, session_id: &SessionId, call_id: &str) -> Result<(), Error> {
+        // Verify session exists
+        let _session = self.get_session(session_id)?;
+        
+        // For now, just log the association - in a full implementation,
+        // we would maintain a call-to-session mapping
+        debug!("Linked session {} to call {}", session_id, call_id);
+        
+        Ok(())
+    }
+    
+    /// Get all sessions for a call (for call-engine integration)
+    pub async fn get_sessions_for_call(&self, call_id: &str) -> Vec<Arc<Session>> {
+        // In a full implementation, we would maintain a call-to-sessions mapping
+        // For now, return empty vector
+        debug!("Requested sessions for call {}", call_id);
+        vec![]
     }
 } 

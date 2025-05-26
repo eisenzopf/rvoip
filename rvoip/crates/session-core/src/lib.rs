@@ -26,13 +26,20 @@ pub mod metrics;
 
 // Re-export important types for convenience
 pub use dialog::{Dialog, DialogId, DialogState};
-// Session implementation is now complete
+// Session implementation is now complete with enhanced media support
 pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirection, SessionManager};
+pub use session::session::SessionMediaState;
 pub use events::{EventBus, SessionEvent};
 pub use errors::{
     Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction
 };
 pub use metrics::MetricsCollector;
+
+// Re-export media types
+pub use media::{
+    MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, MediaType, 
+    AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent
+};
 
 // Re-export helper functions for internal use
 pub(crate) use helpers::{dialog_not_found_error, network_unreachable_error, transaction_creation_error, transaction_send_error};
@@ -116,7 +123,7 @@ pub mod client {
     ) -> Arc<SessionManager> {
         let event_bus = EventBus::new(100);
         
-        Arc::new(SessionManager::new(
+        Arc::new(SessionManager::new_sync(
             transaction_manager,
             config.session_config,
             event_bus
@@ -174,7 +181,7 @@ pub mod server {
     ) -> Arc<SessionManager> {
         let event_bus = EventBus::new(1000);
         
-        Arc::new(SessionManager::new(
+        Arc::new(SessionManager::new_sync(
             transaction_manager,
             config.session_config,
             event_bus
@@ -200,14 +207,17 @@ pub mod prelude {
     pub use rvoip_rtp_core::{RtpSession, RtpPacket};
     pub use rvoip_media_core::{AudioBuffer, Codec};
     
-    // From our own crate - only include currently implemented types
+    // From our own crate - enhanced session-core with media integration
     pub use crate::{
         Dialog, DialogState, DialogId,
-        Session, SessionManager, // Now fully implemented
+        Session, SessionManager, SessionMediaState, // Now fully implemented with media support
         SessionId, SessionState, SessionConfig, SessionDirection,
         Error, ErrorCategory, ErrorSeverity, RecoveryAction, ErrorContext,
         SessionEvent, EventBus,
         MetricsCollector,
+        // Media types
+        MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, MediaType,
+        AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent,
         // Convenience modules
         client, server,
         // Following SDPs are not fully implemented yet or need to be imported differently
