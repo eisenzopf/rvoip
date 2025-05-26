@@ -10,187 +10,122 @@ rvoip is a 100% pure Rust implementation of a SIP/VoIP stack designed to handle,
 - **API-centric**: Designed to be controlled via REST/gRPC/WebSocket
 - **Production-ready**: Aiming for a complete, battle-tested SIP/RTP stack
 
-## Architecture
+## Current Architecture
 
-rvoip follows a layered architecture inspired by established SIP stacks, with clean separation between components:
+rvoip follows a layered architecture with **session-core as the central integration layer**:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                      Application Layer                                              │
-│                             (API Server, Client Applications, UI)                                   │
-└───────────────────────────────────────────────────┬─────────────────────────────────────────────────┘
-                                                    │
-                                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                       call-engine                                                   │
-│                                                                                                     │
-│  ┌─────────────────────────────────┐  ┌─────────────────────────────────┐  ┌────────────────────┐  │
-│  │         Call State Machine      │  │           Service Manager        │  │     Regulatory     │  │
-│  │                                 │  │                                  │  │     Compliance     │  │
-│  └─────────────────────────────────┘  └─────────────────────────────────┘  └────────────────────┘  │
-└───────────────────────────────────────────────────┬─────────────────────────────────────────────────┘
-                                                    │
-                        ┌───────────────────────────┼───────────────────────────┐
-                        │                           │                           │
-                        ▼                           ▼                           ▼
-┌────────────────────────────────────┐ ┌────────────────────────────┐ ┌────────────────────────────────────┐
-│           session-core             │ │        media-core           │ │         media-recorder             │
-│      (SIP Dialogs, Call Flow)      │◄┤   (Media Mixing, Codecs)    │◄┤      (Recording & Analytics)       │
-│                                    │ │                             │ │                                    │
-│ ┌────────────────────────────────┐ │ │┌───────────────────────────┐│ │┌──────────────────────────────────┐│
-│ │        Dialog Management       │ │ ││      Media Pipeline       ││ ││         Capture Engine           ││
-│ └────────────────────────────────┘ │ │└───────────────────────────┘│ │└──────────────────────────────────┘│
-│                                    │ │┌───────────────────────────┐│ │┌──────────────────────────────────┐│
-│                                    │ ││    Multi-Modal Engine     ││ ││      Standards Compliance        ││
-│                                    │ │└───────────────────────────┘│ ││      (SIPrec, vCon)              ││
-│                                    │ │┌───────────────────────────┐│ │└──────────────────────────────────┘│
-│                                    │ ││    Stream Management      ││ │┌──────────────────────────────────┐│
-│                                    │ │└───────────────────────────┘│ ││        Analysis Pipeline         ││
-│                                    │ │                             │ │└──────────────────────────────────┘│
-└──────────────────┬─────────────────┘ └─────────────┬───────────────┘ └───────────────────┬────────────────┘
-                   │                                 │                                     │
-                   ▼                                 ▼                                     │
-┌──────────────────────────────────┐     ┌────────────────────────────────┐     ┌────────────────────────────────┐
-│        transaction-core          │     │          ai-engine             │     │            rtp-core            │
-│      (SIP State Machine)         │     │    (Intelligent Services)      │     │      (RTP/RTCP Processing)     │
-│                                  │     │                                │     │                                │
-│┌────────────────────────────────┐│     │┌──────────────────────────────┐│     │┌──────────────────────────────┐│
-││    Transaction Processing      ││     ││     Speech Processing        ││     ││      Packet Handling         ││
-│└────────────────────────────────┘│     │└──────────────────────────────┘│     │└──────────────────────────────┘│
-└──────────────────┬───────────────┘     │┌──────────────────────────────┐│     └─────────────┬──────────────────┘
-                   │                      ││    Intelligent Routing      ││                    │
-                   │                      │└──────────────────────────────┘│                    │
-                   │                      │┌──────────────────────────────┐│                    │
-                   │                      ││    Media Intelligence        ││                    │
-                   │                      │└──────────────────────────────┘│                    │
-                   │                      └──────────────────┬─────────────┘                    │
-                   │                                         │                                  │
-┌──────────────────▼─────────────────────────────────────────▼──────────────────────────────────▼───────────────┐
-│                                                                                                         │
-│  ┌────────────────────────────────────┐      ┌────────────────────────────────┐     ┌─────────────────┐ │
-│  │          sip-transport             │      │        Media Transport          │     │     Storage     │ │
-│  │     (UDP, TCP, TLS, WebSockets)    │      │      (Socket Management)        │     │     Service     │ │
-│  └────────────────────────────────────┘      └────────────────────────────────┘     └─────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                        infra-common                                                 │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ┌─────────────────────┐ ┌─────────────────────┐ ┌───────────────────────────┐ ┌───────────────────┐ │
-│ │      Event Bus      │ │    Configuration    │ │   Lifecycle Management    │ │      Logging      │ │
-│ └─────────────────────┘ └─────────────────────┘ └───────────────────────────┘ └───────────────────┘ │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ┌───────────────────────────────────────────────────────────────────────────────────────────────┐   │
-│ │                                   Connection Pool Management                                   │   │
-│ │ ┌─────────────────────────────────────┐                    ┌─────────────────────────────────┐│   │
-│ │ │          QUIC Connection            │                    │         UDP Socket Pool         ││   │
-│ │ │               Pool                  │                    │      (for RTP/RTCP media)       ││   │
-│ │ └─────────────────────────────────────┘                    └─────────────────────────────────┘│   │
-│ └───────────────────────────────────────────────────────────────────────────────────────────────┘   │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ┌─────────────────────┐ ┌─────────────────────┐ ┌───────────────────────────┐                       │
-│ │    Rate Limiting    │ │   Circuit Breakers  │ │    Resource Monitoring    │                       │
-│ └─────────────────────┘ └─────────────────────┘ └───────────────────────────┘                       │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-        ▲                                                       ▲
-        │                                                       │
-        │ QUIC/TLS (Signaling, Control)                         │ UDP (Real-time Media)
-        │ - Multiplexed streams                                 │ - Low latency
-        │ - Reliability                                         │ - Minimal overhead
-        │ - Connection migration                                │
-        ▼                                                       ▼
-
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                      External Networks                                              │
-│                         (Public Internet, Carrier Networks, Local)                                  │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                        │
+├─────────────────────────────────────────────────────────────┤
+│  sip-client                    │  call-engine               │
+│  (High-level API)              │  (Call orchestration)     │
+├────────────────────────────────┼────────────────────────────┤
+│                session-core                                 │
+│           (SIP Sessions + RTP Media Coordination)           │
+├────────────────────────────────┼────────────────────────────┤
+│  transaction-core              │  rtp-core    │  ice-core   │
+│  (SIP transactions)            │  (RTP/RTCP)  │  (ICE/STUN) │
+├────────────────────────────────┼──────────────┼─────────────┤
+│  sip-transport                 │  media-core               │
+│  (UDP/TCP/TLS/WebSocket)       │  (Media processing)       │
+├────────────────────────────────┤                           │
+│  sip-core                      │                           │
+│  (Message parsing)             │                           │
+└────────────────────────────────┴───────────────────────────┘
 ```
 
-## Library Structure
+## Current Library Structure
 
-The project is organized into these primary crates:
+**Corrected Dependencies (session-core as integration layer):**
 
-- **sip-core**: SIP message parsing, serialization, URI handling
-- **sip-transport**: UDP, TCP, TLS, WebSocket transport layers for SIP
-- **transaction-core**: SIP transaction layer (RFC 3261 client/server transactions)
-- **session-core**: Dialog management, SDP handling, state machines
-- **rtp-core**: RTP/RTCP packet processing
-- **media-core**: Codec management, media handling, formats
-- **media-recorder**: Media recording, analysis, and standards compliance (SIPrec, vCon)
-- **storage-service**: Distributed storage for media recordings, metadata, and analytics
-- **call-engine**: Call routing, policy enforcement, application logic
-- **ai-engine**: AI agent framework for call assistance, routing intelligence, and media analysis
-- **sip-client**: High-level client library for SIP applications
-- **api-server**: External control API (REST/gRPC/WebSocket)
-- **infra-common**: Shared infrastructure for cross-cutting concerns (events, configuration, logging, lifecycle management)
-- **examples**: Reference implementations and demos
+### Application Integration Layer:
+- `sip-client` → `call-engine`, `session-core`, `media-core`, `rtp-core`, `ice-core`, `transaction-core`, `sip-transport`, `sip-core`
+- `call-engine` → `session-core`, `media-core`, `rtp-core`, `transaction-core`, `sip-transport`, `sip-core`
+
+### **Central Integration Layer:**
+- **`session-core`** → `transaction-core`, `rtp-core`, `sip-transport`, `sip-core`
+  - *Coordinates SIP signaling (via transaction-core) with RTP media (via rtp-core)*
+  - *Manages complete session lifecycle including both signaling and media*
+
+### Core Protocol Stacks:
+- `transaction-core` → `sip-transport`, `sip-core`
+- `sip-transport` → `sip-core`
+- `sip-core` → (no internal dependencies)
+
+### Media Processing Stack:
+- `media-core` → `rtp-core`, `ice-core`
+- `rtp-core` → (no internal dependencies)
+- `ice-core` → (no internal dependencies)
+
+### Infrastructure:
+- `infra-common` → (standalone, not currently used by other crates)
 
 ## Component Responsibilities
 
-### Top-Level Components
+### Currently Implemented Components
 
-- **Application Layer**: External interfaces for applications to interact with the system, including API servers, client SDKs, and user interfaces.
+#### High-Level Components
 
-- **call-engine**: Manages the high-level call processing logic:
-  - **Call State Machine**: Maintains application-level call states and transitions, abstracts protocol details from applications.
-  - **Service Manager**: Orchestrates call-related services like recording, transcoding, and conferencing. Handles registration, discovery, and chaining of services. Enables dynamic service insertion during active calls. Manages resource allocation for services.
-  - **Regulatory Compliance**: Implements emergency services support (E911), lawful intercept capabilities, and number portability handling.
+- **sip-client**: High-level client library providing unified access to all SIP and media functionality
+- **call-engine**: Manages high-level call processing logic and coordinates between SIP signaling and media processing
 
-### Mid-Level Components
+#### Core Protocol Components
 
-- **session-core**: Manages SIP dialogs and call state:
-  - **Dialog Management**: Tracks dialogs per RFC 3261, handles dialog matching, and manages dialog-related states.
+- **session-core**: Manages SIP dialogs and call state
+  - **Dialog Management**: Tracks dialogs per RFC 3261, handles dialog matching, and manages dialog-related states
 
-- **media-core**: Manages media processing and codec operations:
-  - **Media Pipeline**: Processing chain for media (encoding, decoding, mixing, effects).
-  - **Multi-Modal Engine**: Handles different media types (audio, video, text) with format-specific processing.
-  - **Stream Management**: Controls stream publishing, subscription, and synchronization for different communication patterns.
+- **transaction-core**: Implements the SIP transaction layer
+  - **Transaction Processing**: Handles client and server transactions according to the SIP specification
 
-- **media-recorder**: Handles recording, compliance, and analysis of media:
-  - **Capture Engine**: Records audio, video, text, and screen sharing in various formats.
-  - **Standards Compliance**: Implements SIPrec (SIPREC) and vCon standards for interoperable recording.
-  - **Analysis Pipeline**: Real-time and post-call analysis of media content for transcription, sentiment analysis, etc.
+- **sip-transport**: Manages SIP message transport
+  - **Protocol Transport**: UDP, TCP, TLS, and WebSocket transport implementations
 
-- **transaction-core**: Implements the SIP transaction layer:
-  - **Transaction Processing**: Handles client and server transactions according to the SIP specification.
+- **sip-core**: Core SIP message processing
+  - **Message Parsing**: SIP message parsing, serialization, URI handling, and SDP support
 
-- **ai-engine**: Coordinates AI capabilities within the system:
-  - **Speech Processing**: Provides interfaces for speech recognition, transcription, and generation.
-  - **Intelligent Routing**: Makes context-aware routing decisions based on call analysis.
-  - **Media Intelligence**: Analyzes media for sentiment, intent detection, and conversation insights.
+#### Media Components
 
-- **rtp-core**: Handles RTP/RTCP packet processing:
-  - **Packet Handling**: Processes RTP packets, RTCP reports, and provides media synchronization.
-  - **Media Formats**: Support for multiple payload types including audio codecs (G.711, Opus), video codecs (VP8, H.264), and text (T.140, RTT).
-  - **Bandwidth Management**: Dynamic bitrate adaptation for different network conditions and media types.
+- **media-core**: Manages media processing and codec operations
+  - **Media Pipeline**: Processing chain for media (encoding, decoding, basic mixing)
+  - **Codec Support**: G.711 (PCMU/PCMA), G.722, Opus codec implementations
 
-### Transport Components
+- **rtp-core**: Handles RTP/RTCP packet processing
+  - **Packet Handling**: RTP packet processing, RTCP reports, and media synchronization
+  - **Security**: SRTP support for encrypted media
 
-- **Signaling Transport**: Manages SIP message transport:
-  - **QUIC Transport**: For modern applications, providing multiplexed connections.
-  - **UDP/TCP/TLS**: Legacy transports for compatibility with existing SIP endpoints.
+#### Infrastructure
 
-- **Media Transport**: Manages media packet transport:
-  - **UDP**: Low-latency transport for real-time media.
-  - **QUIC**: For media control and non-real-time operations.
+- **infra-common**: Provides cross-cutting infrastructure
+  - **Event Bus**: Inter-component communication
+  - **Configuration**: Dynamic configuration management
+  - **Lifecycle Management**: Component startup/shutdown coordination
+  - **Logging**: Structured logging and tracing
 
-- **Storage Service**: Persistent storage for media recordings and metadata.
+### Planned Components (Not Yet Implemented)
 
-### Infrastructure Components
+#### Future High-Level Components
 
-- **infra-common**: Provides cross-cutting infrastructure for all components:
-  - **Event Bus**: High-performance (250K+ events/sec) message bus for inter-component communication.
-  - **Configuration**: Dynamic configuration management.
-  - **Lifecycle Management**: Component startup/shutdown coordination.
-  - **Logging**: Structured logging and tracing.
-  - **Connection Pools**: Managed network connection resources with protocol-specific optimizations.
-  - **Rate Limiting**: Traffic control mechanisms.
-  - **Resource Monitoring**: System resource tracking and alerting.
-  - **Storage Services**: Manages persistent data across the platform:
-    - **Object Storage**: Scalable storage for media recordings, files, and large binary data.
-    - **Time Series DB**: Storage for metrics, events, and time-based analytics.
-    - **Metadata Store**: Structured storage for session records, call details, and analytics results.
+- **api-server**: External control API (REST/gRPC/WebSocket) - *directory exists but empty*
+
+#### Future Media & Analysis Components
+
+- **media-recorder**: Media recording, compliance, and analysis
+  - **Capture Engine**: Records audio, video, text, and screen sharing in various formats
+  - **Standards Compliance**: SIPrec (SIPREC) and vCon standards for interoperable recording
+  - **Analysis Pipeline**: Real-time and post-call analysis of media content
+
+- **ai-engine**: AI capabilities coordination
+  - **Speech Processing**: Speech recognition, transcription, and generation interfaces
+  - **Intelligent Routing**: Context-aware routing decisions based on call analysis
+  - **Media Intelligence**: Media analysis for sentiment, intent detection, and conversation insights
+
+#### Future Infrastructure Components
+
+- **storage-service**: Distributed storage for recordings and metadata
+  - **Object Storage**: Scalable storage for media recordings and large binary data
+  - **Time Series DB**: Storage for metrics, events, and time-based analytics
+  - **Metadata Store**: Structured storage for session records and call details
 
 ## State Management Architecture
 
