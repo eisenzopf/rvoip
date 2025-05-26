@@ -571,7 +571,7 @@ pub async fn accept_refresh_request(
     let remote_sdp = if let Ok(content_type) = request.content_type() {
         if content_type == "application/sdp" {
             if let Ok(sdp_str) = std::str::from_utf8(&request.body) {
-                match crate::sdp::SessionDescription::from_str(sdp_str) {
+                match crate::sdp::parse_session_description(sdp_str) {
                     Ok(sdp) => Some(sdp),
                     Err(_) => None
                 }
@@ -1053,8 +1053,7 @@ pub async fn put_call_on_hold(
     // Create a new SDP with sendonly direction
     let updated_sdp = crate::sdp::update_sdp_for_reinvite(
         &current_sdp,
-        None, // Keep the same port
-        Some(rvoip_sip_core::sdp::attributes::MediaDirection::SendOnly)
+        &crate::media::MediaConfig::default(),
     ).map_err(|e| Error::SdpError(
         e.to_string(),
         ErrorContext {
@@ -1064,7 +1063,7 @@ pub async fn put_call_on_hold(
             retryable: false,
             dialog_id: Some(dialog_id.to_string()),
             timestamp: SystemTime::now(),
-            details: Some("Failed to create SDP for hold".to_string()),
+            details: Some("Failed to create SDP for resume".to_string()),
             ..Default::default()
         }
     ))?;
@@ -1151,8 +1150,7 @@ pub async fn resume_held_call(
     // Create a new SDP with sendrecv direction
     let updated_sdp = crate::sdp::update_sdp_for_reinvite(
         &current_sdp,
-        None, // Keep the same port
-        Some(rvoip_sip_core::sdp::attributes::MediaDirection::SendRecv)
+        &crate::media::MediaConfig::default(),
     ).map_err(|e| Error::SdpError(
         e.to_string(),
         ErrorContext {
@@ -1290,6 +1288,8 @@ pub async fn update_codec_preferences(
         match codec_name.to_uppercase().as_str() {
             "PCMU" => audio_codecs.push(AudioCodecType::PCMU),
             "PCMA" => audio_codecs.push(AudioCodecType::PCMA),
+            "G722" => audio_codecs.push(AudioCodecType::G722),
+            "Opus" => audio_codecs.push(AudioCodecType::Opus),
             // Add more codecs as they are supported
             _ => {
                 return Err(Error::SdpError(
@@ -1575,7 +1575,8 @@ pub fn create_sdp_offer_with_transport_info(
         match codec {
             crate::media::AudioCodecType::PCMU => formats.push("0".to_string()),
             crate::media::AudioCodecType::PCMA => formats.push("8".to_string()),
-            // Add more codec mappings as needed
+            crate::media::AudioCodecType::G722 => formats.push("9".to_string()),
+            crate::media::AudioCodecType::Opus => formats.push("111".to_string()),
         }
     }
     

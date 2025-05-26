@@ -181,12 +181,13 @@ impl ClientSessionManager {
         
         // FIXED: Automatically set up media coordination
         let media_config = MediaConfig {
-            local_addr: self.config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
-            remote_addr: None, // Will be set during SDP negotiation
-            media_type: crate::media::MediaType::Audio,
-            payload_type: 0, // Will be negotiated
-            clock_rate: 8000, // Default, will be negotiated
-            audio_codec: crate::media::AudioCodecType::PCMU, // Default, will be negotiated
+            local_addr: "127.0.0.1:10000".parse().unwrap(),
+            remote_addr: None,
+            media_type: crate::media::SessionMediaType::Audio,
+            payload_type: 0,
+            clock_rate: 8000,
+            audio_codec: crate::media::AudioCodecType::PCMU,
+            direction: crate::media::SessionMediaDirection::SendRecv,
         };
         
         // Create media session and associate with SIP session

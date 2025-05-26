@@ -1,250 +1,191 @@
+//! Media Configuration Conversion
+//!
+//! This module provides conversion between session-core media configuration
+//! and media-core configuration types, implementing the coordination layer
+//! between the two systems.
+
 use std::net::SocketAddr;
 use anyhow::Result;
 use tracing::{debug, warn};
 
-// Import media-core components
+use crate::sdp::SdpSession;
+use crate::media::{MediaConfig, AudioCodecType, SessionMediaType, SessionMediaDirection};
+
+// Import media-core types
 use rvoip_media_core::prelude::*;
 
-use crate::sdp::{SessionDescription, SdpDirection};
-use super::{AudioCodecType, MediaConfig, SessionMediaType, SessionMediaDirection};
-
-/// Media configuration converter between session-core and media-core
+/// MediaConfigConverter handles conversion between session-core and media-core types
 pub struct MediaConfigConverter;
 
 impl MediaConfigConverter {
-    /// Convert session-core AudioCodecType to media-core PayloadType
-    pub fn audio_codec_to_payload_type(codec: AudioCodecType) -> PayloadType {
-        match codec {
-            AudioCodecType::PCMU => payload_types::PCMU,
-            AudioCodecType::PCMA => payload_types::PCMA,
-            AudioCodecType::G722 => payload_types::G722,
-            AudioCodecType::Opus => payload_types::OPUS,
-        }
-    }
-    
-    /// Convert media-core PayloadType to session-core AudioCodecType
-    pub fn payload_type_to_audio_codec(payload_type: PayloadType) -> Option<AudioCodecType> {
-        // Note: PayloadType is likely a newtype, so we need to compare differently
-        if payload_type == payload_types::PCMU {
-            Some(AudioCodecType::PCMU)
-        } else if payload_type == payload_types::PCMA {
-            Some(AudioCodecType::PCMA)
-        } else if payload_type == payload_types::G722 {
-            Some(AudioCodecType::G722)
-        } else if payload_type == payload_types::OPUS {
-            Some(AudioCodecType::Opus)
-        } else {
-            None
-        }
-    }
-    
     /// Convert session-core MediaConfig to media-core MediaSessionParams
     pub fn to_media_session_params(config: &MediaConfig) -> MediaSessionParams {
-        let payload_type = Self::audio_codec_to_payload_type(config.audio_codec);
+        debug!("Converting MediaConfig to MediaSessionParams: {:?}", config);
         
         // Create basic audio-only params
-        let mut params = MediaSessionParams::audio_only()
-            .with_preferred_codec(payload_type);
+        let params = MediaSessionParams::audio_only();
         
-        // Try to set sample rate if the method exists
-        if let Ok(sample_rate) = SampleRate::from_hz(config.clock_rate) {
-            // Note: with_sample_rate might not exist, so we'll handle this gracefully
-            // params = params.with_sample_rate(sample_rate);
-        }
+        // Set preferred codec
+        let params = params.with_preferred_codec(config.audio_codec.to_payload_type());
         
+        // Note: Sample rate configuration may not be available in all media-core versions
+        // For now, we'll rely on the codec's default sample rate
+        debug!("Converted to MediaSessionParams");
         params
     }
     
-    /// Create MediaConfig from SDP and codec preferences
-    pub fn from_sdp_negotiation(
-        sdp: &SessionDescription, 
+    /// Convert media-core codec info to session-core AudioCodecType
+    pub fn from_payload_type(payload_type: u8) -> AudioCodecType {
+        match payload_type {
+            0 => AudioCodecType::PCMU,
+            8 => AudioCodecType::PCMA,
+            9 => AudioCodecType::G722,
+            111 => AudioCodecType::Opus,
+            _ => {
+                warn!("Unknown payload type {}, defaulting to PCMU", payload_type);
+                AudioCodecType::PCMU
+            }
+        }
+    }
+    
+    /// Create MediaConfig from SDP session and local preferences
+    pub fn from_sdp_session(
+        sdp: &SdpSession,
+        local_addr: SocketAddr,
         preferred_codec: AudioCodecType,
-        local_addr: SocketAddr
     ) -> Result<MediaConfig> {
-        debug!("Creating MediaConfig from SDP negotiation");
+        debug!("Creating MediaConfig from SDP session");
         
-        // Extract media information from SDP
-        let (rtp_port, remote_addr, direction) = Self::extract_media_info_from_sdp(sdp)?;
+        // Get first media description (typically audio)
+        let media_desc = sdp.media_descriptions.first()
+            .ok_or_else(|| anyhow::anyhow!("No media description found in SDP"))?;
         
-        // Create local address with extracted or default port
-        let local_media_addr = SocketAddr::new(local_addr.ip(), rtp_port.unwrap_or(10000));
+        // Extract remote port
+        let remote_port = media_desc.port;
         
-        let config = MediaConfig {
-            local_addr: local_media_addr,
-            remote_addr,
-            media_type: SessionMediaType::Audio,
-            payload_type: Self::audio_codec_to_payload_type(preferred_codec).0,
-            clock_rate: preferred_codec.clock_rate(),
-            audio_codec: preferred_codec,
-            direction: direction.unwrap_or(SessionMediaDirection::SendRecv),
+        // Extract connection address
+        let connection_addr = if let Some(ref conn) = media_desc.connection_info {
+            conn.connection_address.clone()
+        } else {
+            sdp.connection_info.as_ref()
+                .map(|c| c.connection_address.clone())
+                .unwrap_or_else(|| "127.0.0.1".to_string())
         };
         
-        debug!("Created MediaConfig from SDP: {:?}", config);
+        // Create remote address
+        let remote_addr: SocketAddr = format!("{}:{}", connection_addr, remote_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse remote address: {}", e))?;
+        
+        // Extract payload type from formats
+        let payload_type = media_desc.formats.first()
+            .and_then(|f| f.parse::<u8>().ok())
+            .unwrap_or(preferred_codec.to_payload_type());
+        
+        // Determine actual codec
+        let audio_codec = Self::from_payload_type(payload_type);
+        
+        // Extract media direction
+        let direction = media_desc.direction
+            .map(|d| match d {
+                rvoip_sip_core::sdp::attributes::MediaDirection::SendRecv => SessionMediaDirection::SendRecv,
+                rvoip_sip_core::sdp::attributes::MediaDirection::SendOnly => SessionMediaDirection::SendOnly,
+                rvoip_sip_core::sdp::attributes::MediaDirection::RecvOnly => SessionMediaDirection::RecvOnly,
+                rvoip_sip_core::sdp::attributes::MediaDirection::Inactive => SessionMediaDirection::Inactive,
+            })
+            .unwrap_or(SessionMediaDirection::SendRecv);
+        
+        let config = MediaConfig {
+            local_addr,
+            remote_addr: Some(remote_addr),
+            media_type: SessionMediaType::Audio,
+            payload_type,
+            clock_rate: audio_codec.clock_rate(),
+            audio_codec,
+            direction,
+        };
+        
+        debug!("Created MediaConfig: {:?}", config);
         Ok(config)
     }
     
-    /// Extract media information from SDP
-    fn extract_media_info_from_sdp(sdp: &SessionDescription) -> Result<(Option<u16>, Option<SocketAddr>, Option<SessionMediaDirection>)> {
-        debug!("Extracting media info from SDP");
-        
-        // For now, we'll use a simplified approach since SessionDescription structure is complex
-        // TODO: Implement proper SDP parsing using the SessionDescription fields
-        
-        // Return defaults for now
-        Ok((Some(10000), None, Some(SessionMediaDirection::SendRecv)))
-    }
-    
-    /// Create SDP offer for outgoing calls
-    pub fn create_sdp_offer(
-        config: &MediaConfig,
-        session_id: u64,
-        session_version: u64
-    ) -> Result<SessionDescription> {
-        debug!("Creating SDP offer for config: {:?}", config);
-        
-        // For now, create a basic SDP structure
-        // TODO: Use proper SDP builder from sip-core
-        
-        let sdp_content = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP {}\r\n\
-             a=rtpmap:{} {}/{}\r\n\
-             a={}\r\n",
-            session_id,
-            session_version,
-            config.local_addr.ip(),
-            config.local_addr.ip(),
-            config.local_addr.port(),
-            config.payload_type,
-            config.payload_type,
-            Self::get_codec_name(config.audio_codec),
-            config.clock_rate,
-            Self::direction_to_sdp_attribute(config.direction)
-        );
-        
-        // Parse the SDP content into SessionDescription
-        // TODO: Use proper SDP parsing
-        let sdp = crate::sdp::SessionDescription::from_str(&sdp_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse SDP: {}", e))?;
-        
-        debug!("Created SDP offer");
-        Ok(sdp)
-    }
-    
-    /// Create SDP answer for incoming calls
-    pub fn create_sdp_answer(
-        config: &MediaConfig,
-        offer_sdp: &SessionDescription,
-        session_id: u64,
-        session_version: u64
-    ) -> Result<SessionDescription> {
-        debug!("Creating SDP answer for config: {:?}", config);
-        
-        // For now, create a basic SDP answer
-        // TODO: Implement proper SDP answer generation based on offer
-        
-        let sdp_content = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP {}\r\n\
-             a=rtpmap:{} {}/{}\r\n\
-             a={}\r\n",
-            session_id,
-            session_version,
-            config.local_addr.ip(),
-            config.local_addr.ip(),
-            config.local_addr.port(),
-            config.payload_type,
-            config.payload_type,
-            Self::get_codec_name(config.audio_codec),
-            config.clock_rate,
-            Self::direction_to_sdp_attribute(config.direction)
-        );
-        
-        // Parse the SDP content into SessionDescription
-        let sdp = crate::sdp::SessionDescription::from_str(&sdp_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse SDP: {}", e))?;
-        
-        debug!("Created SDP answer");
-        Ok(sdp)
-    }
-    
-    /// Get codec name for SDP rtpmap
-    fn get_codec_name(codec: AudioCodecType) -> &'static str {
-        match codec {
-            AudioCodecType::PCMU => "PCMU",
-            AudioCodecType::PCMA => "PCMA",
-            AudioCodecType::G722 => "G722",
-            AudioCodecType::Opus => "opus",
+    /// Create default MediaConfig for outgoing calls
+    pub fn create_default_outgoing(local_addr: SocketAddr) -> MediaConfig {
+        MediaConfig {
+            local_addr,
+            remote_addr: None, // Will be set after SDP answer
+            media_type: SessionMediaType::Audio,
+            payload_type: 0, // PCMU
+            clock_rate: 8000,
+            audio_codec: AudioCodecType::PCMU,
+            direction: SessionMediaDirection::SendRecv,
         }
     }
     
-    /// Convert SessionMediaDirection to SDP direction attribute
-    fn direction_to_sdp_attribute(direction: SessionMediaDirection) -> &'static str {
+    /// Create MediaConfig for incoming calls from SDP offer
+    pub fn create_for_incoming(
+        offer_sdp: &SdpSession,
+        local_addr: SocketAddr,
+    ) -> Result<MediaConfig> {
+        Self::from_sdp_session(offer_sdp, local_addr, AudioCodecType::PCMU)
+    }
+    
+    /// Update MediaConfig with SDP answer
+    pub fn update_with_answer(
+        mut config: MediaConfig,
+        answer_sdp: &SdpSession,
+    ) -> Result<MediaConfig> {
+        debug!("Updating MediaConfig with SDP answer");
+        
+        // Extract remote address from answer
+        let media_desc = answer_sdp.media_descriptions.first()
+            .ok_or_else(|| anyhow::anyhow!("No media description in SDP answer"))?;
+        
+        let remote_port = media_desc.port;
+        let connection_addr = if let Some(ref conn) = media_desc.connection_info {
+            conn.connection_address.clone()
+        } else {
+            answer_sdp.connection_info.as_ref()
+                .map(|c| c.connection_address.clone())
+                .unwrap_or_else(|| "127.0.0.1".to_string())
+        };
+        
+        let remote_addr: SocketAddr = format!("{}:{}", connection_addr, remote_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse remote address from answer: {}", e))?;
+        
+        config.remote_addr = Some(remote_addr);
+        
+        // Update codec if different in answer
+        if let Some(format) = media_desc.formats.first() {
+            if let Ok(payload_type) = format.parse::<u8>() {
+                config.payload_type = payload_type;
+                config.audio_codec = Self::from_payload_type(payload_type);
+                config.clock_rate = config.audio_codec.clock_rate();
+            }
+        }
+        
+        debug!("Updated MediaConfig: {:?}", config);
+        Ok(config)
+    }
+    
+    /// Convert media direction between session-core and media-core
+    pub fn convert_direction_to_media_core(direction: SessionMediaDirection) -> rvoip_media_core::MediaDirection {
         match direction {
-            SessionMediaDirection::SendRecv => "sendrecv",
-            SessionMediaDirection::SendOnly => "sendonly",
-            SessionMediaDirection::RecvOnly => "recvonly",
-            SessionMediaDirection::Inactive => "inactive",
+            SessionMediaDirection::SendRecv => rvoip_media_core::MediaDirection::SendRecv,
+            SessionMediaDirection::SendOnly => rvoip_media_core::MediaDirection::SendOnly,
+            SessionMediaDirection::RecvOnly => rvoip_media_core::MediaDirection::RecvOnly,
+            SessionMediaDirection::Inactive => rvoip_media_core::MediaDirection::Inactive,
         }
     }
     
-    /// Convert SDP direction to SessionMediaDirection
-    pub fn sdp_direction_to_media_direction(sdp_direction: SdpDirection) -> SessionMediaDirection {
-        // Note: SdpDirection in session-core is different (Outgoing/Incoming)
-        // For now, default to SendRecv
-        SessionMediaDirection::SendRecv
-    }
-    
-    /// Convert SessionMediaDirection to SDP direction
-    pub fn media_direction_to_sdp_direction(media_direction: SessionMediaDirection) -> SdpDirection {
-        // Note: SdpDirection in session-core is different (Outgoing/Incoming)
-        // For now, default to Outgoing
-        SdpDirection::Outgoing
-    }
-    
-    /// Negotiate codec from SDP offer and supported codecs
-    pub fn negotiate_codec_from_sdp(
-        offer_sdp: &SessionDescription,
-        supported_codecs: &[PayloadType]
-    ) -> Result<AudioCodecType> {
-        debug!("Negotiating codec from SDP offer");
-        
-        // For now, default to PCMU
-        // TODO: Implement proper codec negotiation
-        warn!("Codec negotiation not fully implemented, defaulting to PCMU");
-        Ok(AudioCodecType::PCMU)
-    }
-    
-    /// Validate media configuration
-    pub fn validate_config(config: &MediaConfig) -> Result<()> {
-        debug!("Validating media config: {:?}", config);
-        
-        // Validate port range
-        if config.local_addr.port() < 1024 {
-            return Err(anyhow::anyhow!("Local port {} is in reserved range", config.local_addr.port()));
+    /// Convert media direction from media-core to session-core
+    pub fn convert_direction_from_media_core(direction: rvoip_media_core::MediaDirection) -> SessionMediaDirection {
+        match direction {
+            rvoip_media_core::MediaDirection::SendRecv => SessionMediaDirection::SendRecv,
+            rvoip_media_core::MediaDirection::SendOnly => SessionMediaDirection::SendOnly,
+            rvoip_media_core::MediaDirection::RecvOnly => SessionMediaDirection::RecvOnly,
+            rvoip_media_core::MediaDirection::Inactive => SessionMediaDirection::Inactive,
         }
-        
-        // Validate clock rate
-        let expected_clock_rate = config.audio_codec.clock_rate();
-        if config.clock_rate != expected_clock_rate {
-            warn!("Clock rate {} doesn't match expected {} for codec {:?}", 
-                  config.clock_rate, expected_clock_rate, config.audio_codec);
-        }
-        
-        // Validate payload type range
-        if config.payload_type > 127 {
-            return Err(anyhow::anyhow!("Payload type {} is out of valid range (0-127)", config.payload_type));
-        }
-        
-        debug!("Media config validation passed");
-        Ok(())
     }
 } 

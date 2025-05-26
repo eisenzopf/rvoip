@@ -1103,8 +1103,8 @@ impl SessionManager {
                             "transfer_id": transfer_id.to_string(),
                             "metrics": {
                                 "jitter": metrics.jitter_ms,
-                                "packet_loss": metrics.packet_loss_rate,
-                                "rtt": metrics.round_trip_time_ms
+                                "packet_loss": metrics.packet_loss,
+                                "rtt": metrics.rtt_ms
                             }
                         }),
                     };

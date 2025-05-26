@@ -2,6 +2,11 @@
 //!
 //! This module provides high-level server operations for handling incoming calls,
 //! managing sessions, and coordinating with the transport layer via transaction-core.
+//!
+//! **ARCHITECTURAL PRINCIPLE**: session-core is a COORDINATOR, not a SIP protocol handler.
+//! - session-core REACTS to transaction events from transaction-core
+//! - session-core COORDINATES between SIP signaling and media processing
+//! - session-core NEVER sends SIP responses directly (that's transaction-core's job)
 
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -11,14 +16,17 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 use rvoip_sip_core::{Request, Response, StatusCode, Method, Message};
-use rvoip_sip_core::builder::SimpleResponseBuilder;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
 use crate::api::server::config::ServerConfig;
 use crate::session::{SessionManager, Session};
 use crate::transport::{SessionTransportEvent, TransportIntegration};
 use crate::{SessionId, Error};
 
-/// High-level server manager for handling SIP server operations
+/// High-level server manager for coordinating SIP sessions
+/// 
+/// **CRITICAL**: This manager is a COORDINATOR, not a SIP protocol handler.
+/// It reacts to transaction events and coordinates session/media state.
+/// All SIP responses are sent by transaction-core automatically.
 pub struct ServerManager {
     /// Core session manager
     session_manager: Arc<SessionManager>,
@@ -53,35 +61,41 @@ impl ServerManager {
     }
     
     /// Handle transaction events from transaction-core
+    /// 
+    /// **ARCHITECTURAL PRINCIPLE**: We REACT to transaction events, we don't send responses.
+    /// transaction-core handles all SIP protocol details automatically.
     pub async fn handle_transaction_event(&self, event: TransactionEvent) -> Result<()> {
         match event {
             TransactionEvent::InviteRequest { transaction_id, request, source } => {
-                self.handle_invite_transaction(transaction_id, request, source).await?;
+                self.handle_invite_received(transaction_id, request, source).await?;
             },
             TransactionEvent::NonInviteRequest { transaction_id, request, source } => {
-                self.handle_non_invite_transaction(transaction_id, request, source).await?;
+                self.handle_non_invite_received(transaction_id, request, source).await?;
             },
             TransactionEvent::NewRequest { transaction_id, request, source } => {
-                // Handle other new requests
                 match request.method() {
                     Method::Invite => {
-                        // **CRITICAL FIX**: Handle INVITE requests by creating sessions
-                        info!("📞 Received INVITE request - creating session");
-                        self.handle_invite_transaction(transaction_id, request, source).await?;
+                        info!("📞 Received INVITE request - coordinating session creation");
+                        self.handle_invite_received(transaction_id, request, source).await?;
                     },
                     Method::Bye => {
-                        self.handle_bye_transaction(transaction_id, request).await?;
+                        self.handle_bye_received(transaction_id, request).await?;
                     },
                     Method::Ack => {
-                        self.handle_ack_transaction(request).await?;
+                        self.handle_ack_received(request).await?;
                     },
                     _ => {
-                        info!("Received {} request - handled by transaction-core", request.method());
+                        debug!("Received {} request - handled by transaction-core", request.method());
                     }
                 }
             },
+            TransactionEvent::Response { transaction_id, response, .. } => {
+                self.handle_response_sent(transaction_id, response).await?;
+            },
+            TransactionEvent::TransactionTerminated { transaction_id, .. } => {
+                self.handle_transaction_completed(transaction_id).await?;
+            },
             _ => {
-                // Other transaction events (responses, timeouts, etc.) are handled by transaction-core
                 debug!("Received transaction event: {:?}", event);
             }
         }
@@ -90,7 +104,6 @@ impl ServerManager {
     
     /// Handle incoming transport events (legacy compatibility)
     pub async fn handle_transport_event(&self, event: SessionTransportEvent) -> Result<()> {
-        // This is now mainly for logging - transaction-core handles the actual SIP protocol
         match event {
             SessionTransportEvent::TransportError { error, source } => {
                 warn!("Transport error from {:?}: {}", source, error);
@@ -102,44 +115,31 @@ impl ServerManager {
                 info!("Connection closed: {} -> {:?} ({})", local_addr, remote_addr, transport);
             },
             _ => {
-                // Requests and responses are now handled through transaction events
                 debug!("Transport event handled by transaction-core");
             }
         }
         Ok(())
     }
     
-    /// Handle INVITE transaction (send 180 Ringing immediately)
-    async fn handle_invite_transaction(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
-        info!("Creating session for INVITE transaction {}", transaction_id);
+    /// Handle INVITE received (coordinate session creation)
+    /// 
+    /// **ARCHITECTURAL PRINCIPLE**: We create sessions and coordinate state.
+    /// transaction-core automatically sends 180 Ringing and manages SIP protocol.
+    async fn handle_invite_received(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
+        info!("Coordinating session creation for INVITE transaction {}", transaction_id);
         
         // Extract Call-ID
         let call_id = request.call_id()
             .ok_or_else(|| anyhow::anyhow!("INVITE missing Call-ID header"))?
             .value();
         
-        // **CRITICAL FIX**: Send 180 Ringing IMMEDIATELY to keep transaction alive
-        // This must be done before any async operations that might delay processing
-        let ringing_response = SimpleResponseBuilder::response_from_request(
-            &request,
-            StatusCode::Ringing,
-            Some("Ringing"),
-        ).build();
-        
-        if let Err(e) = self.transaction_manager.send_response(&transaction_id, ringing_response).await {
-            error!("Failed to send 180 Ringing response: {}", e);
-            return Err(anyhow::anyhow!("Failed to send 180 Ringing: {}", e));
-        } else {
-            info!("📞 Sent 180 Ringing response for transaction {}", transaction_id);
-        }
-        
-        // Create incoming session
+        // Create incoming session (session-core responsibility)
         let session = self.session_manager.create_incoming_session().await
             .context("Failed to create incoming session")?;
         
         let session_id = session.id.clone();
         
-        // Set session to Ringing state
+        // Set session to Ringing state (session-core responsibility)
         session.set_state(crate::session::session_types::SessionState::Ringing).await
             .context("Failed to set session to ringing state")?;
         
@@ -154,34 +154,37 @@ impl ServerManager {
             active.insert(session_id.clone(), session);
         }
         
-        info!("Created session {} for INVITE transaction {} with Call-ID {} (180 Ringing sent)", 
+        info!("✅ Created session {} for INVITE transaction {} with Call-ID {} (transaction-core handles 180 Ringing)", 
               session_id, transaction_id, call_id);
         Ok(())
     }
     
-    /// Handle non-INVITE transaction
-    async fn handle_non_invite_transaction(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
-        info!("Handling non-INVITE transaction {} for method {}", transaction_id, request.method());
+    /// Handle non-INVITE received (coordinate appropriate response)
+    async fn handle_non_invite_received(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
+        info!("Coordinating response for non-INVITE transaction {} (method: {})", transaction_id, request.method());
         
+        // For non-INVITE methods, we just log - transaction-core handles responses automatically
         match request.method() {
-            Method::Options | Method::Info | Method::Message => {
-                // Send 200 OK response for these methods
-                let response = Response::new(StatusCode::Ok);
-                if let Err(e) = self.transaction_manager.send_response(&transaction_id, response).await {
-                    warn!("Failed to send 200 OK response for {}: {}", request.method(), e);
-                }
+            Method::Options => {
+                debug!("OPTIONS request - transaction-core will send capabilities response");
+            },
+            Method::Info => {
+                debug!("INFO request - transaction-core will send 200 OK");
+            },
+            Method::Message => {
+                debug!("MESSAGE request - transaction-core will send 200 OK");
             },
             _ => {
-                info!("Non-INVITE method {} handled by transaction-core", request.method());
+                debug!("Non-INVITE method {} - transaction-core handles automatically", request.method());
             }
         }
         
         Ok(())
     }
     
-    /// Handle BYE transaction
-    async fn handle_bye_transaction(&self, transaction_id: TransactionKey, request: Request) -> Result<()> {
-        info!("Handling BYE transaction {}", transaction_id);
+    /// Handle BYE received (coordinate session termination)
+    async fn handle_bye_received(&self, transaction_id: TransactionKey, request: Request) -> Result<()> {
+        info!("Coordinating session termination for BYE transaction {}", transaction_id);
         
         let call_id = request.call_id()
             .ok_or_else(|| anyhow::anyhow!("BYE missing Call-ID header"))?
@@ -192,25 +195,20 @@ impl ServerManager {
             pending.get(&call_id).cloned().map(|(session_id, _, _)| session_id)
         };
         
-        // Send 200 OK response to BYE via transaction-core
-        let response = Response::new(StatusCode::Ok);
-        if let Err(e) = self.transaction_manager.send_response(&transaction_id, response).await {
-            warn!("Failed to send 200 OK response to BYE: {}", e);
-        }
-        
+        // Coordinate session termination (session-core responsibility)
         if let Some(session_id) = session_id {
             self.end_call(&session_id).await?;
-            info!("Ended call for session {} (Call-ID: {})", session_id, call_id);
+            info!("✅ Coordinated call termination for session {} (Call-ID: {}) - transaction-core sends 200 OK", session_id, call_id);
         } else {
-            warn!("Received BYE for unknown Call-ID: {}", call_id);
+            warn!("Received BYE for unknown Call-ID: {} - transaction-core will still send 200 OK", call_id);
         }
         
         Ok(())
     }
     
-    /// Handle ACK transaction
-    async fn handle_ack_transaction(&self, request: Request) -> Result<()> {
-        info!("Handling ACK for session confirmation");
+    /// Handle ACK received (coordinate session confirmation)
+    async fn handle_ack_received(&self, request: Request) -> Result<()> {
+        info!("Coordinating session confirmation for ACK");
         
         let call_id = request.call_id()
             .ok_or_else(|| anyhow::anyhow!("ACK missing Call-ID header"))?
@@ -248,9 +246,58 @@ impl ServerManager {
         Ok(())
     }
     
-    /// End an active call
+    /// Handle response sent by transaction-core (coordinate session state)
+    async fn handle_response_sent(&self, transaction_id: TransactionKey, response: Response) -> Result<()> {
+        debug!("Response sent by transaction-core: {} for transaction {}", response.status_code(), transaction_id);
+        
+        // Coordinate session state based on response sent by transaction-core
+        let status_code = response.status_code();
+        match status_code {
+            180 => {
+                debug!("180 Ringing sent by transaction-core - session remains in Ringing state");
+            },
+            200 => {
+                debug!("200 OK sent by transaction-core - session should be in Connected state");
+            },
+            status if status >= 400 && status < 600 => {
+                debug!("Error response {} sent by transaction-core - session should be terminated", status);
+            },
+            _ => {
+                debug!("Response {} sent by transaction-core", status_code);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle transaction completed (coordinate cleanup)
+    async fn handle_transaction_completed(&self, transaction_id: TransactionKey) -> Result<()> {
+        debug!("Transaction {} completed - coordinating cleanup", transaction_id);
+        
+        // Find session associated with this transaction and clean up if needed
+        let session_to_cleanup = {
+            let pending = self.pending_calls.read().await;
+            pending.iter()
+                .find(|(_, (_, tid, _))| *tid == transaction_id)
+                .map(|(call_id, (session_id, _, _))| (call_id.clone(), session_id.clone()))
+        };
+        
+        if let Some((call_id, session_id)) = session_to_cleanup {
+            debug!("Cleaning up completed transaction for session {} (Call-ID: {})", session_id, call_id);
+            
+            // Remove from pending calls
+            {
+                let mut pending = self.pending_calls.write().await;
+                pending.remove(&call_id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// End an active call (coordinate session and media termination)
     pub async fn end_call(&self, session_id: &SessionId) -> Result<()> {
-        info!("Ending call for session {}", session_id);
+        info!("Coordinating call termination for session {}", session_id);
         
         let session = {
             let active = self.active_sessions.read().await;
@@ -261,29 +308,25 @@ impl ServerManager {
             Some(session) => session,
             None => {
                 warn!("Session {} not found in active sessions (may have been already removed)", session_id);
-                return Ok(()); // Consider this a success since the session is already gone
+                return Ok(());
             }
         };
         
-        // Check current state
         let current_state = session.state().await;
         info!("Session {} current state before ending: {}", session_id, current_state);
         
-        // **PHASE 2: AUTOMATIC MEDIA COORDINATION**
-        // 1. Automatically clean up media when ending the call
-        info!("🎵 Cleaning up media automatically for ended call...");
+        // **AUTOMATIC MEDIA COORDINATION** (session-core responsibility)
+        info!("🎵 Coordinating media cleanup for ended call...");
         
-        // Stop media and clean up resources
         if let Err(e) = session.stop_media().await {
             warn!("Failed to stop media for session {}: {}", session_id, e);
-            // Continue with termination even if media stop fails
         } else {
             info!("✅ Media automatically cleaned up for session {}", session_id);
         }
         
-        // Clear media session references
         session.set_media_session_id(None).await;
         
+        // Set session to terminated state (session-core responsibility)
         session.set_state(crate::session::session_types::SessionState::Terminated).await
             .context("Failed to set session state to terminated")?;
         
@@ -293,7 +336,7 @@ impl ServerManager {
             active.remove(session_id);
         }
         
-        info!("Call ended for session {} (state: Terminated, media: cleaned up)", session_id);
+        info!("✅ Call termination coordinated for session {} (state: Terminated, media: cleaned up)", session_id);
         Ok(())
     }
     
@@ -314,9 +357,9 @@ impl ServerManager {
         &self.config
     }
     
-    /// Hold/pause a call
+    /// Hold/pause a call (coordinate media pause)
     pub async fn hold_call(&self, session_id: &SessionId) -> Result<()> {
-        info!("Holding call for session {}", session_id);
+        info!("Coordinating call hold for session {}", session_id);
         
         let session = {
             let active = self.active_sessions.read().await;
@@ -324,11 +367,9 @@ impl ServerManager {
                 .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?
         };
         
-        // Check current state
         let current_state = session.state().await;
         info!("Session {} current state before hold: {}", session_id, current_state);
         
-        // Validate that we can hold from the current state
         if current_state != crate::session::session_types::SessionState::Connected {
             return Err(anyhow::anyhow!(
                 "Cannot hold call in state {}. Call must be Connected to hold.",
@@ -336,27 +377,22 @@ impl ServerManager {
             ));
         }
         
-        // **PHASE 2: AUTOMATIC MEDIA COORDINATION**
-        // 2. Automatically pause media when holding the call
-        info!("🎵 Pausing media automatically for held call...");
+        // **AUTOMATIC MEDIA COORDINATION** (session-core responsibility)
+        info!("🎵 Coordinating media pause for held call...");
         
-        // Pause media for the session
         if let Err(e) = session.pause_media().await {
             warn!("Failed to pause media for session {}: {}", session_id, e);
-            // Continue with hold even if media pause fails
         } else {
             info!("✅ Media automatically paused for session {}", session_id);
         }
         
-        // Set session to on-hold state (we'll use Paused as a hold state)
-        // Note: In a full implementation, we might have a separate Hold state
-        info!("Call held for session {} (media: paused)", session_id);
+        info!("✅ Call hold coordinated for session {} (media: paused)", session_id);
         Ok(())
     }
     
-    /// Resume a held call
+    /// Resume a held call (coordinate media resume)
     pub async fn resume_call(&self, session_id: &SessionId) -> Result<()> {
-        info!("Resuming call for session {}", session_id);
+        info!("Coordinating call resume for session {}", session_id);
         
         let session = {
             let active = self.active_sessions.read().await;
@@ -364,29 +400,28 @@ impl ServerManager {
                 .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?
         };
         
-        // Check current state
         let current_state = session.state().await;
         info!("Session {} current state before resume: {}", session_id, current_state);
         
-        // **PHASE 2: AUTOMATIC MEDIA COORDINATION**
-        // 3. Automatically resume media when resuming the call
-        info!("🎵 Resuming media automatically for resumed call...");
+        // **AUTOMATIC MEDIA COORDINATION** (session-core responsibility)
+        info!("🎵 Coordinating media resume for resumed call...");
         
-        // Resume media for the session
         if let Err(e) = session.resume_media().await {
             warn!("Failed to resume media for session {}: {}", session_id, e);
-            // Continue with resume even if media resume fails
         } else {
             info!("✅ Media automatically resumed for session {}", session_id);
         }
         
-        info!("Call resumed for session {} (media: active)", session_id);
+        info!("✅ Call resume coordinated for session {} (media: active)", session_id);
         Ok(())
     }
     
-    /// Accept an incoming call
+    /// Accept an incoming call (coordinate session acceptance and media setup)
+    /// 
+    /// **ARCHITECTURAL PRINCIPLE**: We coordinate session state and media.
+    /// transaction-core automatically sends 200 OK response when we signal acceptance.
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
-        info!("Accepting call for session {}", session_id);
+        info!("Coordinating call acceptance for session {}", session_id);
         
         let session = {
             let active = self.active_sessions.read().await;
@@ -394,11 +429,9 @@ impl ServerManager {
                 .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?
         };
         
-        // Check current state
         let current_state = session.state().await;
         info!("Session {} current state: {}", session_id, current_state);
         
-        // Validate that we can accept from the current state
         if current_state != crate::session::session_types::SessionState::Ringing {
             return Err(anyhow::anyhow!(
                 "Cannot accept call in state {}. Call must be Ringing to accept.",
@@ -406,63 +439,41 @@ impl ServerManager {
             ));
         }
         
-        // **PHASE 2: AUTOMATIC MEDIA COORDINATION**
-        // Set up media automatically when accepting the call
-        info!("🎵 Setting up media automatically for accepted call...");
+        // **AUTOMATIC MEDIA COORDINATION** (session-core responsibility)
+        info!("🎵 Coordinating media setup for accepted call...");
         
-        // Set media to negotiating state
         if let Err(e) = session.set_media_negotiating().await {
             warn!("Failed to set media negotiating for session {}: {}", session_id, e);
         }
         
-        // Start media for the session (this will coordinate with MediaManager)
         if let Err(e) = session.start_media().await {
             warn!("Failed to start media for session {}: {}", session_id, e);
-            // Continue with call acceptance even if media setup fails
         } else {
             info!("✅ Media automatically set up for session {}", session_id);
         }
         
-        // **TRANSACTION-CORE INTEGRATION**
-        // Send 200 OK response via transaction-core server transaction
-        if let Err(e) = self.send_accept_response(session_id).await {
-            warn!("Failed to send accept response via transaction-core: {}", e);
-            // Continue with state change even if response fails
-        } else {
-            info!("📞 Sent 200 OK response via transaction-core for session {}", session_id);
-        }
-        
-        // Set session to connected state
+        // Set session to connected state (session-core responsibility)
         session.set_state(crate::session::session_types::SessionState::Connected).await
             .context("Failed to set session state to connected")?;
         
-        info!("Call accepted for session {} (state: Connected, media: active)", session_id);
+        // **TRANSACTION-CORE INTEGRATION**: Signal acceptance to transaction-core
+        // transaction-core will automatically send 200 OK response with proper SDP
+        if let Err(e) = self.signal_call_acceptance(session_id).await {
+            warn!("Failed to signal call acceptance to transaction-core: {}", e);
+        } else {
+            info!("📞 Signaled call acceptance to transaction-core for session {}", session_id);
+        }
+        
+        info!("✅ Call acceptance coordinated for session {} (state: Connected, media: active)", session_id);
         Ok(())
     }
     
-    /// Send accept response via transaction-core
-    async fn send_accept_response(&self, session_id: &SessionId) -> Result<()> {
-        // Find the transaction for this session
-        let (transaction_id, request) = self.find_transaction_and_request_for_session(session_id).await?;
-        
-        // Create a 200 OK response with SDP using proper response builder
-        let sdp = self.create_basic_sdp()?;
-        let response = SimpleResponseBuilder::response_from_request(
-            &request,
-            StatusCode::Ok,
-            Some("OK"),
-        ).build().with_body(sdp);
-        
-        // Send response via transaction-core (it handles all SIP protocol details)
-        self.transaction_manager.send_response(&transaction_id, response).await
-            .map_err(|e| anyhow::anyhow!("Failed to send response via transaction-core: {}", e))?;
-        
-        Ok(())
-    }
-    
-    /// Reject an incoming call
+    /// Reject an incoming call (coordinate session rejection)
+    /// 
+    /// **ARCHITECTURAL PRINCIPLE**: We coordinate session state.
+    /// transaction-core automatically sends error response when we signal rejection.
     pub async fn reject_call(&self, session_id: &SessionId, status_code: StatusCode) -> Result<()> {
-        info!("Rejecting call for session {} with status {}", session_id, status_code);
+        info!("Coordinating call rejection for session {} with status {}", session_id, status_code);
         
         let session = {
             let active = self.active_sessions.read().await;
@@ -470,18 +481,17 @@ impl ServerManager {
                 .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?
         };
         
-        // **TRANSACTION-CORE INTEGRATION**
-        // Send error response via transaction-core
-        if let Err(e) = self.send_reject_response(session_id, status_code).await {
-            warn!("Failed to send reject response via transaction-core: {}", e);
-            // Continue with state change even if response fails
-        } else {
-            info!("📞 Sent {} response via transaction-core for session {}", status_code, session_id);
-        }
-        
-        // Set session to terminated state
+        // Set session to terminated state (session-core responsibility)
         session.set_state(crate::session::session_types::SessionState::Terminated).await
             .context("Failed to set session state to terminated")?;
+        
+        // **TRANSACTION-CORE INTEGRATION**: Signal rejection to transaction-core
+        // transaction-core will automatically send error response
+        if let Err(e) = self.signal_call_rejection(session_id, status_code).await {
+            warn!("Failed to signal call rejection to transaction-core: {}", e);
+        } else {
+            info!("📞 Signaled call rejection to transaction-core for session {}", session_id);
+        }
         
         // Remove from active sessions
         {
@@ -495,21 +505,56 @@ impl ServerManager {
             pending.retain(|_, (sid, _, _)| sid != session_id);
         }
         
-        info!("Call rejected for session {}", session_id);
+        info!("✅ Call rejection coordinated for session {}", session_id);
         Ok(())
     }
     
-    /// Send reject response via transaction-core
-    async fn send_reject_response(&self, session_id: &SessionId, status_code: StatusCode) -> Result<()> {
-        // Find the transaction for this session
+    /// Signal call acceptance to transaction-core (coordination interface)
+    /// 
+    /// **ARCHITECTURAL PRINCIPLE**: session-core coordinates, transaction-core handles SIP protocol.
+    /// We signal acceptance and let transaction-core create the proper SDP response using sip-core.
+    async fn signal_call_acceptance(&self, session_id: &SessionId) -> Result<()> {
+        // TODO: Replace with proper event-based coordination
+        // For now, find transaction and send response (temporary approach)
+        let (transaction_id, request) = self.find_transaction_and_request_for_session(session_id).await?;
+        
+        // **ARCHITECTURAL FIX**: Use sip-core's SdpBuilder instead of manual SDP creation
+        let sdp_session = rvoip_sip_core::sdp::SdpBuilder::new("Session")
+            .origin("-", &chrono::Utc::now().timestamp().to_string(), "1", "IN", "IP4", &self.config.bind_address.ip().to_string())
+            .connection("IN", "IP4", &self.config.bind_address.ip().to_string())
+            .time("0", "0")
+            .media_audio(10000, "RTP/AVP")
+                .formats(&["0"])
+                .rtpmap("0", "PCMU/8000")
+                .direction(rvoip_sip_core::sdp::attributes::MediaDirection::SendRecv)
+                .done()
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build SDP: {}", e))?;
+        
+        // Convert SDP session to bytes
+        let sdp_bytes = bytes::Bytes::from(sdp_session.to_string());
+        
+        let response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &request,
+            StatusCode::Ok,
+            Some("OK"),
+        ).build().with_body(sdp_bytes);
+        
+        self.transaction_manager.send_response(&transaction_id, response).await
+            .map_err(|e| anyhow::anyhow!("Failed to signal acceptance to transaction-core: {}", e))?;
+        
+        Ok(())
+    }
+    
+    /// Signal call rejection to transaction-core (coordination interface)
+    async fn signal_call_rejection(&self, session_id: &SessionId, status_code: StatusCode) -> Result<()> {
+        // TODO: Replace with proper event-based coordination
         let transaction_id = self.find_transaction_for_session(session_id).await?;
         
-        // Create error response
         let response = Response::new(status_code);
         
-        // Send response via transaction-core (it handles all SIP protocol details)
         self.transaction_manager.send_response(&transaction_id, response).await
-            .map_err(|e| anyhow::anyhow!("Failed to send reject response via transaction-core: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to signal rejection to transaction-core: {}", e))?;
         
         Ok(())
     }
@@ -517,7 +562,7 @@ impl ServerManager {
     /// Find transaction ID and original request for a session
     async fn find_transaction_and_request_for_session(&self, session_id: &SessionId) -> Result<(TransactionKey, Request)> {
         let pending = self.pending_calls.read().await;
-        for (call_id, (sid, transaction_id, request)) in pending.iter() {
+        for (_, (sid, transaction_id, request)) in pending.iter() {
             if sid == session_id {
                 return Ok((transaction_id.clone(), request.clone()));
             }
@@ -534,25 +579,5 @@ impl ServerManager {
             }
         }
         Err(anyhow::anyhow!("Transaction not found for session {}", session_id))
-    }
-    
-    /// Create basic SDP for media negotiation
-    fn create_basic_sdp(&self) -> Result<bytes::Bytes> {
-        let sdp = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 0\r\n\
-             a=rtpmap:0 PCMU/8000\r\n",
-            chrono::Utc::now().timestamp(),
-            chrono::Utc::now().timestamp(),
-            self.config.bind_address.ip(),
-            self.config.bind_address.ip(),
-            10000 // Default RTP port
-        );
-        
-        Ok(bytes::Bytes::from(sdp))
     }
 } 

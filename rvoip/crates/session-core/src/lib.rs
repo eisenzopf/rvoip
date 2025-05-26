@@ -45,9 +45,8 @@ pub use media::{
     AudioCodecType, QualityMetrics, RtpStreamInfo, MediaEvent,
     // New coordination components
     SessionMediaCoordinator, MediaConfigConverter,
-    // Re-exported media-core types
-    PayloadType, SampleRate, EngineCapabilities,
-    MediaSessionParams, MediaSessionHandle, MediaEngine, MediaEngineConfig
+    // Re-exported media-core types (using proper paths)
+    SampleRate, MediaSessionParams, MediaSessionHandle, MediaEngine, MediaEngineConfig
 };
 
 // Re-export helper functions for internal use
