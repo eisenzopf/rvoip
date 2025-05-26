@@ -1,9 +1,14 @@
 // Session module - Handles SIP sessions and call management
+// Refactored into focused, modular components for better maintainability
+
 mod session_id;
 mod session_config;
 pub mod session_types;
-// Add the missing modules
+
+// Session implementation - now modular
 pub mod session;
+
+// Manager implementation - now modular  
 pub mod manager;
 
 // Re-export main types
@@ -13,5 +18,5 @@ pub use session_types::{
     TransferId, TransferState, TransferType, TransferContext
 };
 pub use session_config::SessionConfig;
-pub use session::Session;
+pub use session::{Session, SessionMediaState};
 pub use manager::SessionManager; 
