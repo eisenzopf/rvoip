@@ -40,8 +40,14 @@ pub use metrics::MetricsCollector;
 
 // Re-export media types
 pub use media::{
-    MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, MediaType, 
-    AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent
+    MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, 
+    SessionMediaType as MediaType, SessionMediaDirection as MediaDirection,
+    AudioCodecType, QualityMetrics, RtpStreamInfo, MediaEvent,
+    // New coordination components
+    SessionMediaCoordinator, MediaConfigConverter,
+    // Re-exported media-core types
+    PayloadType, SampleRate, EngineCapabilities,
+    MediaSessionParams, MediaSessionHandle, MediaEngine, MediaEngineConfig
 };
 
 // Re-export helper functions for internal use
@@ -103,7 +109,7 @@ pub mod prelude {
         MetricsCollector,
         // Media types
         MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, MediaType,
-        AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent,
+        AudioCodecType, QualityMetrics, RtpStreamInfo, MediaEvent,
         // Transfer types
         TransferId, TransferState, TransferType, TransferContext,
         // API modules

@@ -451,7 +451,7 @@ impl ServerManager {
             &request,
             StatusCode::Ok,
             Some("OK"),
-        ).with_body(sdp).build();
+        ).build().with_body(sdp);
         
         // Send response via transaction-core (it handles all SIP protocol details)
         self.transaction_manager.send_response(&transaction_id, response).await
@@ -492,7 +492,7 @@ impl ServerManager {
         // Remove from pending calls
         {
             let mut pending = self.pending_calls.write().await;
-            pending.retain(|_, (sid, _)| sid != session_id);
+            pending.retain(|_, (sid, _, _)| sid != session_id);
         }
         
         info!("Call rejected for session {}", session_id);

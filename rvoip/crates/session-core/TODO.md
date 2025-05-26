@@ -370,24 +370,24 @@ src/
 ### 🔧 **REFACTORING PLAN**
 
 #### 4.1 Media-Core Integration Completion ⚠️ CRITICAL
-- [ ] **Fix MediaManager Implementation** - Complete media-core integration
-  - [ ] Remove simplified MediaStream and use media-core's MediaSession directly
-  - [ ] Implement proper MediaSessionParams conversion from session-core config
-  - [ ] Add real pause/resume operations through media-core API
-  - [ ] Implement SDP-to-MediaConfig conversion for codec negotiation
-  - [ ] Add media quality monitoring and event propagation
+- [x] **Fix MediaManager Implementation** - Complete media-core integration
+  - [x] Remove simplified MediaStream and use media-core's MediaSession directly
+  - [x] Implement proper MediaSessionParams conversion from session-core config
+  - [x] Add real pause/resume operations through media-core API
+  - [x] Implement SDP-to-MediaConfig conversion for codec negotiation
+  - [x] Add media quality monitoring and event propagation
 
-- [ ] **Create Media Coordination Bridge** - `src/media/coordination.rs` (<200 lines)
-  - [ ] SessionMediaCoordinator that maps SessionId -> MediaSessionId
-  - [ ] Automatic media lifecycle management (create/start/pause/resume/stop)
-  - [ ] SDP negotiation integration with media-core capabilities
-  - [ ] Media event propagation to session layer
+- [x] **Create Media Coordination Bridge** - `src/media/coordination.rs` (<200 lines)
+  - [x] SessionMediaCoordinator that maps SessionId -> MediaSessionId
+  - [x] Automatic media lifecycle management (create/start/pause/resume/stop)
+  - [x] SDP negotiation integration with media-core capabilities
+  - [x] Media event propagation to session layer
 
-- [ ] **Refactor Media Configuration** - `src/media/config.rs` (<200 lines)
-  - [ ] Convert session-core MediaConfig to media-core MediaSessionParams
-  - [ ] Codec preference mapping (AudioCodecType -> PayloadType)
-  - [ ] Media direction handling (sendrecv, sendonly, recvonly, inactive)
-  - [ ] RTP stream configuration extraction
+- [x] **Refactor Media Configuration** - `src/media/config.rs` (<200 lines)
+  - [x] Convert session-core MediaConfig to media-core MediaSessionParams
+  - [x] Codec preference mapping (AudioCodecType -> PayloadType)
+  - [x] Media direction handling (sendrecv, sendonly, recvonly, inactive)
+  - [x] RTP stream configuration extraction
 
 #### 4.2 Transaction-Core Integration Refactoring ⚠️ CRITICAL
 - [ ] **Remove SIP Response Handling from ServerManager** - Architecture fix
