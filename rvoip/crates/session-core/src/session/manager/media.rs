@@ -4,9 +4,9 @@ use tracing::debug;
 use crate::errors::{Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction};
 use crate::media::{MediaSessionId, MediaConfig};
 use crate::sdp::SessionDescription;
+use crate::dialog::DialogId;
 use super::core::SessionManager;
 use super::super::SessionId;
-use super::super::DialogId;
 
 impl SessionManager {
     /// Start media for a session based on SDP negotiation

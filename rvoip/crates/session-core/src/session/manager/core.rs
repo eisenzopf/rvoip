@@ -28,31 +28,31 @@ const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 #[derive(Clone)]
 pub struct SessionManager {
     /// Session manager configuration
-    config: SessionConfig,
+    pub(crate) config: SessionConfig,
     
     /// Active sessions by ID
-    sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    pub(crate) sessions: Arc<DashMap<SessionId, Arc<Session>>>,
     
     /// Default dialog for each session
-    default_dialogs: DashMap<SessionId, DialogId>,
+    pub(crate) default_dialogs: DashMap<SessionId, DialogId>,
     
     /// Mapping between dialogs and sessions
-    dialog_to_session: DashMap<DialogId, SessionId>,
+    pub(crate) dialog_to_session: DashMap<DialogId, SessionId>,
     
     /// Transaction manager reference
-    transaction_manager: Arc<TransactionManager>,
+    pub(crate) transaction_manager: Arc<TransactionManager>,
     
     /// Dialog manager reference
-    dialog_manager: Arc<DialogManager>,
+    pub(crate) dialog_manager: Arc<DialogManager>,
     
     /// Media manager for RTP stream coordination
-    media_manager: Arc<MediaManager>,
+    pub(crate) media_manager: Arc<MediaManager>,
     
     /// Event bus for session events
-    event_bus: EventBus,
+    pub(crate) event_bus: EventBus,
     
     /// Running flag
-    running: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) running: Arc<std::sync::atomic::AtomicBool>,
     
     /// Event channel for session-specific events
     event_sender: mpsc::Sender<SessionEvent>,
@@ -198,7 +198,7 @@ impl SessionManager {
     }
     
     /// Check if we're below the max session limit
-    async fn can_create_session(&self) -> bool {
+    pub(crate) async fn can_create_session(&self) -> bool {
         if let Some(max_sessions) = self.config.max_sessions {
             return self.sessions.len() < max_sessions;
         }

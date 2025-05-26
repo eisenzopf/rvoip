@@ -10,7 +10,7 @@ impl Session {
     /// Set a new session state
     pub async fn set_state(&self, new_state: SessionState) -> Result<(), Error> {
         let mut state_guard = self.state.lock().await;
-        let old_state = state_guard.clone();
+        let old_state = *state_guard;
         
         // Validate state transition
         if !Self::is_valid_transition(&old_state, &new_state) {
@@ -31,7 +31,7 @@ impl Session {
         }
         
         // Update state and emit event
-        *state_guard = new_state.clone();
+        *state_guard = new_state;
         
         // Drop lock before emitting event
         drop(state_guard);
