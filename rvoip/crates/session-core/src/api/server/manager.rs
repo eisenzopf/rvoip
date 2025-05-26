@@ -11,6 +11,7 @@ use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 use rvoip_sip_core::{Request, Response, StatusCode, Method, Message};
+use rvoip_sip_core::builder::SimpleResponseBuilder;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
 use crate::api::server::config::ServerConfig;
 use crate::session::{SessionManager, Session};
@@ -28,8 +29,8 @@ pub struct ServerManager {
     /// Server configuration
     config: ServerConfig,
     
-    /// Pending incoming calls (Call-ID -> (SessionId, TransactionKey))
-    pending_calls: Arc<RwLock<HashMap<String, (SessionId, TransactionKey)>>>,
+    /// Pending incoming calls (Call-ID -> (SessionId, TransactionKey, Request))
+    pending_calls: Arc<RwLock<HashMap<String, (SessionId, TransactionKey, Request)>>>,
     
     /// Active sessions (SessionId -> Session)
     active_sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
@@ -63,6 +64,11 @@ impl ServerManager {
             TransactionEvent::NewRequest { transaction_id, request, source } => {
                 // Handle other new requests
                 match request.method() {
+                    Method::Invite => {
+                        // **CRITICAL FIX**: Handle INVITE requests by creating sessions
+                        info!("📞 Received INVITE request - creating session");
+                        self.handle_invite_transaction(transaction_id, request, source).await?;
+                    },
                     Method::Bye => {
                         self.handle_bye_transaction(transaction_id, request).await?;
                     },
@@ -103,7 +109,7 @@ impl ServerManager {
         Ok(())
     }
     
-    /// Handle INVITE transaction (transaction-core already sent 180 Ringing)
+    /// Handle INVITE transaction (send 180 Ringing immediately)
     async fn handle_invite_transaction(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
         info!("Creating session for INVITE transaction {}", transaction_id);
         
@@ -111,6 +117,21 @@ impl ServerManager {
         let call_id = request.call_id()
             .ok_or_else(|| anyhow::anyhow!("INVITE missing Call-ID header"))?
             .value();
+        
+        // **CRITICAL FIX**: Send 180 Ringing IMMEDIATELY to keep transaction alive
+        // This must be done before any async operations that might delay processing
+        let ringing_response = SimpleResponseBuilder::response_from_request(
+            &request,
+            StatusCode::Ringing,
+            Some("Ringing"),
+        ).build();
+        
+        if let Err(e) = self.transaction_manager.send_response(&transaction_id, ringing_response).await {
+            error!("Failed to send 180 Ringing response: {}", e);
+            return Err(anyhow::anyhow!("Failed to send 180 Ringing: {}", e));
+        } else {
+            info!("📞 Sent 180 Ringing response for transaction {}", transaction_id);
+        }
         
         // Create incoming session
         let session = self.session_manager.create_incoming_session().await
@@ -125,7 +146,7 @@ impl ServerManager {
         // Store the session mapping with transaction ID
         {
             let mut pending = self.pending_calls.write().await;
-            pending.insert(call_id.clone(), (session_id.clone(), transaction_id.clone()));
+            pending.insert(call_id.clone(), (session_id.clone(), transaction_id.clone(), request.clone()));
         }
         
         {
@@ -133,7 +154,7 @@ impl ServerManager {
             active.insert(session_id.clone(), session);
         }
         
-        info!("Created session {} for INVITE transaction {} with Call-ID {} (transaction-core handles SIP responses)", 
+        info!("Created session {} for INVITE transaction {} with Call-ID {} (180 Ringing sent)", 
               session_id, transaction_id, call_id);
         Ok(())
     }
@@ -168,7 +189,7 @@ impl ServerManager {
         
         let session_id = {
             let pending = self.pending_calls.read().await;
-            pending.get(&call_id).cloned().map(|(session_id, _)| session_id)
+            pending.get(&call_id).cloned().map(|(session_id, _, _)| session_id)
         };
         
         // Send 200 OK response to BYE via transaction-core
@@ -197,7 +218,7 @@ impl ServerManager {
         
         let session_id = {
             let pending = self.pending_calls.read().await;
-            pending.get(&call_id).cloned().map(|(session_id, _)| session_id)
+            pending.get(&call_id).cloned().map(|(session_id, _, _)| session_id)
         };
         
         if let Some(session_id) = session_id {
@@ -422,14 +443,15 @@ impl ServerManager {
     /// Send accept response via transaction-core
     async fn send_accept_response(&self, session_id: &SessionId) -> Result<()> {
         // Find the transaction for this session
-        let transaction_id = self.find_transaction_for_session(session_id).await?;
+        let (transaction_id, request) = self.find_transaction_and_request_for_session(session_id).await?;
         
-        // Create a 200 OK response with SDP
-        let mut response = Response::new(StatusCode::Ok);
-        
-        // Add basic SDP for media negotiation
+        // Create a 200 OK response with SDP using proper response builder
         let sdp = self.create_basic_sdp()?;
-        response = response.with_body(sdp);
+        let response = SimpleResponseBuilder::response_from_request(
+            &request,
+            StatusCode::Ok,
+            Some("OK"),
+        ).with_body(sdp).build();
         
         // Send response via transaction-core (it handles all SIP protocol details)
         self.transaction_manager.send_response(&transaction_id, response).await
@@ -492,10 +514,21 @@ impl ServerManager {
         Ok(())
     }
     
+    /// Find transaction ID and original request for a session
+    async fn find_transaction_and_request_for_session(&self, session_id: &SessionId) -> Result<(TransactionKey, Request)> {
+        let pending = self.pending_calls.read().await;
+        for (call_id, (sid, transaction_id, request)) in pending.iter() {
+            if sid == session_id {
+                return Ok((transaction_id.clone(), request.clone()));
+            }
+        }
+        Err(anyhow::anyhow!("Transaction not found for session {}", session_id))
+    }
+    
     /// Find transaction ID for a session
     async fn find_transaction_for_session(&self, session_id: &SessionId) -> Result<TransactionKey> {
         let pending = self.pending_calls.read().await;
-        for (_, (sid, transaction_id)) in pending.iter() {
+        for (_, (sid, transaction_id, _)) in pending.iter() {
             if sid == session_id {
                 return Ok(transaction_id.clone());
             }

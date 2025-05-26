@@ -6,27 +6,17 @@ use tokio::sync::{Mutex, mpsc, RwLock};
 use anyhow::Result;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
-use tracing::info;
+use tracing::{info, debug, error};
+
+// Import media-core components
+use rvoip_media_core::prelude::*;
 
 use crate::session::SessionId;
 use crate::dialog::DialogId;
 use crate::sdp::SessionDescription;
 
-/// Unique identifier for media sessions
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MediaSessionId(pub Uuid);
-
-impl MediaSessionId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl std::fmt::Display for MediaSessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Unique identifier for media sessions (re-export from media-core)
+pub use rvoip_media_core::MediaSessionId;
 
 /// Unique identifier for RTP relays
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,25 +28,11 @@ impl RelayId {
     }
 }
 
-/// Media session status
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MediaStatus {
-    Inactive,
-    Starting,
-    Active,
-    Paused,
-    Stopping,
-    Failed(String),
-}
+/// Media session status (re-export from media-core)
+pub use rvoip_media_core::MediaSessionState as MediaStatus;
 
-/// Media quality metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QualityMetrics {
-    pub packet_loss_rate: f64,
-    pub jitter_ms: f64,
-    pub round_trip_time_ms: f64,
-    pub bitrate_kbps: u32,
-}
+/// Media quality metrics (re-export from media-core)
+pub use rvoip_media_core::QualityMetrics;
 
 /// RTP stream information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,14 +89,8 @@ pub enum MediaEvent {
     },
 }
 
-/// Supported media types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MediaType {
-    /// Audio media
-    Audio,
-    /// Video media
-    Video,
-}
+/// Supported media types (re-export from media-core)
+pub use rvoip_media_core::MediaType;
 
 /// Supported audio codecs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,163 +136,147 @@ impl Default for MediaConfig {
     }
 }
 
-/// Simplified media stream for a SIP session
-pub struct MediaStream {
-    /// Unique identifier
-    pub id: MediaSessionId,
-    
-    /// Media configuration
-    config: MediaConfig,
-    
-    /// Current status
-    status: Arc<RwLock<MediaStatus>>,
-}
-
-impl MediaStream {
-    /// Create a new media stream
-    pub async fn new(config: MediaConfig) -> Result<Self> {
-        Ok(Self {
-            id: MediaSessionId::new(),
-            config,
-            status: Arc::new(RwLock::new(MediaStatus::Inactive)),
-        })
-    }
-    
-    /// Start the media stream
-    pub async fn start(&self) -> Result<()> {
-        let mut status = self.status.write().await;
-        if *status != MediaStatus::Inactive {
-            return Ok(());
-        }
-        
-        *status = MediaStatus::Active;
-        Ok(())
-    }
-    
-    /// Stop the media stream
-    pub async fn stop(&self) -> Result<()> {
-        let mut status = self.status.write().await;
-        if *status == MediaStatus::Inactive || *status == MediaStatus::Stopping {
-            return Ok(());
-        }
-        
-        *status = MediaStatus::Inactive;
-        Ok(())
-    }
-    
-    /// Get the current media stream status
-    pub async fn status(&self) -> MediaStatus {
-        self.status.read().await.clone()
-    }
-    
-    /// Get stream information
-    pub async fn get_stream_info(&self) -> RtpStreamInfo {
-        RtpStreamInfo {
-            local_port: self.config.local_addr.port(),
-            remote_addr: self.config.remote_addr,
-            payload_type: self.config.payload_type,
-            clock_rate: self.config.clock_rate,
-            ssrc: 12345, // Mock SSRC for now
-        }
-    }
-}
-
-/// MediaManager coordinates RTP streams with SIP sessions (simplified implementation)
+/// MediaManager coordinates between SIP sessions and media-core's MediaEngine
+/// This is the bridge that implements session-core's role as central coordinator
 pub struct MediaManager {
-    /// Active media sessions
-    media_sessions: Arc<RwLock<HashMap<MediaSessionId, Arc<MediaStream>>>>,
+    /// The actual media processing engine from media-core
+    media_engine: Arc<MediaEngine>,
     
     /// Session to media session mapping
     session_to_media: Arc<RwLock<HashMap<SessionId, MediaSessionId>>>,
+    
+    /// Dialog to media session mapping
+    dialog_to_media: Arc<RwLock<HashMap<DialogId, MediaSessionId>>>,
     
     /// Active RTP relays
     relays: Arc<RwLock<HashMap<RelayId, (SessionId, SessionId)>>>,
 }
 
 impl MediaManager {
-    /// Create a new MediaManager (simplified for compilation)
+    /// Create a new MediaManager with media-core integration
     pub async fn new() -> Result<Self> {
+        debug!("Creating MediaManager with media-core integration");
+        
+        // Create media-core engine with default configuration
+        let config = MediaEngineConfig::default();
+        let media_engine = Arc::new(MediaEngine::new(config).await?);
+        
+        // Start the media engine
+        media_engine.start().await?;
+        
         Ok(Self {
-            media_sessions: Arc::new(RwLock::new(HashMap::new())),
+            media_engine,
             session_to_media: Arc::new(RwLock::new(HashMap::new())),
+            dialog_to_media: Arc::new(RwLock::new(HashMap::new())),
             relays: Arc::new(RwLock::new(HashMap::new())),
         })
     }
     
-    /// Create a media session
+    /// Create a media session using media-core
     pub async fn create_media_session(&self, config: MediaConfig) -> Result<MediaSessionId> {
-        let media_stream = Arc::new(MediaStream::new(config.clone()).await?);
-        let media_session_id = media_stream.id.clone();
+        debug!("Creating media session with config: {:?}", config);
         
-        // Store the media session
-        let mut sessions = self.media_sessions.write().await;
-        sessions.insert(media_session_id.clone(), media_stream);
+        // Convert our config to media-core's MediaSessionParams
+        let payload_type = match config.audio_codec {
+            AudioCodecType::PCMU => payload_types::PCMU,
+            AudioCodecType::PCMA => payload_types::PCMA,
+        };
         
+        let params = MediaSessionParams::audio_only()
+            .with_preferred_codec(payload_type);
+        
+        // Create dialog ID for media session
+        let dialog_id = DialogId::new(&format!("media-{}", Uuid::new_v4()));
+        
+        // Create media session through media-core
+        let media_session_handle = self.media_engine.create_media_session(dialog_id.clone(), params).await?;
+        let media_session_id = media_session_handle.session_id();
+        
+        // Store dialog mapping
+        let mut dialog_mapping = self.dialog_to_media.write().await;
+        dialog_mapping.insert(dialog_id, media_session_id.clone());
+        
+        info!("Created media session: {}", media_session_id);
         Ok(media_session_id)
     }
     
     /// Start media for a session
     pub async fn start_media(&self, session_id: &SessionId, media_session_id: &MediaSessionId) -> Result<()> {
-        let sessions = self.media_sessions.read().await;
-        if let Some(media_stream) = sessions.get(media_session_id) {
-            media_stream.start().await?;
-            
-            // Update session mapping
-            let mut session_mapping = self.session_to_media.write().await;
-            session_mapping.insert(session_id.clone(), media_session_id.clone());
-            
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
-        }
+        debug!("Starting media for session: {} -> {}", session_id, media_session_id);
+        
+        // Update session mapping
+        let mut session_mapping = self.session_to_media.write().await;
+        session_mapping.insert(session_id.clone(), media_session_id.clone());
+        
+        info!("Started media for session: {}", session_id);
+        Ok(())
     }
     
     /// Stop media for a session
     pub async fn stop_media(&self, media_session_id: &MediaSessionId, reason: String) -> Result<()> {
-        let sessions = self.media_sessions.read().await;
-        if let Some(media_stream) = sessions.get(media_session_id) {
-            media_stream.stop().await?;
-            Ok(())
+        debug!("Stopping media session: {} (reason: {})", media_session_id, reason);
+        
+        // Find the dialog ID for this media session
+        let dialog_mapping = self.dialog_to_media.read().await;
+        let dialog_id = dialog_mapping.iter()
+            .find(|(_, &ref id)| id == media_session_id)
+            .map(|(dialog_id, _)| dialog_id.clone());
+        
+        if let Some(dialog_id) = dialog_id {
+            // Destroy media session through media-core
+            self.media_engine.destroy_media_session(dialog_id).await?;
+            info!("Stopped media session: {}", media_session_id);
         } else {
-            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
+            error!("Media session not found: {}", media_session_id);
         }
+        
+        Ok(())
     }
     
     /// Setup RTP streams based on SDP negotiation
     pub async fn setup_rtp_streams(&self, config: &MediaConfig) -> Result<RtpStreamInfo> {
-        let media_session_id = self.create_media_session(config.clone()).await?;
-        let sessions = self.media_sessions.read().await;
+        debug!("Setting up RTP streams with config: {:?}", config);
         
-        if let Some(media_stream) = sessions.get(&media_session_id) {
-            Ok(media_stream.get_stream_info().await)
-        } else {
-            Err(anyhow::anyhow!("Failed to create RTP stream"))
-        }
+        let media_session_id = self.create_media_session(config.clone()).await?;
+        
+        // Return stream info based on configuration
+        Ok(RtpStreamInfo {
+            local_port: config.local_addr.port(),
+            remote_addr: config.remote_addr,
+            payload_type: config.payload_type,
+            clock_rate: config.clock_rate,
+            ssrc: 12345, // TODO: Get actual SSRC from media-core
+        })
     }
     
     /// Update media direction for a session
     pub async fn update_media_direction(&self, media_session_id: &MediaSessionId, _direction: crate::sdp::SdpDirection) -> Result<()> {
-        // Implementation for updating media direction
-        // This would involve coordinating with RTP stream settings
+        debug!("Updating media direction for session: {}", media_session_id);
+        // TODO: Implement media direction updates through media-core
         Ok(())
     }
     
     /// Setup RTP relay between two sessions
     pub async fn setup_rtp_relay(&self, session_a_id: &SessionId, session_b_id: &SessionId) -> Result<RelayId> {
+        debug!("Setting up RTP relay between sessions: {} <-> {}", session_a_id, session_b_id);
+        
         let relay_id = RelayId::new();
         
         // Store relay mapping
         let mut relays = self.relays.write().await;
         relays.insert(relay_id.clone(), (session_a_id.clone(), session_b_id.clone()));
         
+        info!("Created RTP relay: {}", relay_id.0);
         Ok(relay_id)
     }
     
     /// Teardown RTP relay
     pub async fn teardown_rtp_relay(&self, relay_id: &RelayId) -> Result<()> {
+        debug!("Tearing down RTP relay: {}", relay_id.0);
+        
         let mut relays = self.relays.write().await;
         if relays.remove(relay_id).is_some() {
-            // Relay removed successfully
+            info!("Removed RTP relay: {}", relay_id.0);
         }
         
         Ok(())
@@ -335,42 +289,43 @@ impl MediaManager {
     }
     
     /// Get media session information
-    pub async fn get_media_session_info(&self, media_session_id: &MediaSessionId) -> Option<Arc<MediaStream>> {
-        let sessions = self.media_sessions.read().await;
-        sessions.get(media_session_id).cloned()
+    pub async fn get_media_session_info(&self, media_session_id: &MediaSessionId) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        // TODO: Get actual media session info from media-core
+        None
     }
     
     /// Pause media for a session
     pub async fn pause_media(&self, media_session_id: &MediaSessionId) -> Result<()> {
-        let sessions = self.media_sessions.read().await;
-        if let Some(media_stream) = sessions.get(media_session_id) {
-            // TODO: Implement actual pause functionality
-            info!("Media session {} paused", media_session_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
-        }
+        debug!("Pausing media session: {}", media_session_id);
+        // TODO: Implement pause through media-core
+        info!("Media session {} paused", media_session_id);
+        Ok(())
     }
     
     /// Resume media for a session
     pub async fn resume_media(&self, media_session_id: &MediaSessionId) -> Result<()> {
-        let sessions = self.media_sessions.read().await;
-        if let Some(media_stream) = sessions.get(media_session_id) {
-            // TODO: Implement actual resume functionality
-            info!("Media session {} resumed", media_session_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
-        }
+        debug!("Resuming media session: {}", media_session_id);
+        // TODO: Implement resume through media-core
+        info!("Media session {} resumed", media_session_id);
+        Ok(())
+    }
+    
+    /// Get supported codecs from media-core
+    pub async fn get_supported_codecs(&self) -> Vec<PayloadType> {
+        self.media_engine.get_supported_codecs()
+    }
+    
+    /// Get media engine capabilities
+    pub async fn get_capabilities(&self) -> EngineCapabilities {
+        self.media_engine.get_capabilities()
     }
     
     /// Shutdown the media manager
     pub async fn shutdown(&self) -> Result<()> {
-        // Stop all media sessions
-        let sessions = self.media_sessions.read().await;
-        for media_stream in sessions.values() {
-            let _ = media_stream.stop().await;
-        }
+        info!("Shutting down MediaManager");
+        
+        // Stop the media engine
+        self.media_engine.stop().await?;
         
         Ok(())
     }

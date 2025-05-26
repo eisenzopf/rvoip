@@ -114,58 +114,40 @@ pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
     config.validate()
         .context("Invalid server configuration")?;
     
-    // **SINGLE TRANSPORT APPROACH**
-    // Create one transport that both session layer and transaction-core will use
-    let (shared_transport, transport_events) = match config.transport_protocol {
-        crate::api::server::config::TransportProtocol::Udp => {
-            let (transport, events) = rvoip_sip_transport::UdpTransport::bind(config.bind_address, None)
-                .await
-                .context("Failed to create UDP transport")?;
-            (Arc::new(transport) as Arc<dyn rvoip_sip_transport::Transport>, events)
-        },
-        crate::api::server::config::TransportProtocol::Tcp => {
-            let (transport, events) = rvoip_sip_transport::TcpTransport::bind(config.bind_address, None, None)
-                .await
-                .context("Failed to create TCP transport")?;
-            (Arc::new(transport) as Arc<dyn rvoip_sip_transport::Transport>, events)
-        },
-        crate::api::server::config::TransportProtocol::Tls => {
-            let (transport, events) = rvoip_sip_transport::TlsTransport::bind(
-                config.bind_address, 
-                "cert.pem", 
-                "key.pem", 
-                None, 
-                None, 
-                None
-            ).await.context("Failed to create TLS transport")?;
-            (Arc::new(transport) as Arc<dyn rvoip_sip_transport::Transport>, events)
-        },
-        crate::api::server::config::TransportProtocol::WebSocket => {
-            let (transport, events) = rvoip_sip_transport::WebSocketTransport::bind(
-                config.bind_address, 
-                false, // not secure
-                None,  // no cert path
-                None,  // no key path
-                None   // default channel capacity
-            ).await.context("Failed to create WebSocket transport")?;
-            (Arc::new(transport) as Arc<dyn rvoip_sip_transport::Transport>, events)
-        },
+    // **TRANSACTION-CORE HANDLES ALL TRANSPORT**
+    // Create TransportManager configuration based on our server config
+    let transport_config = rvoip_transaction_core::transport::TransportManagerConfig {
+        enable_udp: config.transport_protocol == crate::api::server::config::TransportProtocol::Udp,
+        enable_tcp: config.transport_protocol == crate::api::server::config::TransportProtocol::Tcp,
+        enable_ws: config.transport_protocol == crate::api::server::config::TransportProtocol::WebSocket,
+        enable_tls: config.transport_protocol == crate::api::server::config::TransportProtocol::Tls,
+        bind_addresses: vec![config.bind_address],
+        default_channel_capacity: 100,
+        tls_cert_path: None, // TODO: Add TLS config to ServerConfig
+        tls_key_path: None,  // TODO: Add TLS config to ServerConfig
     };
     
-    info!("✅ Created shared transport on {}", config.bind_address);
+    // Create and initialize transport manager
+    let (mut transport_manager, transport_events) = rvoip_transaction_core::transport::TransportManager::new(transport_config).await
+        .context("Failed to create transport manager")?;
     
-    // **TRANSACTION-CORE INTEGRATION**
-    // Create transaction manager using the shared transport
-    let (transaction_manager, transaction_events) = rvoip_transaction_core::TransactionManager::new(
-        shared_transport.clone(),
+    transport_manager.initialize().await
+        .context("Failed to initialize transport manager")?;
+    
+    info!("✅ Created and initialized transport manager for {} on {}", 
+          config.transport_protocol, config.bind_address);
+    
+    // Create transaction manager using the transport manager
+    let (transaction_manager, transaction_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
+        transport_manager,
         transport_events,
         Some(100), // Event buffer capacity
     ).await.context("Failed to create transaction manager")?;
     
     let transaction_manager = Arc::new(transaction_manager);
-    info!("✅ Created transaction manager with shared transport");
+    info!("✅ Created transaction manager with transport manager");
     
-    // Create session manager
+    // Create session manager (no transport needed - uses transaction-core)
     let session_config = crate::session::SessionConfig::default();
     let event_bus = crate::events::EventBus::new(1000).await
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
@@ -186,7 +168,7 @@ pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
     ));
     
     info!("✅ Created server manager");
-    info!("SIP server created successfully on {}", config.bind_address);
+    info!("🎯 SIP server ready - transaction-core handles all transport on {}", config.bind_address);
     
     Ok(SipServer {
         session_manager,
