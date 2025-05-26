@@ -29,6 +29,7 @@ pub use dialog::{Dialog, DialogId, DialogState};
 // Session implementation is now complete with enhanced media support
 pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirection, SessionManager};
 pub use session::session::SessionMediaState;
+pub use session::session_types::{TransferId, TransferState, TransferType, TransferContext};
 pub use events::{EventBus, SessionEvent};
 pub use errors::{
     Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction
@@ -218,6 +219,8 @@ pub mod prelude {
         // Media types
         MediaManager, MediaSessionId, RelayId, MediaStatus, MediaConfig, MediaType,
         AudioCodecType, MediaStream, QualityMetrics, RtpStreamInfo, MediaEvent,
+        // Transfer types
+        TransferId, TransferState, TransferType, TransferContext,
         // Convenience modules
         client, server,
         // Following SDPs are not fully implemented yet or need to be imported differently

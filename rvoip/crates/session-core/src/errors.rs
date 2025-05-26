@@ -368,6 +368,10 @@ pub enum Error {
     #[error("Invalid request: {0}")]
     InvalidRequest(String, ErrorContext),
 
+    /// Malformed request
+    #[error("Malformed request: {0}")]
+    MalformedRequest(String, ErrorContext),
+
     /// Invalid response
     #[error("Invalid response: {0}")]
     InvalidResponse(String, ErrorContext),
@@ -537,6 +541,7 @@ impl Error {
             Error::AuthChallenge { context, .. } => context,
             Error::InvalidCredentials(_, ctx) => ctx,
             Error::InvalidRequest(_, ctx) => ctx,
+            Error::MalformedRequest(_, ctx) => ctx,
             Error::InvalidResponse(_, ctx) => ctx,
             Error::InvalidHeader(_, ctx) => ctx,
             Error::MissingHeader(_, ctx) => ctx,

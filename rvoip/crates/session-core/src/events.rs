@@ -189,6 +189,80 @@ pub enum SessionEvent {
         /// Whether recovery was successful
         success: bool,
     },
+    
+    // ==== Transfer Events (REFER Method Support) ====
+    
+    /// Transfer request initiated (REFER sent/received)
+    TransferInitiated {
+        /// Session ID being transferred
+        session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+        /// Transfer type
+        transfer_type: String,
+        /// Target URI
+        target_uri: String,
+    },
+    
+    /// Transfer accepted (202 Accepted sent/received)
+    TransferAccepted {
+        /// Session ID
+        session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+    },
+    
+    /// Transfer progress notification (NOTIFY received/sent)
+    TransferProgress {
+        /// Session ID
+        session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+        /// Progress status (e.g., "100 Trying", "200 OK")
+        status: String,
+    },
+    
+    /// Transfer completed successfully
+    TransferCompleted {
+        /// Session ID
+        session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+        /// Final status
+        final_status: String,
+    },
+    
+    /// Transfer failed
+    TransferFailed {
+        /// Session ID
+        session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+        /// Failure reason
+        reason: String,
+    },
+    
+    /// Consultation call created for attended transfer
+    ConsultationCallCreated {
+        /// Original session ID
+        original_session_id: SessionId,
+        /// Consultation session ID
+        consultation_session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+    },
+    
+    /// Consultation call completed
+    ConsultationCallCompleted {
+        /// Original session ID
+        original_session_id: SessionId,
+        /// Consultation session ID
+        consultation_session_id: SessionId,
+        /// Transfer ID
+        transfer_id: String,
+        /// Whether consultation was successful
+        success: bool,
+    },
 }
 
 /// Trait for handling session events
