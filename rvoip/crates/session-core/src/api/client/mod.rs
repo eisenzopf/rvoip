@@ -3,6 +3,11 @@
 //! This module provides client-specific functionality for building SIP clients,
 //! including factory functions, configuration, and client-oriented helper methods.
 
+pub mod config;
+
+// Re-export the new config types
+pub use config::{ClientConfig, ClientCredentials};
+
 use crate::{
     session::{SessionManager, SessionConfig, SessionDirection},
     events::{EventBus, SessionEvent},
@@ -13,9 +18,9 @@ use std::sync::Arc;
 use rvoip_transaction_core::TransactionManager;
 use rvoip_sip_core::Uri;
 
-/// Client configuration for SIP client applications
+/// Legacy client configuration for backward compatibility
 #[derive(Debug, Clone)]
-pub struct ClientConfig {
+pub struct LegacyClientConfig {
     /// Display name for outgoing calls
     pub display_name: String,
     
@@ -47,7 +52,7 @@ pub struct ClientConfig {
     pub session_config: SessionConfig,
 }
 
-impl Default for ClientConfig {
+impl Default for LegacyClientConfig {
     fn default() -> Self {
         Self {
             display_name: "RVOIP Client".to_string(),
@@ -87,9 +92,15 @@ impl ClientSessionManager {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let event_bus = EventBus::new(100).await?;
         
+        // Convert new ClientConfig to old SessionConfig for compatibility
+        let session_config = SessionConfig {
+            local_media_addr: config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
+            ..Default::default()
+        };
+        
         let session_manager = SessionManager::new(
             transaction_manager,
-            config.session_config.clone(),
+            session_config,
             event_bus
         ).await?;
         
@@ -111,9 +122,15 @@ impl ClientSessionManager {
     ) -> Self {
         let event_bus = EventBus::new_simple(100);
         
+        // Convert new ClientConfig to old SessionConfig for compatibility
+        let session_config = SessionConfig {
+            local_media_addr: config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
+            ..Default::default()
+        };
+        
         let session_manager = SessionManager::new_sync(
             transaction_manager,
-            config.session_config.clone(),
+            session_config,
             event_bus
         );
         
@@ -144,9 +161,9 @@ impl ClientSessionManager {
     pub async fn make_call(&self, destination: Uri) -> Result<Arc<Session>, Error> {
         // Check if we're at the maximum concurrent calls
         let active_sessions = self.session_manager.list_sessions();
-        if active_sessions.len() >= self.config.max_concurrent_calls {
+        if active_sessions.len() >= self.config.max_sessions {
             return Err(Error::ResourceLimitExceeded(
-                format!("Maximum concurrent calls ({}) reached", self.config.max_concurrent_calls),
+                format!("Maximum concurrent calls ({}) reached", self.config.max_sessions),
                 crate::errors::ErrorContext {
                     category: crate::errors::ErrorCategory::Resource,
                     severity: crate::errors::ErrorSeverity::Error,
@@ -164,7 +181,7 @@ impl ClientSessionManager {
         
         // FIXED: Automatically set up media coordination
         let media_config = MediaConfig {
-            local_addr: self.config.session_config.local_media_addr,
+            local_addr: self.config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
             remote_addr: None, // Will be set during SDP negotiation
             media_type: crate::media::MediaType::Audio,
             payload_type: 0, // Will be negotiated
@@ -248,7 +265,7 @@ impl ClientSessionManager {
             session_id,
             target_uri,
             transfer_type,
-            Some(self.config.uri.clone())
+            self.config.from_uri.clone()
         ).await
     }
     

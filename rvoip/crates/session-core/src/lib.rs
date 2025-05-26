@@ -24,6 +24,7 @@ pub mod sdp;
 pub mod helpers;
 pub mod metrics;
 pub mod api;
+pub mod transport;
 
 // Re-export important types for convenience
 pub use dialog::{Dialog, DialogId, DialogState};

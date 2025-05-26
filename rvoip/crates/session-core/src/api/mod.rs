@@ -44,6 +44,7 @@
 
 pub mod client;
 pub mod server;
+pub mod factory;
 
 // Re-export the main types and functions for convenience
 pub use client::{
@@ -57,6 +58,9 @@ pub use server::{
     create_server_session_manager, create_server_session_manager_sync,
     create_full_server_manager, create_full_server_manager_sync,
 };
+
+// Re-export factory functions
+pub use factory::{create_sip_server, create_sip_client, SipServer, SipClient};
 
 /// API version information
 pub const API_VERSION: &str = "1.0.0";
