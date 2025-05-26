@@ -3,6 +3,7 @@ use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::time::SystemTime;
 use tracing::{debug, info, error, warn};
+use serde_json;
 
 use rvoip_transaction_core::{
     TransactionManager, 
@@ -183,5 +184,30 @@ impl Session {
     pub async fn remove_transaction(&self, transaction_id: &TransactionKey) -> Option<SessionTransactionType> {
         let mut txs = self.transactions.lock().await;
         txs.remove(transaction_id)
+    }
+    
+    // Media coordination methods (only unique ones not defined elsewhere)
+    
+    /// Set the media state (internal method for transfer coordination)
+    pub async fn set_media_state(&self, state: SessionMediaState) -> Result<(), Error> {
+        let mut media_state = self.media_state.lock().await;
+        let previous_state = media_state.clone();
+        *media_state = state.clone();
+        
+        // Publish media state change event
+        let event = SessionEvent::Custom {
+            session_id: self.id.clone(),
+            event_type: "media_state_changed".to_string(),
+            data: serde_json::json!({
+                "previous_state": format!("{:?}", previous_state),
+                "new_state": format!("{:?}", state)
+            }),
+        };
+        
+        if let Err(e) = self.event_bus.publish(event).await {
+            warn!("Failed to publish media state change event: {}", e);
+        }
+        
+        Ok(())
     }
 } 

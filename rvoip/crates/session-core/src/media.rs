@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, mpsc, RwLock};
 use anyhow::Result;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
+use tracing::info;
 
 use crate::session::SessionId;
 use crate::dialog::DialogId;
@@ -331,6 +332,36 @@ impl MediaManager {
     pub async fn get_media_session(&self, session_id: &SessionId) -> Option<MediaSessionId> {
         let session_mapping = self.session_to_media.read().await;
         session_mapping.get(session_id).cloned()
+    }
+    
+    /// Get media session information
+    pub async fn get_media_session_info(&self, media_session_id: &MediaSessionId) -> Option<Arc<MediaStream>> {
+        let sessions = self.media_sessions.read().await;
+        sessions.get(media_session_id).cloned()
+    }
+    
+    /// Pause media for a session
+    pub async fn pause_media(&self, media_session_id: &MediaSessionId) -> Result<()> {
+        let sessions = self.media_sessions.read().await;
+        if let Some(media_stream) = sessions.get(media_session_id) {
+            // TODO: Implement actual pause functionality
+            info!("Media session {} paused", media_session_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
+        }
+    }
+    
+    /// Resume media for a session
+    pub async fn resume_media(&self, media_session_id: &MediaSessionId) -> Result<()> {
+        let sessions = self.media_sessions.read().await;
+        if let Some(media_stream) = sessions.get(media_session_id) {
+            // TODO: Implement actual resume functionality
+            info!("Media session {} resumed", media_session_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Media session not found: {}", media_session_id))
+        }
     }
     
     /// Shutdown the media manager

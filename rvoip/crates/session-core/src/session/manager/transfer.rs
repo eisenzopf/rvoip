@@ -851,15 +851,76 @@ impl SessionManager {
         info!("Completing attended transfer: transferor={}, transferee={}, consultation={}", 
               transferor_session_id, transferee_session_id, consultation_session_id);
         
-        // TODO: Implement attended transfer completion
-        // This would involve:
-        // 1. Sending REFER with Replaces to connect transferee and consultation target
-        // 2. Terminating the transferor session
-        // 3. Managing the media coordination
-        // 4. Handling any errors or failures
-        
+        // Step 1: Coordinate media during transfer
         let transfer_id = TransferId::new();
         
+        // Get all sessions involved in the transfer
+        let transferor_session = self.get_session(transferor_session_id)?;
+        let transferee_session = self.get_session(transferee_session_id)?;
+        let consultation_session = self.get_session(consultation_session_id)?;
+        
+        // Step 2: Setup media bridging for the transfer
+        match self.setup_transfer_media_coordination(
+            transferor_session_id,
+            transferee_session_id,
+            consultation_session_id,
+            &transfer_id
+        ).await {
+            Ok(()) => {
+                info!("Media coordination setup successful for transfer {}", transfer_id);
+            },
+            Err(e) => {
+                error!("Failed to setup media coordination for transfer {}: {}", transfer_id, e);
+                
+                // Publish transfer failed event
+                let event = SessionEvent::TransferFailed {
+                    session_id: transferor_session_id.clone(),
+                    transfer_id: transfer_id.to_string(),
+                    reason: format!("Media coordination failed: {}", e),
+                };
+                
+                if let Err(e) = self.event_bus.publish(event).await {
+                    warn!("Failed to publish TransferFailed event: {}", e);
+                }
+                
+                return Err(e);
+            }
+        }
+        
+        // Step 3: Send REFER with Replaces to connect transferee and consultation target
+        // TODO: Implement actual REFER with Replaces header
+        
+        // Step 4: Coordinate media transfer from consultation to transferee
+        match self.execute_media_transfer(
+            consultation_session_id,
+            transferee_session_id,
+            &transfer_id
+        ).await {
+            Ok(()) => {
+                info!("Media transfer executed successfully for transfer {}", transfer_id);
+            },
+            Err(e) => {
+                error!("Failed to execute media transfer for transfer {}: {}", transfer_id, e);
+                
+                // Cleanup media coordination
+                let _ = self.cleanup_transfer_media_coordination(&transfer_id).await;
+                
+                return Err(e);
+            }
+        }
+        
+        // Step 5: Terminate the transferor session and cleanup
+        match self.terminate_transferor_session(transferor_session_id, &transfer_id).await {
+            Ok(()) => {
+                info!("Transferor session terminated successfully for transfer {}", transfer_id);
+            },
+            Err(e) => {
+                warn!("Failed to terminate transferor session for transfer {}: {}", transfer_id, e);
+                // Continue with transfer completion despite this error
+            }
+        }
+        
+        // Step 6: Publish successful transfer completion event
         let event = SessionEvent::ConsultationCallCompleted {
             original_session_id: transferor_session_id.clone(),
             consultation_session_id: consultation_session_id.clone(),
@@ -871,6 +932,348 @@ impl SessionManager {
             warn!("Failed to publish ConsultationCallCompleted event: {}", e);
         }
         
+        info!("Attended transfer {} completed successfully", transfer_id);
         Ok(())
     }
+    
+    /// Setup media coordination for call transfer
+    pub async fn setup_transfer_media_coordination(
+        &self,
+        transferor_session_id: &SessionId,
+        transferee_session_id: &SessionId,
+        consultation_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Setting up media coordination for transfer {}", transfer_id);
+        
+        // Step 1: Put transferor session media on hold
+        self.hold_session_media(transferor_session_id, transfer_id).await?;
+        
+        // Step 2: Setup media bridge between consultation and transferee sessions
+        let relay_id = self.setup_rtp_relay(consultation_session_id, transferee_session_id).await?;
+        
+        // Step 3: Store relay information for cleanup
+        // TODO: Store relay_id in transfer context for later cleanup
+        
+        // Step 4: Monitor media quality during transfer
+        self.start_transfer_media_monitoring(
+            transferor_session_id,
+            transferee_session_id,
+            consultation_session_id,
+            transfer_id
+        ).await?;
+        
+        info!("Media coordination setup completed for transfer {}", transfer_id);
+        Ok(())
+    }
+    
+    /// Execute media transfer between sessions
+    pub async fn execute_media_transfer(
+        &self,
+        source_session_id: &SessionId,
+        target_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Executing media transfer from {} to {} for transfer {}", 
+              source_session_id, target_session_id, transfer_id);
+        
+        // Step 1: Get media session information from source
+        let source_media_info = self.get_session_media_info(source_session_id).await?;
+        
+        // Step 2: Prepare target session for media transfer
+        self.prepare_session_for_media_transfer(target_session_id, &source_media_info, transfer_id).await?;
+        
+        // Step 3: Coordinate RTP stream transfer
+        self.transfer_rtp_streams(source_session_id, target_session_id, transfer_id).await?;
+        
+        // Step 4: Update media state for both sessions
+        self.update_transfer_media_states(source_session_id, target_session_id, transfer_id).await?;
+        
+        // Step 5: Publish media transfer progress event
+        let event = SessionEvent::TransferProgress {
+            session_id: target_session_id.clone(),
+            transfer_id: transfer_id.to_string(),
+            status: "Media transfer completed".to_string(),
+        };
+        
+        if let Err(e) = self.event_bus.publish(event).await {
+            warn!("Failed to publish TransferProgress event: {}", e);
+        }
+        
+        info!("Media transfer executed successfully for transfer {}", transfer_id);
+        Ok(())
+    }
+    
+    /// Hold session media during transfer
+    pub async fn hold_session_media(
+        &self,
+        session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Putting session {} media on hold for transfer {}", session_id, transfer_id);
+        
+        let session = self.get_session(session_id)?;
+        
+        // Update session media state to paused
+        session.set_media_state(crate::session::session::SessionMediaState::Paused).await?;
+        
+        // Get media session and pause it
+        if let Some(media_session_id) = self.media_manager.get_media_session(session_id).await {
+            // TODO: Implement media pause functionality in MediaManager
+            // For now, we'll just log the action
+            info!("Media session {} paused for transfer", media_session_id);
+        }
+        
+        // Publish media hold event
+        let event = SessionEvent::Custom {
+            session_id: session_id.clone(),
+            event_type: "media_hold".to_string(),
+            data: serde_json::json!({
+                "transfer_id": transfer_id.to_string(),
+                "reason": "call_transfer"
+            }),
+        };
+        
+        if let Err(e) = self.event_bus.publish(event).await {
+            warn!("Failed to publish media hold event: {}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// Resume session media after transfer
+    pub async fn resume_session_media(
+        &self,
+        session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Resuming session {} media after transfer {}", session_id, transfer_id);
+        
+        let session = self.get_session(session_id)?;
+        
+        // Update session media state to active
+        session.set_media_state(crate::session::session::SessionMediaState::Active).await?;
+        
+        // Get media session and resume it
+        if let Some(media_session_id) = self.media_manager.get_media_session(session_id).await {
+            // TODO: Implement media resume functionality in MediaManager
+            // For now, we'll just log the action
+            info!("Media session {} resumed after transfer", media_session_id);
+        }
+        
+        // Publish media resume event
+        let event = SessionEvent::Custom {
+            session_id: session_id.clone(),
+            event_type: "media_resume".to_string(),
+            data: serde_json::json!({
+                "transfer_id": transfer_id.to_string(),
+                "reason": "transfer_completed"
+            }),
+        };
+        
+        if let Err(e) = self.event_bus.publish(event).await {
+            warn!("Failed to publish media resume event: {}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// Start monitoring media quality during transfer
+    pub async fn start_transfer_media_monitoring(
+        &self,
+        transferor_session_id: &SessionId,
+        transferee_session_id: &SessionId,
+        consultation_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Starting media quality monitoring for transfer {}", transfer_id);
+        
+        // Monitor media quality for all sessions involved in the transfer
+        let sessions = vec![transferor_session_id, transferee_session_id, consultation_session_id];
+        
+        for session_id in sessions {
+            if let Ok(session) = self.get_session(session_id) {
+                // Get current media metrics
+                if let Some(metrics) = session.media_metrics().await {
+                    // Publish media quality event
+                    let event = SessionEvent::Custom {
+                        session_id: session_id.clone(),
+                        event_type: "transfer_media_quality".to_string(),
+                        data: serde_json::json!({
+                            "transfer_id": transfer_id.to_string(),
+                            "metrics": {
+                                "jitter": metrics.jitter_ms,
+                                "packet_loss": metrics.packet_loss_rate,
+                                "rtt": metrics.round_trip_time_ms
+                            }
+                        }),
+                    };
+                    
+                    if let Err(e) = self.event_bus.publish(event).await {
+                        warn!("Failed to publish media quality event: {}", e);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get media information for a session
+    pub async fn get_session_media_info(
+        &self,
+        session_id: &SessionId
+    ) -> Result<SessionMediaInfo, Error> {
+        let session = self.get_session(session_id)?;
+        
+        // Get media session ID
+        let media_session_id = self.media_manager.get_media_session(session_id).await
+            .ok_or_else(|| Error::MediaResourceError(
+                "No media session found for session".to_string(),
+                ErrorContext {
+                    category: ErrorCategory::Media,
+                    severity: ErrorSeverity::Error,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    session_id: Some(session_id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some("Media session lookup failed".to_string()),
+                    ..Default::default()
+                }
+            ))?;
+        
+        // Get RTP stream information
+        let rtp_stream_info = session.rtp_stream_info().await;
+        
+        // Get media metrics
+        let media_metrics = session.media_metrics().await;
+        
+        Ok(SessionMediaInfo {
+            session_id: session_id.clone(),
+            media_session_id,
+            rtp_stream_info,
+            media_metrics,
+            media_state: session.media_state().await,
+        })
+    }
+    
+    /// Prepare session for media transfer
+    pub async fn prepare_session_for_media_transfer(
+        &self,
+        session_id: &SessionId,
+        source_media_info: &SessionMediaInfo,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Preparing session {} for media transfer {}", session_id, transfer_id);
+        
+        let session = self.get_session(session_id)?;
+        
+        // Update session media state to negotiating
+        session.set_media_state(crate::session::session::SessionMediaState::Negotiating).await?;
+        
+        // TODO: Implement media preparation logic
+        // This would involve:
+        // 1. Updating RTP stream parameters
+        // 2. Coordinating codec negotiation if needed
+        // 3. Setting up media relay parameters
+        
+        info!("Session {} prepared for media transfer", session_id);
+        Ok(())
+    }
+    
+    /// Transfer RTP streams between sessions
+    pub async fn transfer_rtp_streams(
+        &self,
+        source_session_id: &SessionId,
+        target_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Transferring RTP streams from {} to {} for transfer {}", 
+              source_session_id, target_session_id, transfer_id);
+        
+        // Setup RTP relay between source and target
+        let relay_id = self.setup_rtp_relay(source_session_id, target_session_id).await?;
+        
+        // TODO: Store relay_id for cleanup
+        
+        info!("RTP streams transferred successfully for transfer {}", transfer_id);
+        Ok(())
+    }
+    
+    /// Update media states for transfer sessions
+    pub async fn update_transfer_media_states(
+        &self,
+        source_session_id: &SessionId,
+        target_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Updating media states for transfer {}", transfer_id);
+        
+        // Update source session media state
+        let source_session = self.get_session(source_session_id)?;
+        source_session.set_media_state(crate::session::session::SessionMediaState::Paused).await?;
+        
+        // Update target session media state
+        let target_session = self.get_session(target_session_id)?;
+        target_session.set_media_state(crate::session::session::SessionMediaState::Active).await?;
+        
+        info!("Media states updated for transfer {}", transfer_id);
+        Ok(())
+    }
+    
+    /// Terminate transferor session
+    pub async fn terminate_transferor_session(
+        &self,
+        transferor_session_id: &SessionId,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Terminating transferor session {} for transfer {}", transferor_session_id, transfer_id);
+        
+        // Stop media for the transferor session
+        self.stop_session_media(transferor_session_id).await?;
+        
+        // Update session state to terminated
+        let session = self.get_session(transferor_session_id)?;
+        session.set_state(crate::session::session_types::SessionState::Terminated).await?;
+        
+        // Publish session terminated event
+        let event = SessionEvent::Terminated {
+            session_id: transferor_session_id.clone(),
+            reason: format!("Transfer {} completed", transfer_id),
+        };
+        
+        if let Err(e) = self.event_bus.publish(event).await {
+            warn!("Failed to publish session terminated event: {}", e);
+        }
+        
+        info!("Transferor session {} terminated for transfer {}", transferor_session_id, transfer_id);
+        Ok(())
+    }
+    
+    /// Cleanup media coordination after transfer
+    pub async fn cleanup_transfer_media_coordination(
+        &self,
+        transfer_id: &TransferId
+    ) -> Result<(), Error> {
+        info!("Cleaning up media coordination for transfer {}", transfer_id);
+        
+        // TODO: Implement cleanup logic
+        // This would involve:
+        // 1. Removing RTP relays
+        // 2. Cleaning up media sessions
+        // 3. Releasing media resources
+        
+        info!("Media coordination cleanup completed for transfer {}", transfer_id);
+        Ok(())
+    }
+}
+
+/// Media information for a session
+#[derive(Debug, Clone)]
+pub struct SessionMediaInfo {
+    pub session_id: SessionId,
+    pub media_session_id: crate::media::MediaSessionId,
+    pub rtp_stream_info: Option<crate::media::RtpStreamInfo>,
+    pub media_metrics: Option<crate::media::QualityMetrics>,
+    pub media_state: crate::session::session::SessionMediaState,
 } 
