@@ -20,24 +20,27 @@ rvoip follows a layered architecture with **session-core as the central integrat
 ├─────────────────────────────────────────────────────────────┤
 │  sip-client                    │  call-engine               │
 │  (High-level API)              │  (Call orchestration)     │
-├────────────────────────────────┼────────────────────────────┤
+├─────────────────────────────────────────────────────────────┤
 │                session-core                                 │
 │           (SIP Sessions + RTP Media Coordination)           │
-├────────────────────────────────┼────────────────────────────┤
-│  transaction-core              │  rtp-core    │  ice-core   │
-│  (SIP transactions)            │  (RTP/RTCP)  │  (ICE/STUN) │
-├────────────────────────────────┼──────────────┼─────────────┤
-│  sip-transport                 │  media-core               │
-│  (UDP/TCP/TLS/WebSocket)       │  (Media processing)       │
-├────────────────────────────────┤                           │
-│  sip-core                      │                           │
-│  (Message parsing)             │                           │
-└────────────────────────────────┴───────────────────────────┘
+├─────────────────────────────────────────────────────────────┤
+│         Processing Layer                                    │
+│  transaction-core              │  media-core               │
+│  (SIP transactions)            │  (Media processing)       │
+├─────────────────────────────────────────────────────────────┤
+│              Transport Layer                                │
+│  sip-transport    │  rtp-core    │  ice-core               │
+│  (SIP transport)  │  (RTP/RTCP)  │  (ICE/STUN)             │
+├─────────────────────────────────────────────────────────────┤
+│              Foundation Layer                               │
+│                    sip-core                                 │
+│                (Message parsing)                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Current Library Structure
 
-**Corrected Dependencies (session-core as integration layer):**
+**Corrected Dependencies (proper transport layering):**
 
 ### Application Integration Layer:
 - `sip-client` → `call-engine`, `session-core`, `media-core`, `rtp-core`, `ice-core`, `transaction-core`, `sip-transport`, `sip-core`
@@ -48,15 +51,17 @@ rvoip follows a layered architecture with **session-core as the central integrat
   - *Coordinates SIP signaling (via transaction-core) with RTP media (via rtp-core)*
   - *Manages complete session lifecycle including both signaling and media*
 
-### Core Protocol Stacks:
+### Processing Layer:
 - `transaction-core` → `sip-transport`, `sip-core`
-- `sip-transport` → `sip-core`
-- `sip-core` → (no internal dependencies)
-
-### Media Processing Stack:
 - `media-core` → `rtp-core`, `ice-core`
+
+### Transport Layer:
+- `sip-transport` → `sip-core`
 - `rtp-core` → (no internal dependencies)
 - `ice-core` → (no internal dependencies)
+
+### Foundation Layer:
+- `sip-core` → (no internal dependencies)
 
 ### Infrastructure:
 - `infra-common` → (standalone, not currently used by other crates)
