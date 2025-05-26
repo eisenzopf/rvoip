@@ -11,6 +11,7 @@ use rvoip_sip_core::json::ext::{SipMessageJson, SipJsonExt};
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
 
 use crate::dialog::DialogId;
+use crate::dialog::dialog_utils::uri_resolver;
 use crate::events::SessionEvent;
 use crate::errors::{Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction};
 use super::core::SessionManager;
@@ -247,9 +248,74 @@ impl SessionManager {
             debug!("REFER request: {}", json);
         }
         
-        // Create client transaction for the REFER request
-        // TODO: Get transport from dialog manager or session manager
-        // For now, we'll track the transfer and simulate sending
+        // Create client transaction for the REFER request and send it
+        // Use the URI resolver to convert the URI to a SocketAddr
+        let destination = match uri_resolver::resolve_uri_to_socketaddr(&dialog.remote_target).await {
+            Some(addr) => addr,
+            None => {
+                error!("Failed to resolve destination address for REFER");
+                return Err(Error::CannotResolveDestination(
+                    format!("Failed to resolve destination for REFER: {}", dialog.remote_target),
+                    ErrorContext {
+                        category: ErrorCategory::Network,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::Retry,
+                        retryable: true,
+                        session_id: Some(session_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("REFER destination resolution failed".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        };
+        
+        match self.transaction_manager.create_non_invite_client_transaction(refer_request, destination).await {
+            Ok(transaction_id) => {
+                info!("Created REFER transaction: {}", transaction_id);
+                
+                // Send the request
+                match self.transaction_manager.send_request(&transaction_id).await {
+                    Ok(()) => {
+                        info!("REFER request sent successfully for transfer {}", transfer_id);
+                    },
+                    Err(e) => {
+                        error!("Failed to send REFER request: {}", e);
+                        return Err(Error::TransactionFailed(
+                            format!("Failed to send REFER request: {}", e),
+                            Some(Box::new(e)),
+                            ErrorContext {
+                                category: ErrorCategory::Network,
+                                severity: ErrorSeverity::Error,
+                                recovery: RecoveryAction::Retry,
+                                retryable: true,
+                                session_id: Some(session_id.to_string()),
+                                timestamp: SystemTime::now(),
+                                details: Some("REFER request sending failed".to_string()),
+                                ..Default::default()
+                            }
+                        ));
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Failed to create REFER transaction: {}", e);
+                return Err(Error::TransactionCreationFailed(
+                    format!("Failed to create REFER transaction: {}", e),
+                    Some(Box::new(e)),
+                    ErrorContext {
+                        category: ErrorCategory::Internal,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::Retry,
+                        retryable: true,
+                        session_id: Some(session_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("REFER transaction creation failed".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        }
         
         // Update session with transfer context
         session.initiate_transfer(target_uri.clone(), transfer_type, referred_by.clone()).await?;
@@ -366,8 +432,50 @@ impl SessionManager {
             debug!("202 Accepted response: {}", json);
         }
         
-        // TODO: Send response through transaction manager
-        // For now, we'll just log that we would send it
+        // Send response through transaction manager
+        // Create transaction key from the REFER request
+        let transaction_key = match rvoip_transaction_core::TransactionKey::from_request(refer_request) {
+            Some(key) => key,
+            None => {
+                error!("Failed to create transaction key from REFER request");
+                return Err(Error::InvalidRequest(
+                    "Failed to create transaction key from REFER request".to_string(),
+                    ErrorContext {
+                        category: ErrorCategory::Protocol,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::None,
+                        retryable: false,
+                        dialog_id: Some(dialog_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("REFER request missing required headers for transaction key".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        };
+        
+        match self.transaction_manager.send_response(&transaction_key, response).await {
+            Ok(()) => {
+                info!("202 Accepted response sent successfully");
+            },
+            Err(e) => {
+                error!("Failed to send 202 Accepted response: {}", e);
+                return Err(Error::TransactionFailed(
+                    format!("Failed to send 202 Accepted response: {}", e),
+                    Some(Box::new(e)),
+                    ErrorContext {
+                        category: ErrorCategory::Network,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::Retry,
+                        retryable: true,
+                        dialog_id: Some(dialog_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("202 Accepted response sending failed".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        }
         
         Ok(())
     }
@@ -583,8 +691,74 @@ impl SessionManager {
             debug!("NOTIFY request: {}", json);
         }
         
-        // TODO: Send NOTIFY through transaction manager
-        // For now, we'll just log that we would send it
+        // Send NOTIFY through transaction manager
+        // Use the URI resolver to convert the URI to a SocketAddr
+        let destination = match uri_resolver::resolve_uri_to_socketaddr(&dialog.remote_target).await {
+            Some(addr) => addr,
+            None => {
+                error!("Failed to resolve destination address for NOTIFY");
+                return Err(Error::CannotResolveDestination(
+                    format!("Failed to resolve destination for NOTIFY: {}", dialog.remote_target),
+                    ErrorContext {
+                        category: ErrorCategory::Network,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::Retry,
+                        retryable: true,
+                        session_id: Some(session_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("NOTIFY destination resolution failed".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        };
+        
+        match self.transaction_manager.create_non_invite_client_transaction(notify_request, destination).await {
+            Ok(transaction_id) => {
+                info!("Created NOTIFY transaction: {}", transaction_id);
+                
+                // Send the request
+                match self.transaction_manager.send_request(&transaction_id).await {
+                    Ok(()) => {
+                        info!("NOTIFY request sent successfully for transfer {}", transfer_id);
+                    },
+                    Err(e) => {
+                        error!("Failed to send NOTIFY request: {}", e);
+                        return Err(Error::TransactionFailed(
+                            format!("Failed to send NOTIFY request: {}", e),
+                            Some(Box::new(e)),
+                            ErrorContext {
+                                category: ErrorCategory::Network,
+                                severity: ErrorSeverity::Error,
+                                recovery: RecoveryAction::Retry,
+                                retryable: true,
+                                session_id: Some(session_id.to_string()),
+                                timestamp: SystemTime::now(),
+                                details: Some("NOTIFY request sending failed".to_string()),
+                                ..Default::default()
+                            }
+                        ));
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Failed to create NOTIFY transaction: {}", e);
+                return Err(Error::TransactionCreationFailed(
+                    format!("Failed to create NOTIFY transaction: {}", e),
+                    Some(Box::new(e)),
+                    ErrorContext {
+                        category: ErrorCategory::Internal,
+                        severity: ErrorSeverity::Error,
+                        recovery: RecoveryAction::Retry,
+                        retryable: true,
+                        session_id: Some(session_id.to_string()),
+                        timestamp: SystemTime::now(),
+                        details: Some("NOTIFY transaction creation failed".to_string()),
+                        ..Default::default()
+                    }
+                ));
+            }
+        }
         
         Ok(())
     }
