@@ -4,9 +4,13 @@
 //! including factory functions, configuration, and server-oriented helper methods.
 
 pub mod config;
+pub mod manager;
 
 // Re-export the new config types
 pub use config::{ServerConfig, TransportProtocol};
+
+// Re-export the new manager types
+pub use manager::ServerManager;
 
 use crate::{
     session::{SessionManager, SessionConfig, SessionDirection},

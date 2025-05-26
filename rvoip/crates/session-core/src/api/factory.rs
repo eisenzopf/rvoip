@@ -10,12 +10,14 @@ use tracing::{info, debug};
 
 use crate::api::server::config::ServerConfig;
 use crate::api::client::config::ClientConfig;
+use crate::api::server::manager::ServerManager;
 use crate::transport::{TransportFactory, SessionTransportEvent};
 use crate::session::manager::SessionManager;
 
 /// High-level SIP server manager
 pub struct SipServer {
     session_manager: Arc<SessionManager>,
+    server_manager: Arc<ServerManager>,
     transport_events: mpsc::Receiver<SessionTransportEvent>,
     config: ServerConfig,
 }
@@ -32,6 +34,11 @@ impl SipServer {
         self.session_manager.clone()
     }
     
+    /// Get the server manager
+    pub fn server_manager(&self) -> Arc<ServerManager> {
+        self.server_manager.clone()
+    }
+    
     /// Get the server configuration
     pub fn config(&self) -> &ServerConfig {
         &self.config
@@ -42,7 +49,7 @@ impl SipServer {
         info!("Starting SIP server event processing");
         
         while let Some(event) = self.transport_events.recv().await {
-            if let Err(e) = self.handle_transport_event(event).await {
+            if let Err(e) = self.server_manager.handle_transport_event(event).await {
                 tracing::error!("Error handling transport event: {}", e);
             }
         }
@@ -51,38 +58,27 @@ impl SipServer {
         Ok(())
     }
     
-    /// Handle transport events
-    async fn handle_transport_event(&self, event: SessionTransportEvent) -> Result<()> {
-        match event {
-            SessionTransportEvent::IncomingRequest { request, source, transport } => {
-                debug!("Handling incoming {} request from {} via {}", 
-                       request.method(), source, transport);
-                
-                // For now, just log the request - proper handling would require more integration
-                info!("Received {} request from {}", request.method(), source);
-            },
-            SessionTransportEvent::IncomingResponse { response, source, transport } => {
-                debug!("Handling incoming {} response from {} via {}", 
-                       response.status_code(), source, transport);
-                
-                // For now, just log the response - proper handling would require more integration
-                info!("Received {} response from {}", response.status_code(), source);
-            },
-            SessionTransportEvent::TransportError { error, source } => {
-                tracing::warn!("Transport error from {:?}: {}", source, error);
-                // Handle transport errors (could trigger reconnection, etc.)
-            },
-            SessionTransportEvent::ConnectionEstablished { local_addr, remote_addr, transport } => {
-                info!("Transport connection established: {} -> {:?} ({})", 
-                      local_addr, remote_addr, transport);
-            },
-            SessionTransportEvent::ConnectionClosed { local_addr, remote_addr, transport } => {
-                info!("Transport connection closed: {} -> {:?} ({})", 
-                      local_addr, remote_addr, transport);
-            },
-        }
-        
-        Ok(())
+    /// Accept an incoming call
+    pub async fn accept_call(&self, session_id: &crate::SessionId) -> Result<()> {
+        self.server_manager.accept_call(session_id).await
+            .context("Failed to accept call")
+    }
+    
+    /// Reject an incoming call
+    pub async fn reject_call(&self, session_id: &crate::SessionId, status_code: rvoip_sip_core::StatusCode) -> Result<()> {
+        self.server_manager.reject_call(session_id, status_code).await
+            .context("Failed to reject call")
+    }
+    
+    /// End an active call
+    pub async fn end_call(&self, session_id: &crate::SessionId) -> Result<()> {
+        self.server_manager.end_call(session_id).await
+            .context("Failed to end call")
+    }
+    
+    /// Get all active sessions
+    pub async fn get_active_sessions(&self) -> Vec<crate::SessionId> {
+        self.server_manager.get_active_sessions().await
     }
 }
 
@@ -136,10 +132,14 @@ pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
         event_bus
     ).await.context("Failed to create session manager")?);
     
+    // Create server manager
+    let server_manager = Arc::new(ServerManager::new(session_manager.clone(), config.clone()));
+    
     info!("SIP server created successfully on {}", config.bind_address);
     
     Ok(SipServer {
         session_manager,
+        server_manager,
         transport_events: transport_rx,
         config,
     })
