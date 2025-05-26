@@ -6,6 +6,7 @@
 use crate::{
     session::{SessionManager, SessionConfig, SessionDirection},
     events::{EventBus, SessionEvent},
+    media::{MediaManager, MediaConfig},
     Error, SessionId, Session
 };
 use std::sync::Arc;
@@ -68,6 +69,9 @@ pub struct ClientSessionManager {
     /// Core session manager
     session_manager: Arc<SessionManager>,
     
+    /// Media manager for coordinating RTP streams
+    media_manager: Arc<MediaManager>,
+    
     /// Client configuration
     config: ClientConfig,
     
@@ -89,8 +93,12 @@ impl ClientSessionManager {
             event_bus
         ).await?;
         
+        // Create media manager for coordinating RTP streams
+        let media_manager = MediaManager::new().await?;
+        
         Ok(Self {
             session_manager: Arc::new(session_manager),
+            media_manager: Arc::new(media_manager),
             config,
             registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -109,8 +117,14 @@ impl ClientSessionManager {
             event_bus
         );
         
+        // Create media manager for coordinating RTP streams
+        let media_manager = tokio::runtime::Handle::current().block_on(async {
+            MediaManager::new().await.expect("Failed to create media manager")
+        });
+        
         Self {
             session_manager: Arc::new(session_manager),
+            media_manager: Arc::new(media_manager),
             config,
             registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -148,7 +162,30 @@ impl ClientSessionManager {
         // Create outgoing session
         let session = self.session_manager.create_outgoing_session().await?;
         
-        // Set initial state
+        // FIXED: Automatically set up media coordination
+        let media_config = MediaConfig {
+            local_addr: self.config.session_config.local_media_addr,
+            remote_addr: None, // Will be set during SDP negotiation
+            media_type: crate::media::MediaType::Audio,
+            payload_type: 0, // Will be negotiated
+            clock_rate: 8000, // Default, will be negotiated
+            audio_codec: crate::media::AudioCodecType::PCMU, // Default, will be negotiated
+        };
+        
+        // Create media session and associate with SIP session
+        let media_session_id = self.media_manager.create_media_session(media_config).await
+            .map_err(|e| Error::MediaResourceError(
+                format!("Failed to create media session: {}", e),
+                crate::errors::ErrorContext::default()
+            ))?;
+        
+        // Set media session ID on the session
+        session.set_media_session_id(Some(media_session_id.clone())).await;
+        
+        // Set media state to negotiating (will be configured after SDP negotiation)
+        session.set_media_negotiating().await?;
+        
+        // Set initial session state
         session.set_state(crate::session::session_types::SessionState::Dialing).await?;
         
         Ok(session)
@@ -178,6 +215,19 @@ impl ClientSessionManager {
     pub async fn end_call(&self, session_id: &SessionId) -> Result<(), Error> {
         let session = self.session_manager.get_session(session_id)?;
         
+        // FIXED: Automatically stop media when ending call
+        if let Some(media_session_id) = session.media_session_id().await {
+            // Stop media in the media manager
+            self.media_manager.stop_media(&media_session_id, "Call ended".to_string()).await
+                .map_err(|e| Error::MediaResourceError(
+                    format!("Failed to stop media: {}", e),
+                    crate::errors::ErrorContext::default()
+                ))?;
+        }
+        
+        // Stop session media
+        session.stop_media().await?;
+        
         // Set terminating state
         let _ = session.set_state(crate::session::session_types::SessionState::Terminating).await;
         
@@ -205,13 +255,39 @@ impl ClientSessionManager {
     /// Put a call on hold
     pub async fn hold_call(&self, session_id: &SessionId) -> Result<(), Error> {
         let session = self.session_manager.get_session(session_id)?;
-        session.pause_media().await
+        
+        // FIXED: Automatically pause media when putting call on hold
+        session.pause_media().await?;
+        
+        // If we have a media session, pause it in the media manager too
+        if let Some(media_session_id) = session.media_session_id().await {
+            self.media_manager.pause_media(&media_session_id).await
+                .map_err(|e| Error::MediaResourceError(
+                    format!("Failed to pause media: {}", e),
+                    crate::errors::ErrorContext::default()
+                ))?;
+        }
+        
+        Ok(())
     }
     
     /// Resume a held call
     pub async fn resume_call(&self, session_id: &SessionId) -> Result<(), Error> {
         let session = self.session_manager.get_session(session_id)?;
-        session.resume_media().await
+        
+        // FIXED: Automatically resume media when resuming call
+        session.resume_media().await?;
+        
+        // If we have a media session, resume it in the media manager too
+        if let Some(media_session_id) = session.media_session_id().await {
+            self.media_manager.resume_media(&media_session_id).await
+                .map_err(|e| Error::MediaResourceError(
+                    format!("Failed to resume media: {}", e),
+                    crate::errors::ErrorContext::default()
+                ))?;
+        }
+        
+        Ok(())
     }
     
     /// Get all active calls

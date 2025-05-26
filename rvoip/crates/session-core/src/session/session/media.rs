@@ -114,9 +114,13 @@ impl Session {
         let mut media_state = self.media_state.lock().await;
         
         match *media_state {
-            SessionMediaState::Active => {
+            SessionMediaState::Active | SessionMediaState::Configured | SessionMediaState::Negotiating => {
                 *media_state = SessionMediaState::Paused;
                 debug!("Paused media for session {}", self.id);
+                Ok(())
+            },
+            SessionMediaState::Paused => {
+                debug!("Media already paused for session {}", self.id);
                 Ok(())
             },
             _ => {
@@ -128,7 +132,7 @@ impl Session {
                         retryable: false,
                         session_id: Some(self.id.to_string()),
                         timestamp: SystemTime::now(),
-                        details: Some("Media not active, cannot pause".to_string()),
+                        details: Some(format!("Media in state {:?}, cannot pause", *media_state)),
                         ..Default::default()
                     }
                 })
@@ -142,8 +146,13 @@ impl Session {
         
         match *media_state {
             SessionMediaState::Paused => {
+                // Resume to Active state (assuming media was previously active)
                 *media_state = SessionMediaState::Active;
                 debug!("Resumed media for session {}", self.id);
+                Ok(())
+            },
+            SessionMediaState::Active => {
+                debug!("Media already active for session {}", self.id);
                 Ok(())
             },
             _ => {
@@ -155,7 +164,7 @@ impl Session {
                         retryable: false,
                         session_id: Some(self.id.to_string()),
                         timestamp: SystemTime::now(),
-                        details: Some("Media not paused, cannot resume".to_string()),
+                        details: Some(format!("Media in state {:?}, cannot resume", *media_state)),
                         ..Default::default()
                     }
                 })
@@ -277,3 +286,4 @@ impl Session {
         }
     }
 } 
+

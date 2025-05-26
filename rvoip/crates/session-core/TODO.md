@@ -2,6 +2,283 @@
 
 This document tracks planned improvements and enhancements for the `rvoip-session-core` library.
 
+## 📏 CODE ORGANIZATION CONSTRAINT
+
+**CRITICAL RULE**: No library file (excluding examples, tests, and documentation) may exceed **200 lines**.
+- When a file approaches 200 lines, it MUST be refactored into smaller, focused modules
+- This ensures maintainability, readability, and proper separation of concerns
+- Examples and tests are exempt from this constraint
+- Documentation files (README.md, TODO.md, etc.) are exempt
+
+---
+
+## 🎯 MASTER GOAL: Self-Contained Session-Core Server API
+
+**Objective**: Create a session-core API that can handle real SIPp connections without requiring users to import sip-core, transaction-core, or sip-transport directly.
+
+### Target Directory Structure
+```
+src/
+├── api/                           # Public API layer (self-contained)
+│   ├── mod.rs                     # API module exports (<200 lines)
+│   ├── client/                    # Client API
+│   │   ├── mod.rs                 # Client exports (<200 lines)
+│   │   ├── config.rs              # Client configuration (<200 lines)
+│   │   ├── manager.rs             # ClientSessionManager (<200 lines)
+│   │   └── operations.rs          # Client operations (<200 lines)
+│   ├── server/                    # Server API  
+│   │   ├── mod.rs                 # Server exports (<200 lines)
+│   │   ├── config.rs              # Server configuration (<200 lines)
+│   │   ├── manager.rs             # ServerSessionManager (<200 lines)
+│   │   ├── operations.rs          # Server operations (<200 lines)
+│   │   └── transport.rs           # Transport integration (<200 lines)
+│   ├── common/                    # Shared API components
+│   │   ├── mod.rs                 # Common exports (<200 lines)
+│   │   ├── session.rs             # Session interface (<200 lines)
+│   │   ├── events.rs              # Event types (<200 lines)
+│   │   └── errors.rs              # API error types (<200 lines)
+│   └── factory.rs                 # Factory functions (<200 lines)
+├── session/                       # Core session management
+│   ├── mod.rs                     # Session exports (<200 lines)
+│   ├── manager.rs                 # SessionManager (<200 lines)
+│   ├── session/                   # Session implementation
+│   │   ├── mod.rs                 # Session exports (<200 lines)
+│   │   ├── core.rs                # Core Session struct (<200 lines)
+│   │   ├── media.rs               # Media coordination (<200 lines)
+│   │   ├── state.rs               # State management (<200 lines)
+│   │   └── operations.rs          # Session operations (<200 lines)
+│   └── events.rs                  # Session events (<200 lines)
+├── media/                         # Media coordination layer
+│   ├── mod.rs                     # Media exports (<200 lines)
+│   ├── manager.rs                 # MediaManager (<200 lines)
+│   ├── session.rs                 # MediaSession (<200 lines)
+│   ├── config.rs                  # Media configuration (<200 lines)
+│   └── coordination.rs            # Session-media coordination (<200 lines)
+├── transport/                     # Transport integration
+│   ├── mod.rs                     # Transport exports (<200 lines)
+│   ├── integration.rs             # Transport integration (<200 lines)
+│   └── factory.rs                 # Transport factory (<200 lines)
+└── lib.rs                         # Main library exports (<200 lines)
+```
+
+---
+
+## 🚀 PHASE 1: API Foundation & Transport Integration (IMMEDIATE)
+
+### 1.1 Create Self-Contained Server API Structure
+- [ ] **Create `src/api/server/config.rs`** - Server configuration types
+  - [ ] ServerConfig struct with transport settings
+  - [ ] Default implementations and validation
+  - [ ] Transport protocol selection (UDP/TCP/TLS)
+  - [ ] Binding address and port configuration
+
+- [ ] **Create `src/api/server/transport.rs`** - Transport integration layer
+  - [ ] Abstract transport creation from config
+  - [ ] Transport event handling integration
+  - [ ] Message routing to session manager
+  - [ ] Transport lifecycle management
+
+- [ ] **Create `src/api/server/manager.rs`** - ServerSessionManager
+  - [ ] Incoming call handling (INVITE processing)
+  - [ ] Session creation from incoming requests
+  - [ ] Response generation and sending
+  - [ ] Session lifecycle coordination
+
+- [ ] **Create `src/api/server/operations.rs`** - Server operations
+  - [ ] accept_call(), reject_call(), end_call()
+  - [ ] hold_call(), resume_call()
+  - [ ] Media coordination for server sessions
+  - [ ] Event subscription and notification
+
+### 1.2 Create Factory Functions
+- [ ] **Create `src/api/factory.rs`** - High-level factory functions
+  - [ ] `create_sip_server(config) -> ServerManager`
+  - [ ] `create_sip_client(config) -> ClientManager`
+  - [ ] Automatic transport setup and integration
+  - [ ] Media manager initialization
+
+### 1.3 Transport Integration Layer
+- [ ] **Create `src/transport/integration.rs`** - Bridge to sip-transport
+  - [ ] Transport trait implementation using sip-transport
+  - [ ] Message parsing and routing
+  - [ ] Error handling and conversion
+  - [ ] Event propagation to session layer
+
+- [ ] **Create `src/transport/factory.rs`** - Transport factory
+  - [ ] Create transports from configuration
+  - [ ] Protocol-specific transport creation
+  - [ ] Transport lifecycle management
+
+### 1.4 Update API Exports
+- [ ] **Update `src/api/mod.rs`** - Clean public API exports
+  - [ ] Export only high-level types and functions
+  - [ ] Hide internal implementation details
+  - [ ] Provide clear documentation
+
+- [ ] **Update `src/lib.rs`** - Main library exports
+  - [ ] Export API layer as primary interface
+  - [ ] Maintain backward compatibility
+  - [ ] Clear module organization
+
+**Success Criteria for Phase 1:**
+- [ ] `create_sip_server()` function works without external imports
+- [ ] Server can bind to UDP port and receive messages
+- [ ] Basic INVITE processing without media
+- [ ] All files under 200 lines
+
+---
+
+## 🎵 PHASE 2: Media Manager Implementation (HIGH PRIORITY)
+
+### 2.1 Create MediaManager Infrastructure
+- [ ] **Create `src/media/manager.rs`** - MediaManager implementation
+  - [ ] MediaSession creation and lifecycle
+  - [ ] RTP stream coordination with rtp-core
+  - [ ] Media state management
+  - [ ] Session-to-media mapping
+
+- [ ] **Create `src/media/session.rs`** - MediaSession implementation
+  - [ ] Individual media session handling
+  - [ ] RTP stream start/stop/pause operations
+  - [ ] Media configuration management
+  - [ ] Quality metrics collection
+
+- [ ] **Create `src/media/config.rs`** - Media configuration
+  - [ ] MediaConfig struct with codec preferences
+  - [ ] RTP parameters and addressing
+  - [ ] Media direction handling
+  - [ ] Default configurations
+
+- [ ] **Create `src/media/coordination.rs`** - Session-media coordination
+  - [ ] Automatic media setup on session creation
+  - [ ] SDP-to-media configuration mapping
+  - [ ] Media state synchronization
+  - [ ] Cleanup on session termination
+
+### 2.2 Integrate MediaManager with Session Layer
+- [ ] **Update `src/session/session/media.rs`** - Session media operations
+  - [ ] Automatic MediaManager integration
+  - [ ] Media state transitions
+  - [ ] Hold/resume media coordination
+  - [ ] Error handling and recovery
+
+- [ ] **Update `src/session/manager.rs`** - SessionManager media integration
+  - [ ] MediaManager initialization
+  - [ ] Session-media lifecycle coordination
+  - [ ] Media event handling
+  - [ ] Resource cleanup
+
+### 2.3 Update API Layer for Media
+- [ ] **Update `src/api/server/operations.rs`** - Add media operations
+  - [ ] Automatic media setup in accept_call()
+  - [ ] Media coordination in hold/resume
+  - [ ] Media cleanup in end_call()
+
+- [ ] **Update `src/api/client/operations.rs`** - Add media operations
+  - [ ] Automatic media setup in make_call()
+  - [ ] Media coordination in hold/resume
+  - [ ] Media cleanup in end_call()
+
+**Success Criteria for Phase 2:**
+- [ ] make_call() automatically sets up media
+- [ ] hold_call() automatically pauses media
+- [ ] resume_call() automatically resumes media
+- [ ] end_call() automatically cleans up media
+- [ ] No manual media state management required
+- [ ] All files under 200 lines
+
+---
+
+## 🌐 PHASE 3: Complete SIPp Integration (VALIDATION)
+
+### 3.1 Enhanced Server Operations
+- [ ] **Update `src/api/server/manager.rs`** - Full INVITE handling
+  - [ ] Complete INVITE/200 OK/ACK flow
+  - [ ] SDP negotiation integration
+  - [ ] Media setup coordination
+  - [ ] Error response generation
+
+- [ ] **Create `src/api/server/handlers.rs`** - Request handlers
+  - [ ] INVITE request handler
+  - [ ] BYE request handler
+  - [ ] ACK request handler
+  - [ ] Re-INVITE handler for hold/resume
+
+### 3.2 SDP Integration
+- [ ] **Create `src/api/common/sdp.rs`** - SDP handling
+  - [ ] SDP generation from media config
+  - [ ] SDP parsing and validation
+  - [ ] Media parameter extraction
+  - [ ] Direction attribute handling
+
+### 3.3 Event System Enhancement
+- [ ] **Update `src/api/common/events.rs`** - Complete event types
+  - [ ] Call establishment events
+  - [ ] Media state change events
+  - [ ] Error and timeout events
+  - [ ] Session termination events
+
+### 3.4 Create SIPp Test Examples
+- [ ] **Create `examples/sipp_server.rs`** - Production SIPp server
+  - [ ] Uses only session-core API
+  - [ ] Handles multiple concurrent calls
+  - [ ] Complete call lifecycle support
+  - [ ] Comprehensive logging
+
+- [ ] **Create `examples/sipp_client.rs`** - SIPp client example
+  - [ ] Outbound call generation
+  - [ ] Media establishment
+  - [ ] Call termination
+  - [ ] Performance testing
+
+**Success Criteria for Phase 3:**
+- [ ] SIPp UAC scenario works against our server
+- [ ] SIPp UAS scenario works with our client
+- [ ] Multiple concurrent calls supported
+- [ ] Media flows established and terminated
+- [ ] All operations use only session-core API
+- [ ] All files under 200 lines
+
+---
+
+## 🔧 PHASE 4: API Refinement & Production Features (ENHANCEMENT)
+
+### 4.1 Configuration Enhancement
+- [ ] **Create `src/api/common/config.rs`** - Advanced configuration
+  - [ ] Codec preferences and capabilities
+  - [ ] Transport protocol selection
+  - [ ] Security settings (TLS/SRTP)
+  - [ ] Performance tuning parameters
+
+### 4.2 Error Handling Enhancement
+- [ ] **Update `src/api/common/errors.rs`** - Comprehensive error types
+  - [ ] Transport-specific errors
+  - [ ] Media-specific errors
+  - [ ] Protocol violation errors
+  - [ ] Configuration errors
+
+### 4.3 Monitoring and Observability
+- [ ] **Create `src/api/common/metrics.rs`** - Metrics collection
+  - [ ] Call success/failure rates
+  - [ ] Media quality metrics
+  - [ ] Performance counters
+  - [ ] Resource usage tracking
+
+### 4.4 Advanced Features
+- [ ] **Authentication integration** - Digest auth support
+- [ ] **REFER handling** - Call transfer support
+- [ ] **Security enhancements** - TLS and SRTP
+- [ ] **Performance optimization** - Connection pooling
+
+**Success Criteria for Phase 4:**
+- [ ] Production-ready configuration options
+- [ ] Comprehensive error handling
+- [ ] Performance monitoring capabilities
+- [ ] Advanced SIP features working
+- [ ] All files under 200 lines
+
+---
+
 ## ✅ COMPLETED - Core Infrastructure Foundation
 
 ### Session Manager & Dialog Integration
@@ -90,183 +367,42 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 
 ---
 
-## 🔄 PRIORITY 1: Media-Core Integration (Current Focus)
+## 📊 PROGRESS TRACKING
 
-**Status**: This is the main gap that needs to be addressed to complete the session manager design.
+### Current Status: **Phase 1 - API Foundation**
+- **Total Tasks**: 16
+- **Completed**: 0
+- **In Progress**: Planning
+- **Next Milestone**: Self-contained server API structure
 
-### MediaManager Implementation 
-- [ ] **Create MediaManager struct** to bridge session-core and media-core
-  - [ ] Design MediaManager interface for RTP stream coordination
-  - [ ] Implement session-to-media stream mapping
-  - [ ] Add media stream lifecycle management (start/stop/pause)
-  - [ ] Coordinate RTP stream setup based on SDP negotiation
-  - [ ] Handle media stream cleanup on session termination
-
-### RTP Stream Coordination
-- [ ] **Extract RTP parameters** from negotiated SDP
-- [ ] **Configure rtp-core streams** based on session requirements
-- [ ] **Handle bidirectional RTP flow** (send/receive streams)
-- [ ] **Coordinate RTCP reporting** with session state
-
-### Media Event Integration
-- [ ] **Subscribe to media-core events** (stream status, quality metrics)
-- [ ] **Propagate media events** to session layer
-- [ ] **Handle media failures** and recovery
-- [ ] **Coordinate media-driven session state changes**
-
-### Session-Media API Integration
-- [ ] **Extend SessionManager** with media coordination
-  - [ ] start_session_media(), stop_session_media(), update_session_media()
-- [ ] **Extend Session** with media operations
-  - [ ] media_status(), get_media_config(), update_media_config()
-- [ ] **Update helper functions** to include media coordination
-- [ ] **Add media events** to SessionEvent enum
+### File Count Monitoring
+- **Current API files**: 8 (need to verify line counts)
+- **Target API files**: 20+ (all under 200 lines)
+- **Refactoring needed**: TBD after line count audit
 
 ---
 
-## 🔜 PRIORITY 2: Advanced Features
+## 🎯 IMMEDIATE NEXT STEPS
 
-### Authentication Integration
-- [ ] **Digest Authentication** implementation according to RFC 3261 Section 22.2
-  - [ ] Challenge-response handling for 401/407 responses
-  - [ ] Nonce tracking and expiration handling
-  - [ ] Authentication caching for subsequent requests
-  - [ ] Quality of protection (qop) support
-- [ ] **High-level authentication API** for both client and server usage
-- [ ] **Credential storage and management**
-
-### Advanced Call Control
-- [ ] **REFER handling** (RFC 3515) for call transfer
-- [ ] **NOTIFY generation** for transfer progress updates
-- [ ] **Attended transfer scenarios**
-- [ ] **Replaces header support** (RFC 3891) for transfer completion
-
-### Security Enhancements
-- [ ] **TLS transport support integration** for secure signaling
-- [ ] **SRTP coordination** for secure media (integrate with media-core)
-- [ ] **Security event monitoring** and alerting
-
-### Codec Negotiation Enhancement
-- [ ] **Dynamic codec preference handling**
-- [ ] **Codec capability discovery** from media-core
-- [ ] **Advanced codec parameter negotiation**
-- [ ] **Fallback codec selection**
-
----
-
-## 🔜 PRIORITY 3: Production Features
-
-### Performance and Scalability
-- [ ] **Session pooling** for high-volume environments
-- [ ] **Connection reuse optimizations**
-- [ ] **Memory usage optimization** for large session counts
-- [ ] **Adaptive throttling mechanisms**
-- [ ] **Distributed session management support**
-
-### Advanced Media Features
-- [ ] **Video stream coordination** (future)
-- [ ] **Text stream support** (future)
-- [ ] **ICE integration** for NAT traversal (RFC 8445)
-- [ ] **RTCP feedback mechanisms** (RFC 4585)
-- [ ] **DTMF handling** via RTP events (RFC 4733)
-
-### Event System Enhancement
-- [ ] **Type-safe event definitions** for all session activities
-- [ ] **Event correlation and tracing** across layers
-- [ ] **Event filtering and subscription management**
-- [ ] **Event persistence** for debugging and analytics
-- [ ] **Webhook support** for session events
-- [ ] **WebSocket event streaming**
-- [ ] **Event bus integration** with infra-common
-
-### Monitoring and Observability
-- [ ] **Call quality metrics collection**
-- [ ] **Session duration and success rate tracking**
-- [ ] **Performance monitoring integration**
-- [ ] **Distributed tracing support**
-
----
-
-## ✅ COMPLETED - Testing & Compliance
-
-### Core Testing Infrastructure
-- [x] Comprehensive test suite for transaction-to-session integration
-- [x] Dialog creation and management tests
-- [x] Session state transitions based on transaction events tests
-- [x] Integration with transaction-core using mock transport
-- [x] RFC-mandated behaviors test coverage
-- [x] Critical performance metrics benchmarks
-
-### Performance Testing
-- [x] Benchmarks specific to async runtime performance
-- [x] Resource usage reporting implementation
-- [x] Metrics collection for operational monitoring
-
----
-
-## 🔜 TODO: Additional Testing & Integration
-
-### Media Integration Testing
-- [ ] **Unit tests** for MediaManager interface
-- [ ] **Integration tests** for session+media flows
-- [ ] **End-to-end session creation** with media setup
-- [ ] **Session termination** with media cleanup
-- [ ] **Hold/resume operations** with media direction changes
-
-### Production Testing
-- [ ] **Interoperability tests** with common SIP servers
-- [ ] **Continuous performance regression testing**
-- [ ] **High-volume session creation** with media
-- [ ] **Memory usage** with large session counts
-- [ ] **Event throughput** under load
-
----
-
-## Recent Major Improvements ✅
-
-### Network Transport & Dialog Management
-- [x] Transport trait abstraction for network operations
-- [x] UDP transport with send/receive capabilities
-- [x] Automatic address resolution for SIP URIs
-- [x] INVITE client and server transaction state machines
-- [x] Non-INVITE transaction support
-- [x] Transaction manager for handling all transactions
-- [x] Timer support for retransmissions
-- [x] Reliable provisional responses (PRACK support)
-- [x] Dialog creation from 2xx responses
-- [x] Dialog state management and ID generation
-- [x] Route set manipulation and early dialog support
-- [x] Dialog-based request creation and in-dialog ACK generation
-- [x] re-INVITE support for dialog refresh
-- [x] UPDATE method support (RFC 3311)
-
-### Session & SDP Handling
-- [x] Basic SDP parsing and generation with sip-core integration
-- [x] Audio codec support and proper SDP negotiation
-- [x] SDP offer/answer model implementation
-- [x] SDP version handling and early media SDP support
-- [x] SDP renegotiation for session updates
-- [x] Session refreshes with SDP and UPDATE method support
+1. **Start Phase 1.1**: Create server API structure
+2. **Audit existing files**: Check which files exceed 200 lines
+3. **Refactor oversized files**: Split into focused modules
+4. **Implement transport integration**: Bridge to sip-transport
+5. **Create factory functions**: High-level API entry points
 
 ---
 
 ## Integration Notes
 
 ### Current Architecture Status
-The session-core crate has a **very strong foundation** with:
-- ✅ **Complete session management infrastructure**
-- ✅ **Full SIP dialog handling with transaction integration**
-- ✅ **Complete SDP negotiation framework**
-- ✅ **Robust error handling and recovery mechanisms**
-- ✅ **Production-ready async runtime optimizations**
-- ✅ **Comprehensive public API with helper functions**
+The session-core crate has a **very strong foundation** with complete session management, SIP dialog handling, SDP negotiation, and async runtime optimizations. The main work is creating a **self-contained API layer** that doesn't require users to import lower-level crates.
 
-### Primary Gap: Media Integration
-The **only major missing piece** is the MediaManager implementation to bridge session-core with media-core/rtp-core. This is outlined in **Priority 1** above and detailed in the INTEGRATION_PLAN.md.
+### Primary Goal: API Abstraction
+The **main objective** is creating a clean API that internally uses transaction-core (which uses sip-transport) while providing a simple, high-level interface for SIP server and client operations.
 
-### Next Steps
-1. **Complete MediaManager implementation** (Priority 1)
-2. **Add authentication integration** (Priority 2) 
-3. **Enhance with advanced features** (Priority 3)
-
-The session-core is well-positioned to serve as the **central coordination layer** once the media integration is completed. 
+### Success Metrics
+- SIPp compatibility without external imports
+- All library files under 200 lines
+- Complete call lifecycle support
+- Automatic media coordination
+- Production-ready performance 
