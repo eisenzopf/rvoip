@@ -118,11 +118,27 @@ pub mod client {
     }
 
     /// Create a session manager configured for client use
-    pub fn create_client_session_manager(
+    pub async fn create_client_session_manager(
+        transaction_manager: Arc<TransactionManager>,
+        config: ClientConfig
+    ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
+        let event_bus = EventBus::new(100).await?;
+        
+        let session_manager = SessionManager::new(
+            transaction_manager,
+            config.session_config,
+            event_bus
+        ).await?;
+        
+        Ok(Arc::new(session_manager))
+    }
+    
+    /// Create a session manager configured for client use (synchronous)
+    pub fn create_client_session_manager_sync(
         transaction_manager: Arc<TransactionManager>,
         config: ClientConfig
     ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new(100);
+        let event_bus = EventBus::new_simple(100);
         
         Arc::new(SessionManager::new_sync(
             transaction_manager,
@@ -176,11 +192,27 @@ pub mod server {
     }
 
     /// Create a session manager configured for server use
-    pub fn create_server_session_manager(
+    pub async fn create_server_session_manager(
+        transaction_manager: Arc<TransactionManager>,
+        config: ServerConfig
+    ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
+        let event_bus = EventBus::new(1000).await?;
+        
+        let session_manager = SessionManager::new(
+            transaction_manager,
+            config.session_config,
+            event_bus
+        ).await?;
+        
+        Ok(Arc::new(session_manager))
+    }
+    
+    /// Create a session manager configured for server use (synchronous)
+    pub fn create_server_session_manager_sync(
         transaction_manager: Arc<TransactionManager>,
         config: ServerConfig
     ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new(1000);
+        let event_bus = EventBus::new_simple(1000);
         
         Arc::new(SessionManager::new_sync(
             transaction_manager,

@@ -1,18 +1,31 @@
-use std::sync::Arc;
-use async_trait::async_trait;
-use tokio::sync::broadcast;
-use uuid::Uuid;
-use std::fmt;
+//! Session event system using zero-copy event infrastructure
+//!
+//! This module provides session-specific events using the high-performance
+//! zero-copy event system from infra-common.
 
-use rvoip_sip_core::{Request, Response};
+use std::sync::Arc;
+use std::any::Any;
+use std::fmt;
+use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
+use uuid::Uuid;
+
+// Import zero-copy event system
+use infra_common::events::system::{EventSystem, EventPublisher, EventSubscriber};
+use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use infra_common::events::types::{Event, EventPriority, EventResult, EventFilter};
+use infra_common::events::bus::EventBusConfig;
+use infra_common::events::api::EventSystem as EventSystemTrait;
+
+use rvoip_sip_core::{Response, StatusCode};
 use rvoip_transaction_core::TransactionKey;
 
 use crate::session::{SessionId, SessionState};
 use crate::dialog::{DialogId, DialogState};
 use crate::sdp::NegotiationState;
 
-/// Event types that can be emitted during session lifecycle
-#[derive(Debug, Clone, PartialEq)]
+/// Session event types for the SIP session management
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// A new session was created
     Created {
@@ -57,25 +70,28 @@ pub enum SessionEvent {
     /// Provisional response received
     ProvisionalResponse {
         session_id: SessionId,
-        response: Response,
+        status_code: u16,
+        reason_phrase: String,
     },
     
     /// Success response received
     SuccessResponse {
         session_id: SessionId,
-        response: Response,
+        status_code: u16,
+        reason_phrase: String,
     },
     
     /// Failure response received
     FailureResponse {
         session_id: SessionId,
-        response: Response,
+        status_code: u16,
+        reason_phrase: String,
     },
     
     /// New transaction created
     TransactionCreated {
         session_id: SessionId,
-        transaction_id: TransactionKey,
+        transaction_id: String,
         is_client: bool,
         method: String,
     },
@@ -83,7 +99,117 @@ pub enum SessionEvent {
     /// Transaction completed
     TransactionCompleted {
         session_id: SessionId,
-        transaction_id: TransactionKey,
+        transaction_id: String,
+        success: bool,
+    },
+    
+    /// Dialog created
+    DialogCreated {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// Dialog state changed
+    DialogStateChanged {
+        session_id: SessionId,
+        dialog_id: DialogId,
+        previous: DialogState,
+        current: DialogState,
+    },
+    
+    /// SDP offer sent in a request
+    SdpOfferSent {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// SDP offer received in a request
+    SdpOfferReceived {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// SDP answer sent in a response
+    SdpAnswerSent {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// SDP answer received in a response
+    SdpAnswerReceived {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// SDP negotiation completed
+    SdpNegotiationComplete {
+        session_id: SessionId,
+        dialog_id: DialogId,
+    },
+    
+    /// Dialog recovery started
+    DialogRecoveryStarted {
+        session_id: SessionId,
+        dialog_id: DialogId,
+        reason: String,
+    },
+    
+    /// Dialog recovery completed (successfully or not)
+    DialogRecoveryCompleted {
+        session_id: SessionId,
+        dialog_id: DialogId,
+        success: bool,
+    },
+    
+    // ==== Transfer Events (REFER Method Support) ====
+    
+    /// Transfer request initiated (REFER sent/received)
+    TransferInitiated {
+        session_id: SessionId,
+        transfer_id: String,
+        transfer_type: String,
+        target_uri: String,
+    },
+    
+    /// Transfer accepted (202 Accepted sent/received)
+    TransferAccepted {
+        session_id: SessionId,
+        transfer_id: String,
+    },
+    
+    /// Transfer progress notification (NOTIFY received/sent)
+    TransferProgress {
+        session_id: SessionId,
+        transfer_id: String,
+        status: String,
+    },
+    
+    /// Transfer completed successfully
+    TransferCompleted {
+        session_id: SessionId,
+        transfer_id: String,
+        final_status: String,
+    },
+    
+    /// Transfer failed
+    TransferFailed {
+        session_id: SessionId,
+        transfer_id: String,
+        reason: String,
+    },
+    
+    /// Consultation call created for attended transfer
+    ConsultationCallCreated {
+        original_session_id: SessionId,
+        consultation_session_id: SessionId,
+        transfer_id: String,
+    },
+    
+    /// Consultation call completed
+    ConsultationCallCompleted {
+        original_session_id: SessionId,
+        consultation_session_id: SessionId,
+        transfer_id: String,
         success: bool,
     },
     
@@ -93,176 +219,144 @@ pub enum SessionEvent {
         event_type: String,
         data: serde_json::Value,
     },
+}
+
+// Implement the Event trait for zero-copy support
+impl Event for SessionEvent {
+    fn event_type() -> &'static str {
+        "session_event"
+    }
     
-    /// Session created
-    SessionCreated {
-        /// Session ID
-        session_id: SessionId,
-    },
+    fn priority() -> EventPriority {
+        EventPriority::Normal
+    }
     
-    /// Session state changed
-    SessionStateChanged {
-        /// Session ID
-        session_id: SessionId,
-        /// Previous state
-        previous: SessionState,
-        /// New state
-        current: SessionState,
-    },
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// High-performance event bus using zero-copy event system
+pub struct EventBus {
+    event_system: EventSystem,
+    publisher: EventPublisher<SessionEvent>,
+}
+
+impl Clone for EventBus {
+    fn clone(&self) -> Self {
+        // Create a new publisher from the cloned event system
+        let publisher_box = self.event_system.create_publisher::<SessionEvent>();
+        let publisher = EventPublisher::new(publisher_box);
+        
+        Self {
+            event_system: self.event_system.clone(),
+            publisher,
+        }
+    }
+}
+
+impl EventBus {
+    /// Create a new event bus with zero-copy event system
+    pub async fn new(capacity: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let event_system = EventSystemBuilder::new()
+            .implementation(ImplementationType::ZeroCopy)
+            .channel_capacity(capacity)
+            .max_concurrent_dispatches(capacity / 2)
+            .enable_priority(true)
+            .default_timeout(Some(std::time::Duration::from_secs(5)))
+            .batch_size(100)
+            .shard_count(8)
+            .build();
+        
+        // Start the event system
+        event_system.start().await?;
+        
+        // Create publisher
+        let publisher_box = event_system.create_publisher::<SessionEvent>();
+        let publisher = EventPublisher::new(publisher_box);
+        
+        Ok(Self {
+            event_system,
+            publisher,
+        })
+    }
     
-    /// Dialog created
-    DialogCreated {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Create a new event bus with default configuration
+    pub async fn default() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(1000).await
+    }
     
-    /// Dialog state changed
-    DialogStateChanged {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-        /// Previous state
-        previous: DialogState,
-        /// New state
-        current: DialogState,
-    },
+    /// Create a simple event bus for testing (synchronous)
+    pub fn new_simple(capacity: usize) -> Self {
+        // Create a runtime for the async initialization
+        let rt = tokio::runtime::Handle::try_current()
+            .or_else(|_| {
+                // If no runtime is available, create a temporary one
+                tokio::runtime::Runtime::new().map(|rt| rt.handle().clone())
+            })
+            .expect("No tokio runtime available");
+        
+        rt.block_on(async {
+            Self::new(capacity).await.expect("Failed to create event bus")
+        })
+    }
     
-    /// SDP offer sent in a request
-    SdpOfferSent {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Subscribe to session events
+    pub async fn subscribe(&self) -> Result<EventSubscriber<SessionEvent>, Box<dyn std::error::Error>> {
+        let subscriber_box = self.event_system.subscribe::<SessionEvent>().await?;
+        Ok(EventSubscriber::new(subscriber_box))
+    }
     
-    /// SDP offer received in a request
-    SdpOfferReceived {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Subscribe with a filter
+    pub async fn subscribe_filtered<F>(&self, filter: F) -> Result<EventSubscriber<SessionEvent>, Box<dyn std::error::Error>>
+    where
+        F: Fn(&SessionEvent) -> bool + Send + Sync + 'static,
+    {
+        let subscriber_box = self.event_system.subscribe_filtered(filter).await?;
+        Ok(EventSubscriber::new(subscriber_box))
+    }
     
-    /// SDP answer sent in a response
-    SdpAnswerSent {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Publish an event
+    pub async fn publish(&self, event: SessionEvent) -> Result<(), Box<dyn std::error::Error>> {
+        self.publisher.publish(event).await.map_err(|e| e.into())
+    }
     
-    /// SDP answer received in a response
-    SdpAnswerReceived {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Publish a batch of events for better performance
+    pub async fn publish_batch(&self, events: Vec<SessionEvent>) -> Result<(), Box<dyn std::error::Error>> {
+        self.publisher.publish_batch(events).await.map_err(|e| e.into())
+    }
     
-    /// SDP negotiation completed
-    SdpNegotiationComplete {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-    },
+    /// Register an event handler with the zero-copy system
+    pub async fn register_handler(&self, handler: Arc<dyn EventHandler>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut subscriber = self.subscribe().await?;
+        
+        tokio::spawn(async move {
+            loop {
+                match subscriber.receive().await {
+                    Ok(event) => {
+                        handler.handle_event((*event).clone()).await;
+                    },
+                    Err(_) => break, // Channel closed or error
+                }
+            }
+        });
+        
+        Ok(())
+    }
     
-    /// Dialog recovery started
-    DialogRecoveryStarted {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-        /// Reason for entering recovery mode
-        reason: String,
-    },
+    /// Shutdown the event system
+    pub async fn shutdown(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.event_system.shutdown().await.map_err(|e| e.into())
+    }
     
-    /// Dialog recovery completed (successfully or not)
-    DialogRecoveryCompleted {
-        /// Session ID
-        session_id: SessionId,
-        /// Dialog ID
-        dialog_id: DialogId,
-        /// Whether recovery was successful
-        success: bool,
-    },
-    
-    // ==== Transfer Events (REFER Method Support) ====
-    
-    /// Transfer request initiated (REFER sent/received)
-    TransferInitiated {
-        /// Session ID being transferred
-        session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-        /// Transfer type
-        transfer_type: String,
-        /// Target URI
-        target_uri: String,
-    },
-    
-    /// Transfer accepted (202 Accepted sent/received)
-    TransferAccepted {
-        /// Session ID
-        session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-    },
-    
-    /// Transfer progress notification (NOTIFY received/sent)
-    TransferProgress {
-        /// Session ID
-        session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-        /// Progress status (e.g., "100 Trying", "200 OK")
-        status: String,
-    },
-    
-    /// Transfer completed successfully
-    TransferCompleted {
-        /// Session ID
-        session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-        /// Final status
-        final_status: String,
-    },
-    
-    /// Transfer failed
-    TransferFailed {
-        /// Session ID
-        session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-        /// Failure reason
-        reason: String,
-    },
-    
-    /// Consultation call created for attended transfer
-    ConsultationCallCreated {
-        /// Original session ID
-        original_session_id: SessionId,
-        /// Consultation session ID
-        consultation_session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-    },
-    
-    /// Consultation call completed
-    ConsultationCallCompleted {
-        /// Original session ID
-        original_session_id: SessionId,
-        /// Consultation session ID
-        consultation_session_id: SessionId,
-        /// Transfer ID
-        transfer_id: String,
-        /// Whether consultation was successful
-        success: bool,
-    },
+    /// Get event system metrics
+    pub fn metrics(&self) -> serde_json::Value {
+        // The zero-copy system can provide detailed metrics
+        serde_json::json!({
+            "system_type": "zero_copy",
+            "implementation": "sharded"
+        })
+    }
 }
 
 /// Trait for handling session events
@@ -272,75 +366,136 @@ pub trait EventHandler: Send + Sync {
     async fn handle_event(&self, event: SessionEvent);
 }
 
-/// Event bus for broadcasting session events
-#[derive(Clone)]
-pub struct EventBus {
-    sender: broadcast::Sender<SessionEvent>,
+/// Session event priority for different types of events
+impl SessionEvent {
+    pub fn priority(&self) -> EventPriority {
+        match self {
+            // High priority events
+            SessionEvent::Terminated { .. } |
+            SessionEvent::TransferFailed { .. } |
+            SessionEvent::FailureResponse { .. } => EventPriority::High,
+            
+            // Normal priority events
+            SessionEvent::Created { .. } |
+            SessionEvent::StateChanged { .. } |
+            SessionEvent::TransferInitiated { .. } |
+            SessionEvent::TransferCompleted { .. } |
+            SessionEvent::ConsultationCallCreated { .. } |
+            SessionEvent::TransferAccepted { .. } |
+            SessionEvent::SuccessResponse { .. } |
+            SessionEvent::TransactionCreated { .. } |
+            SessionEvent::TransactionCompleted { .. } |
+            SessionEvent::DialogCreated { .. } |
+            SessionEvent::DialogStateChanged { .. } |
+            SessionEvent::SdpOfferSent { .. } |
+            SessionEvent::SdpOfferReceived { .. } |
+            SessionEvent::SdpAnswerSent { .. } |
+            SessionEvent::SdpAnswerReceived { .. } |
+            SessionEvent::SdpNegotiationComplete { .. } |
+            SessionEvent::DialogRecoveryStarted { .. } |
+            SessionEvent::DialogRecoveryCompleted { .. } |
+            SessionEvent::ConsultationCallCompleted { .. } => EventPriority::Normal,
+            
+            // Low priority events  
+            SessionEvent::TransferProgress { .. } |
+            SessionEvent::ProvisionalResponse { .. } |
+            SessionEvent::DialogUpdated { .. } |
+            SessionEvent::DtmfReceived { .. } |
+            SessionEvent::Custom { .. } |
+            SessionEvent::MediaStarted { .. } |
+            SessionEvent::MediaStopped { .. } => EventPriority::Low,
+        }
+    }
+    
+    /// Get the session ID from any event
+    pub fn session_id(&self) -> SessionId {
+        match self {
+            SessionEvent::Created { session_id } |
+            SessionEvent::StateChanged { session_id, .. } |
+            SessionEvent::DialogUpdated { session_id, .. } |
+            SessionEvent::MediaStarted { session_id } |
+            SessionEvent::MediaStopped { session_id } |
+            SessionEvent::DtmfReceived { session_id, .. } |
+            SessionEvent::Terminated { session_id, .. } |
+            SessionEvent::ProvisionalResponse { session_id, .. } |
+            SessionEvent::SuccessResponse { session_id, .. } |
+            SessionEvent::FailureResponse { session_id, .. } |
+            SessionEvent::TransactionCreated { session_id, .. } |
+            SessionEvent::TransactionCompleted { session_id, .. } |
+            SessionEvent::DialogCreated { session_id, .. } |
+            SessionEvent::DialogStateChanged { session_id, .. } |
+            SessionEvent::SdpOfferSent { session_id, .. } |
+            SessionEvent::SdpOfferReceived { session_id, .. } |
+            SessionEvent::SdpAnswerSent { session_id, .. } |
+            SessionEvent::SdpAnswerReceived { session_id, .. } |
+            SessionEvent::SdpNegotiationComplete { session_id, .. } |
+            SessionEvent::DialogRecoveryStarted { session_id, .. } |
+            SessionEvent::DialogRecoveryCompleted { session_id, .. } |
+            SessionEvent::TransferInitiated { session_id, .. } |
+            SessionEvent::TransferAccepted { session_id, .. } |
+            SessionEvent::TransferProgress { session_id, .. } |
+            SessionEvent::TransferCompleted { session_id, .. } |
+            SessionEvent::TransferFailed { session_id, .. } |
+            SessionEvent::Custom { session_id, .. } => session_id.clone(),
+            SessionEvent::ConsultationCallCreated { original_session_id, .. } |
+            SessionEvent::ConsultationCallCompleted { original_session_id, .. } => original_session_id.clone(),
+        }
+    }
 }
 
-impl EventBus {
-    /// Create a new event bus
-    pub fn new(capacity: usize) -> Self {
-        let (sender, _) = broadcast::channel(capacity);
-        Self { sender }
+/// Event filters for specific event types
+pub struct EventFilters;
+
+impl EventFilters {
+    /// Filter for transfer-related events only
+    pub fn transfers_only() -> impl Fn(&SessionEvent) -> bool {
+        |event| matches!(event, 
+            SessionEvent::TransferInitiated { .. } |
+            SessionEvent::TransferAccepted { .. } |
+            SessionEvent::TransferProgress { .. } |
+            SessionEvent::TransferCompleted { .. } |
+            SessionEvent::TransferFailed { .. } |
+            SessionEvent::ConsultationCallCreated { .. } |
+            SessionEvent::ConsultationCallCompleted { .. }
+        )
     }
     
-    /// Subscribe to events
-    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-        self.sender.subscribe()
+    /// Filter for specific session ID
+    pub fn session_id_filter(target_session_id: SessionId) -> impl Fn(&SessionEvent) -> bool {
+        move |event| event.session_id() == target_session_id
     }
     
-    /// Publish an event
-    pub fn publish(&self, event: SessionEvent) {
-        let _ = self.sender.send(event);
+    /// Filter for state change events only
+    pub fn state_changes_only() -> impl Fn(&SessionEvent) -> bool {
+        |event| matches!(event,
+            SessionEvent::StateChanged { .. } |
+            SessionEvent::DialogStateChanged { .. }
+        )
     }
     
-    /// Register an event handler
-    pub async fn register_handler(&self, handler: Arc<dyn EventHandler>) -> broadcast::Receiver<SessionEvent> {
-        let mut rx = self.subscribe();
-        let handler_clone = handler.clone();
-        
-        tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                handler_clone.handle_event(event.clone()).await;
-            }
-        });
-        
-        self.subscribe()
-    }
-    
-    /// Create a default event bus
-    pub fn default() -> Self {
-        Self::new(100)
+    /// Filter for high priority events only
+    pub fn high_priority_only() -> impl Fn(&SessionEvent) -> bool {
+        |event| matches!(event.priority(), EventPriority::High)
     }
 }
 
-// Unit tests for events module
+// Unit tests for the zero-copy event system
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::time::sleep;
-    use std::time::Duration;
-    use crate::session::{SessionId, SessionState};
-    use crate::dialog::DialogId;
+    use tokio::time::{sleep, Duration};
 
-    // Create a test event handler that counts events
     struct TestEventHandler {
         event_count: AtomicUsize,
-        created_count: AtomicUsize,
-        state_changed_count: AtomicUsize,
-        terminated_count: AtomicUsize,
+        transfer_count: AtomicUsize,
     }
 
     impl TestEventHandler {
         fn new() -> Self {
             Self {
                 event_count: AtomicUsize::new(0),
-                created_count: AtomicUsize::new(0),
-                state_changed_count: AtomicUsize::new(0),
-                terminated_count: AtomicUsize::new(0),
+                transfer_count: AtomicUsize::new(0),
             }
         }
         
@@ -348,16 +503,8 @@ mod tests {
             self.event_count.load(Ordering::SeqCst)
         }
         
-        fn created_count(&self) -> usize {
-            self.created_count.load(Ordering::SeqCst)
-        }
-        
-        fn state_changed_count(&self) -> usize {
-            self.state_changed_count.load(Ordering::SeqCst)
-        }
-        
-        fn terminated_count(&self) -> usize {
-            self.terminated_count.load(Ordering::SeqCst)
+        fn transfer_count(&self) -> usize {
+            self.transfer_count.load(Ordering::SeqCst)
         }
     }
 
@@ -366,156 +513,90 @@ mod tests {
         async fn handle_event(&self, event: SessionEvent) {
             self.event_count.fetch_add(1, Ordering::SeqCst);
             
-            match event {
-                SessionEvent::Created { .. } => {
-                    self.created_count.fetch_add(1, Ordering::SeqCst);
-                },
-                SessionEvent::StateChanged { .. } => {
-                    self.state_changed_count.fetch_add(1, Ordering::SeqCst);
-                },
-                SessionEvent::Terminated { .. } => {
-                    self.terminated_count.fetch_add(1, Ordering::SeqCst);
-                },
-                _ => {}
+            if EventFilters::transfers_only()(&event) {
+                self.transfer_count.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
 
     #[tokio::test]
-    async fn test_event_bus_publish_subscribe() {
-        // Create event bus
-        let event_bus = EventBus::new(10);
-        
-        // Subscribe to events
-        let mut rx = event_bus.subscribe();
-        
-        // Create a session ID for testing
+    async fn test_zero_copy_event_bus() {
+        let event_bus = EventBus::new(100).await.unwrap();
         let session_id = SessionId::new();
         
-        // Publish an event
-        event_bus.publish(SessionEvent::Created { 
-            session_id: session_id.clone() 
-        });
+        // Create subscriber
+        let mut subscriber = event_bus.subscribe().await.unwrap();
         
-        // Try to receive the event with a timeout
-        let received = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx.recv()
-        ).await;
+        // Publish event
+        let event = SessionEvent::Created { session_id: session_id.clone() };
+        event_bus.publish(event).await.unwrap();
         
-        // Check if we received the event
-        assert!(received.is_ok(), "Failed to receive event within timeout");
+        // Receive event
+        let received = subscriber.receive_timeout(Duration::from_millis(100)).await.unwrap();
+        assert_eq!(received.session_id(), session_id);
         
-        if let Ok(event_result) = received {
-            match event_result {
-                Ok(SessionEvent::Created { session_id: event_session_id }) => {
-                    assert_eq!(event_session_id, session_id);
-                },
-                _ => panic!("Received wrong event type"),
-            }
-        }
+        // Shutdown
+        event_bus.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_event_handler_registration() {
-        // Create event bus
-        let event_bus = EventBus::new(10);
+    async fn test_transfer_events_zero_copy() {
+        let event_bus = EventBus::new(100).await.unwrap();
+        let session_id = SessionId::new();
         
-        // Create and register handler
+        // Register handler
         let handler = Arc::new(TestEventHandler::new());
-        event_bus.register_handler(handler.clone()).await;
+        event_bus.register_handler(handler.clone()).await.unwrap();
         
-        // Create a session ID for testing
-        let session_id = SessionId::new();
-        let dialog_id = DialogId::new();
+        // Publish transfer events
+        let events = vec![
+            SessionEvent::TransferInitiated {
+                session_id: session_id.clone(),
+                transfer_id: "transfer1".to_string(),
+                transfer_type: "Blind".to_string(),
+                target_uri: "sip:bob@example.com".to_string(),
+            },
+            SessionEvent::TransferProgress {
+                session_id: session_id.clone(),
+                transfer_id: "transfer1".to_string(),
+                status: "100 Trying".to_string(),
+            },
+            SessionEvent::TransferCompleted {
+                session_id: session_id.clone(),
+                transfer_id: "transfer1".to_string(),
+                final_status: "200 OK".to_string(),
+            },
+        ];
         
-        // Publish several events
-        event_bus.publish(SessionEvent::Created { 
-            session_id: session_id.clone() 
-        });
+        // Batch publish for better performance
+        event_bus.publish_batch(events).await.unwrap();
         
-        event_bus.publish(SessionEvent::StateChanged { 
-            session_id: session_id.clone(),
-            old_state: SessionState::Initializing,
-            new_state: SessionState::Dialing,
-        });
-        
-        event_bus.publish(SessionEvent::DialogUpdated { 
-            session_id: session_id.clone(),
-            dialog_id,
-        });
-        
-        event_bus.publish(SessionEvent::Terminated { 
-            session_id: session_id.clone(),
-            reason: "Test termination".to_string(),
-        });
-        
-        // Wait a bit for all events to be processed
+        // Wait for events to be processed
         sleep(Duration::from_millis(50)).await;
         
-        // Check the counts
-        assert_eq!(handler.event_count(), 4);
-        assert_eq!(handler.created_count(), 1);
-        assert_eq!(handler.state_changed_count(), 1);
-        assert_eq!(handler.terminated_count(), 1);
+        assert_eq!(handler.event_count(), 3);
+        assert_eq!(handler.transfer_count(), 3);
+        
+        event_bus.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_multiple_subscribers() {
-        // Create event bus
-        let event_bus = EventBus::new(10);
-        
-        // Create two subscribers
-        let mut rx1 = event_bus.subscribe();
-        let mut rx2 = event_bus.subscribe();
-        
-        // Create a session ID for testing
+    async fn test_event_priority() {
         let session_id = SessionId::new();
         
-        // Publish an event
-        event_bus.publish(SessionEvent::Created { 
-            session_id: session_id.clone() 
-        });
+        let high_priority_event = SessionEvent::Terminated {
+            session_id: session_id.clone(),
+            reason: "Connection lost".to_string(),
+        };
         
-        // Try to receive the event on both subscribers
-        let received1 = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx1.recv()
-        ).await;
+        let low_priority_event = SessionEvent::TransferProgress {
+            session_id: session_id.clone(),
+            transfer_id: "transfer1".to_string(),
+            status: "180 Ringing".to_string(),
+        };
         
-        let received2 = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx2.recv()
-        ).await;
-        
-        // Check if both received the event
-        assert!(received1.is_ok(), "Subscriber 1 failed to receive event within timeout");
-        assert!(received2.is_ok(), "Subscriber 2 failed to receive event within timeout");
-    }
-
-    #[tokio::test]
-    async fn test_event_bus_default() {
-        // Test the default constructor
-        let event_bus = EventBus::default();
-        
-        // Subscribe to events
-        let mut rx = event_bus.subscribe();
-        
-        // Create a session ID for testing
-        let session_id = SessionId::new();
-        
-        // Publish an event
-        event_bus.publish(SessionEvent::Created { 
-            session_id: session_id.clone() 
-        });
-        
-        // Verify we can receive it
-        let received = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx.recv()
-        ).await;
-        
-        assert!(received.is_ok(), "Failed to receive event within timeout");
+        assert_eq!(high_priority_event.priority(), EventPriority::High);
+        assert_eq!(low_priority_event.priority(), EventPriority::Low);
     }
 }
 

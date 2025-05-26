@@ -108,6 +108,29 @@ impl SessionManager {
         Ok(session_manager)
     }
     
+    /// Create a new session manager with default event bus
+    pub async fn new_with_default_events(
+        transaction_manager: Arc<TransactionManager>,
+        config: SessionConfig,
+    ) -> Result<Self, Error> {
+        // Create default zero-copy event bus
+        let event_bus = EventBus::new(1000).await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create event bus: {}", e),
+                ErrorContext {
+                    category: ErrorCategory::Internal,
+                    severity: ErrorSeverity::Critical,
+                    recovery: RecoveryAction::None,
+                    retryable: false,
+                    timestamp: SystemTime::now(),
+                    details: Some("Event bus initialization failed".to_string()),
+                    ..Default::default()
+                }
+            ))?;
+        
+        Self::new(transaction_manager, config, event_bus).await
+    }
+    
     /// Create a new session manager (legacy method for backward compatibility)
     pub fn new_sync(
         transaction_manager: Arc<TransactionManager>,
@@ -262,10 +285,12 @@ impl SessionManager {
                     // Remove from active sessions
                     self.sessions.remove(session_id);
                 },
-                _ => {
-                    // Forward the event to the event bus
-                    self.event_bus.publish(event);
-                }
+                _ => {}
+            }
+            
+            // Forward the event to the zero-copy event bus (async)
+            if let Err(e) = self.event_bus.publish(event).await {
+                error!("Failed to publish event to zero-copy event bus: {}", e);
             }
         }
     }
