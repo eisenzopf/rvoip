@@ -59,6 +59,9 @@ pub use server::{
     create_full_server_manager, create_full_server_manager_sync,
 };
 
+// Re-export server config types for convenience
+pub use crate::api::server::config::TransportProtocol;
+
 // Re-export factory functions
 pub use factory::{create_sip_server, create_sip_client, SipServer, SipClient};
 

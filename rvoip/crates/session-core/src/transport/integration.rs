@@ -230,6 +230,12 @@ impl TransportIntegration {
         self.config.transport_protocol
     }
     
+    /// Get the underlying transport for use with transaction-core
+    pub fn get_transport(&self) -> Arc<dyn Transport> {
+        // Cast from Arc<dyn Transport + Send + Sync> to Arc<dyn Transport>
+        self.transport.clone() as Arc<dyn Transport>
+    }
+    
     /// Stop the transport integration
     pub async fn stop(&self) -> Result<()> {
         info!("Stopping transport integration");
