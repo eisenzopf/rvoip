@@ -54,10 +54,10 @@ pub struct Session {
     pub id: SessionId,
     
     /// Current session state
-    state: Arc<Mutex<SessionState>>,
+    pub(crate) state: Arc<Mutex<SessionState>>,
     
     /// Current media state
-    media_state: Arc<Mutex<SessionMediaState>>,
+    pub(crate) media_state: Arc<Mutex<SessionMediaState>>,
     
     /// Direction of the session (incoming or outgoing)
     direction: SessionDirection,
@@ -75,25 +75,25 @@ pub struct Session {
     transactions: Arc<Mutex<HashMap<TransactionKey, SessionTransactionType>>>,
     
     /// Media session ID (if media is active)
-    media_session_id: Arc<Mutex<Option<MediaSessionId>>>,
+    pub(crate) media_session_id: Arc<Mutex<Option<MediaSessionId>>>,
     
     /// Latest media quality metrics
-    media_metrics: Arc<Mutex<Option<QualityMetrics>>>,
+    pub(crate) media_metrics: Arc<Mutex<Option<QualityMetrics>>>,
     
     /// RTP stream information
-    rtp_stream_info: Arc<Mutex<Option<RtpStreamInfo>>>,
+    pub(crate) rtp_stream_info: Arc<Mutex<Option<RtpStreamInfo>>>,
     
     /// Current transfer context (if transfer is in progress)
-    transfer_context: Arc<Mutex<Option<TransferContext>>>,
+    pub(crate) transfer_context: Arc<Mutex<Option<TransferContext>>>,
     
     /// Transfer history for this session
-    transfer_history: Arc<Mutex<Vec<TransferContext>>>,
+    pub(crate) transfer_history: Arc<Mutex<Vec<TransferContext>>>,
     
     /// Consultation session ID (for attended transfers)
-    consultation_session_id: Arc<Mutex<Option<SessionId>>>,
+    pub(crate) consultation_session_id: Arc<Mutex<Option<SessionId>>>,
     
     /// Event bus for publishing session events
-    event_bus: EventBus,
+    pub(crate) event_bus: EventBus,
 }
 
 impl Session {
