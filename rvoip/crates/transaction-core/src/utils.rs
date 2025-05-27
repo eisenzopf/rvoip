@@ -79,6 +79,133 @@ pub fn create_ok_response(request: &Request) -> Response {
     create_response(request, StatusCode::Ok)
 }
 
+/// Create a 200 OK response with To-tag and Contact header for dialog establishment
+/// 
+/// This function creates a proper 200 OK response for INVITE requests that includes:
+/// - A generated To-tag for dialog identification
+/// - A Contact header for future in-dialog requests
+/// - All standard headers copied from the request
+/// 
+/// # Arguments
+/// * `request` - The original INVITE request
+/// * `contact_user` - The user part for the Contact URI (e.g., "server", "alice", etc.)
+/// * `contact_host` - The host/IP for the Contact URI (e.g., "192.168.1.1")
+/// * `contact_port` - Optional port for the Contact URI
+/// 
+/// # Returns
+/// A 200 OK response ready for dialog establishment
+pub fn create_ok_response_with_dialog_info(
+    request: &Request, 
+    contact_user: &str, 
+    contact_host: &str, 
+    contact_port: Option<u16>
+) -> Response {
+    // Generate a unique To-tag for this dialog
+    let to_tag = format!("tag-{}", Uuid::new_v4().simple());
+    
+    // Start with basic response
+    let mut response = create_response(request, StatusCode::Ok);
+    
+    // Update the To header to include the tag
+    if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+        let new_to = to.clone().with_tag(&to_tag);
+        
+        // Replace the To header
+        response.headers.retain(|h| !matches!(h, TypedHeader::To(_)));
+        response.headers.push(TypedHeader::To(new_to));
+    }
+    
+    // Create Contact header using proper sip-core URI builder
+    let mut contact_uri = Uri::sip(contact_host).with_user(contact_user);
+    if let Some(port) = contact_port {
+        contact_uri = contact_uri.with_port(port);
+    }
+    
+    let contact_addr = Address::new(contact_uri);
+    let contact_info = ContactParamInfo { address: contact_addr };
+    let contact = Contact::new_params(vec![contact_info]);
+    response.headers.push(TypedHeader::Contact(contact));
+    
+    response
+}
+
+/// Create a 180 Ringing response with To-tag for early dialog establishment
+/// 
+/// This function creates a 180 Ringing response that includes a To-tag,
+/// which establishes an early dialog state.
+/// 
+/// # Arguments
+/// * `request` - The original INVITE request
+/// 
+/// # Returns
+/// A 180 Ringing response with To-tag for early dialog
+pub fn create_ringing_response_with_tag(request: &Request) -> Response {
+    // Generate a unique To-tag for this early dialog
+    let to_tag = format!("tag-{}", Uuid::new_v4().simple());
+    
+    // Start with basic ringing response
+    let mut response = create_ringing_response(request);
+    
+    // Update the To header to include the tag
+    if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+        let new_to = to.clone().with_tag(&to_tag);
+        
+        // Replace the To header
+        response.headers.retain(|h| !matches!(h, TypedHeader::To(_)));
+        response.headers.push(TypedHeader::To(new_to));
+    }
+    
+    response
+}
+
+/// Create a 180 Ringing response with To-tag and Contact header for early dialog
+/// 
+/// This function creates a 180 Ringing response that includes both a To-tag
+/// and Contact header for early dialog establishment with media capabilities.
+/// 
+/// # Arguments
+/// * `request` - The original INVITE request
+/// * `contact_user` - The user part for the Contact URI (e.g., "server", "alice", etc.)
+/// * `contact_host` - The host/IP for the Contact URI (e.g., "192.168.1.1")
+/// * `contact_port` - Optional port for the Contact URI
+/// 
+/// # Returns
+/// A 180 Ringing response with To-tag and Contact header
+pub fn create_ringing_response_with_dialog_info(
+    request: &Request, 
+    contact_user: &str, 
+    contact_host: &str, 
+    contact_port: Option<u16>
+) -> Response {
+    // Generate a unique To-tag for this early dialog
+    let to_tag = format!("tag-{}", Uuid::new_v4().simple());
+    
+    // Start with basic ringing response
+    let mut response = create_ringing_response(request);
+    
+    // Update the To header to include the tag
+    if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+        let new_to = to.clone().with_tag(&to_tag);
+        
+        // Replace the To header
+        response.headers.retain(|h| !matches!(h, TypedHeader::To(_)));
+        response.headers.push(TypedHeader::To(new_to));
+    }
+    
+    // Create Contact header using proper sip-core URI builder
+    let mut contact_uri = Uri::sip(contact_host).with_user(contact_user);
+    if let Some(port) = contact_port {
+        contact_uri = contact_uri.with_port(port);
+    }
+    
+    let contact_addr = Address::new(contact_uri);
+    let contact_info = ContactParamInfo { address: contact_addr };
+    let contact = Contact::new_params(vec![contact_info]);
+    response.headers.push(TypedHeader::Contact(contact));
+    
+    response
+}
+
 /// Extract the transaction classification (prefix) and branch from a message
 /// Used by manager to determine transaction type and potentially match.
 pub fn extract_transaction_parts(message: &Message) -> Result<(TransactionKind, String)> {
@@ -457,6 +584,87 @@ mod tests {
                 assert_eq!(addr.uri.host, Host::Domain("example.org".to_string()));
                 // Verify display name
                 assert_eq!(addr.display_name, Some("Test User".to_string()));
+            } else {
+                panic!("Contact has no address");
+            }
+        } else {
+            panic!("Missing Contact header in response");
+        }
+    }
+
+    #[test]
+    fn test_create_ok_response_with_dialog_info() {
+        let request = create_test_request(Method::Invite);
+        let response = create_ok_response_with_dialog_info(&request, "alice", "192.168.1.100", Some(5060));
+
+        // Check status code
+        assert_eq!(response.status(), StatusCode::Ok);
+        
+        // Check that To header has a tag
+        if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+            assert!(to.tag().is_some(), "To header should have a tag");
+            assert!(to.tag().unwrap().starts_with("tag-"), "To tag should start with 'tag-'");
+        } else {
+            panic!("Missing To header in response");
+        }
+        
+        // Check that Contact header was added with proper URI
+        if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
+            if let Some(addr) = contact.address() {
+                assert_eq!(addr.uri.user, Some("alice".to_string()));
+                assert_eq!(addr.uri.host, Host::Domain("192.168.1.100".to_string()));
+                assert_eq!(addr.uri.port, Some(5060));
+            } else {
+                panic!("Contact has no address");
+            }
+        } else {
+            panic!("Missing Contact header in response");
+        }
+    }
+
+    #[test]
+    fn test_create_ringing_response_with_tag() {
+        let request = create_test_request(Method::Invite);
+        let response = create_ringing_response_with_tag(&request);
+
+        // Check status code
+        assert_eq!(response.status(), StatusCode::Ringing);
+        
+        // Check that To header has a tag
+        if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+            assert!(to.tag().is_some(), "To header should have a tag");
+            assert!(to.tag().unwrap().starts_with("tag-"), "To tag should start with 'tag-'");
+        } else {
+            panic!("Missing To header in response");
+        }
+        
+        // Check that Contact header was NOT added (basic ringing response)
+        assert!(response.header(&HeaderName::Contact).is_none(), 
+               "Basic ringing response should not have Contact header");
+    }
+
+    #[test]
+    fn test_create_ringing_response_with_dialog_info() {
+        let request = create_test_request(Method::Invite);
+        let response = create_ringing_response_with_dialog_info(&request, "bob", "10.0.0.1", None);
+
+        // Check status code
+        assert_eq!(response.status(), StatusCode::Ringing);
+        
+        // Check that To header has a tag
+        if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+            assert!(to.tag().is_some(), "To header should have a tag");
+            assert!(to.tag().unwrap().starts_with("tag-"), "To tag should start with 'tag-'");
+        } else {
+            panic!("Missing To header in response");
+        }
+        
+        // Check that Contact header was added with proper URI (no port)
+        if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
+            if let Some(addr) = contact.address() {
+                assert_eq!(addr.uri.user, Some("bob".to_string()));
+                assert_eq!(addr.uri.host, Host::Domain("10.0.0.1".to_string()));
+                assert_eq!(addr.uri.port, None); // No port specified
             } else {
                 panic!("Contact has no address");
             }

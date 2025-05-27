@@ -62,20 +62,19 @@ impl ServerManager {
     
     /// Handle transaction events from transaction-core
     /// 
-    /// **ARCHITECTURAL PRINCIPLE**: We REACT to transaction events, we don't send responses.
-    /// transaction-core handles all SIP protocol details automatically.
+    /// **ARCHITECTURAL FIX**: Forward events to DialogManager first, then coordinate sessions.
+    /// DialogManager handles SIP protocol details and dialog state management.
     pub async fn handle_transaction_event(&self, event: TransactionEvent) -> Result<()> {
+        // **CRITICAL FIX**: Forward transaction events to DialogManager first
+        // DialogManager handles SIP protocol details and dialog state
+        self.session_manager.dialog_manager().process_transaction_event(event.clone()).await;
+        
+        // Then handle session-level coordination based on the event
         match event {
-            TransactionEvent::InviteRequest { transaction_id, request, source } => {
-                self.handle_invite_received(transaction_id, request, source).await?;
-            },
-            TransactionEvent::NonInviteRequest { transaction_id, request, source } => {
-                self.handle_non_invite_received(transaction_id, request, source).await?;
-            },
             TransactionEvent::NewRequest { transaction_id, request, source } => {
                 match request.method() {
                     Method::Invite => {
-                        info!("📞 Received INVITE request - coordinating session creation");
+                        info!("📞 Received INVITE request - coordinating session creation via DialogManager");
                         self.handle_invite_received(transaction_id, request, source).await?;
                     },
                     Method::Bye => {
@@ -85,7 +84,7 @@ impl ServerManager {
                         self.handle_ack_received(request).await?;
                     },
                     _ => {
-                        debug!("Received {} request - handled by transaction-core", request.method());
+                        debug!("Received {} request - handled by DialogManager", request.method());
                     }
                 }
             },
@@ -96,7 +95,7 @@ impl ServerManager {
                 self.handle_transaction_completed(transaction_id).await?;
             },
             _ => {
-                debug!("Received transaction event: {:?}", event);
+                debug!("Received transaction event: {:?} - forwarded to DialogManager", event);
             }
         }
         Ok(())
@@ -121,17 +120,23 @@ impl ServerManager {
         Ok(())
     }
     
-    /// Handle INVITE received (coordinate session creation)
+    /// Handle INVITE received (coordinate session creation via DialogManager)
     /// 
-    /// **ARCHITECTURAL PRINCIPLE**: We create sessions and coordinate state.
-    /// transaction-core automatically sends 180 Ringing and manages SIP protocol.
+    /// **ARCHITECTURAL FIX**: Use DialogManager to handle SIP protocol details.
+    /// DialogManager creates server transactions and manages dialog state.
+    /// ServerManager only coordinates session-level state.
     async fn handle_invite_received(&self, transaction_id: TransactionKey, request: Request, source: std::net::SocketAddr) -> Result<()> {
+        info!("📞 Received INVITE request - coordinating session creation via DialogManager");
         info!("Coordinating session creation for INVITE transaction {}", transaction_id);
         
-        // Extract Call-ID
+        // Extract Call-ID for session tracking
         let call_id = request.call_id()
             .ok_or_else(|| anyhow::anyhow!("INVITE missing Call-ID header"))?
             .value();
+        
+        // **ARCHITECTURAL FIX**: Let DialogManager handle the SIP protocol details
+        // DialogManager will create server transactions and send responses
+        // We just coordinate session creation and state
         
         // Create incoming session (session-core responsibility)
         let session = self.session_manager.create_incoming_session().await
@@ -154,7 +159,7 @@ impl ServerManager {
             active.insert(session_id.clone(), session);
         }
         
-        info!("✅ Created session {} for INVITE transaction {} with Call-ID {} (transaction-core handles 180 Ringing)", 
+        info!("✅ Created session {} for INVITE transaction {} with Call-ID {} (DialogManager handles SIP protocol)", 
               session_id, transaction_id, call_id);
         Ok(())
     }
@@ -190,9 +195,20 @@ impl ServerManager {
             .ok_or_else(|| anyhow::anyhow!("BYE missing Call-ID header"))?
             .value();
         
+        // Look for session in both pending calls and active sessions
         let session_id = {
+            // First check pending calls
             let pending = self.pending_calls.read().await;
-            pending.get(&call_id).cloned().map(|(session_id, _, _)| session_id)
+            if let Some((session_id, _, _)) = pending.get(&call_id) {
+                Some(session_id.clone())
+            } else {
+                drop(pending);
+                // If not in pending, check active sessions
+                // For now, just take the first active session as a fallback
+                // TODO: Implement proper Call-ID to SessionId mapping
+                let active = self.active_sessions.read().await;
+                active.keys().next().cloned()
+            }
         };
         
         // Coordinate session termination (session-core responsibility)
