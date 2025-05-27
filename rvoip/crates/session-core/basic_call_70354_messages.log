@@ -1,0 +1,75 @@
+----------------------------------------------- 2025-05-26 21:30:49.096983
+UDP message sent (500 bytes):
+
+INVITE sip:test@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-70354-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=70354SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-70354@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   129
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-05-26 21:30:49.100495
+UDP message received [237] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-70354-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=70354SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-70354@127.0.0.1
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-05-26 21:30:49.303139
+UDP message received [279] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-70354-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=70354SIPpTag001
+Call-ID: 1-70354@127.0.0.1
+CSeq: 1 INVITE
+Content-Length: 0
+To: test <sip:test@127.0.0.1:5060>;tag=tag-88723f4e7d86434793cdb382caba5453
+
+
+----------------------------------------------- 2025-05-26 21:30:49.806279
+UDP message received [307] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-70354-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=70354SIPpTag001
+Call-ID: 1-70354@127.0.0.1
+CSeq: 1 INVITE
+Content-Length: 0
+To: test <sip:test@127.0.0.1:5060>;tag=tag-ff6874f1059645569e0038aac2ab58bd
+Contact: <sip:server@127.0.0.1>
+
+
+----------------------------------------------- 2025-05-26 21:30:49.806768
+UDP message sent (370 bytes):
+
+ACK <sip:server@127.0.0.1> SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-70354-1-4
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=70354SIPpTag001
+To: test <sip:test@127.0.0.1:5060>;tag=tag-ff6874f1059645569e0038aac2ab58bd
+Call-ID: 1-70354@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Length: 0
+
+

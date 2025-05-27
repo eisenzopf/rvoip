@@ -406,14 +406,45 @@ impl DialogManager {
             TransactionEvent::NewRequest { transaction_id: tx_key, request, source } => {
                 debug!("Received new request {}:\n{}", tx_key, request);
                 
-                // Handle ACK requests specially - they should be forwarded to the server transaction
-                // for proper processing using our new process_request method
+                // Handle ACK requests specially - they need different handling based on response type
                 if request.method() == Method::Ack {
-                    // Try to find the associated INVITE transaction
-                    // First, look for existing dialog that matches the ACK request
+                    // For 2xx ACKs: Handle at dialog level (INVITE server transaction is already terminated)
+                    // For non-2xx ACKs: Forward to INVITE server transaction (still active in Completed state)
+                    
+                    // Try to find the associated dialog that matches the ACK request
                     if let Some(dialog_id) = self.find_dialog_for_request(&request) {
                         debug!("Found dialog {} for ACK request", dialog_id);
                         
+                        // Check if this is a 2xx ACK by looking at dialog state
+                        if let Some(dialog) = self.dialogs.get(&dialog_id) {
+                            if dialog.state == DialogState::Confirmed {
+                                // This is a 2xx ACK - handle at dialog level
+                                debug!("Handling 2xx ACK for dialog {} at dialog level", dialog_id);
+                                
+                                // Update dialog state if needed
+                                drop(dialog); // Release the reference
+                                
+                                // Emit ACK received event for the dialog
+                                if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
+                                    let session_id = session_id.clone();
+                                    drop(session_id); // Release the reference
+                                    
+                                    self.event_bus.publish(crate::events::SessionEvent::Custom {
+                                        session_id,
+                                        event_type: "ack_received".to_string(),
+                                        data: serde_json::json!({
+                                            "dialog_id": dialog_id.to_string(),
+                                            "method": "ACK",
+                                        }),
+                                    });
+                                }
+                                
+                                debug!("Successfully handled 2xx ACK for dialog {}", dialog_id);
+                                return;
+                            }
+                        }
+                        
+                        // If we get here, this might be a non-2xx ACK - try to forward to transaction
                         // Look for INVITE server transaction associated with this dialog
                         let invite_tx_key = self.transaction_to_dialog.iter()
                             .filter(|entry| entry.value().clone() == dialog_id)
@@ -426,20 +457,26 @@ impl DialogManager {
                             .next();
                         
                         if let Some(invite_tx_key) = invite_tx_key {
-                            debug!("Found INVITE transaction {} for ACK, forwarding request", invite_tx_key);
+                            debug!("Found INVITE transaction {} for non-2xx ACK, attempting to forward", invite_tx_key);
                             
                             // Forward the ACK request to the INVITE transaction
                             if let Err(e) = self.transaction_manager.process_request(&invite_tx_key, request.clone()).await {
-                                warn!("Failed to process ACK request: {}", e);
+                                warn!("Failed to process non-2xx ACK request (transaction may be terminated): {}", e);
+                                // This is expected for 2xx ACKs since the transaction is already terminated
+                                debug!("ACK processing failed, likely a 2xx ACK after transaction termination");
                             } else {
-                                // Successfully processed the ACK
+                                debug!("Successfully forwarded non-2xx ACK to transaction {}", invite_tx_key);
                                 return;
                             }
                         }
                     }
                     
-                    // If we get here, we couldn't match the ACK to a transaction
-                    debug!("Could not match ACK request to any INVITE transaction, treating as stray ACK");
+                    // If we get here, we couldn't match the ACK to a dialog or transaction
+                    debug!("Could not match ACK request to any dialog or active transaction, treating as stray ACK");
+                    
+                    // For stray ACKs, just log and continue - this is normal for 2xx ACKs
+                    // since the INVITE server transaction terminates after sending 200 OK
+                    return;
                 }
                 
                 // Process other new requests as usual...
