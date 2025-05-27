@@ -151,18 +151,24 @@ pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
     let transaction_manager = Arc::new(transaction_manager);
     info!("✅ Created transaction manager with transport manager");
     
-    // Create session manager (no transport needed - uses transaction-core)
+    // **NEW: Create media manager for call lifecycle coordination**
+    let media_manager = Arc::new(crate::media::MediaManager::new().await
+        .context("Failed to create media manager")?);
+    info!("✅ Created media manager");
+    
+    // Create session manager with dialog manager that has call lifecycle coordinator
     let session_config = crate::session::SessionConfig::default();
     let event_bus = crate::events::EventBus::new(1000).await
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
-    let session_manager = Arc::new(crate::session::SessionManager::new(
+    let session_manager = Arc::new(crate::session::SessionManager::new_with_call_coordinator(
         transaction_manager.clone(),
         session_config,
-        event_bus
-    ).await.context("Failed to create session manager")?);
+        event_bus,
+        media_manager.clone()
+    ).await.context("Failed to create session manager with call coordinator")?);
     
-    info!("✅ Created session manager");
+    info!("✅ Created session manager with automatic call lifecycle coordination");
     
     // Create server manager with transaction manager
     let server_manager = Arc::new(ServerManager::new(

@@ -180,6 +180,14 @@ src/
 ### 🎯 **CORRECT ARCHITECTURE DESIGN**
 
 ```
+SIPp INVITE → transaction-core → session-core dialog manager → coordinate back to transaction-core
+     ↓              ↓                        ↓                           ↓
+  Network      100 Trying Auto         Application Logic         180 Ringing + 200 OK
+```
+
+**Layer Responsibilities:**
+
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Application Layer                        │
 ├─────────────────────────────────────────────────────────────┤
@@ -188,6 +196,7 @@ src/
 │      • Session Lifecycle Management  • Media Coordination   │
 │      • Dialog State Coordination     • Event Orchestration  │  
 │      • Reacts to Transaction Events  • Coordinates Media    │
+│      • SIGNALS transaction-core for responses               │
 ├─────────────────────────────────────────────────────────────┤
 │         Processing Layer                                    │
 │  transaction-core              │  media-core               │
@@ -195,11 +204,19 @@ src/
 │  • Sends SIP Responses         │  • Codec Management       │
 │  • Manages SIP State Machine   │  • Audio Processing       │
 │  • Handles Retransmissions     │  • RTP Stream Management  │
+│  • Timer 100 (100 Trying) ✅   │  • SDP Generation         │
 ├─────────────────────────────────────────────────────────────┤
 │              Transport Layer                                │
 │  sip-transport    │  rtp-core    │  ice-core               │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Critical Coordination Flow:**
+1. **transaction-core** receives INVITE → sends 100 Trying ✅ → emits InviteRequest event
+2. **session-core** receives InviteRequest → makes application decision → coordinates responses
+3. **session-core** signals transaction-core: `send_response(180_ringing)` 
+4. **session-core** coordinates with media-core for SDP → signals: `send_response(200_ok_with_sdp)`
+5. **transaction-core** handles all SIP protocol details (formatting, sending, retransmissions)
 
 ### 🔧 **REFACTORING PLAN**
 
@@ -295,26 +312,111 @@ src/
 
 ---
 
-## 🔄 PHASE 5: CODE SIZE OPTIMIZATION (NEW)
+## 🔄 PHASE 5: DIALOG MANAGER RESPONSE COORDINATION (NEW - CRITICAL)
 
-### 5.1 Dialog Module Size Reduction 🔄 IN PROGRESS
-- [ ] **Reduce `dialog_operations.rs`** - Split 589 lines into smaller modules
-- [ ] **Reduce `event_processing.rs`** - Split 478 lines into smaller modules  
-- [ ] **Reduce `recovery_manager.rs`** - Split 386 lines into smaller modules
-- [ ] **Reduce `manager.rs`** - Split 361 lines into smaller modules
-- [ ] **Reduce `transaction_handling.rs`** - Split 298 lines into smaller modules
+### 🚨 **CURRENT ISSUE: Dialog Manager Not Coordinating Responses**
 
-### 5.2 Create Additional Dialog Sub-modules
-- [ ] **Create `dialog/core/`** - Core dialog functionality
-- [ ] **Create `dialog/events/`** - Event handling sub-modules
-- [ ] **Create `dialog/recovery/`** - Recovery sub-modules
-- [ ] **Create `dialog/transactions/`** - Transaction handling sub-modules
+**Status**: 🔄 **IN PROGRESS** - Timer 100 working, but dialog manager needs response coordination
+
+**Problem Identified**: 
+- ✅ **WORKING**: transaction-core correctly sends 100 Trying automatically
+- ✅ **WORKING**: Dialog manager receives InviteRequest events
+- ❌ **MISSING**: Dialog manager doesn't coordinate with transaction-core to send 180 Ringing and 200 OK
+- ❌ **MISSING**: Call lifecycle coordination between dialog and transaction layers
+
+**Root Cause**: Dialog manager lacks the coordination interface to signal transaction-core for response sending.
+
+### 🎯 **SOLUTION ARCHITECTURE**
+
+```
+SIPp INVITE → transaction-core → session-core dialog manager → coordinate back to transaction-core
+     ↓              ↓                        ↓                           ↓
+  Network      100 Trying Auto         Application Logic         180 Ringing + 200 OK
+```
+
+**Layer Responsibilities:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                        │
+├─────────────────────────────────────────────────────────────┤
+│                 *** session-core ***                        │
+│           (Session Manager - Central Coordinator)           │
+│      • Session Lifecycle Management  • Media Coordination   │
+│      • Dialog State Coordination     • Event Orchestration  │  
+│      • Reacts to Transaction Events  • Coordinates Media    │
+│      • SIGNALS transaction-core for responses               │
+├─────────────────────────────────────────────────────────────┤
+│         Processing Layer                                    │
+│  transaction-core              │  media-core               │
+│  (SIP Protocol Handler)        │  (Media Processing)       │
+│  • Sends SIP Responses         │  • Codec Management       │
+│  • Manages SIP State Machine   │  • Audio Processing       │
+│  • Handles Retransmissions     │  • RTP Stream Management  │
+│  • Timer 100 (100 Trying) ✅   │  • SDP Generation         │
+├─────────────────────────────────────────────────────────────┤
+│              Transport Layer                                │
+│  sip-transport    │  rtp-core    │  ice-core               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Critical Coordination Flow:**
+1. **transaction-core** receives INVITE → sends 100 Trying ✅ → emits InviteRequest event
+2. **session-core** receives InviteRequest → makes application decision → coordinates responses
+3. **session-core** signals transaction-core: `send_response(180_ringing)` 
+4. **session-core** coordinates with media-core for SDP → signals: `send_response(200_ok_with_sdp)`
+5. **transaction-core** handles all SIP protocol details (formatting, sending, retransmissions)
+
+### 🔧 **IMPLEMENTATION PLAN**
+
+#### 5.1 Dialog Manager Response Coordination 🆕 CRITICAL
+- [ ] **Create `src/dialog/transaction_coordination.rs`** - Dialog→Transaction coordination interface (<200 lines)
+  - [ ] `send_provisional_response()` - Send 180 Ringing via transaction-core
+  - [ ] `send_success_response()` - Send 200 OK with SDP via transaction-core  
+  - [ ] `send_error_response()` - Send 4xx/5xx responses via transaction-core
+  - [ ] `get_transaction_manager()` - Access to transaction-core API
+
+- [ ] **Update `src/dialog/event_processing.rs`** - Add response coordination logic (<200 lines target)
+  - [ ] Handle `InviteRequest` → coordinate 180 Ringing response
+  - [ ] Implement call acceptance logic → coordinate 200 OK response
+  - [ ] Add automatic response timing (180 after 1s, 200 after 3s for demo)
+  - [ ] Integrate with media-core for SDP generation
+
+- [ ] **Create `src/dialog/call_lifecycle.rs`** - Call flow coordination (<200 lines)
+  - [ ] `handle_incoming_invite()` - Complete INVITE processing workflow
+  - [ ] `coordinate_call_acceptance()` - Media setup + 200 OK coordination
+  - [ ] `coordinate_call_rejection()` - Cleanup + error response coordination
+  - [ ] `handle_ack_received()` - Call establishment confirmation
+
+- [ ] **Update `src/dialog/manager.rs`** - Integrate transaction coordination (<200 lines target)
+  - [ ] Add transaction manager reference
+  - [ ] Wire up transaction coordination interface
+  - [ ] Ensure proper event flow: transaction events → dialog decisions → transaction coordination
+
+#### 5.2 SIPp Integration Validation 🆕 CRITICAL
+- [ ] **Test Basic Call Flow** - INVITE → 100 → 180 → 200 → ACK flow
+  - [ ] Verify 100 Trying sent automatically by transaction-core ✅ WORKING
+  - [ ] Verify 180 Ringing sent by dialog manager coordination
+  - [ ] Verify 200 OK with SDP sent by dialog manager coordination
+  - [ ] Verify ACK handling and call establishment
+
+- [ ] **Test Error Scenarios** - Call rejection and cancellation
+  - [ ] Test call rejection (486 Busy Here) coordination
+  - [ ] Test call cancellation (CANCEL → 487) coordination
+  - [ ] Test timeout scenarios and cleanup
+
+- [ ] **Test SDP Integration** - Media negotiation
+  - [ ] Verify SDP offer/answer through media-core
+  - [ ] Test codec negotiation and media setup
+  - [ ] Verify RTP flow establishment
+
+#### 5.3 Code Size Optimization 🔄 ONGOING
 
 ---
 
 ## 📊 PROGRESS TRACKING
 
-### Current Status: **Phase 4 - Architectural Refactoring ✅ COMPLETE**
+### Current Status: **Phase 5 - Dialog Manager Response Coordination 🔄 CRITICAL**
 - **Phase 1 - API Foundation**: ✅ COMPLETE (16/16 tasks)
 - **Phase 2 - Media Coordination**: ✅ COMPLETE (4/4 tasks)  
 - **Phase 3.1 - Enhanced Server Operations**: ✅ COMPLETE (4/4 tasks)
@@ -324,15 +426,18 @@ src/
 - **Phase 4.3 - Pure Coordinator**: ✅ COMPLETE (3/3 tasks)
 - **Phase 4.4 - Dialog Manager Modularization**: ✅ COMPLETE (8/8 tasks)
 - **Phase 4.5 - API Simplification**: 🔄 IN PROGRESS (0/2 tasks)
-- **Phase 5.1 - Dialog Module Size Reduction**: 🔄 NEW (0/5 tasks)
-- **Total Completed**: 44/55 tasks (80%) - **MAJOR PROGRESS**
-- **Next Milestone**: Complete dialog module size optimization and API simplification
+- **Phase 5.1 - Dialog Manager Response Coordination**: 🔄 **CRITICAL** (0/4 tasks)
+- **Phase 5.2 - SIPp Integration Validation**: 🔄 **CRITICAL** (0/3 tasks)
+- **Phase 5.3 - Code Size Optimization**: 🔄 ONGOING (0/5 tasks)
+- **Total Completed**: 44/67 tasks (66%) - **CRITICAL PHASE**
+- **Next Milestone**: Complete dialog manager response coordination for working SIPp calls
 
 ### File Count Monitoring
 - **Current API files**: 12 (all under 200 lines ✅)
 - **Current Dialog files**: 8 (2 under 200 lines, 6 need reduction)
 - **Target**: All files under 200 lines
 - **Refactoring status**: ✅ **MAJOR SUCCESS** - architecture violations fixed, modularization achieved
+- **Current Priority**: 🔄 **CRITICAL** - Dialog manager response coordination
 
 ### Recent Achievements ✅ MAJOR MILESTONES
 - ✅ **CRITICAL**: Architecture violation fixed - session-core no longer sends SIP responses
@@ -341,6 +446,7 @@ src/
 - ✅ **CRITICAL**: Event-driven architecture implemented - proper separation of concerns
 - ✅ **CRITICAL**: DialogManager modularized - 2,271 lines split into 8 focused modules
 - ✅ **NEW**: SIPp integration testing complete - 10 comprehensive test scenarios with automated runner
+- ✅ **NEW**: Timer 100 RFC 3261 compliance achieved - automatic 100 Trying responses working
 
 ### Architecture Compliance Status ✅ ACHIEVED
 1. ✅ **SIP Protocol Handling**: session-core NEVER sends SIP responses directly
@@ -348,6 +454,10 @@ src/
 3. ✅ **Event Coordination**: Proper event-driven architecture between layers implemented
 4. ✅ **Separation of Concerns**: Each layer handles only its designated responsibilities
 5. ✅ **Code Organization**: Large files broken into maintainable modules
+6. ✅ **RFC 3261 Compliance**: Timer 100 automatic 100 Trying responses working correctly
+
+### Current Critical Issue 🚨
+**Dialog Manager Response Coordination Missing**: Dialog manager receives transaction events but lacks coordination interface to send 180 Ringing and 200 OK responses through transaction-core. This is the final piece needed for complete SIPp call flow.
 
 ---
 
@@ -357,9 +467,23 @@ src/
 2. ✅ **COMPLETED**: Phase 4.2 - Remove all SIP response sending from ServerManager
 3. ✅ **COMPLETED**: Phase 4.3 - Implement proper event-driven coordination between layers
 4. ✅ **COMPLETED**: Phase 4.4 - Modularize DialogManager into focused modules
-5. 🔄 **NEXT**: Phase 5.1 - Reduce dialog module sizes to under 200 lines each
-6. 🔄 **NEXT**: Phase 4.5 - Simplify API layer further
-7. 🔄 **NEXT**: Phase 3.2 - Complete SIPp integration testing with new architecture
+5. 🔄 **CRITICAL NEXT**: Phase 5.1 - Create dialog manager response coordination interface
+6. 🔄 **CRITICAL NEXT**: Phase 5.2 - Implement call lifecycle coordination (180 Ringing, 200 OK)
+7. 🔄 **CRITICAL NEXT**: Phase 5.2 - Test complete SIPp call flow with response coordination
+8. 🔄 **NEXT**: Phase 5.3 - Reduce dialog module sizes to under 200 lines each
+9. 🔄 **NEXT**: Phase 4.5 - Simplify API layer further
+
+### 🚨 **CRITICAL PATH TO WORKING SIPp CALLS**
+
+**Current Status**: Timer 100 (100 Trying) ✅ WORKING → Need 180 Ringing + 200 OK coordination
+
+**Required Steps**:
+1. **Create transaction coordination interface** - Dialog manager needs way to signal transaction-core
+2. **Implement call acceptance logic** - Dialog manager decides to accept calls and coordinates responses
+3. **Add SDP integration** - Coordinate with media-core for proper SDP in 200 OK
+4. **Test end-to-end flow** - Verify complete INVITE → 100 → 180 → 200 → ACK → BYE cycle
+
+**Success Criteria**: SIPp basic_call.xml scenario completes successfully with proper SIP response sequence.
 
 ---
 

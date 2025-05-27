@@ -79,6 +79,103 @@ pub fn create_ok_response(request: &Request) -> Response {
     create_response(request, StatusCode::Ok)
 }
 
+/// Create a 200 OK response for BYE requests
+/// 
+/// This function creates a simple 200 OK response for BYE requests.
+/// Unlike INVITE responses, BYE responses don't need To-tags (dialog already established)
+/// or Contact headers (dialog is being terminated).
+/// 
+/// # Arguments
+/// * `request` - The original BYE request
+/// 
+/// # Returns
+/// A simple 200 OK response for BYE termination
+pub fn create_ok_response_for_bye(request: &Request) -> Response {
+    create_response(request, StatusCode::Ok)
+}
+
+/// Create a 200 OK response for CANCEL requests
+/// 
+/// This function creates a simple 200 OK response for CANCEL requests.
+/// CANCEL responses are always simple 200 OK responses without additional headers.
+/// 
+/// # Arguments
+/// * `request` - The original CANCEL request
+/// 
+/// # Returns
+/// A simple 200 OK response for CANCEL acknowledgment
+pub fn create_ok_response_for_cancel(request: &Request) -> Response {
+    create_response(request, StatusCode::Ok)
+}
+
+/// Create a 200 OK response for OPTIONS requests with Allow header
+/// 
+/// This function creates a 200 OK response for OPTIONS requests that includes
+/// an Allow header listing the supported SIP methods.
+/// 
+/// # Arguments
+/// * `request` - The original OPTIONS request
+/// * `allowed_methods` - List of methods supported by this server/UA
+/// 
+/// # Returns
+/// A 200 OK response with Allow header for OPTIONS capability query
+pub fn create_ok_response_for_options(request: &Request, allowed_methods: &[Method]) -> Response {
+    let mut response = create_response(request, StatusCode::Ok);
+    
+    // Add Allow header with supported methods
+    let methods_str = allowed_methods.iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    
+    // Create Allow header using proper typed header
+    let allow = rvoip_sip_core::types::allow::Allow::from_str(&methods_str)
+        .unwrap_or_else(|_| rvoip_sip_core::types::allow::Allow::new());
+    
+    response.headers.push(TypedHeader::Allow(allow));
+    
+    response
+}
+
+/// Create a 200 OK response for MESSAGE requests
+/// 
+/// This function creates a simple 200 OK response for MESSAGE requests.
+/// MESSAGE responses are typically simple acknowledgments.
+/// 
+/// # Arguments
+/// * `request` - The original MESSAGE request
+/// 
+/// # Returns
+/// A simple 200 OK response for MESSAGE acknowledgment
+pub fn create_ok_response_for_message(request: &Request) -> Response {
+    create_response(request, StatusCode::Ok)
+}
+
+/// Create a 200 OK response for REGISTER requests with Contact and Expires
+/// 
+/// This function creates a 200 OK response for REGISTER requests that includes
+/// the registered Contact header and Expires value.
+/// 
+/// # Arguments
+/// * `request` - The original REGISTER request
+/// * `expires` - The registration expiration time in seconds
+/// 
+/// # Returns
+/// A 200 OK response with Contact and Expires headers for REGISTER confirmation
+pub fn create_ok_response_for_register(request: &Request, expires: u32) -> Response {
+    let mut response = create_response(request, StatusCode::Ok);
+    
+    // Copy Contact header from request (if present)
+    if let Some(contact_header) = request.header(&HeaderName::Contact) {
+        response.headers.push(contact_header.clone());
+    }
+    
+    // Add Expires header using proper typed header
+    response.headers.push(TypedHeader::Expires(Expires::new(expires)));
+    
+    response
+}
+
 /// Create a 200 OK response with To-tag and Contact header for dialog establishment
 /// 
 /// This function creates a proper 200 OK response for INVITE requests that includes:

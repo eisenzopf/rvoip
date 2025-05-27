@@ -381,16 +381,58 @@ impl DialogManager {
         // If we get here, this is an initial INVITE (no existing dialog found)
         debug!("No existing dialog found - treating as initial INVITE");
         
-        // The transaction is already created by transaction-core and responses are being sent
-        // We just need to create a dialog when we get the response events
+        // **NEW: AUTOMATIC CALL HANDLING WITH LIFECYCLE COORDINATOR**
+        // Create a session ID for this new call
+        let session_id = SessionId::new();
+        debug!("Created new session {} for INVITE transaction {}", session_id, tx_key);
+        
+        // **CRITICAL: Start automatic call lifecycle coordination**
+        // This will handle: 180 Ringing → 200 OK with SDP → ACK handling
+        if let Some(call_coordinator) = &self.call_lifecycle_coordinator {
+            debug!("Starting automatic call lifecycle coordination for session {}", session_id);
+            
+            let tx_key_clone = tx_key.clone();
+            let request_clone = request.clone();
+            let session_id_str = session_id.to_string();
+            let coordinator = call_coordinator.clone();
+            
+            // Spawn the call handling task
+            tokio::spawn(async move {
+                if let Err(e) = coordinator.handle_incoming_invite(
+                    &tx_key_clone,
+                    &request_clone,
+                    &session_id_str,
+                ).await {
+                    error!(
+                        transaction_id = %tx_key_clone,
+                        session_id = %session_id_str,
+                        error = %e,
+                        "❌ Failed to handle incoming INVITE call flow"
+                    );
+                } else {
+                    debug!(
+                        transaction_id = %tx_key_clone,
+                        session_id = %session_id_str,
+                        "✅ INVITE call flow handled successfully"
+                    );
+                }
+            });
+        } else {
+            warn!("No call lifecycle coordinator available - call will not be automatically handled");
+        }
+        
+        // The transaction is already created by transaction-core
+        // The call lifecycle coordinator will handle all responses
         debug!("INVITE transaction {} already created by transaction-core", tx_key);
         
         // Emit event for new INVITE (session-core can coordinate session creation)
         self.event_bus.publish(crate::events::SessionEvent::Custom {
-            session_id: SessionId::new(), // We don't know the session yet
-            event_type: "call_established".to_string(),
+            session_id: session_id.clone(),
+            event_type: "invite_received".to_string(),
             data: serde_json::json!({
                 "transaction_id": tx_key.to_string(),
+                "session_id": session_id.to_string(),
+                "auto_handling": self.call_lifecycle_coordinator.is_some(),
             }),
         });
     }
@@ -403,12 +445,25 @@ impl DialogManager {
             Method::Bye => {
                 debug!("Processing BYE request for transaction {}", tx_key);
                 
+                // **CRITICAL: Send 200 OK response to BYE using specific BYE helper**
+                // Create a 200 OK response for the BYE request using the proper BYE-specific helper
+                let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
+                
+                // Send the response through transaction-core
+                if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
+                    error!("Failed to send 200 OK response to BYE: {}", e);
+                } else {
+                    debug!("✅ Sent 200 OK response to BYE request");
+                }
+                
                 // Find and terminate the associated dialog
                 if let Some(dialog_id) = self.find_dialog_for_request(&request) {
                     debug!("Found dialog {} for BYE, terminating", dialog_id);
                     if let Err(e) = self.terminate_dialog(&dialog_id).await {
                         error!("Failed to terminate dialog {}: {}", dialog_id, e);
                     }
+                } else {
+                    debug!("No dialog found for BYE request - call may have already been terminated");
                 }
                 
                 // Emit call terminated event

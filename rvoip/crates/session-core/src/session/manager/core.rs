@@ -294,4 +294,48 @@ impl SessionManager {
             }
         }
     }
+
+    /// Create a new session manager with call lifecycle coordinator for automatic call handling
+    pub async fn new_with_call_coordinator(
+        transaction_manager: Arc<TransactionManager>,
+        config: SessionConfig,
+        event_bus: EventBus,
+        media_manager: Arc<MediaManager>
+    ) -> Result<Self, Error> {
+        // Create a dialog manager with call lifecycle coordinator
+        let dialog_manager = DialogManager::new_with_call_coordinator(
+            transaction_manager.clone(), 
+            event_bus.clone(),
+            media_manager.clone()
+        );
+        
+        // Create the session event channel
+        let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
+        
+        let session_manager = Self {
+            config,
+            sessions: Arc::new(DashMap::new()),
+            transaction_manager,
+            dialog_manager: Arc::new(dialog_manager),
+            media_manager,
+            event_bus: event_bus.clone(),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            default_dialogs: DashMap::new(),
+            dialog_to_session: DashMap::new(),
+            event_sender,
+        };
+        
+        // Start the session event processing
+        let manager_clone = session_manager.clone();
+        tokio::spawn(async move {
+            manager_clone.process_session_events(event_receiver).await;
+        });
+        
+        // Start the dialog manager
+        let _ = session_manager.dialog_manager.start().await;
+        
+        info!("✅ SessionManager created with automatic call lifecycle coordination");
+        
+        Ok(session_manager)
+    }
 } 

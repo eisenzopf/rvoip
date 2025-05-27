@@ -11,9 +11,12 @@ use rvoip_transaction_core::{
 };
 
 use super::dialog_state::DialogState;
+use super::transaction_coordination::TransactionCoordinator;
+use super::call_lifecycle::CallLifecycleCoordinator;
 use crate::errors::{Error, ErrorContext, ErrorCategory, ErrorSeverity, RecoveryAction};
 use crate::events::{EventBus, SessionEvent};
 use crate::session::SessionId;
+use crate::media::MediaManager;
 use crate::{dialog_not_found_error};
 
 use super::dialog_id::DialogId;
@@ -58,6 +61,9 @@ pub struct DialogManager {
     
     /// Recovery metrics
     pub(super) recovery_metrics: Arc<RwLock<RecoveryMetrics>>,
+    
+    /// Call lifecycle coordinator for automatic call handling
+    pub(super) call_lifecycle_coordinator: Option<Arc<CallLifecycleCoordinator>>,
 }
 
 impl DialogManager {
@@ -132,6 +138,7 @@ impl DialogManager {
             run_recovery_in_background,
             recovery_config,
             recovery_metrics,
+            call_lifecycle_coordinator: None,
         };
         
         // Start the event processor for the event_receiver
@@ -357,5 +364,38 @@ impl DialogManager {
     /// Get the session ID associated with a dialog
     pub(super) fn get_session_for_dialog(&self, dialog_id: &DialogId) -> Option<SessionId> {
         self.dialog_to_session.get(dialog_id).map(|id| id.clone())
+    }
+    
+    /// Create a new dialog manager with call lifecycle coordinator
+    pub fn new_with_call_coordinator(
+        transaction_manager: Arc<TransactionManager>,
+        event_bus: EventBus,
+        media_manager: Arc<MediaManager>,
+    ) -> Self {
+        // Create transaction coordinator
+        let transaction_coordinator = TransactionCoordinator::new(transaction_manager.clone());
+        
+        // Create call lifecycle coordinator
+        let call_lifecycle_coordinator = Arc::new(CallLifecycleCoordinator::new(
+            transaction_coordinator,
+            media_manager,
+        ));
+        
+        let mut dialog_manager = Self::new_with_full_config(
+            transaction_manager,
+            event_bus,
+            true,
+            RecoveryConfig::default(),
+        );
+        
+        // Set the call lifecycle coordinator
+        dialog_manager.call_lifecycle_coordinator = Some(call_lifecycle_coordinator);
+        
+        dialog_manager
+    }
+    
+    /// Set the call lifecycle coordinator
+    pub fn set_call_lifecycle_coordinator(&mut self, coordinator: Arc<CallLifecycleCoordinator>) {
+        self.call_lifecycle_coordinator = Some(coordinator);
     }
 } 

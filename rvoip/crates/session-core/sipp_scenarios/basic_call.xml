@@ -41,15 +41,12 @@
 
   <!-- Expect 200 OK with SDP -->
   <recv response="200" rtd="true">
-    <action>
-      <ereg regexp="&lt;([^&gt;]+)&gt;" search_in="hdr" header="Contact" assign_to="contact_uri"/>
-    </action>
   </recv>
 
-  <!-- Send ACK -->
+  <!-- Send ACK - Use simple Request-URI instead of Contact extraction -->
   <send>
     <![CDATA[
-      ACK [$contact_uri] SIP/2.0
+      ACK sip:test@[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
       To: test <sip:test@[remote_ip]:[remote_port]>[peer_tag_param]
@@ -59,6 +56,7 @@
       Max-Forwards: 70
       Subject: Performance Test
       Content-Length: 0
+
     ]]>
   </send>
 
@@ -68,16 +66,16 @@
   <!-- Send BYE to terminate the call -->
   <send retrans="500">
     <![CDATA[
-      BYE [$contact_uri] SIP/2.0
+      BYE sip:test@[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
       To: test <sip:test@[remote_ip]:[remote_port]>[peer_tag_param]
       Call-ID: [call_id]
       CSeq: 2 BYE
-      Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
-      Subject: Performance Test
+      Contact: <sip:sipp@[local_ip]:[local_port];transport=[transport]>
       Content-Length: 0
+
     ]]>
   </send>
 
