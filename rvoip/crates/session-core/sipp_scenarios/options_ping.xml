@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- OPTIONS Ping Scenario for Session-Core Testing -->
+<!-- This scenario tests OPTIONS method for keepalive/ping functionality -->
+
+<scenario name="OPTIONS Ping Test">
+  
+  <!-- Send OPTIONS request -->
+  <send retrans="500">
+    <![CDATA[
+      OPTIONS sip:test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: test <sip:test@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 OPTIONS
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: OPTIONS Ping Test
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK with capabilities -->
+  <recv response="200" rtd="true">
+  </recv>
+
+  <!-- Wait a bit -->
+  <pause milliseconds="1000"/>
+
+  <!-- Send another OPTIONS request -->
+  <send retrans="500">
+    <![CDATA[
+      OPTIONS sip:test@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: test <sip:test@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 2 OPTIONS
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: OPTIONS Ping Test - Second
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK for second OPTIONS -->
+  <recv response="200" rtd="true">
+  </recv>
+
+  <!-- OPTIONS ping test completed successfully -->
+  
+</scenario> 
