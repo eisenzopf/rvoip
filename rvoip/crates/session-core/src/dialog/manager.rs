@@ -30,22 +30,22 @@ const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 #[derive(Clone)]
 pub struct DialogManager {
     /// Active dialogs by ID
-    pub(super) dialogs: DashMap<DialogId, Dialog>,
+    pub(super) dialogs: Arc<DashMap<DialogId, Dialog>>,
     
     /// Dialog lookup by SIP dialog identifier tuple (call-id, local-tag, remote-tag)
-    pub(super) dialog_lookup: DashMap<(String, String, String), DialogId>,
+    pub(super) dialog_lookup: Arc<DashMap<(String, String, String), DialogId>>,
     
     /// DialogId mapped to SessionId for session references
-    pub(super) dialog_to_session: DashMap<DialogId, SessionId>,
+    pub(super) dialog_to_session: Arc<DashMap<DialogId, SessionId>>,
     
     /// Transaction manager reference
     pub(super) transaction_manager: Arc<TransactionManager>,
     
     /// Transaction to Dialog mapping
-    pub(super) transaction_to_dialog: DashMap<TransactionKey, DialogId>,
+    pub(super) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
     
     /// Track which transactions we've already subscribed to to avoid duplicate subscriptions
-    pub(super) subscribed_transactions: DashMap<TransactionKey, bool>,
+    pub(super) subscribed_transactions: Arc<DashMap<TransactionKey, bool>>,
     
     /// Main event channel for distributing transaction events
     pub(super) event_sender: mpsc::Sender<TransactionEvent>,
@@ -118,11 +118,11 @@ impl DialogManager {
         // Create the main event channel
         let (event_sender, mut event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         
-        let dialogs = DashMap::new();
-        let dialog_lookup = DashMap::new();
-        let dialog_to_session = DashMap::new();
-        let transaction_to_dialog = DashMap::new();
-        let subscribed_transactions = DashMap::new();
+        let dialogs = Arc::new(DashMap::new());
+        let dialog_lookup = Arc::new(DashMap::new());
+        let dialog_to_session = Arc::new(DashMap::new());
+        let transaction_to_dialog = Arc::new(DashMap::new());
+        let subscribed_transactions = Arc::new(DashMap::new());
         let recovery_metrics = Arc::new(RwLock::new(RecoveryMetrics::default()));
         
         // Create the dialog manager
@@ -367,34 +367,60 @@ impl DialogManager {
     }
     
     /// Create a new dialog manager with call lifecycle coordinator
+    /// Returns both the dialog manager and the coordinator
     pub fn new_with_call_coordinator(
         transaction_manager: Arc<TransactionManager>,
         event_bus: EventBus,
         media_manager: Arc<MediaManager>,
-    ) -> Self {
-        // Create transaction coordinator
-        let transaction_coordinator = TransactionCoordinator::new(transaction_manager.clone());
-        
-        // Create call lifecycle coordinator
-        let call_lifecycle_coordinator = Arc::new(CallLifecycleCoordinator::new(
-            transaction_coordinator,
-            media_manager,
-        ));
-        
-        let mut dialog_manager = Self::new_with_full_config(
-            transaction_manager,
+    ) -> (Arc<Self>, Arc<CallLifecycleCoordinator>) {
+        // Create dialog manager first without coordinator
+        let dialog_manager = Self::new_with_full_config(
+            transaction_manager.clone(),
             event_bus,
             true,
             RecoveryConfig::default(),
         );
         
-        // Set the call lifecycle coordinator
-        dialog_manager.call_lifecycle_coordinator = Some(call_lifecycle_coordinator);
+        // Create transaction coordinator
+        let transaction_coordinator = TransactionCoordinator::new(transaction_manager);
         
-        dialog_manager
+        // Create call lifecycle coordinator
+        let mut call_lifecycle_coordinator = CallLifecycleCoordinator::new(
+            transaction_coordinator,
+            media_manager,
+        );
+        
+        // Wrap dialog manager in Arc first
+        let dialog_manager_arc = Arc::new(dialog_manager);
+        
+        // Set the dialog manager reference in the coordinator
+        call_lifecycle_coordinator.set_dialog_manager(dialog_manager_arc.clone());
+        
+        // Create the coordinator Arc
+        let coordinator_arc = Arc::new(call_lifecycle_coordinator);
+        
+        // Now create a new dialog manager instance that shares the same storage
+        // but has the coordinator set
+        let final_dialog_manager = Self {
+            dialogs: dialog_manager_arc.dialogs.clone(),
+            dialog_lookup: dialog_manager_arc.dialog_lookup.clone(),
+            dialog_to_session: dialog_manager_arc.dialog_to_session.clone(),
+            transaction_manager: dialog_manager_arc.transaction_manager.clone(),
+            transaction_to_dialog: dialog_manager_arc.transaction_to_dialog.clone(),
+            subscribed_transactions: dialog_manager_arc.subscribed_transactions.clone(),
+            event_sender: dialog_manager_arc.event_sender.clone(),
+            event_bus: dialog_manager_arc.event_bus.clone(),
+            run_recovery_in_background: dialog_manager_arc.run_recovery_in_background,
+            recovery_config: dialog_manager_arc.recovery_config.clone(),
+            recovery_metrics: dialog_manager_arc.recovery_metrics.clone(),
+            call_lifecycle_coordinator: Some(coordinator_arc.clone()),
+        };
+        
+        // Return both
+        (Arc::new(final_dialog_manager), coordinator_arc)
     }
     
-    /// Set the call lifecycle coordinator
+    /// Set the call lifecycle coordinator (called after creation)
     pub fn set_call_lifecycle_coordinator(&mut self, coordinator: Arc<CallLifecycleCoordinator>) {
         self.call_lifecycle_coordinator = Some(coordinator);
     }

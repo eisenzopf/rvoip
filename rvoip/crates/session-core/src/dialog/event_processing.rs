@@ -1,4 +1,4 @@
-use tracing::{debug, error, warn};
+use tracing::{debug, error, warn, info};
 use std::str::FromStr;
 
 use rvoip_sip_core::{
@@ -445,15 +445,69 @@ impl DialogManager {
             Method::Bye => {
                 debug!("Processing BYE request for transaction {}", tx_key);
                 
-                // **CRITICAL: Send 200 OK response to BYE using specific BYE helper**
-                // Create a 200 OK response for the BYE request using the proper BYE-specific helper
-                let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
-                
-                // Send the response through transaction-core
-                if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
-                    error!("Failed to send 200 OK response to BYE: {}", e);
+                // **NEW: AUTOMATIC BYE HANDLING WITH LIFECYCLE COORDINATOR**
+                // Find the session associated with this BYE request
+                let session_id = self.find_session_for_transaction(&tx_key)
+                    .or_else(|| {
+                        // Try to find session by dialog lookup
+                        self.find_dialog_for_request(&request)
+                            .and_then(|dialog_id| self.dialog_to_session.get(&dialog_id).map(|s| s.clone()))
+                    });
+
+                if let Some(session_id) = session_id {
+                    // **CRITICAL: Use call lifecycle coordinator for complete BYE handling**
+                    if let Some(call_coordinator) = &self.call_lifecycle_coordinator {
+                        debug!("Starting automatic BYE lifecycle coordination for session {}", session_id);
+                        
+                        let tx_key_clone = tx_key.clone();
+                        let request_clone = request.clone();
+                        let session_id_str = session_id.to_string();
+                        let coordinator = call_coordinator.clone();
+                        
+                        // Spawn the BYE handling task
+                        tokio::spawn(async move {
+                            if let Err(e) = coordinator.handle_incoming_bye(
+                                &tx_key_clone,
+                                &request_clone,
+                                &session_id_str,
+                            ).await {
+                                error!(
+                                    transaction_id = %tx_key_clone,
+                                    session_id = %session_id_str,
+                                    error = %e,
+                                    "❌ Failed to handle incoming BYE call termination"
+                                );
+                            } else {
+                                debug!(
+                                    transaction_id = %tx_key_clone,
+                                    session_id = %session_id_str,
+                                    "✅ BYE call termination handled successfully"
+                                );
+                            }
+                        });
+                    } else {
+                        warn!("No call lifecycle coordinator available - using fallback BYE handling");
+                        
+                        // **FALLBACK: Manual BYE response (if no coordinator)**
+                        let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
+                        
+                        if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
+                            error!("Failed to send 200 OK response to BYE: {}", e);
+                        } else {
+                            debug!("✅ Sent 200 OK response to BYE request (fallback)");
+                        }
+                    }
                 } else {
-                    debug!("✅ Sent 200 OK response to BYE request");
+                    warn!("No session found for BYE request - using basic BYE handling");
+                    
+                    // **BASIC: Simple BYE response (no session context)**
+                    let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
+                    
+                    if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
+                        error!("Failed to send 200 OK response to BYE: {}", e);
+                    } else {
+                        debug!("✅ Sent 200 OK response to BYE request (basic)");
+                    }
                 }
                 
                 // Find and terminate the associated dialog

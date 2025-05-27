@@ -13,7 +13,10 @@ use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{HeaderName, TypedHeader};
 use rvoip_transaction_core::TransactionKey;
 use crate::dialog::transaction_coordination::TransactionCoordinator;
+use crate::dialog::manager::DialogManager;
 use crate::media::MediaManager;
+use crate::session::SessionId;
+use uuid;
 
 /// Call lifecycle coordinator
 ///
@@ -23,6 +26,7 @@ use crate::media::MediaManager;
 pub struct CallLifecycleCoordinator {
     transaction_coordinator: TransactionCoordinator,
     media_manager: Arc<MediaManager>,
+    dialog_manager: Option<Arc<DialogManager>>,
 }
 
 impl CallLifecycleCoordinator {
@@ -34,7 +38,13 @@ impl CallLifecycleCoordinator {
         Self {
             transaction_coordinator,
             media_manager,
+            dialog_manager: None,
         }
+    }
+
+    /// Set the dialog manager reference (for dialog creation)
+    pub fn set_dialog_manager(&mut self, dialog_manager: Arc<DialogManager>) {
+        self.dialog_manager = Some(dialog_manager);
     }
 
     /// Handle incoming INVITE request with complete call flow coordination
@@ -43,7 +53,7 @@ impl CallLifecycleCoordinator {
     /// 1. Process the INVITE request
     /// 2. Send 180 Ringing (after brief delay)
     /// 3. Coordinate media setup
-    /// 4. Send 200 OK with SDP
+    /// 4. Send 200 OK with SDP and create dialog
     pub async fn handle_incoming_invite(
         &self,
         transaction_id: &TransactionKey,
@@ -65,7 +75,7 @@ impl CallLifecycleCoordinator {
         // Step 3: Simulate call acceptance decision time
         sleep(Duration::from_millis(1500)).await;
 
-        // Step 4: Coordinate call acceptance
+        // Step 4: Coordinate call acceptance with dialog creation
         self.coordinate_call_acceptance(transaction_id, request, session_id).await?;
 
         info!(
@@ -102,12 +112,13 @@ impl CallLifecycleCoordinator {
         Ok(())
     }
 
-    /// Coordinate call acceptance with media setup and 200 OK response
+    /// Coordinate call acceptance with media setup, 200 OK response, and dialog creation
     ///
     /// This method handles the complete call acceptance workflow:
     /// 1. Extract SDP offer from INVITE
     /// 2. Coordinate with media-core for SDP answer
     /// 3. Send 200 OK with SDP answer
+    /// 4. **CRITICAL**: Create dialog from the transaction and response
     pub async fn coordinate_call_acceptance(
         &self,
         transaction_id: &TransactionKey,
@@ -117,7 +128,7 @@ impl CallLifecycleCoordinator {
         info!(
             transaction_id = %transaction_id,
             session_id = session_id,
-            "🎵 Coordinating call acceptance with media setup"
+            "🎵 Coordinating call acceptance with media setup and dialog creation"
         );
 
         // Step 1: Extract SDP offer from INVITE request
@@ -135,7 +146,83 @@ impl CallLifecycleCoordinator {
         );
 
         // Step 3: Send 200 OK response with SDP answer
-        self.send_success_response(transaction_id, request, &answer_sdp).await?;
+        let ok_response = self.send_success_response(transaction_id, request, &answer_sdp).await?;
+
+        // Step 4: **CRITICAL FIX**: Create dialog from the transaction and response
+        if let Some(dialog_manager) = &self.dialog_manager {
+            debug!(
+                transaction_id = %transaction_id,
+                "🔗 Creating dialog from INVITE transaction and 200 OK response"
+            );
+
+            // Extract session ID from the request (from a custom header or generate one)
+            let session_id = if let Some(session_header) = request.header(&HeaderName::Other("X-Session-ID".to_string())) {
+                // Get the header value as a string
+                let session_id_str = match session_header {
+                    TypedHeader::Other(_, header_value) => {
+                        match header_value {
+                            rvoip_sip_core::types::headers::HeaderValue::Raw(bytes) => {
+                                std::str::from_utf8(&bytes).unwrap_or("")
+                            }
+                            _ => ""
+                        }
+                    }
+                    _ => ""
+                };
+                
+                // Try to parse the session ID as a UUID
+                match uuid::Uuid::parse_str(session_id_str) {
+                    Ok(uuid) => SessionId(uuid),
+                    Err(_) => {
+                        warn!("Invalid session ID format: {}, generating new one", session_id_str);
+                        SessionId::new()
+                    }
+                }
+            } else {
+                // Generate a new session ID if not provided
+                SessionId::new()
+            };
+
+            // Create dialog from the transaction (server side, so is_initiator = false)
+            if let Some(dialog_id) = dialog_manager.create_dialog_from_transaction(
+                transaction_id,
+                request,
+                &ok_response,
+                false, // Server side - not initiator
+            ).await {
+                info!(
+                    transaction_id = %transaction_id,
+                    dialog_id = %dialog_id,
+                    "✅ Dialog created successfully for call acceptance"
+                );
+
+                // Associate dialog with session
+                if let Err(e) = dialog_manager.associate_with_session(&dialog_id, &session_id) {
+                    warn!(
+                        dialog_id = %dialog_id,
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to associate dialog with session"
+                    );
+                } else {
+                    info!(
+                        dialog_id = %dialog_id,
+                        session_id = %session_id,
+                        "✅ Dialog associated with session successfully"
+                    );
+                }
+            } else {
+                error!(
+                    transaction_id = %transaction_id,
+                    "❌ Failed to create dialog from INVITE transaction"
+                );
+            }
+        } else {
+            warn!(
+                transaction_id = %transaction_id,
+                "⚠️ No dialog manager available - dialog will not be created"
+            );
+        }
 
         info!(
             transaction_id = %transaction_id,
@@ -146,22 +233,22 @@ impl CallLifecycleCoordinator {
         Ok(())
     }
 
-    /// Send 200 OK response with SDP
+    /// Send 200 OK response with SDP and return the response for dialog creation
     async fn send_success_response(
         &self,
         transaction_id: &TransactionKey,
         request: &Request,
         sdp: &str,
-    ) -> Result<()> {
+    ) -> Result<Response> {
         info!(
             transaction_id = %transaction_id,
             "📞 Sending 200 OK response with SDP"
         );
 
-        let ok_response = self.transaction_coordinator.create_200_ok_response(request, sdp);
+        let ok_response = self.transaction_coordinator.create_200_ok_response(request, Some(sdp))?;
         
         self.transaction_coordinator
-            .send_success_response(transaction_id, ok_response)
+            .send_success_response(transaction_id, ok_response.clone())
             .await?;
 
         info!(
@@ -169,7 +256,8 @@ impl CallLifecycleCoordinator {
             "✅ 200 OK response with SDP sent successfully"
         );
 
-        Ok(())
+        // Return the response for dialog creation
+        Ok(ok_response)
     }
 
     /// Coordinate call rejection with error response
@@ -225,6 +313,212 @@ impl CallLifecycleCoordinator {
             transaction_id = %transaction_id,
             session_id = session_id,
             "✅ Call establishment confirmed - media coordination will be enhanced"
+        );
+
+        Ok(())
+    }
+
+    /// Handle incoming BYE request with complete call termination coordination
+    ///
+    /// This method manages the complete BYE processing workflow:
+    /// 1. Process the BYE request
+    /// 2. Find and terminate the associated dialog
+    /// 3. Coordinate media session cleanup
+    /// 4. Send 200 OK response
+    /// 5. Emit session termination events
+    pub async fn handle_incoming_bye(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        session_id: &str,
+    ) -> Result<()> {
+        info!(
+            transaction_id = %transaction_id,
+            session_id = session_id,
+            "🛑 Starting complete BYE call termination coordination"
+        );
+
+        // Step 1: Find and terminate the associated dialog
+        self.terminate_dialog_for_bye(transaction_id, request, session_id).await?;
+
+        // Step 2: Coordinate media session cleanup
+        self.coordinate_media_cleanup(session_id).await?;
+
+        // Step 3: Send 200 OK response to BYE
+        self.send_bye_response(transaction_id, request).await?;
+
+        // Step 4: Emit session termination events
+        self.emit_session_termination_events(session_id).await?;
+
+        info!(
+            transaction_id = %transaction_id,
+            session_id = session_id,
+            "✅ Complete BYE call termination coordination successful"
+        );
+
+        Ok(())
+    }
+
+    /// Find and terminate the dialog associated with the BYE request
+    async fn terminate_dialog_for_bye(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        session_id: &str,
+    ) -> Result<()> {
+        info!(
+            transaction_id = %transaction_id,
+            session_id = session_id,
+            "🔗 Finding and terminating dialog for BYE request"
+        );
+
+        if let Some(dialog_manager) = &self.dialog_manager {
+            // Try to find the dialog for this BYE request
+            if let Some(dialog_id) = dialog_manager.find_dialog_for_request(request) {
+                info!(
+                    transaction_id = %transaction_id,
+                    dialog_id = %dialog_id,
+                    "🔗 Found dialog for BYE request - terminating"
+                );
+
+                // Terminate the dialog
+                if let Err(e) = dialog_manager.terminate_dialog(&dialog_id).await {
+                    error!(
+                        transaction_id = %transaction_id,
+                        dialog_id = %dialog_id,
+                        error = %e,
+                        "❌ Failed to terminate dialog"
+                    );
+                } else {
+                    info!(
+                        transaction_id = %transaction_id,
+                        dialog_id = %dialog_id,
+                        "✅ Dialog terminated successfully"
+                    );
+                }
+
+                // Associate the BYE transaction with the dialog for cleanup
+                dialog_manager.transaction_to_dialog.insert(transaction_id.clone(), dialog_id);
+            } else {
+                warn!(
+                    transaction_id = %transaction_id,
+                    session_id = session_id,
+                    "⚠️ No dialog found for BYE request - call may have already been terminated"
+                );
+            }
+        } else {
+            warn!(
+                transaction_id = %transaction_id,
+                "⚠️ No dialog manager available for dialog termination"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Send 200 OK response to BYE request
+    async fn send_bye_response(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+    ) -> Result<()> {
+        info!(
+            transaction_id = %transaction_id,
+            "📞 Sending 200 OK response to BYE"
+        );
+
+        // **PROPER ARCHITECTURE**: Use transaction-core's helper to create response
+        // and transaction-core's send_response method to send it
+        let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(request);
+        
+        // Send through transaction-core (not through transaction coordinator)
+        self.transaction_coordinator
+            .transaction_manager()
+            .send_response(transaction_id, bye_response)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send BYE response: {}", e))?;
+
+        info!(
+            transaction_id = %transaction_id,
+            "✅ 200 OK response to BYE sent successfully"
+        );
+
+        Ok(())
+    }
+
+    /// Coordinate media session cleanup
+    async fn coordinate_media_cleanup(&self, session_id: &str) -> Result<()> {
+        info!(
+            session_id = session_id,
+            "🎵 Coordinating media session cleanup"
+        );
+
+        // **REAL IMPLEMENTATION**: Coordinate with media-core to clean up media session
+        // First, try to get the media session ID for this session
+        if let Ok(session_uuid) = uuid::Uuid::parse_str(session_id) {
+            let session_id_obj = SessionId(session_uuid);
+            
+            if let Some(media_session_id) = self.media_manager.get_media_session(&session_id_obj).await {
+                // Stop the media session
+                if let Err(e) = self.media_manager.stop_media(&media_session_id, "BYE received".to_string()).await {
+                    warn!(
+                        session_id = session_id,
+                        media_session_id = %media_session_id,
+                        error = %e,
+                        "Failed to stop media session - continuing with call termination"
+                    );
+                } else {
+                    debug!(
+                        session_id = session_id,
+                        media_session_id = %media_session_id,
+                        "🎵 Media session stopped successfully"
+                    );
+                }
+            } else {
+                debug!(session_id = session_id, "No media session found for cleanup");
+            }
+        } else {
+            warn!(session_id = session_id, "Invalid session ID format for media cleanup");
+        }
+        
+        info!(
+            session_id = session_id,
+            "✅ Media session cleanup coordinated successfully"
+        );
+
+        Ok(())
+    }
+
+    /// Emit session termination events
+    async fn emit_session_termination_events(&self, session_id: &str) -> Result<()> {
+        info!(
+            session_id = session_id,
+            "📡 Emitting session termination events"
+        );
+
+        // **REAL IMPLEMENTATION**: Emit proper session termination events
+        if let Some(dialog_manager) = &self.dialog_manager {
+            // Parse session ID
+            if let Ok(session_uuid) = uuid::Uuid::parse_str(session_id) {
+                let session_id_obj = SessionId(session_uuid);
+                
+                // Emit session termination event through the dialog manager's event bus
+                dialog_manager.event_bus.publish(crate::events::SessionEvent::Terminated {
+                    session_id: session_id_obj,
+                    reason: "BYE received".to_string(),
+                }).await.map_err(|e| anyhow::anyhow!("Failed to publish termination event: {}", e))?;
+                
+                debug!(session_id = session_id, "📡 Session termination event published successfully");
+            } else {
+                warn!(session_id = session_id, "Invalid session ID format for event emission");
+            }
+        } else {
+            warn!("No dialog manager available for event emission");
+        }
+        
+        info!(
+            session_id = session_id,
+            "✅ Session termination events emitted successfully"
         );
 
         Ok(())

@@ -303,7 +303,7 @@ impl SessionManager {
         media_manager: Arc<MediaManager>
     ) -> Result<Self, Error> {
         // Create a dialog manager with call lifecycle coordinator
-        let dialog_manager = DialogManager::new_with_call_coordinator(
+        let (dialog_manager, _call_lifecycle_coordinator) = DialogManager::new_with_call_coordinator(
             transaction_manager.clone(), 
             event_bus.clone(),
             media_manager.clone()
@@ -316,7 +316,7 @@ impl SessionManager {
             config,
             sessions: Arc::new(DashMap::new()),
             transaction_manager,
-            dialog_manager: Arc::new(dialog_manager),
+            dialog_manager,
             media_manager,
             event_bus: event_bus.clone(),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),

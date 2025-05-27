@@ -1,24 +1,24 @@
-//! Transaction Coordination Interface
+//! Transaction Coordination
 //!
-//! This module provides the interface for dialog manager to coordinate with
-//! transaction-core for sending SIP responses. It maintains proper separation
-//! of concerns where dialog manager makes application decisions and coordinates
-//! with transaction-core for SIP protocol handling.
+//! This module provides the interface between dialog manager and transaction-core,
+//! allowing the dialog manager to coordinate SIP responses through transaction-core
+//! while maintaining proper architectural separation.
 
 use std::sync::Arc;
 use anyhow::Result;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::{HeaderName, TypedHeader};
+use rvoip_sip_core::builder::ContentLengthBuilderExt;
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
-use uuid;
+use bytes::Bytes;
 
-/// Transaction coordination interface for dialog manager
+/// Transaction coordinator
 ///
-/// This struct provides methods for the dialog manager to coordinate with
-/// transaction-core for sending SIP responses while maintaining proper
-/// architectural separation.
-#[derive(Debug, Clone)]
+/// This struct provides the interface between dialog manager and transaction-core,
+/// allowing dialog manager to coordinate SIP responses without directly handling
+/// SIP protocol details.
 pub struct TransactionCoordinator {
     transaction_manager: Arc<TransactionManager>,
 }
@@ -31,175 +31,151 @@ impl TransactionCoordinator {
         }
     }
 
-    /// Send a provisional response (1xx) through transaction-core
-    ///
-    /// This method coordinates with transaction-core to send provisional responses
-    /// like 180 Ringing while maintaining proper SIP protocol handling.
+    /// Get access to the transaction manager
+    pub fn transaction_manager(&self) -> &Arc<TransactionManager> {
+        &self.transaction_manager
+    }
+
+    /// Send a provisional response (e.g., 180 Ringing)
     pub async fn send_provisional_response(
         &self,
         transaction_id: &TransactionKey,
         response: Response,
     ) -> Result<()> {
-        debug!(
+        info!(
             transaction_id = %transaction_id,
-            status_code = response.status_code(),
-            "Coordinating provisional response with transaction-core"
+            status_code = response.status().as_u16(),
+            "📞 Sending provisional response through transaction-core"
         );
 
-        // Coordinate with transaction-core to send the response
-        match self.transaction_manager.send_response(transaction_id, response.clone()).await {
-            Ok(()) => {
-                info!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    "✅ Provisional response coordinated successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    error = %e,
-                    "❌ Failed to coordinate provisional response"
-                );
-                Err(anyhow::anyhow!("Failed to send provisional response: {}", e))
-            }
-        }
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send provisional response: {}", e))?;
+
+        info!(
+            transaction_id = %transaction_id,
+            "✅ Provisional response sent successfully"
+        );
+
+        Ok(())
     }
 
-    /// Send a success response (2xx) through transaction-core
-    ///
-    /// This method coordinates with transaction-core to send success responses
-    /// like 200 OK with SDP for call establishment.
+    /// Send a success response (e.g., 200 OK) and create dialog
     pub async fn send_success_response(
         &self,
         transaction_id: &TransactionKey,
         response: Response,
     ) -> Result<()> {
-        debug!(
+        info!(
             transaction_id = %transaction_id,
-            status_code = response.status_code(),
-            "Coordinating success response with transaction-core"
+            status_code = response.status().as_u16(),
+            "📞 Sending success response through transaction-core"
         );
 
-        // Coordinate with transaction-core to send the response
-        match self.transaction_manager.send_response(transaction_id, response.clone()).await {
-            Ok(()) => {
-                info!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    "✅ Success response coordinated successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    error = %e,
-                    "❌ Failed to coordinate success response"
-                );
-                Err(anyhow::anyhow!("Failed to send success response: {}", e))
-            }
-        }
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send success response: {}", e))?;
+
+        info!(
+            transaction_id = %transaction_id,
+            "✅ Success response sent successfully"
+        );
+
+        Ok(())
     }
 
-    /// Send an error response (4xx/5xx/6xx) through transaction-core
-    ///
-    /// This method coordinates with transaction-core to send error responses
-    /// for call rejection or server errors.
+    /// Send an error response (e.g., 486 Busy Here)
     pub async fn send_error_response(
         &self,
         transaction_id: &TransactionKey,
         response: Response,
     ) -> Result<()> {
-        debug!(
+        info!(
             transaction_id = %transaction_id,
-            status_code = response.status_code(),
-            "Coordinating error response with transaction-core"
+            status_code = response.status().as_u16(),
+            "📞 Sending error response through transaction-core"
         );
 
-        // Coordinate with transaction-core to send the response
-        match self.transaction_manager.send_response(transaction_id, response.clone()).await {
-            Ok(()) => {
-                info!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    "✅ Error response coordinated successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    transaction_id = %transaction_id,
-                    status_code = response.status_code(),
-                    error = %e,
-                    "❌ Failed to coordinate error response"
-                );
-                Err(anyhow::anyhow!("Failed to send error response: {}", e))
-            }
-        }
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send error response: {}", e))?;
+
+        info!(
+            transaction_id = %transaction_id,
+            "✅ Error response sent successfully"
+        );
+
+        Ok(())
     }
 
-    /// Get reference to the transaction manager
-    ///
-    /// This provides access to the underlying transaction manager for
-    /// advanced coordination scenarios.
-    pub fn transaction_manager(&self) -> &Arc<TransactionManager> {
-        &self.transaction_manager
-    }
-}
-
-/// Helper functions for creating SIP responses using transaction-core utilities
-impl TransactionCoordinator {
-    /// Create a 180 Ringing response from the original request
-    ///
-    /// Uses transaction-core's helper function that properly handles To-tags
-    /// and other SIP requirements for dialog establishment.
+    /// Create 180 Ringing response using transaction-core helpers
     pub fn create_180_ringing_response(&self, request: &Request) -> Response {
-        // Use transaction-core's helper that properly handles To-tags
+        debug!("Creating 180 Ringing response using transaction-core helpers");
+        
+        // **PROPER ARCHITECTURE**: Use transaction-core's helper function
         rvoip_transaction_core::utils::create_ringing_response_with_tag(request)
     }
 
-    /// Create a 200 OK response with SDP from the original request
-    ///
-    /// Uses transaction-core's helper function that properly handles To-tags,
-    /// Contact headers, and other SIP requirements for dialog establishment.
-    pub fn create_200_ok_response(&self, request: &Request, sdp: &str) -> Response {
-        // Use transaction-core's helper that properly handles To-tags and Contact
+    /// Create 200 OK response using transaction-core helpers
+    pub fn create_200_ok_response(&self, request: &Request, sdp: Option<&str>) -> Result<Response> {
+        debug!("Creating 200 OK response with SDP using transaction-core helpers");
+        
+        // **PROPER ARCHITECTURE**: Use transaction-core's helper function
+        // Extract local contact information from the request's destination
+        let contact_host = "127.0.0.1"; // In production, this should be the actual local IP
+        let contact_port = 5060; // In production, this should be the actual local port
+        let contact_user = "session-core"; // In production, this could be extracted from config
+        
         let mut response = rvoip_transaction_core::utils::create_ok_response_with_dialog_info(
             request,
-            "server",      // contact_user
-            "127.0.0.1",   // contact_host - TODO: make this configurable
-            Some(5060),    // contact_port - TODO: make this configurable
+            &contact_user,
+            &contact_host,
+            Some(contact_port),
         );
         
-        // Add SDP content using proper ContentType creation
-        use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-        use std::collections::HashMap;
+        // Add Content-Type header for SDP
+        if let Some(sdp) = sdp {
+            use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
+            use std::collections::HashMap;
+            
+            let ct = rvoip_sip_core::types::content_type::ContentType::new(ContentTypeValue {
+                m_type: "application".to_string(),
+                m_subtype: "sdp".to_string(),
+                parameters: HashMap::new(),
+            });
+            response.headers.push(TypedHeader::ContentType(ct));
+            response.body = Bytes::from(sdp.as_bytes().to_vec());
+        }
         
-        let content_type = ContentType::new(ContentTypeValue {
-            m_type: "application".to_string(),
-            m_subtype: "sdp".to_string(),
-            parameters: HashMap::new(),
-        });
-        
-        response.headers.push(TypedHeader::ContentType(content_type));
-        response.headers.retain(|h| !matches!(h, TypedHeader::ContentLength(_)));
-        response.headers.push(TypedHeader::ContentLength(
-            ContentLength::new(sdp.len() as u32)
-        ));
-        response.body = bytes::Bytes::from(sdp.as_bytes().to_vec());
-        
-        response
+        Ok(response)
     }
 
-    /// Create an error response from the original request
-    ///
-    /// Uses transaction-core's helper function for proper response creation.
-    pub fn create_error_response(&self, request: &Request, status_code: StatusCode, reason: Option<&str>) -> Response {
-        // Use transaction-core's basic response helper
-        rvoip_transaction_core::utils::create_response(request, status_code)
+    /// Create error response using transaction-core helpers
+    pub fn create_error_response(
+        &self,
+        request: &Request,
+        status_code: StatusCode,
+        reason: Option<&str>,
+    ) -> Response {
+        debug!(
+            status_code = status_code.as_u16(),
+            "Creating error response using transaction-core helpers"
+        );
+        
+        // **PROPER ARCHITECTURE**: Use sip-core's response builder
+        // (transaction-core doesn't have specific helpers for all error codes)
+        let mut builder = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            request,
+            status_code,
+            reason,
+        );
+        
+        // Add Content-Length: 0 for error responses
+        builder = builder.content_length(0);
+        
+        builder.build()
     }
 } 
