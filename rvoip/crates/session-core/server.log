@@ -1,0 +1,353 @@
+warning: unused import: `TypedBroadcastSender`
+ --> crates/infra-common/src/events/bus.rs:3:45
+  |
+3 | use crate::events::registry::{TypeRegistry, TypedBroadcastSender, TypedBroadcastReceiver, GlobalTypeRegistry};
+  |                                             ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Instant`
+ --> crates/infra-common/src/events/bus.rs:5:27
+  |
+5 | use std::time::{Duration, Instant};
+  |                           ^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> crates/infra-common/src/events/bus.rs:9:5
+  |
+9 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `EventType`
+ --> crates/infra-common/src/events/registry.rs:1:35
+  |
+1 | use crate::events::types::{Event, EventType, StaticEvent};
+  |                                   ^^^^^^^^^
+
+warning: unused import: `once_cell::sync::OnceCell`
+ --> crates/infra-common/src/events/registry.rs:6:5
+  |
+6 | use once_cell::sync::OnceCell;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::RwLock`
+ --> crates/infra-common/src/events/registry.rs:9:5
+  |
+9 | use std::sync::RwLock;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::marker::PhantomData`
+ --> crates/infra-common/src/events/subscriber.rs:4:5
+  |
+4 | use std::marker::PhantomData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> crates/infra-common/src/events/types.rs:6:5
+  |
+6 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `EventError`
+ --> crates/infra-common/src/events/api.rs:9:48
+  |
+9 | use crate::events::types::{Event, EventResult, EventError, EventFilter};
+  |                                                ^^^^^^^^^^
+
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> crates/infra-common/src/config/loader.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ConfigProvider`
+ --> crates/infra-common/src/config/loader.rs:5:31
+  |
+5 | use crate::config::provider::{ConfigProvider, ConfigSource, BasicConfigProvider};
+  |                               ^^^^^^^^^^^^^^
+
+warning: unused import: `Instant`
+ --> crates/infra-common/src/config/dynamic.rs:8:27
+  |
+8 | use std::time::{Duration, Instant};
+  |                           ^^^^^^^
+
+warning: unused import: `HashSet`
+ --> crates/infra-common/src/lifecycle/manager.rs:4:33
+  |
+4 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> crates/infra-common/src/lifecycle/manager.rs:8:5
+  |
+8 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Error` and `Result`
+ --> crates/infra-common/src/lifecycle/health.rs:1:28
+  |
+1 | use crate::errors::types::{Error, Result};
+  |                            ^^^^^  ^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `infra-common` (lib) generated 29 warnings (run `cargo fix --lib -p infra-common` to apply 22 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/release/examples/sipp_server`
+[2m2025-05-27T19:42:13.038236Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m35:[0m 🚀 Starting SIPp-Compatible SIP Server
+[2m2025-05-27T19:42:13.038326Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m36:[0m 📞 Ready to handle real SIP traffic from SIPp
+[2m2025-05-27T19:42:13.038357Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m50:[0m 📋 Server Configuration:
+[2m2025-05-27T19:42:13.038360Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m51:[0m   📍 Bind Address: 127.0.0.1:5060
+[2m2025-05-27T19:42:13.038363Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m52:[0m   🚛 Transport: UDP
+[2m2025-05-27T19:42:13.038393Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m53:[0m   📊 Max Sessions: 1000
+[2m2025-05-27T19:42:13.038394Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m54:[0m   ⏱️  Session Timeout: 300s
+[2m2025-05-27T19:42:13.038396Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m55:[0m   🎵 Media Enabled: true
+[2m2025-05-27T19:42:13.038441Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m115:[0m Creating SIP server with config: ServerConfig { bind_address: 127.0.0.1:5060, transport_protocol: Udp, max_sessions: 1000, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, server_name: "SIPp-Compatible-Server/1.0", contact_uri: Some("sip:server@127.0.0.1:5060") }
+[2m2025-05-27T19:42:13.038565Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m48:[0m SIP UDP transport bound to 127.0.0.1:5060
+[2m2025-05-27T19:42:13.038810Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_transaction_core::transport[0m[2m:[0m [2mcrates/transaction-core/src/transport/mod.rs[0m[2m:[0m[2m247:[0m Added UDP transport bound to 127.0.0.1:5060
+[2m2025-05-27T19:42:13.038833Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m141:[0m ✅ Created and initialized transport manager for UDP on 127.0.0.1:5060
+[2m2025-05-27T19:42:13.038886Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m152:[0m ✅ Created transaction manager with transport manager
+[2m2025-05-27T19:42:13.038912Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m39:[0m Created ZeroCopySystem with config: EventBusConfig { max_concurrent_dispatches: 500, default_timeout: 5s, broadcast_capacity: 1000, enable_priority: true, enable_zero_copy: true, batch_size: 100, shard_count: 8 }
+[2m2025-05-27T19:42:13.039003Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m82:[0m Started ZeroCopySystem
+[2m2025-05-27T19:42:13.039010Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m93:[0m Created ZeroCopyPublisher for rvoip_session_core::events::SessionEvent
+[2m2025-05-27T19:42:13.038963Z[0m [34mDEBUG[0m ThreadId(16) [2mrvoip_transaction_core::manager[0m[2m:[0m [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1527:[0m Starting transaction message loop
+[2m2025-05-27T19:42:13.039061Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m93:[0m Created ZeroCopyPublisher for rvoip_session_core::events::SessionEvent
+[2m2025-05-27T19:42:13.039177Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m93:[0m Created ZeroCopyPublisher for rvoip_session_core::events::SessionEvent
+[2m2025-05-27T19:42:13.039235Z[0m [34mDEBUG[0m ThreadId(01) [2mrvoip_session_core::media[0m[2m:[0m [2mcrates/session-core/src/media/mod.rs[0m[2m:[0m[2m271:[0m Creating MediaManager with media-core MediaEngine integration
+[2m2025-05-27T19:42:13.039241Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_media_core::engine::media_engine[0m[2m:[0m [2mcrates/media-core/src/engine/media_engine.rs[0m[2m:[0m[2m106:[0m Creating new MediaEngine
+[2m2025-05-27T19:42:13.039243Z[0m [34mDEBUG[0m ThreadId(01) [2mrvoip_media_core::engine::media_engine[0m[2m:[0m [2mcrates/media-core/src/engine/media_engine.rs[0m[2m:[0m[2m118:[0m MediaEngine created successfully
+[2m2025-05-27T19:42:13.039245Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_media_core::engine::media_engine[0m[2m:[0m [2mcrates/media-core/src/engine/media_engine.rs[0m[2m:[0m[2m124:[0m Starting MediaEngine
+[2m2025-05-27T19:42:13.039247Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_media_core::engine::lifecycle[0m[2m:[0m [2mcrates/media-core/src/engine/lifecycle.rs[0m[2m:[0m[2m99:[0m Starting MediaEngine...
+[2m2025-05-27T19:42:13.039248Z[0m [34mDEBUG[0m ThreadId(01) [2mrvoip_media_core::engine::lifecycle[0m[2m:[0m [2mcrates/media-core/src/engine/lifecycle.rs[0m[2m:[0m[2m192:[0m Performing MediaEngine startup operations
+[2m2025-05-27T19:42:13.141310Z[0m [34mDEBUG[0m ThreadId(01) [2mrvoip_media_core::engine::lifecycle[0m[2m:[0m [2mcrates/media-core/src/engine/lifecycle.rs[0m[2m:[0m[2m204:[0m MediaEngine startup operations completed
+[2m2025-05-27T19:42:13.141319Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_media_core::engine::lifecycle[0m[2m:[0m [2mcrates/media-core/src/engine/lifecycle.rs[0m[2m:[0m[2m106:[0m MediaEngine started successfully
+[2m2025-05-27T19:42:13.141321Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_media_core::engine::media_engine[0m[2m:[0m [2mcrates/media-core/src/engine/media_engine.rs[0m[2m:[0m[2m126:[0m MediaEngine started and ready
+[2m2025-05-27T19:42:13.141322Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::media[0m[2m:[0m [2mcrates/session-core/src/media/mod.rs[0m[2m:[0m[2m283:[0m ✅ MediaManager created with media-core MediaEngine
+[2m2025-05-27T19:42:13.141370Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m93:[0m Created ZeroCopyPublisher for rvoip_session_core::events::SessionEvent
+[2m2025-05-27T19:42:13.141410Z[0m [34mDEBUG[0m ThreadId(01) [2minfra_common::events::zero_copy[0m[2m:[0m [2mcrates/infra-common/src/events/zero_copy.rs[0m[2m:[0m[2m93:[0m Created ZeroCopyPublisher for rvoip_session_core::events::SessionEvent
+[2m2025-05-27T19:42:13.141468Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m165:[0m ✅ Created session manager
+[2m2025-05-27T19:42:13.141486Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m174:[0m ✅ Created server manager
+[2m2025-05-27T19:42:13.141487Z[0m [32m INFO[0m ThreadId(01) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m175:[0m 🎯 SIP server ready - transaction-core handles all transport on 127.0.0.1:5060
+[2m2025-05-27T19:42:13.141490Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m60:[0m ✅ SIP server created successfully
+[2m2025-05-27T19:42:13.141491Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m61:[0m 🎯 Server ready for SIPp testing on 127.0.0.1:5060
+[2m2025-05-27T19:42:13.141492Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m74:[0m 
+[2m2025-05-27T19:42:13.141493Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m75:[0m 🧪 SIPp Test Commands:
+[2m2025-05-27T19:42:13.141494Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m76:[0m   📞 Basic call test:
+[2m2025-05-27T19:42:13.141495Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m77:[0m     sipp -sn uac 127.0.0.1:5060 -m 1 -d 5000
+[2m2025-05-27T19:42:13.141496Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m78:[0m   📊 Load test (10 calls):
+[2m2025-05-27T19:42:13.141497Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m79:[0m     sipp -sn uac 127.0.0.1:5060 -m 10 -r 1
+[2m2025-05-27T19:42:13.141498Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m80:[0m   🔄 Continuous test:
+[2m2025-05-27T19:42:13.141499Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m81:[0m     sipp -sn uac 127.0.0.1:5060 -d 10000
+[2m2025-05-27T19:42:13.141500Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m82:[0m 
+[2m2025-05-27T19:42:13.141538Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m147:[0m 🎯 SIP Server is running and ready for SIPp testing
+[2m2025-05-27T19:42:13.141539Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m148:[0m 📡 Listening for SIP messages on 127.0.0.1:5060
+[2m2025-05-27T19:42:13.141540Z[0m [32m INFO[0m ThreadId(01) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m149:[0m 🛑 Press Ctrl+C to shutdown
+[2m2025-05-27T19:42:13.141547Z[0m [32m INFO[0m ThreadId(16) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m87:[0m 🎧 Starting call handler task
+[2m2025-05-27T19:42:13.141566Z[0m [32m INFO[0m ThreadId(17) [2msipp_server[0m[2m:[0m [2mcrates/session-core/examples/sipp_server.rs[0m[2m:[0m[2m134:[0m 🎧 Starting server event processing
+[2m2025-05-27T19:42:13.141572Z[0m [32m INFO[0m ThreadId(17) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m49:[0m Starting SIP server event processing
+[2m2025-05-27T19:42:24.109470Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:24.110572Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+[2m2025-05-27T19:42:24.110674Z[0m [32m INFO[0m ThreadId(02) [2mrvoip_transaction_core::manager[0m[2m:[0m [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1926:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+Transaction loop starting for Key(z9hG4bK-68313-1-0:INVITE:server)
+Initial state: Proceeding
+[2m2025-05-27T19:42:24.110770Z[0m [34mDEBUG[0m ThreadId(16) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m109:[0m Generic transaction loop starting. Initial state: Proceeding [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mtest_mode[0m[2m=[0mfalse
+[2m2025-05-27T19:42:24.110707Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::api::factory[0m[2m:[0m [2mcrates/session-core/src/api/factory.rs[0m[2m:[0m[2m54:[0m SipServer received transaction event #1: InviteRequest { transaction_id: z9hG4bK-68313-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }, source: 127.0.0.1:5061 }
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:24.110807Z[0m [34mDEBUG[0m ThreadId(16) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mTransitionTo(Proceeding)
+Processing TransitionTo(Proceeding) current state: Proceeding
+[2m2025-05-27T19:42:24.110810Z[0m [34mDEBUG[0m ThreadId(16) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m121:[0m Processing state transition [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcurrent_state[0m[2m=[0mProceeding [3mnew_state[0m[2m=[0mProceeding
+Already in requested state, no transition needed: Proceeding
+[2m2025-05-27T19:42:24.110823Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::api::server::manager[0m[2m:[0m [2mcrates/session-core/src/api/server/manager.rs[0m[2m:[0m[2m69:[0m ServerManager received transaction event: InviteRequest { transaction_id: z9hG4bK-68313-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-05-27T19:42:24.110832Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::api::server::manager[0m[2m:[0m [2mcrates/session-core/src/api/server/manager.rs[0m[2m:[0m[2m73:[0m Forwarding transaction event to DialogManager
+[2m2025-05-27T19:42:24.110864Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::event_processing[0m[2m:[0m [2mcrates/session-core/src/dialog/event_processing.rs[0m[2m:[0m[2m22:[0m Processing transaction event: InviteRequest { transaction_id: z9hG4bK-68313-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-05-27T19:42:24.110885Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::event_processing[0m[2m:[0m [2mcrates/session-core/src/dialog/event_processing.rs[0m[2m:[0m[2m353:[0m Received INVITE request from transaction-core: Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:24.110886Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::event_processing[0m[2m:[0m [2mcrates/session-core/src/dialog/event_processing.rs[0m[2m:[0m[2m356:[0m Processing INVITE request - checking if it's a re-INVITE
+[2m2025-05-27T19:42:24.110889Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::dialog_operations[0m[2m:[0m [2mcrates/session-core/src/dialog/dialog_operations.rs[0m[2m:[0m[2m35:[0m Looking for dialog: Call-ID=1-68313@127.0.0.1, From-tag=Some("68313SIPpTag001"), To-tag=None
+[2m2025-05-27T19:42:24.110892Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::dialog_operations[0m[2m:[0m [2mcrates/session-core/src/dialog/dialog_operations.rs[0m[2m:[0m[2m40:[0m Missing tags - From-tag: Some("68313SIPpTag001"), To-tag: None
+[2m2025-05-27T19:42:24.110893Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::event_processing[0m[2m:[0m [2mcrates/session-core/src/dialog/event_processing.rs[0m[2m:[0m[2m382:[0m No existing dialog found - treating as initial INVITE
+[2m2025-05-27T19:42:24.110894Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::dialog::event_processing[0m[2m:[0m [2mcrates/session-core/src/dialog/event_processing.rs[0m[2m:[0m[2m386:[0m INVITE transaction Key(z9hG4bK-68313-1-0:INVITE:server) already created by transaction-core
+[2m2025-05-27T19:42:24.110944Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::api::server::manager[0m[2m:[0m [2mcrates/session-core/src/api/server/manager.rs[0m[2m:[0m[2m75:[0m DialogManager processing completed, continuing with session coordination
+[2m2025-05-27T19:42:24.110959Z[0m [34mDEBUG[0m ThreadId(02) [2mrvoip_session_core::api::server::manager[0m[2m:[0m [2mcrates/session-core/src/api/server/manager.rs[0m[2m:[0m[2m108:[0m Received transaction event: InviteRequest { transaction_id: z9hG4bK-68313-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }, source: 127.0.0.1:5061 } - forwarded to DialogManager
+[2m2025-05-27T19:42:24.610448Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:24.611889Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+Received command: ProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" })) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:24.612039Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }))
+[2m2025-05-27T19:42:24.612100Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::server::invite[0m[2m:[0m [2mcrates/transaction-core/src/server/invite.rs[0m[2m:[0m[2m485:[0m Received INVITE retransmission in Proceeding state [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:25.612042Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:25.613751Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+Received command: ProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" })) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:25.613912Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }))
+[2m2025-05-27T19:42:25.613935Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::server::invite[0m[2m:[0m [2mcrates/transaction-core/src/server/invite.rs[0m[2m:[0m[2m485:[0m Received INVITE retransmission in Proceeding state [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:27.614733Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:27.615772Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+Received command: ProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" })) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:27.615851Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }))
+[2m2025-05-27T19:42:27.615876Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::server::invite[0m[2m:[0m [2mcrates/transaction-core/src/server/invite.rs[0m[2m:[0m[2m485:[0m Received INVITE retransmission in Proceeding state [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:31.615662Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:31.616593Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+Received command: ProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" })) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:31.616648Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }))
+[2m2025-05-27T19:42:31.616666Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::server::invite[0m[2m:[0m [2mcrates/transaction-core/src/server/invite.rs[0m[2m:[0m[2m485:[0m Received INVITE retransmission in Proceeding state [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:39.616709Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_sip_transport::transport::udp[0m[2m:[0m [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m104:[0m Received SIP message from 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 509 bytes
+Input as string: "INVITE sip:service@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-68313-1-0\r\nFrom: sipp <sip:sipp@127.0.0.1:5061>;tag=68313SIPpTag001\r\nTo: service <sip:service@127.0.0.1:5060>\r\nCall-ID: 1-68313@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: Performance Test\r\nContent-Type: application/sdp\r\nContent-Length:   129\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 36, 38, 33, 31, 33, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 73, 69, 70, 70, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 36, 38, 33, 31, 33, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 73, 65, 72, 76, 69, 63, 65, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 36, 38, 33, 31, 33, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 50, 65, 72, 66, 6f, 72, 6d, 61, 6e, 63, 65, 20, 54, 65, 73, 74, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 32, 39, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 2d, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-05-27T19:42:39.618920Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::manager::handlers[0m[2m:[0m [2mcrates/transaction-core/src/manager/handlers.rs[0m[2m:[0m[2m660:[0m Received message from 127.0.0.1:5061
+Received command: ProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" })) for transaction Key(z9hG4bK-68313-1-0:INVITE:server)
+[2m2025-05-27T19:42:39.619018Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::transaction::runner[0m[2m:[0m [2mcrates/transaction-core/src/transaction/runner.rs[0m[2m:[0m[2m116:[0m Transaction received command [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server) [3mcommand[0m[2m=[0mProcessMessage(Request(Request { method: Invite, uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-68313-1-0")] }])), From(From(Address { display_name: Some("sipp"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("68313SIPpTag001")] })), To(To(Address { display_name: Some("service"), uri: Uri { scheme: Sip, user: Some("service"), password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-68313@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Performance Test")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(129))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n" }))
+[2m2025-05-27T19:42:39.619054Z[0m [34mDEBUG[0m ThreadId(14) [2mrvoip_transaction_core::server::invite[0m[2m:[0m [2mcrates/transaction-core/src/server/invite.rs[0m[2m:[0m[2m485:[0m Received INVITE retransmission in Proceeding state [3mid[0m[2m=[0mKey(z9hG4bK-68313-1-0:INVITE:server)

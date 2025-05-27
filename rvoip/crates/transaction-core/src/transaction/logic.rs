@@ -219,4 +219,23 @@ where
     /// * `timer_handles`: Mutable reference to the transaction's timer handles.
     ///                  The implementation should abort and remove all active timers.
     fn cancel_all_specific_timers(&self, timer_handles: &mut TH);
+    
+    /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
+    ///
+    /// This method is called when the TU sends any provisional response, making the
+    /// automatic 100 Trying response unnecessary per RFC 3261 Section 17.2.1.
+    ///
+    /// For non-INVITE transactions, this method should be a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handles`: Mutable reference to the transaction's timer handles.
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or failure of the timer cancellation.
+    async fn handle_cancel_timer_100(&self, timer_handles: &mut TH) -> Result<()> {
+        // Default implementation is a no-op for non-INVITE server transactions
+        Ok(())
+    }
 } 

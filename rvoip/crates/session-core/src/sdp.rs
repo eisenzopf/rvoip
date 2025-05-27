@@ -103,14 +103,14 @@ impl SdpContext {
     /// Set local SDP answer
     pub fn set_local_answer(&mut self, sdp: SdpSession) -> Result<()> {
         self.local_sdp = Some(sdp);
-        self.state = NegotiationState::Complete;
+            self.state = NegotiationState::Complete;
         Ok(())
     }
     
     /// Set remote SDP answer
     pub fn set_remote_answer(&mut self, sdp: SdpSession) -> Result<()> {
         self.remote_sdp = Some(sdp);
-        self.state = NegotiationState::Complete;
+            self.state = NegotiationState::Complete;
         Ok(())
     }
     

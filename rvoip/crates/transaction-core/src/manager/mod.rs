@@ -1552,15 +1552,7 @@ impl TransactionManager {
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
                     Some(message_event) = receiver.recv() => {
-                        if let Err(e) = handle_transport_message(
-                            message_event,
-                            &transport_arc,
-                            &client_transactions,
-                            &server_transactions,
-                            &events_tx,
-                            &event_subscribers,
-                            &manager_arc,
-                        ).await {
+                        if let Err(e) = manager_arc.handle_transport_event(message_event).await {
                             error!("Error handling transport message: {}", e);
                         }
                     }

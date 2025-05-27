@@ -144,8 +144,9 @@ impl ServerManager {
         info!("📞 Received INVITE request - coordinating session creation");
         
         // **RFC 3261 COMPLIANCE**: session-core is Transaction User (TU)
-        // - transaction-core should auto-send 100 Trying within 200ms
+        // - transaction-core should auto-send 100 Trying within 200ms (Timer 100)
         // - We only make application-level decisions and coordinate state
+        // - We do NOT send SIP responses directly (that's transaction-core's job)
         
         info!("Coordinating session creation for INVITE transaction {}", transaction_id);
         
@@ -175,24 +176,13 @@ impl ServerManager {
             active.insert(session_id.clone(), session);
         }
         
-        // **APPLICATION DECISION**: Send 180 Ringing (optional per RFC 3261)
-        // This is a TU decision, not automatic protocol handling
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        
-        let ringing_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
-            &request,
-            rvoip_sip_core::StatusCode::Ringing,
-            Some("Ringing")
-        ).build();
-        
-        if let Err(e) = self.transaction_manager.send_response(&transaction_id, ringing_response).await {
-            warn!("Failed to send 180 Ringing (non-fatal): {}", e);
-        } else {
-            debug!("✅ Sent 180 Ringing as application decision");
-        }
+        // **ARCHITECTURAL FIX**: Do NOT send SIP responses manually
+        // transaction-core will automatically send 100 Trying via Timer 100
+        // session-core only coordinates application state, not SIP protocol
         
         info!("✅ Created session {} for INVITE transaction {} with Call-ID {}", 
               session_id, transaction_id, call_id);
+        info!("🎯 transaction-core will automatically send 100 Trying via Timer 100");
         Ok(())
     }
     

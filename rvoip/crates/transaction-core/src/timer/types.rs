@@ -81,6 +81,11 @@ pub enum TimerType {
     /// for this duration to absorb retransmissions of the response before terminating.
     /// Value is T4 for unreliable transports. Defined in RFC 3261, Section 17.1.2.2.
     K,
+    /// **Timer 100**: INVITE server transaction automatic 100 Trying timer (RFC 3261 Section 17.2.1)
+    /// 
+    /// RFC 3261 states: "If the TU does not send a provisional response within 200ms,
+    /// the server transaction MUST send a 100 Trying response."
+    Timer100,
     /// A generic timer used for message retransmissions, not specific to a particular RFC 3261 timer letter.
     /// Behavior (e.g., backoff strategy) would be defined by how the `Timer` struct is configured.
     Retransmission,
@@ -118,6 +123,7 @@ impl fmt::Display for TimerType {
             TimerType::WaitForAck => write!(f, "WaitForAck"),
             TimerType::WaitAfterAck => write!(f, "WaitAfterAck"),
             TimerType::Custom => write!(f, "Custom"),
+            TimerType::Timer100 => write!(f, "100"),
         }
     }
 }
@@ -397,47 +403,58 @@ impl fmt::Display for Timer {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // Added PartialEq, Eq for testing
 pub struct TimerSettings {
-    /// **T1: Round-Trip Time (RTT) Estimate (Default: 500 ms)**
-    /// An estimate of the RTT between client and server. It's the initial retransmission
-    /// interval for INVITEs (Timer A) and non-INVITEs (Timer E) over UDP.
-    /// Retransmissions typically double this interval. (RFC 3261, Section 17.1.1.2)
+    /// **T1**: Base retransmission interval (RFC 3261 Section 17.1.1.1)
+    /// 
+    /// Default: 500ms. Used as the initial interval for Timer A and Timer E.
+    /// Should be adjusted based on network round-trip time.
     pub t1: Duration,
 
-    /// **T2: Maximum Retransmission Interval (Default: 4 seconds)**
-    /// The maximum interval for retransmitting non-INVITE requests (Timer E) and
-    /// INVITE responses (Timer G). (RFC 3261, Section 17.1.2.2)
+    /// **T2**: Maximum retransmission interval (RFC 3261 Section 17.1.1.1)
+    /// 
+    /// Default: 4s. Maximum interval for exponential backoff in retransmissions.
+    /// Must be >= T1.
     pub t2: Duration,
 
-    /// **Transaction Timeout (Default: 32 seconds, i.e., 64 * T1)**
-    /// General timeout for INVITE (Timer B) and non-INVITE (Timer F) client transactions.
-    /// (RFC 3261, Sections 17.1.1.2 & 17.1.2.2)
+    /// **T4**: Maximum duration for messages to remain in network (RFC 3261 Section 17.1.1.1)
+    /// 
+    /// Default: 5s. Used for Timer K and other wait timers.
+    pub t4: Duration,
+
+    /// **Timer 100 Interval**: Automatic 100 Trying response timeout (RFC 3261 Section 17.2.1)
+    /// 
+    /// Default: 200ms. If the TU does not send a provisional response within this time,
+    /// the server transaction MUST send a 100 Trying response automatically.
+    pub timer_100_interval: Duration,
+
+    /// **Transaction Timeout**: Overall transaction timeout
+    /// 
+    /// Default: 32s (64*T1). Maximum time a transaction can remain active.
+    /// Used for Timer B and Timer F.
     pub transaction_timeout: Duration,
 
-    /// **Timer D Wait Time (Default: 32 seconds)**
-    /// Duration an INVITE client transaction waits in the Completed state for response
-    /// retransmissions after receiving a non-2xx final response.
-    /// Minimum 32s for unreliable transports. (RFC 3261, Section 17.1.1.2)
+    /// **Wait Time D**: Time to wait in Terminated state for INVITE client transactions
+    /// 
+    /// Default: 32s. Used for Timer D.
     pub wait_time_d: Duration,
 
-    /// **Timer H Wait Time (Default: 32 seconds, i.e., 64 * T1)**
-    /// Duration an INVITE server transaction waits for an ACK after sending a 2xx response.
-    /// (RFC 3261, Section 17.2.1)
+    /// **Wait Time H**: Time to wait for ACK in INVITE server transactions
+    /// 
+    /// Default: 32s. Used for Timer H.
     pub wait_time_h: Duration,
 
-    /// **Timer I Wait Time (Default: 5 seconds, i.e., T4)**
-    /// Duration an INVITE server transaction waits in the Confirmed state (after ACK for 2xx)
-    /// to absorb retransmitted ACKs. This is T4 for unreliable transports.
-    /// (RFC 3261, Section 17.2.1)
+    /// **Wait Time I**: Time to wait in Confirmed state for INVITE server transactions
+    /// 
+    /// Default: 5s (T4). Used for Timer I.
     pub wait_time_i: Duration,
 
-    /// **Timer J Wait Time (Default: 32 seconds, i.e., 64 * T1)**
-    /// Duration a non-INVITE server transaction waits in the Completed state
-    /// to absorb request retransmissions. (RFC 3261, Section 17.2.2)
+    /// **Wait Time J**: Time to wait in Completed state for non-INVITE server transactions
+    /// 
+    /// Default: 32s. Used for Timer J.
     pub wait_time_j: Duration,
 
-    /// **Timer K Wait Time (Default: 5 seconds, i.e., T4)**
-    /// Duration a non-INVITE client transaction waits in the Completed state
-    /// to absorb response retransmissions. (RFC 3261, Section 17.1.2.2)
+    /// **Wait Time K**: Time to wait in Completed state for non-INVITE client transactions
+    /// 
+    /// Default: 5s (T4). Used for Timer K.
     pub wait_time_k: Duration,
 }
 
@@ -448,6 +465,8 @@ impl Default for TimerSettings {
         Self {
             t1: Duration::from_millis(500),
             t2: Duration::from_secs(4),
+            t4: Duration::from_secs(5),
+            timer_100_interval: Duration::from_millis(200),
             transaction_timeout: Duration::from_secs(32), // 64 * T1
             wait_time_d: Duration::from_secs(32),
             wait_time_h: Duration::from_secs(32),         // 64 * T1
@@ -709,6 +728,8 @@ mod tests {
         let settings = TimerSettings::default();
         assert_eq!(settings.t1, Duration::from_millis(500));
         assert_eq!(settings.t2, Duration::from_secs(4));
+        assert_eq!(settings.t4, Duration::from_secs(5));
+        assert_eq!(settings.timer_100_interval, Duration::from_millis(200));
         assert_eq!(settings.transaction_timeout, Duration::from_secs(32));
         assert_eq!(settings.wait_time_d, Duration::from_secs(32));
         assert_eq!(settings.wait_time_h, Duration::from_secs(32));
@@ -722,6 +743,8 @@ mod tests {
         let settings = TimerSettings {
             t1: Duration::from_millis(100),
             t2: Duration::from_secs(1),
+            t4: Duration::from_secs(10),
+            timer_100_interval: Duration::from_millis(200),
             transaction_timeout: Duration::from_secs(10),
             wait_time_d: Duration::from_secs(10),
             wait_time_h: Duration::from_secs(10),

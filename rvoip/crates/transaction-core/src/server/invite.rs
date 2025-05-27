@@ -120,6 +120,9 @@ pub struct ServerInviteTransaction {
 /// INVITE server transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ServerInviteTimerHandles {
+    /// Handle for Timer 100, which controls automatic 100 Trying response
+    timer_100: Option<JoinHandle<()>>,
+    
     /// Handle for Timer G, which controls response retransmissions
     timer_g: Option<JoinHandle<()>>,
     
@@ -144,6 +147,111 @@ struct ServerInviteLogic {
 }
 
 impl ServerInviteLogic {
+    /// Starts Timer 100 (automatic 100 Trying response timer)
+    ///
+    /// According to RFC 3261 Section 17.2.1, if the TU does not send a provisional
+    /// response within 200ms, the server transaction MUST send a 100 Trying response.
+    async fn start_timer_100(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        timer_handles: &mut ServerInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) {
+        let tx_id = &data.id;
+        let timer_config = &data.timer_config;
+        
+        // Start Timer 100 with 200ms interval
+        let interval_100 = timer_config.timer_100_interval;
+        
+        // Use timer_utils to start the timer
+        let timer_manager = self.timer_factory.timer_manager();
+        match timer_utils::start_transaction_timer(
+            &timer_manager,
+            tx_id,
+            "100",
+            TimerType::Timer100,
+            interval_100,
+            command_tx
+        ).await {
+            Ok(handle) => {
+                timer_handles.timer_100 = Some(handle);
+                trace!(id=%tx_id, interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
+            },
+            Err(e) => {
+                error!(id=%tx_id, error=%e, "Failed to start Timer 100");
+            }
+        }
+    }
+    
+    /// Cancels Timer 100 (automatic 100 Trying response timer)
+    ///
+    /// This is called when the TU sends a provisional response, making the
+    /// automatic 100 Trying response unnecessary.
+    fn cancel_timer_100(&self, timer_handles: &mut ServerInviteTimerHandles) {
+        if let Some(handle) = timer_handles.timer_100.take() {
+            handle.abort();
+            trace!("Cancelled Timer 100 (TU sent provisional response)");
+        }
+    }
+    
+    /// Handles Timer 100 (automatic 100 Trying) trigger
+    ///
+    /// When Timer 100 fires, the transaction should automatically send a 100 Trying
+    /// response if the TU hasn't sent any provisional response yet.
+    async fn handle_timer_100_trigger(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        current_state: TransactionState,
+        _command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<Option<TransactionState>> {
+        let tx_id = &data.id;
+        
+        match current_state {
+            TransactionState::Proceeding => {
+                debug!(id=%tx_id, "Timer 100 triggered, sending automatic 100 Trying response");
+                
+                // Check if TU has already sent a provisional response
+                let last_response = data.last_response.lock().await;
+                let should_send_100 = last_response.is_none();
+                drop(last_response);
+                
+                if should_send_100 {
+                    // Create 100 Trying response
+                    let original_request = data.request.lock().await;
+                    let request = &*original_request;
+                    let trying_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+                        request,
+                        rvoip_sip_core::StatusCode::Trying,
+                        Some("Trying")
+                    ).build();
+                    
+                    // Send the 100 Trying response
+                    if let Err(e) = data.transport.send_message(
+                        Message::Response(trying_response.clone()),
+                        data.remote_addr
+                    ).await {
+                        error!(id=%tx_id, error=%e, "Failed to send automatic 100 Trying response");
+                        common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
+                    } else {
+                        debug!(id=%tx_id, "✅ Sent automatic 100 Trying response per RFC 3261");
+                        
+                        // Store the 100 Trying as last response
+                        let mut last_response = data.last_response.lock().await;
+                        *last_response = Some(trying_response);
+                    }
+                    drop(original_request);
+                } else {
+                    trace!(id=%tx_id, "Timer 100 fired but TU already sent provisional response, ignoring");
+                }
+            },
+            _ => {
+                trace!(id=%tx_id, state=?current_state, "Timer 100 fired in invalid state, ignoring");
+            }
+        }
+        
+        Ok(None)
+    }
+
     /// Starts Timer G (response retransmission timer)
     ///
     /// According to RFC 3261 Section 17.2.1, Timer G controls retransmission of the final
@@ -487,6 +595,9 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
     }
 
     fn cancel_all_specific_timers(&self, timer_handles: &mut ServerInviteTimerHandles) {
+        if let Some(handle) = timer_handles.timer_100.take() {
+            handle.abort();
+        }
         if let Some(handle) = timer_handles.timer_g.take() {
             handle.abort();
         }
@@ -509,35 +620,53 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<()> {
         let tx_id = &data.id;
-
+        
         match new_state {
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Entered Proceeding state. No timers are started yet.");
-            }
+                debug!(id=%tx_id, "Entered Proceeding state");
+                
+                // **RFC 3261 COMPLIANCE**: Start automatic 100 Trying timer
+                // RFC 3261 Section 17.2.1: "If the TU does not send a provisional response 
+                // within 200ms, the server transaction MUST send a 100 Trying response."
+                self.start_timer_100(data, timer_handles, command_tx.clone()).await;
+            },
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Entered Completed state after sending final response.");
-                // Start Timer G for retransmitting responses
-                timer_handles.current_timer_g_interval = Some(data.timer_config.t1);
+                debug!(id=%tx_id, "Entered Completed state, starting Timers G and H");
+                
+                // Cancel Timer 100 if still running (TU sent a response)
+                self.cancel_timer_100(timer_handles);
+                
+                // Start Timer G (response retransmission)
                 self.start_timer_g(data, timer_handles, command_tx.clone()).await;
                 
-                // Start Timer H to guard against lost ACKs
+                // Start Timer H (ACK timeout)
                 self.start_timer_h(data, timer_handles, command_tx).await;
-            }
+            },
             TransactionState::Confirmed => {
-                debug!(id=%tx_id, "Entered Confirmed state after receiving ACK.");
-                // Start Timer I for final cleanup
+                debug!(id=%tx_id, "Entered Confirmed state, starting Timer I");
+                
+                // Cancel Timers G and H
+                if let Some(handle) = timer_handles.timer_g.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = timer_handles.timer_h.take() {
+                    handle.abort();
+                }
+                
+                // Start Timer I (wait for retransmissions)
                 self.start_timer_i(data, timer_handles, command_tx).await;
-            }
+            },
             TransactionState::Terminated => {
-                trace!(id=%tx_id, "Entered Terminated state. Specific timers should have been cancelled by runner.");
-                // Unregister from timer manager when terminated
-                let timer_manager = self.timer_factory.timer_manager();
-                timer_utils::unregister_transaction(&timer_manager, tx_id).await;
-            }
+                debug!(id=%tx_id, "Entered Terminated state, canceling all timers");
+                
+                // Cancel all timers
+                self.cancel_all_specific_timers(timer_handles);
+            },
             _ => {
-                trace!(id=%tx_id, "Entered unhandled state {:?} in on_enter_state", new_state);
+                trace!(id=%tx_id, state=?new_state, "Entered state with no specific timer actions");
             }
         }
+        
         Ok(())
     }
 
@@ -552,6 +681,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         
         // Clear the timer handle since it fired
         match timer_name {
+            "100" => { timer_handles.timer_100.take(); }
             "G" => { timer_handles.timer_g.take(); }
             "H" => { timer_handles.timer_h.take(); }
             "I" => { timer_handles.timer_i.take(); }
@@ -565,6 +695,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         let self_command_tx = data.cmd_tx.clone();
         
         match timer_name {
+            "100" => self.handle_timer_100_trigger(data, current_state, self_command_tx).await,
             "G" => self.handle_timer_g_trigger(data, current_state, timer_handles, self_command_tx).await,
             "H" => self.handle_timer_h_trigger(data, current_state, self_command_tx).await,
             "I" => self.handle_timer_i_trigger(data, current_state, self_command_tx).await,
@@ -663,6 +794,19 @@ impl ServerInviteTransaction {
         let data_for_runner = data.clone();
         let logic_for_runner = logic.clone();
         
+        // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state
+        // Timer 100 must be started when the transaction begins in Proceeding state
+        let initial_cmd_tx = data.cmd_tx.clone();
+        let initial_data = data.clone();
+        let initial_logic = logic.clone();
+        
+        // Start Timer 100 immediately for the initial Proceeding state
+        tokio::spawn(async move {
+            let mut temp_timer_handles = ServerInviteTimerHandles::default();
+            initial_logic.start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx).await;
+            // Timer handles will be managed by the main transaction loop
+        });
+        
         // Spawn the generic event loop runner - get the receiver from the data first in a separate tokio task
         let event_loop_handle = tokio::spawn(async move {
             let mut cmd_rx_guard = data_for_runner.cmd_rx.lock().await;
@@ -670,6 +814,7 @@ impl ServerInviteTransaction {
             let cmd_rx = std::mem::replace(&mut *cmd_rx_guard, mpsc::channel(1).1);
             // Drop the guard to release the lock
             drop(cmd_rx_guard);
+            
             run_transaction_loop(data_for_runner, logic_for_runner, cmd_rx).await;
         });
 
@@ -795,6 +940,13 @@ impl ServerTransaction for ServerInviteTransaction {
             {
                 let mut response_guard = data.last_response.lock().await;
                 *response_guard = Some(response.clone());
+            }
+            
+            // **RFC 3261 COMPLIANCE**: Cancel Timer 100 if TU sends any response
+            // This prevents automatic 100 Trying since TU is handling responses
+            if current_state == TransactionState::Proceeding {
+                data.cmd_tx.send(InternalTransactionCommand::CancelTimer100).await
+                    .map_err(|e| Error::Other(format!("Failed to send cancel timer command: {}", e)))?;
             }
             
             // Always send the response
