@@ -38,7 +38,7 @@
   
   <recv response="200" rtd="true">
     <action>
-      <ereg regexp=".*" search_in="hdr" header="Contact" assign_to="contact_uri"/>
+      <ereg regexp="&lt;([^&gt;]+)&gt;" search_in="hdr" header="Contact" assign_to="contact_uri"/>
     </action>
   </recv>
 

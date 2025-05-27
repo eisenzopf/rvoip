@@ -408,80 +408,139 @@ impl DialogManager {
                 
                 // Handle ACK requests specially - they need different handling based on response type
                 if request.method() == Method::Ack {
-                    // For 2xx ACKs: Handle at dialog level (INVITE server transaction is already terminated)
-                    // For non-2xx ACKs: Forward to INVITE server transaction (still active in Completed state)
+                    debug!("Processing ACK request");
                     
-                    // Try to find the associated dialog that matches the ACK request
+                    // **CRITICAL FIX**: ACK for 2xx responses should be handled at dialog level
+                    // According to RFC 3261, ACK for 2xx responses is end-to-end and doesn't 
+                    // belong to the INVITE transaction (which is already terminated)
+                    
+                    // Try to find the dialog this ACK belongs to
                     if let Some(dialog_id) = self.find_dialog_for_request(&request) {
-                        debug!("Found dialog {} for ACK request", dialog_id);
+                        debug!("Found dialog {} for ACK request - handling at dialog level", dialog_id);
                         
-                        // Check if this is a 2xx ACK by looking at dialog state
+                        // Handle ACK at dialog level (this confirms the dialog)
                         if let Some(dialog) = self.dialogs.get(&dialog_id) {
-                            if dialog.state == DialogState::Confirmed {
-                                // This is a 2xx ACK - handle at dialog level
-                                debug!("Handling 2xx ACK for dialog {} at dialog level", dialog_id);
-                                
-                                // Update dialog state if needed
-                                drop(dialog); // Release the reference
-                                
-                                // Emit ACK received event for the dialog
-                                if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                                    let session_id = session_id.clone();
-                                    drop(session_id); // Release the reference
-                                    
-                                    self.event_bus.publish(crate::events::SessionEvent::Custom {
-                                        session_id,
-                                        event_type: "ack_received".to_string(),
-                                        data: serde_json::json!({
-                                            "dialog_id": dialog_id.to_string(),
-                                            "method": "ACK",
-                                        }),
-                                    });
-                                }
-                                
-                                debug!("Successfully handled 2xx ACK for dialog {}", dialog_id);
-                                return;
-                            }
+                            debug!("Confirming dialog {} with ACK", dialog_id);
+                            // The dialog is already established, ACK just confirms it
+                            // No further action needed - the call is now fully established
                         }
                         
-                        // If we get here, this might be a non-2xx ACK - try to forward to transaction
-                        // Look for INVITE server transaction associated with this dialog
-                        let invite_tx_key = self.transaction_to_dialog.iter()
-                            .filter(|entry| entry.value().clone() == dialog_id)
-                            .filter_map(|entry| {
-                                if !entry.key().is_server() || entry.key().method() != &Method::Invite {
-                                    return None;
-                                }
-                                Some(entry.key().clone())
-                            })
-                            .next();
-                        
-                        if let Some(invite_tx_key) = invite_tx_key {
-                            debug!("Found INVITE transaction {} for non-2xx ACK, attempting to forward", invite_tx_key);
+                        // Notify about ACK received
+                        let branch = request.first_via()
+                            .and_then(|v| v.branch().map(|b| b.to_string()))
+                            .unwrap_or_else(|| "unknown".to_string());
                             
-                            // Forward the ACK request to the INVITE transaction
-                            if let Err(e) = self.transaction_manager.process_request(&invite_tx_key, request.clone()).await {
-                                warn!("Failed to process non-2xx ACK request (transaction may be terminated): {}", e);
-                                // This is expected for 2xx ACKs since the transaction is already terminated
-                                debug!("ACK processing failed, likely a 2xx ACK after transaction termination");
-                            } else {
-                                debug!("Successfully forwarded non-2xx ACK to transaction {}", invite_tx_key);
-                                return;
-                            }
-                        }
+                        let _ = self.event_sender.send(TransactionEvent::AckRequest {
+                            transaction_id: TransactionKey::new(
+                                branch,
+                                Method::Ack,
+                                false // ACK is not a server transaction
+                            ),
+                            request,
+                            source,
+                        }).await;
+                        
+                        return;
+                    } else {
+                        debug!("No dialog found for ACK request - treating as stray ACK");
+                        
+                        // This is a stray ACK (no matching dialog)
+                        let _ = self.event_sender.send(TransactionEvent::StrayAckRequest {
+                            request,
+                            source,
+                        }).await;
+                        
+                        return;
                     }
-                    
-                    // If we get here, we couldn't match the ACK to a dialog or transaction
-                    debug!("Could not match ACK request to any dialog or active transaction, treating as stray ACK");
-                    
-                    // For stray ACKs, just log and continue - this is normal for 2xx ACKs
-                    // since the INVITE server transaction terminates after sending 200 OK
-                    return;
                 }
                 
                 // Process other new requests as usual...
                 // For new dialogs, create a server transaction
                 self.create_server_transaction_for_request(tx_key, request, source).await;
+            },
+            // **CRITICAL FIX**: Handle the actual events that transaction-core emits
+            TransactionEvent::InviteRequest { transaction_id: tx_key, request, source } => {
+                debug!("Received INVITE request from transaction-core: {}", tx_key);
+                
+                // **CHECK FOR RE-INVITE**: First check if this is a re-INVITE (in-dialog INVITE)
+                debug!("Processing INVITE request - checking if it's a re-INVITE");
+                if let Some(dialog_id) = self.find_dialog_for_request(&request) {
+                    debug!("Detected re-INVITE for existing dialog {}", dialog_id);
+                    
+                    // This is a re-INVITE - the transaction is already created by transaction-core
+                    // We just need to associate it with the existing dialog
+                    self.transaction_to_dialog.insert(tx_key.clone(), dialog_id.clone());
+                    
+                    // Emit event for re-INVITE (session-core can coordinate session update)
+                    if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
+                        let session_id = session_id.clone();
+                        self.event_bus.publish(crate::events::SessionEvent::Custom {
+                            session_id,
+                            event_type: "re_invite_processed".to_string(),
+                            data: serde_json::json!({
+                                "dialog_id": dialog_id.to_string(),
+                                "transaction_id": tx_key.to_string(),
+                            }),
+                        });
+                    }
+                    
+                    debug!("Re-INVITE processed for dialog {} with transaction {}", dialog_id, tx_key);
+                    return; // Important: return here to avoid treating as new call
+                }
+                
+                // If we get here, this is an initial INVITE (no existing dialog found)
+                debug!("No existing dialog found - treating as initial INVITE");
+                
+                // The transaction is already created by transaction-core and responses are being sent
+                // We just need to create a dialog when we get the response events
+                debug!("INVITE transaction {} already created by transaction-core", tx_key);
+                
+                // Emit event for new INVITE (session-core can coordinate session creation)
+                self.event_bus.publish(crate::events::SessionEvent::Custom {
+                    session_id: SessionId::new(), // We don't know the session yet
+                    event_type: "call_established".to_string(),
+                    data: serde_json::json!({
+                        "transaction_id": tx_key.to_string(),
+                    }),
+                });
+            },
+            TransactionEvent::NonInviteRequest { transaction_id: tx_key, request, source } => {
+                debug!("Received non-INVITE request from transaction-core: {} (method: {})", tx_key, request.method());
+                
+                match request.method() {
+                    Method::Bye => {
+                        debug!("Processing BYE request for transaction {}", tx_key);
+                        
+                        // Find and terminate the associated dialog
+                        if let Some(dialog_id) = self.find_dialog_for_request(&request) {
+                            debug!("Found dialog {} for BYE, terminating", dialog_id);
+                            if let Err(e) = self.terminate_dialog(&dialog_id).await {
+                                error!("Failed to terminate dialog {}: {}", dialog_id, e);
+                            }
+                        }
+                        
+                        // Emit call terminated event
+                        self.event_bus.publish(crate::events::SessionEvent::Custom {
+                            session_id: SessionId::new(),
+                            event_type: "call_terminated".to_string(),
+                            data: serde_json::json!({
+                                "transaction_id": tx_key.to_string(),
+                            }),
+                        });
+                    },
+                    _ => {
+                        debug!("Received {} request - transaction-core handles automatically", request.method());
+                        
+                        // Emit event for the request
+                        self.event_bus.publish(crate::events::SessionEvent::Custom {
+                            session_id: SessionId::new(), // We don't know the session yet
+                            event_type: format!("new_{}", request.method().to_string().to_lowercase()),
+                            data: serde_json::json!({
+                                "transaction_id": tx_key.to_string(),
+                            }),
+                        });
+                    }
+                }
             },
             TransactionEvent::Error { transaction_id, error } => {
                 debug!("Transaction error event received for {:?}: {:?}", transaction_id, error);
@@ -522,6 +581,35 @@ impl DialogManager {
                     }
                 });
             },
+            // **CRITICAL FIX**: Handle response events to create dialogs
+            TransactionEvent::Response { transaction_id: tx_key, response, source } => {
+                debug!("Received response event from transaction-core: {} (status: {})", tx_key, response.status());
+                
+                // For server transactions sending responses, we need to create dialogs
+                if tx_key.is_server() && response.status().is_success() {
+                    // Get the original request to create the dialog
+                    if let Ok(Some(request)) = self.get_transaction_request(&tx_key).await {
+                        debug!("Creating dialog from successful response {} for transaction {}", response.status(), tx_key);
+                        
+                        // Create dialog from the transaction
+                        if let Some(dialog_id) = self.create_dialog_from_transaction(&tx_key, &request, &response, false).await {
+                            debug!("Created dialog {} from response event", dialog_id);
+                            
+                            // Emit dialog created event if associated with a session
+                            if let Some(session_id) = self.find_session_for_transaction(&tx_key) {
+                                debug!("Associating dialog {} with session {}", dialog_id, session_id);
+                                let _ = self.associate_with_session(&dialog_id, &session_id);
+                                
+                                // Emit dialog updated event
+                                self.event_bus.publish(SessionEvent::DialogCreated {
+                                    session_id,
+                                    dialog_id,
+                                });
+                            }
+                        }
+                    }
+                }
+            },
             // Catch-all for any other events
             _ => {
                 // Log the event type for debugging
@@ -539,7 +627,69 @@ impl DialogManager {
     ) {
         match request.method() {
             Method::Invite => {
-                debug!("Creating server transaction for new INVITE request");
+                // **CHECK FOR RE-INVITE**: First check if this is a re-INVITE (in-dialog INVITE)
+                debug!("Processing INVITE request - checking if it's a re-INVITE");
+                if let Some(dialog_id) = self.find_dialog_for_request(&request) {
+                    debug!("Detected re-INVITE for existing dialog {}", dialog_id);
+                    
+                    // This is a re-INVITE - handle it as an in-dialog request
+                    match self.transaction_manager.create_server_transaction(request.clone(), source).await {
+                        Ok(server_tx) => {
+                            let server_tx_id = server_tx.id().clone();
+                            debug!("Created server transaction {} for re-INVITE", server_tx_id);
+                            
+                            // Associate this transaction with the existing dialog
+                            self.transaction_to_dialog.insert(server_tx_id.clone(), dialog_id.clone());
+                            
+                            // Send 100 Trying immediately
+                            let trying_response = rvoip_transaction_core::utils::create_trying_response(&request);
+                            if let Err(e) = self.transaction_manager.send_response(&server_tx_id, trying_response).await {
+                                error!("Failed to send 100 Trying for re-INVITE: {}", e);
+                                return;
+                            }
+                            debug!("Sent 100 Trying for re-INVITE transaction {}", server_tx_id);
+                            
+                            // For re-INVITE, send 200 OK directly (no ringing phase)
+                            let local_addr = self.transaction_manager.transport().local_addr()
+                                .unwrap_or_else(|_| source);
+                            
+                            let server_user = "server"; // This should be configurable
+                            let server_host = local_addr.ip().to_string();
+                            let server_port = if local_addr.port() != 5060 { Some(local_addr.port()) } else { None };
+                            
+                            let ok_response = rvoip_transaction_core::utils::create_ok_response_with_dialog_info(
+                                &request, 
+                                server_user, 
+                                &server_host, 
+                                server_port
+                            );
+                            
+                            if let Err(e) = self.transaction_manager.send_response(&server_tx_id, ok_response.clone()).await {
+                                error!("Failed to send 200 OK for re-INVITE: {}", e);
+                                return;
+                            }
+                            debug!("Sent 200 OK for re-INVITE transaction {} - dialog updated!", server_tx_id);
+                            
+                            // Emit event for re-INVITE (session-core can coordinate session update)
+                            self.event_bus.publish(crate::events::SessionEvent::Custom {
+                                session_id: SessionId::new(), // We don't know the session yet
+                                event_type: "re_invite_processed".to_string(),
+                                data: serde_json::json!({
+                                    "dialog_id": dialog_id.to_string(),
+                                    "transaction_id": server_tx_id.to_string(),
+                                    "original_transaction_id": transaction_id.to_string(),
+                                }),
+                            });
+                        },
+                        Err(e) => {
+                            error!("Failed to create server transaction for re-INVITE: {}", e);
+                        }
+                    }
+                    return; // Important: return here to avoid treating as new call
+                }
+                
+                // If we get here, this is an initial INVITE (no existing dialog found)
+                debug!("No existing dialog found - treating as initial INVITE");
                 
                 // **ARCHITECTURAL FIX**: Create actual server transaction and send responses
                 // This is what transaction-core examples do - we need to create the server transaction
@@ -602,8 +752,12 @@ impl DialogManager {
                         debug!("Sent 200 OK for INVITE transaction {} - call established!", server_tx_id);
                         
                         // Create dialog from the INVITE transaction using the actual response we sent
+                        debug!("Attempting to create dialog from INVITE transaction {} with response status {}", 
+                               server_tx_id, ok_response.status);
                         if let Some(dialog_id) = self.create_dialog_from_transaction(&server_tx_id, &request, &ok_response, false).await {
                             debug!("Created dialog {} for established call", dialog_id);
+                        } else {
+                            debug!("Failed to create dialog for INVITE transaction {}", server_tx_id);
                         }
                         
                         // Emit event for new INVITE (session-core can coordinate session creation)
@@ -953,40 +1107,58 @@ impl DialogManager {
         // Extract call-id
         let call_id = match request.call_id() {
             Some(call_id) => call_id.to_string(),
-            _ => return None
+            _ => {
+                debug!("No Call-ID found in request");
+                return None;
+            }
         };
         
         // Extract tags
         let from_tag = request.from().and_then(|from| from.tag().map(|s| s.to_string()));
         let to_tag = request.to().and_then(|to| to.tag().map(|s| s.to_string()));
         
+        debug!("Looking for dialog: Call-ID={}, From-tag={:?}, To-tag={:?}", 
+               call_id, from_tag, to_tag);
+        
         // Both tags are required for dialog lookup
         if from_tag.is_none() || to_tag.is_none() {
+            debug!("Missing tags - From-tag: {:?}, To-tag: {:?}", from_tag, to_tag);
             return None;
         }
         
         let from_tag = from_tag.unwrap();
         let to_tag = to_tag.unwrap();
         
+        // Debug: Show all stored dialog tuples
+        debug!("Currently stored dialog tuples:");
+        for entry in self.dialog_lookup.iter() {
+            debug!("  Stored tuple: {:?} -> {}", entry.key(), entry.value());
+        }
+        
         // Try to find a matching dialog - check both scenarios
         
         // Scenario 1: Local is From, Remote is To
         let id_tuple1 = (call_id.clone(), from_tag.clone(), to_tag.clone());
+        debug!("Trying scenario 1 (Local=From, Remote=To): {:?}", id_tuple1);
         if let Some(dialog_id_ref) = self.dialog_lookup.get(&id_tuple1) {
             let dialog_id = dialog_id_ref.value().clone();
             drop(dialog_id_ref);
+            debug!("Found dialog {} with scenario 1", dialog_id);
             return Some(dialog_id);
         }
         
         // Scenario 2: Local is To, Remote is From
         let id_tuple2 = (call_id, to_tag, from_tag);
+        debug!("Trying scenario 2 (Local=To, Remote=From): {:?}", id_tuple2);
         if let Some(dialog_id_ref) = self.dialog_lookup.get(&id_tuple2) {
             let dialog_id = dialog_id_ref.value().clone();
             drop(dialog_id_ref);
+            debug!("Found dialog {} with scenario 2", dialog_id);
             return Some(dialog_id);
         }
         
         // No matching dialog found
+        debug!("No matching dialog found for request");
         None
     }
     
@@ -998,7 +1170,7 @@ impl DialogManager {
         response: &Response,
         is_initiator: bool
     ) -> Option<DialogId> {
-        debug!("Creating dialog from transaction: {}", transaction_id);
+        debug!("Creating dialog from transaction: {} (is_initiator={})", transaction_id, is_initiator);
         
         // Create dialog based on response type
         let dialog = if response.status().is_success() {
@@ -1014,7 +1186,8 @@ impl DialogManager {
         
         if let Some(dialog) = dialog {
             let dialog_id = dialog.id.clone();
-            debug!("Created dialog with ID: {}", dialog_id);
+            debug!("Created dialog with ID: {} (is_initiator={}, local_tag={:?}, remote_tag={:?})", 
+                   dialog_id, dialog.is_initiator, dialog.local_tag, dialog.remote_tag);
             
             // Store the dialog
             self.dialogs.insert(dialog_id.clone(), dialog.clone());
@@ -1024,8 +1197,11 @@ impl DialogManager {
             
             // Save dialog tuple mapping if available
             if let Some(tuple) = dialog.dialog_id_tuple() {
-                debug!("Mapping dialog tuple to dialog ID: {:?} -> {}", tuple, dialog_id);
+                debug!("Mapping dialog tuple to dialog ID: {:?} -> {} (call_id={}, local_tag={:?}, remote_tag={:?})", 
+                       tuple, dialog_id, dialog.call_id, dialog.local_tag, dialog.remote_tag);
                 self.dialog_lookup.insert(tuple, dialog_id.clone());
+            } else {
+                debug!("No dialog tuple available for dialog {} (missing tags)", dialog_id);
             }
             
             // Return the created dialog ID

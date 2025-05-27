@@ -48,13 +48,17 @@ impl SipServer {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting SIP server event processing");
         
+        let mut event_count = 0;
         while let Some(event) = self.transaction_events.recv().await {
+            event_count += 1;
+            debug!("SipServer received transaction event #{}: {:?}", event_count, event);
+            
             if let Err(e) = self.server_manager.handle_transaction_event(event).await {
                 tracing::error!("Error handling transaction event: {}", e);
             }
         }
         
-        info!("SIP server event processing ended");
+        info!("SIP server event processing ended (received {} events total)", event_count);
         Ok(())
     }
     

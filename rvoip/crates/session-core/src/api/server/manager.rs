@@ -65,9 +65,13 @@ impl ServerManager {
     /// **ARCHITECTURAL FIX**: Forward events to DialogManager first, then coordinate sessions.
     /// DialogManager handles SIP protocol details and dialog state management.
     pub async fn handle_transaction_event(&self, event: TransactionEvent) -> Result<()> {
+        debug!("ServerManager received transaction event: {:?}", event);
+        
         // **CRITICAL FIX**: Forward transaction events to DialogManager first
         // DialogManager handles SIP protocol details and dialog state
+        debug!("Forwarding transaction event to DialogManager");
         self.session_manager.dialog_manager().process_transaction_event(event.clone()).await;
+        debug!("DialogManager processing completed, continuing with session coordination");
         
         // Then handle session-level coordination based on the event
         match event {
