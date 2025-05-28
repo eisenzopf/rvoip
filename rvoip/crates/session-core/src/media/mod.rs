@@ -470,4 +470,40 @@ impl MediaManager {
         info!("✅ MediaManager shutdown complete");
         Ok(())
     }
+    
+    /// Establish media flow with bi-directional audio transmission
+    pub async fn establish_media_flow(&self, media_session_id: &MediaSessionId, remote_addr: SocketAddr) -> Result<()> {
+        debug!("🔗 Establishing media flow for session: {} -> {}", media_session_id, remote_addr);
+        
+        // Extract dialog ID from media session ID
+        let dialog_id = media_session_id.as_str();
+        
+        // Establish media flow through MediaSessionController
+        self.media_controller.establish_media_flow(dialog_id, remote_addr).await
+            .map_err(|e| anyhow::anyhow!("Failed to establish media flow: {}", e))?;
+        
+        info!("✅ Established bi-directional media flow for session: {}", media_session_id);
+        Ok(())
+    }
+    
+    /// Terminate media flow and stop audio transmission
+    pub async fn terminate_media_flow(&self, media_session_id: &MediaSessionId) -> Result<()> {
+        debug!("🛑 Terminating media flow for session: {}", media_session_id);
+        
+        // Extract dialog ID from media session ID
+        let dialog_id = media_session_id.as_str();
+        
+        // Terminate media flow through MediaSessionController
+        self.media_controller.terminate_media_flow(dialog_id).await
+            .map_err(|e| anyhow::anyhow!("Failed to terminate media flow: {}", e))?;
+        
+        info!("✅ Terminated media flow for session: {}", media_session_id);
+        Ok(())
+    }
+    
+    /// Check if audio transmission is active for a media session
+    pub async fn is_audio_transmission_active(&self, media_session_id: &MediaSessionId) -> bool {
+        let dialog_id = media_session_id.as_str();
+        self.media_controller.is_audio_transmission_active(dialog_id).await
+    }
 } 

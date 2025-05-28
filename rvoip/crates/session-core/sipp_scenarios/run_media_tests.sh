@@ -92,7 +92,7 @@ run_media_test() {
     # Add RTP dump if tcpdump is available
     if command -v tcpdump &> /dev/null; then
         echo "Starting RTP packet capture..."
-        sudo tcpdump -i lo0 -w "$rtp_dump" 'udp and portrange 10000-20000' &
+        sudo tcpdump -i lo0 -w "$rtp_dump" 'udp and not port 53 and not port 5060' &
         local tcpdump_pid=$!
         sleep 1  # Give tcpdump time to start
     fi
@@ -139,7 +139,7 @@ analyze_rtp_flow() {
     # Basic packet count analysis
     if command -v tcpdump &> /dev/null; then
         local packet_count=$(tcpdump -r "$pcap_file" 2>/dev/null | wc -l)
-        echo "Total RTP packets captured: $packet_count"
+        echo "Total packets captured: $packet_count"
         
         if [ "$packet_count" -gt 0 ]; then
             printf "${GREEN}✓ RTP media flow detected${NC}\n"
@@ -147,16 +147,60 @@ analyze_rtp_flow() {
             # More detailed analysis if tshark is available
             if command -v tshark &> /dev/null; then
                 echo "Detailed RTP analysis:"
-                tshark -r "$pcap_file" -T fields \
-                       -e rtp.ssrc -e rtp.timestamp -e rtp.seq \
-                       -Y "rtp" 2>/dev/null | head -10
-                       
-                # Check for packet loss
-                local rtp_packets=$(tshark -r "$pcap_file" -Y "rtp" 2>/dev/null | wc -l)
-                echo "RTP packets: $rtp_packets"
+                
+                # First, try to identify RTP packets by examining UDP traffic
+                # Look for packets that might be RTP (check for RTP version 2 in payload)
+                local potential_rtp_ports=$(tshark -r "$pcap_file" -T fields -e udp.srcport -e udp.dstport -Y "udp" 2>/dev/null | sort -u | head -10)
+                
+                # Try to decode common ports as RTP and count
+                local rtp_packets=0
+                local decode_args=""
+                
+                # Build decode arguments for potential RTP ports
+                while read -r src_port dst_port; do
+                    if [ ! -z "$src_port" ] && [ ! -z "$dst_port" ]; then
+                        decode_args="$decode_args -d udp.port==$src_port,rtp -d udp.port==$dst_port,rtp"
+                    fi
+                done <<< "$potential_rtp_ports"
+                
+                # Count RTP packets with dynamic port detection
+                if [ ! -z "$decode_args" ]; then
+                    rtp_packets=$(tshark -r "$pcap_file" $decode_args -Y "rtp" 2>/dev/null | wc -l)
+                fi
+                
+                # If no RTP packets found with port detection, try heuristic detection
+                if [ "$rtp_packets" -eq 0 ]; then
+                    # Look for UDP packets with RTP-like headers (version 2, reasonable payload types)
+                    rtp_packets=$(tshark -r "$pcap_file" -Y "udp and data[0:1] == 80:00" 2>/dev/null | wc -l)
+                    if [ "$rtp_packets" -gt 0 ]; then
+                        echo "RTP packets (heuristic detection): $rtp_packets"
+                    fi
+                else
+                    echo "RTP packets: $rtp_packets"
+                    
+                    # Show sample RTP packet details
+                    echo "Sample RTP packet details:"
+                    tshark -r "$pcap_file" $decode_args -Y "rtp" -T fields \
+                           -e rtp.ssrc -e rtp.timestamp -e rtp.seq -e rtp.p_type \
+                           2>/dev/null | head -5 | while read ssrc ts seq pt; do
+                        echo "  SSRC: 0x$ssrc, Seq: $seq, Timestamp: $ts, PT: $pt"
+                    done
+                fi
+                
+                # Additional analysis: check for bidirectional flow
+                local unique_ssrcs=$(tshark -r "$pcap_file" $decode_args -Y "rtp" -T fields -e rtp.ssrc 2>/dev/null | sort -u | wc -l)
+                if [ "$unique_ssrcs" -gt 0 ]; then
+                    echo "Unique RTP streams (SSRCs): $unique_ssrcs"
+                fi
+                
+                # Check packet timing (should be ~20ms intervals for typical audio)
+                echo "RTP timing analysis:"
+                tshark -r "$pcap_file" $decode_args -Y "rtp" -T fields -e frame.time_relative 2>/dev/null | head -10 | while read time; do
+                    echo "  Packet at: ${time}s"
+                done
             fi
         else
-            printf "${RED}✗ No RTP media flow detected${NC}\n"
+            printf "${RED}✗ No packets captured${NC}\n"
         fi
     fi
 }

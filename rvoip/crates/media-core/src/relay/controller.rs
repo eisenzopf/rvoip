@@ -16,6 +16,159 @@ use super::{MediaRelay, RelaySessionConfig, RelayEvent, RelayStats, generate_ses
 // Import RTP session capabilities
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 
+// Audio generation imports
+use std::time::{Duration, Instant};
+use tokio::time::interval;
+
+/// Audio generator for creating test tones and audio streams
+pub struct AudioGenerator {
+    /// Sample rate (Hz)
+    sample_rate: u32,
+    /// Current phase for sine wave generation
+    phase: f64,
+    /// Frequency of the generated tone (Hz)
+    frequency: f64,
+    /// Amplitude (0.0 to 1.0)
+    amplitude: f64,
+}
+
+impl AudioGenerator {
+    /// Create a new audio generator
+    pub fn new(sample_rate: u32, frequency: f64, amplitude: f64) -> Self {
+        Self {
+            sample_rate,
+            phase: 0.0,
+            frequency,
+            amplitude,
+        }
+    }
+    
+    /// Generate audio samples for PCMU (G.711 μ-law) encoding
+    pub fn generate_pcmu_samples(&mut self, num_samples: usize) -> Vec<u8> {
+        let mut samples = Vec::with_capacity(num_samples);
+        let phase_increment = 2.0 * std::f64::consts::PI * self.frequency / self.sample_rate as f64;
+        
+        for _ in 0..num_samples {
+            // Generate sine wave sample
+            let sample = (self.phase.sin() * self.amplitude * 32767.0) as i16;
+            
+            // Convert to μ-law (simplified implementation)
+            let pcmu_sample = Self::linear_to_ulaw(sample);
+            samples.push(pcmu_sample);
+            
+            // Update phase
+            self.phase += phase_increment;
+            if self.phase >= 2.0 * std::f64::consts::PI {
+                self.phase -= 2.0 * std::f64::consts::PI;
+            }
+        }
+        
+        samples
+    }
+    
+    /// Convert linear PCM to μ-law (G.711)
+    fn linear_to_ulaw(pcm: i16) -> u8 {
+        // Simplified μ-law encoding
+        let sign = if pcm < 0 { 0x80u8 } else { 0x00u8 };
+        let magnitude = pcm.abs() as u16;
+        
+        // Find the segment
+        let mut segment = 0u8;
+        let mut temp = magnitude >> 5;
+        while temp != 0 && segment < 7 {
+            segment += 1;
+            temp >>= 1;
+        }
+        
+        // Calculate quantization value
+        let quantization = if segment == 0 {
+            (magnitude >> 1) as u8
+        } else {
+            (((magnitude >> (segment + 1)) & 0x0F) + 0x10) as u8
+        };
+        
+        // Combine sign, segment, and quantization
+        sign | (segment << 4) | (quantization & 0x0F)
+    }
+}
+
+/// Audio transmission task for RTP sessions
+pub struct AudioTransmitter {
+    /// RTP session for transmission
+    rtp_session: Arc<tokio::sync::Mutex<RtpSession>>,
+    /// Audio generator
+    audio_generator: AudioGenerator,
+    /// Transmission interval (20ms for standard audio)
+    interval: Duration,
+    /// Current RTP timestamp
+    timestamp: u32,
+    /// Samples per packet (160 samples for 20ms at 8kHz)
+    samples_per_packet: usize,
+    /// Whether transmission is active
+    is_active: Arc<tokio::sync::RwLock<bool>>,
+}
+
+impl AudioTransmitter {
+    /// Create a new audio transmitter
+    pub fn new(rtp_session: Arc<tokio::sync::Mutex<RtpSession>>) -> Self {
+        Self {
+            rtp_session,
+            audio_generator: AudioGenerator::new(8000, 440.0, 0.5), // 440Hz tone at 8kHz
+            interval: Duration::from_millis(20), // 20ms packets
+            timestamp: 0,
+            samples_per_packet: 160, // 20ms * 8000 samples/sec = 160 samples
+            is_active: Arc::new(tokio::sync::RwLock::new(false)),
+        }
+    }
+    
+    /// Start audio transmission
+    pub async fn start(&mut self) {
+        *self.is_active.write().await = true;
+        info!("🎵 Started audio transmission (440Hz tone, 20ms packets)");
+        
+        let rtp_session = self.rtp_session.clone();
+        let is_active = self.is_active.clone();
+        let mut interval_timer = interval(self.interval);
+        let mut timestamp = self.timestamp;
+        let mut audio_gen = AudioGenerator::new(8000, 440.0, 0.5);
+        
+        tokio::spawn(async move {
+            while *is_active.read().await {
+                interval_timer.tick().await;
+                
+                // Generate audio samples
+                let audio_samples = audio_gen.generate_pcmu_samples(160); // 160 samples for 20ms
+                
+                // Send RTP packet
+                {
+                    let mut session = rtp_session.lock().await;
+                    if let Err(e) = session.send_packet(timestamp, bytes::Bytes::from(audio_samples), false).await {
+                        error!("Failed to send RTP audio packet: {}", e);
+                    } else {
+                        debug!("📡 Sent RTP audio packet (timestamp: {}, 160 samples)", timestamp);
+                    }
+                }
+                
+                // Update timestamp (160 samples at 8kHz = 20ms)
+                timestamp = timestamp.wrapping_add(160);
+            }
+            
+            info!("🛑 Stopped audio transmission");
+        });
+    }
+    
+    /// Stop audio transmission
+    pub async fn stop(&self) {
+        *self.is_active.write().await = false;
+        info!("🛑 Stopping audio transmission");
+    }
+    
+    /// Check if transmission is active
+    pub async fn is_active(&self) -> bool {
+        *self.is_active.read().await
+    }
+}
+
 /// Represents a SIP Dialog ID (from session-core)
 pub type DialogId = String;
 
@@ -76,6 +229,10 @@ struct RtpSessionWrapper {
     remote_addr: Option<SocketAddr>,
     /// Session creation time
     created_at: std::time::Instant,
+    /// Audio transmitter for outgoing audio
+    audio_transmitter: Option<AudioTransmitter>,
+    /// Whether audio transmission is enabled
+    transmission_enabled: bool,
 }
 
 impl Default for MediaSessionInfo {
@@ -259,6 +416,8 @@ impl MediaSessionController {
             local_addr: local_rtp_addr,
             remote_addr: config.remote_addr,
             created_at: std::time::Instant::now(),
+            audio_transmitter: None,
+            transmission_enabled: false,
         };
         
         // Create media session info
@@ -489,6 +648,84 @@ impl MediaSessionController {
         let ssrc = session.get_ssrc();
         
         Some(format!("RTP Session - Local: {}, SSRC: 0x{:08x}", local_addr, ssrc))
+    }
+    
+    /// Start audio transmission for a dialog
+    pub async fn start_audio_transmission(&self, dialog_id: &str) -> Result<()> {
+        info!("🎵 Starting audio transmission for dialog: {}", dialog_id);
+        
+        let mut rtp_sessions = self.rtp_sessions.write().await;
+        let wrapper = rtp_sessions.get_mut(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+        
+        if wrapper.transmission_enabled {
+            return Ok(()); // Already started
+        }
+        
+        // Create audio transmitter
+        let mut audio_transmitter = AudioTransmitter::new(wrapper.session.clone());
+        audio_transmitter.start().await;
+        
+        wrapper.audio_transmitter = Some(audio_transmitter);
+        wrapper.transmission_enabled = true;
+        
+        info!("✅ Audio transmission started for dialog: {}", dialog_id);
+        Ok(())
+    }
+    
+    /// Stop audio transmission for a dialog
+    pub async fn stop_audio_transmission(&self, dialog_id: &str) -> Result<()> {
+        info!("🛑 Stopping audio transmission for dialog: {}", dialog_id);
+        
+        let mut rtp_sessions = self.rtp_sessions.write().await;
+        let wrapper = rtp_sessions.get_mut(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+        
+        if let Some(transmitter) = &wrapper.audio_transmitter {
+            transmitter.stop().await;
+        }
+        
+        wrapper.audio_transmitter = None;
+        wrapper.transmission_enabled = false;
+        
+        info!("✅ Audio transmission stopped for dialog: {}", dialog_id);
+        Ok(())
+    }
+    
+    /// Check if audio transmission is active for a dialog
+    pub async fn is_audio_transmission_active(&self, dialog_id: &str) -> bool {
+        let rtp_sessions = self.rtp_sessions.read().await;
+        if let Some(wrapper) = rtp_sessions.get(dialog_id) {
+            if let Some(transmitter) = &wrapper.audio_transmitter {
+                return transmitter.is_active().await;
+            }
+        }
+        false
+    }
+    
+    /// Set remote address and start audio transmission (called when call is established)
+    pub async fn establish_media_flow(&self, dialog_id: &str, remote_addr: SocketAddr) -> Result<()> {
+        info!("🔗 Establishing media flow for dialog: {} -> {}", dialog_id, remote_addr);
+        
+        // Update remote address
+        self.update_rtp_remote_addr(dialog_id, remote_addr).await?;
+        
+        // Start audio transmission
+        self.start_audio_transmission(dialog_id).await?;
+        
+        info!("✅ Media flow established for dialog: {}", dialog_id);
+        Ok(())
+    }
+    
+    /// Terminate media flow (called when call ends)
+    pub async fn terminate_media_flow(&self, dialog_id: &str) -> Result<()> {
+        info!("🛑 Terminating media flow for dialog: {}", dialog_id);
+        
+        // Stop audio transmission
+        self.stop_audio_transmission(dialog_id).await?;
+        
+        info!("✅ Media flow terminated for dialog: {}", dialog_id);
+        Ok(())
     }
 }
 

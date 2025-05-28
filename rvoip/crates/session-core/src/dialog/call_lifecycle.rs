@@ -113,13 +113,14 @@ impl CallLifecycleCoordinator {
         Ok(())
     }
 
-    /// Coordinate call acceptance with media setup, 200 OK response, and dialog creation
+    /// Coordinate call acceptance with media setup and dialog creation
     ///
     /// This method handles the complete call acceptance workflow:
-    /// 1. Extract SDP offer from INVITE
-    /// 2. Coordinate with media-core for SDP answer
-    /// 3. Send 200 OK with SDP answer
-    /// 4. **CRITICAL**: Create dialog from the transaction and response
+    /// 1. Extract SDP offer from INVITE request
+    /// 2. Create SDP answer through media-core coordination
+    /// 3. Send 200 OK response with SDP answer
+    /// 4. Create dialog from INVITE transaction and response
+    /// 5. Establish bi-directional media flow
     pub async fn coordinate_call_acceptance(
         &self,
         transaction_id: &TransactionKey,
@@ -139,7 +140,7 @@ impl CallLifecycleCoordinator {
             "📋 Extracted SDP offer from INVITE request"
         );
 
-        // Step 2: Coordinate with media-core to create SDP answer
+        // Step 2: Create SDP answer through media-core coordination
         let answer_sdp = self.create_media_answer(session_id, &offer_sdp).await?;
         debug!(
             transaction_id = %transaction_id,
@@ -148,48 +149,18 @@ impl CallLifecycleCoordinator {
 
         // Step 3: Send 200 OK response with SDP answer
         let ok_response = self.send_success_response(transaction_id, request, &answer_sdp).await?;
+        debug!(
+            transaction_id = %transaction_id,
+            "🔗 Creating dialog from INVITE transaction and 200 OK response"
+        );
 
-        // Step 4: **CRITICAL FIX**: Create dialog from the transaction and response
+        // Step 4: Create dialog from INVITE transaction and response
         if let Some(dialog_manager) = &self.dialog_manager {
-            debug!(
-                transaction_id = %transaction_id,
-                "🔗 Creating dialog from INVITE transaction and 200 OK response"
-            );
-
-            // Extract session ID from the request (from a custom header or generate one)
-            let session_id = if let Some(session_header) = request.header(&HeaderName::Other("X-Session-ID".to_string())) {
-                // Get the header value as a string
-                let session_id_str = match session_header {
-                    TypedHeader::Other(_, header_value) => {
-                        match header_value {
-                            rvoip_sip_core::types::headers::HeaderValue::Raw(bytes) => {
-                                std::str::from_utf8(&bytes).unwrap_or("")
-                            }
-                            _ => ""
-                        }
-                    }
-                    _ => ""
-                };
-                
-                // Try to parse the session ID as a UUID
-                match uuid::Uuid::parse_str(session_id_str) {
-                    Ok(uuid) => SessionId(uuid),
-                    Err(_) => {
-                        warn!("Invalid session ID format: {}, generating new one", session_id_str);
-                        SessionId::new()
-                    }
-                }
-            } else {
-                // Generate a new session ID if not provided
-                SessionId::new()
-            };
-
-            // Create dialog from the transaction (server side, so is_initiator = false)
             if let Some(dialog_id) = dialog_manager.create_dialog_from_transaction(
                 transaction_id,
                 request,
                 &ok_response,
-                false, // Server side - not initiator
+                false, // is_initiator = false (we're the server)
             ).await {
                 info!(
                     transaction_id = %transaction_id,
@@ -197,19 +168,43 @@ impl CallLifecycleCoordinator {
                     "✅ Dialog created successfully for call acceptance"
                 );
 
-                // Associate dialog with session
-                if let Err(e) = dialog_manager.associate_with_session(&dialog_id, &session_id) {
-                    warn!(
-                        dialog_id = %dialog_id,
-                        session_id = %session_id,
-                        error = %e,
-                        "Failed to associate dialog with session"
-                    );
+                // Parse session ID for association
+                if let Ok(session_uuid) = uuid::Uuid::parse_str(session_id) {
+                    let session_id_obj = crate::session::SessionId(session_uuid);
+                    
+                    // Associate dialog with session
+                    if let Err(e) = dialog_manager.associate_with_session(&dialog_id, &session_id_obj) {
+                        warn!(
+                            dialog_id = %dialog_id,
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to associate dialog with session"
+                        );
+                    } else {
+                        info!(
+                            dialog_id = %dialog_id,
+                            session_id = %session_id,
+                            "✅ Dialog associated with session successfully"
+                        );
+                    }
+                    
+                    // Step 5: Establish bi-directional media flow
+                    if let Err(e) = self.establish_media_flow_for_session(&session_id_obj, &offer_sdp).await {
+                        warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to establish media flow - call will continue without audio"
+                        );
+                    } else {
+                        info!(
+                            session_id = %session_id,
+                            "✅ Bi-directional media flow established successfully"
+                        );
+                    }
                 } else {
-                    info!(
-                        dialog_id = %dialog_id,
+                    error!(
                         session_id = %session_id,
-                        "✅ Dialog associated with session successfully"
+                        "Invalid session ID format - cannot associate with dialog"
                     );
                 }
             } else {
@@ -231,6 +226,33 @@ impl CallLifecycleCoordinator {
             "✅ Call acceptance coordination completed successfully"
         );
 
+        Ok(())
+    }
+    
+    /// Establish bi-directional media flow for a session
+    async fn establish_media_flow_for_session(&self, session_id: &crate::session::SessionId, offer_sdp: &str) -> Result<()> {
+        debug!(session_id = %session_id, "🔗 Establishing bi-directional media flow");
+        
+        // Get the media session for this session
+        if let Some(media_session_id) = self.media_manager.get_media_session(session_id).await {
+            // Parse remote address from SDP
+            let (remote_port, _codec) = self.parse_offer_sdp(offer_sdp)?;
+            let remote_addr = format!("127.0.0.1:{}", remote_port).parse()
+                .map_err(|e| anyhow::anyhow!("Invalid remote address: {}", e))?;
+            
+            // Establish media flow with bi-directional audio transmission
+            self.media_manager.establish_media_flow(&media_session_id, remote_addr).await?;
+            
+            info!(
+                session_id = %session_id,
+                media_session_id = %media_session_id,
+                remote_addr = %remote_addr,
+                "✅ Bi-directional media flow established"
+            );
+        } else {
+            return Err(anyhow::anyhow!("No media session found for session: {}", session_id));
+        }
+        
         Ok(())
     }
 
@@ -460,6 +482,22 @@ impl CallLifecycleCoordinator {
             let session_id_obj = SessionId(session_uuid);
             
             if let Some(media_session_id) = self.media_manager.get_media_session(&session_id_obj).await {
+                // Terminate media flow (stops audio transmission)
+                if let Err(e) = self.media_manager.terminate_media_flow(&media_session_id).await {
+                    warn!(
+                        session_id = session_id,
+                        media_session_id = %media_session_id,
+                        error = %e,
+                        "Failed to terminate media flow - continuing with cleanup"
+                    );
+                } else {
+                    info!(
+                        session_id = session_id,
+                        media_session_id = %media_session_id,
+                        "🛑 Media flow terminated successfully"
+                    );
+                }
+                
                 // Stop the media session
                 if let Err(e) = self.media_manager.stop_media(&media_session_id, "BYE received".to_string()).await {
                     warn!(
