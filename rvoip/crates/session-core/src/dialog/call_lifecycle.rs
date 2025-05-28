@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
+use chrono;
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{HeaderName, TypedHeader};
@@ -555,28 +556,142 @@ impl CallLifecycleCoordinator {
     }
 
     /// Create media answer through media-core coordination
-    async fn create_media_answer(&self, session_id: &str, _offer_sdp: &str) -> Result<String> {
-        // For now, we'll create a basic SDP answer
-        // In the future, this will coordinate with media-core to:
-        // 1. Parse the offer SDP
-        // 2. Create a media session with appropriate configuration
-        // 3. Generate an SDP answer based on media-core capabilities
+    async fn create_media_answer(&self, session_id: &str, offer_sdp: &str) -> Result<String> {
+        debug!(session_id = session_id, "🎵 Creating SDP answer through media-core coordination");
         
-        debug!(session_id = session_id, "🎵 Creating SDP answer (basic implementation)");
+        // Parse session ID
+        let session_uuid = uuid::Uuid::parse_str(session_id)
+            .map_err(|e| anyhow::anyhow!("Invalid session ID format: {}", e))?;
+        let session_id_obj = crate::session::SessionId(session_uuid);
         
-        // Return a basic SDP answer for now
-        Ok(self.create_basic_audio_answer())
+        // Parse the offer SDP to extract media requirements
+        let (remote_port, remote_codec) = self.parse_offer_sdp(offer_sdp)?;
+        
+        // Create media configuration based on the offer
+        let media_config = crate::media::MediaConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(), // Will be updated with real port
+            remote_addr: Some(format!("127.0.0.1:{}", remote_port).parse().unwrap()),
+            media_type: crate::media::SessionMediaType::Audio,
+            payload_type: remote_codec.to_payload_type(),
+            clock_rate: remote_codec.clock_rate(),
+            audio_codec: remote_codec,
+            direction: crate::media::SessionMediaDirection::SendRecv,
+        };
+        
+        // Create actual media session through media-core with real port allocation
+        let media_session_id = self.media_manager.create_media_session(media_config.clone()).await
+            .map_err(|e| anyhow::anyhow!("Failed to create media session: {}", e))?;
+            
+        debug!(
+            session_id = session_id,
+            media_session_id = %media_session_id,
+            "🎵 Created media session through media-core"
+        );
+        
+        // Start the media session
+        self.media_manager.start_media(&session_id_obj, &media_session_id).await
+            .map_err(|e| anyhow::anyhow!("Failed to start media session: {}", e))?;
+            
+        info!(
+            session_id = session_id,
+            media_session_id = %media_session_id,
+            "🎵 Started media session - RTP streams should now be active"
+        );
+        
+        // Get the REAL allocated RTP port directly from the media session
+        // Use the full media session ID (including "media-" prefix) to query MediaSessionController
+        let session_info = self.media_manager.media_controller().get_session_info(media_session_id.as_str()).await
+            .ok_or_else(|| anyhow::anyhow!("Media session not found: {}", media_session_id))?;
+        
+        let actual_local_port = session_info.rtp_port
+            .ok_or_else(|| anyhow::anyhow!("No RTP port allocated for session: {}", media_session_id))?;
+        
+        debug!(
+            session_id = session_id,
+            local_port = actual_local_port,
+            remote_port = remote_port,
+            "🎵 RTP streams configured - local_port={}, remote_port={}",
+            actual_local_port, remote_port
+        );
+        
+        // Generate SDP answer with actual RTP port from media session
+        let answer_sdp = self.create_sdp_answer_with_real_port(actual_local_port, remote_codec);
+        
+        info!(
+            session_id = session_id,
+            media_session_id = %media_session_id,
+            local_rtp_port = actual_local_port,
+            "✅ Created SDP answer with real RTP port through media-core coordination"
+        );
+        
+        Ok(answer_sdp)
     }
-
-    /// Create basic audio SDP answer
-    fn create_basic_audio_answer(&self) -> String {
-        // Create a basic audio SDP answer for testing
-        "v=0\r\n\
-         o=session-core 654321 123456 IN IP4 127.0.0.1\r\n\
-         s=-\r\n\
-         c=IN IP4 127.0.0.1\r\n\
-         t=0 0\r\n\
-         m=audio 8001 RTP/AVP 0\r\n\
-         a=rtpmap:0 PCMU/8000\r\n".to_string()
+    
+    /// Parse offer SDP to extract media requirements
+    fn parse_offer_sdp(&self, offer_sdp: &str) -> Result<(u16, crate::media::AudioCodecType)> {
+        debug!("🔍 Parsing offer SDP to extract media requirements");
+        
+        let mut remote_port = 6000u16; // Default fallback
+        let mut codec = crate::media::AudioCodecType::PCMU; // Default fallback
+        
+        // Parse SDP lines
+        for line in offer_sdp.lines() {
+            // Extract media port from m= line
+            if line.starts_with("m=audio ") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(port) = parts[1].parse::<u16>() {
+                        remote_port = port;
+                        debug!("🔍 Extracted remote RTP port: {}", remote_port);
+                    }
+                }
+                
+                // Extract payload type from m= line
+                if parts.len() >= 4 {
+                    if let Ok(payload_type) = parts[3].parse::<u8>() {
+                        codec = match payload_type {
+                            0 => crate::media::AudioCodecType::PCMU,
+                            8 => crate::media::AudioCodecType::PCMA,
+                            9 => crate::media::AudioCodecType::G722,
+                            111 => crate::media::AudioCodecType::Opus,
+                            _ => crate::media::AudioCodecType::PCMU, // Default fallback
+                        };
+                        debug!("🔍 Extracted codec: {:?} (payload_type={})", codec, payload_type);
+                    }
+                }
+            }
+        }
+        
+        Ok((remote_port, codec))
+    }
+    
+    /// Create SDP answer with real RTP port from media session
+    fn create_sdp_answer_with_real_port(&self, local_port: u16, codec: crate::media::AudioCodecType) -> String {
+        let payload_type = codec.to_payload_type();
+        let clock_rate = codec.clock_rate();
+        let codec_name = match codec {
+            crate::media::AudioCodecType::PCMU => "PCMU",
+            crate::media::AudioCodecType::PCMA => "PCMA", 
+            crate::media::AudioCodecType::G722 => "G722",
+            crate::media::AudioCodecType::Opus => "opus",
+        };
+        
+        format!(
+            "v=0\r\n\
+             o=session-core {} {} IN IP4 127.0.0.1\r\n\
+             s=-\r\n\
+             c=IN IP4 127.0.0.1\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP {}\r\n\
+             a=rtpmap:{} {}/{}\r\n\
+             a=sendrecv\r\n",
+            chrono::Utc::now().timestamp(),
+            chrono::Utc::now().timestamp() + 1,
+            local_port,
+            payload_type,
+            payload_type,
+            codec_name,
+            clock_rate
+        )
     }
 } 

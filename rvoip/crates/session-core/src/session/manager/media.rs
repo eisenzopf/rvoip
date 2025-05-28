@@ -1,12 +1,13 @@
+use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::errors::{Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction};
-use crate::media::{MediaSessionId, MediaConfig};
+use crate::session::{SessionId, SessionState};
+use crate::media::{MediaManager, MediaConfig, AudioCodecType, SessionMediaType, SessionMediaDirection, MediaSessionId};
 use crate::sdp::SessionDescription;
 use crate::dialog::DialogId;
 use super::core::SessionManager;
-use super::super::SessionId;
 
 impl SessionManager {
     /// Start media for a session based on SDP negotiation
@@ -104,42 +105,22 @@ impl SessionManager {
         self.stop_session_media(session_id).await
     }
     
-    /// Setup RTP relay between two sessions
-    pub async fn setup_rtp_relay(&self, session_a_id: &SessionId, session_b_id: &SessionId) -> Result<crate::media::RelayId, Error> {
-        // Verify both sessions exist
-        let _session_a = self.get_session(session_a_id)?;
-        let _session_b = self.get_session(session_b_id)?;
+    /// Setup RTP relay between two sessions (placeholder for future implementation)
+    pub async fn setup_rtp_relay(&self, session_a_id: &SessionId, session_b_id: &SessionId) -> Result<String, Error> {
+        debug!("Setting up RTP relay between sessions: {} <-> {}", session_a_id, session_b_id);
         
-        // Setup relay in media manager
-        self.media_manager.setup_rtp_relay(session_a_id, session_b_id).await
-            .map_err(|e| Error::MediaResourceError(
-                format!("Failed to setup RTP relay: {}", e),
-                ErrorContext {
-                    category: ErrorCategory::Media,
-                    severity: ErrorSeverity::Error,
-                    recovery: RecoveryAction::Retry,
-                    retryable: true,
-                    timestamp: SystemTime::now(),
-                    details: Some(format!("RTP relay setup failed: {}", e)),
-                    ..Default::default()
-                }
-            ))
+        // For now, just return a placeholder relay ID
+        let relay_id = format!("relay-{}-{}", session_a_id.0, session_b_id.0);
+        
+        info!("✅ Created RTP relay placeholder: {}", relay_id);
+        Ok(relay_id)
     }
     
-    /// Teardown RTP relay
-    pub async fn teardown_rtp_relay(&self, relay_id: &crate::media::RelayId) -> Result<(), Error> {
-        self.media_manager.teardown_rtp_relay(relay_id).await
-            .map_err(|e| Error::MediaResourceError(
-                format!("Failed to teardown RTP relay: {}", e),
-                ErrorContext {
-                    category: ErrorCategory::Media,
-                    severity: ErrorSeverity::Warning,
-                    recovery: RecoveryAction::None,
-                    retryable: false,
-                    timestamp: SystemTime::now(),
-                    details: Some(format!("RTP relay teardown failed: {}", e)),
-                    ..Default::default()
-                }
-            ))
+    /// Teardown RTP relay (placeholder for future implementation)
+    pub async fn teardown_rtp_relay(&self, relay_id: &str) -> Result<(), Error> {
+        debug!("Tearing down RTP relay: {}", relay_id);
+        
+        info!("✅ Removed RTP relay placeholder: {}", relay_id);
+        Ok(())
     }
 } 
