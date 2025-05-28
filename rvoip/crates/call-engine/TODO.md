@@ -352,6 +352,166 @@ call-engine/
   - [ ] Add media frame to RTP packet conversion verification
   - [ ] Create security setup validation
 
+---
+
+## 🚀 PHASE 5: ESSENTIAL SIP SYSTEM COMPONENTS ⏳ REQUIRED
+
+### 🎯 **CRITICAL SIP FEATURES - NOT OPTIONAL**
+
+**Status**: ⏳ **REQUIRED** - These are essential components of any production SIP system
+
+**Note**: These features were moved from session-core as they represent business logic and policy decisions that belong in the call-engine layer, not the session coordination layer.
+
+### 🔧 **IMPLEMENTATION PLAN**
+
+#### 5.1 SIP Authentication and Security ⏳ CRITICAL
+- [ ] **SIP Digest Authentication** - Essential for production SIP systems
+  - [ ] Implement SIP Digest Authentication (RFC 3261 Section 22)
+  - [ ] Handle 401 Unauthorized responses
+  - [ ] Support realm-based authentication
+  - [ ] Add user credential management
+
+- [ ] **Security Headers** - Basic SIP security
+  - [ ] Implement proper Via header handling
+  - [ ] Add Contact header validation
+  - [ ] Support secure SIP transport (TLS)
+  - [ ] Add basic DoS protection
+
+#### 5.2 SIP Registration (REGISTER) ⏳ CRITICAL
+- [ ] **User Registration** - Fundamental SIP functionality
+  - [ ] Implement REGISTER method handling
+  - [ ] Add user location database
+  - [ ] Support registration expiration and refresh
+  - [ ] Handle multiple device registration per user
+
+- [ ] **Location Service** - User location management
+  - [ ] Implement Address of Record (AOR) to Contact mapping
+  - [ ] Add registration state management
+  - [ ] Support contact prioritization
+  - [ ] Handle registration conflicts
+
+#### 5.3 Call Transfer (REFER) ⏳ CRITICAL
+- [ ] **REFER Method Implementation** - Essential call control
+  - [ ] Implement REFER method (RFC 3515)
+  - [ ] Handle attended call transfer
+  - [ ] Handle unattended call transfer
+  - [ ] Add NOTIFY for transfer status
+
+- [ ] **Transfer Coordination** - Call transfer management
+  - [ ] Coordinate between transferor, transferee, and target
+  - [ ] Handle transfer failure scenarios
+  - [ ] Implement proper dialog management during transfer
+  - [ ] Add transfer progress notifications
+
+#### 5.4 Session Modification (re-INVITE/UPDATE) ⏳ CRITICAL
+- [ ] **re-INVITE Handling** - Session modification
+  - [ ] Handle re-INVITE for session changes
+  - [ ] Support media parameter changes
+  - [ ] Implement call hold/resume functionality
+  - [ ] Handle codec renegotiation
+
+- [ ] **UPDATE Method** - Lightweight session modification
+  - [ ] Implement UPDATE method (RFC 3311)
+  - [ ] Handle session parameter updates without SDP
+  - [ ] Support session timer refresh
+  - [ ] Add session modification coordination
+
+---
+
+## 🚀 PHASE 6: ADVANCED SIP FEATURES ⏳ REQUIRED
+
+### 🎯 **PRODUCTION SIP SYSTEM REQUIREMENTS**
+
+**Status**: ⏳ **REQUIRED** - Advanced features needed for production deployment
+
+#### 6.1 SIP Presence and Messaging ⏳ REQUIRED
+- [ ] **SUBSCRIBE/NOTIFY** - Presence and event notification
+  - [ ] Implement SUBSCRIBE method (RFC 3856)
+  - [ ] Implement NOTIFY method
+  - [ ] Add presence state management
+  - [ ] Support event packages (presence, dialog, etc.)
+
+- [ ] **MESSAGE Method** - Instant messaging
+  - [ ] Implement MESSAGE method (RFC 3428)
+  - [ ] Add message routing and delivery
+  - [ ] Support message composition indicators
+  - [ ] Handle offline message storage
+
+#### 6.2 Advanced Call Features ⏳ REQUIRED
+- [ ] **Call Forwarding** - Essential telephony feature
+  - [ ] Implement unconditional call forwarding
+  - [ ] Add busy/no-answer call forwarding
+  - [ ] Support forwarding loops prevention
+  - [ ] Handle forwarding chains
+
+- [ ] **Conference Calling** - Multi-party calls
+  - [ ] Implement basic conference bridge
+  - [ ] Add participant management
+  - [ ] Support conference control (mute, kick, etc.)
+  - [ ] Handle conference media mixing
+
+#### 6.3 NAT Traversal and Connectivity ⏳ REQUIRED
+- [ ] **ICE Integration** - NAT traversal
+  - [ ] Integrate with ice-core for NAT traversal
+  - [ ] Implement STUN/TURN support
+  - [ ] Add ICE candidate gathering and connectivity checks
+  - [ ] Handle symmetric NAT scenarios
+
+- [ ] **SIP ALG Handling** - NAT/Firewall traversal
+  - [ ] Handle SIP Application Layer Gateway (ALG) scenarios
+  - [ ] Implement proper Contact header rewriting
+  - [ ] Add Via header NAT detection
+  - [ ] Support symmetric response routing
+
+---
+
+## 🚀 PHASE 7: PRODUCTION READINESS ⏳ REQUIRED
+
+### 🎯 **PRODUCTION DEPLOYMENT REQUIREMENTS**
+
+**Status**: ⏳ **REQUIRED** - Essential for production deployment
+
+#### 7.1 Performance and Scalability ⏳ CRITICAL
+- [ ] **High Performance Optimizations** - Production scalability
+  - [ ] Connection pooling and reuse
+  - [ ] Memory pool allocation for frequent objects
+  - [ ] Lock-free data structures where possible
+  - [ ] Async I/O optimizations
+
+- [ ] **Load Balancing and Clustering** - Horizontal scaling
+  - [ ] Support multiple server instances
+  - [ ] Implement session affinity
+  - [ ] Add health check endpoints
+  - [ ] Support graceful shutdown
+
+#### 7.2 Monitoring and Observability ⏳ CRITICAL
+- [ ] **Call Quality Metrics** - Production monitoring
+  - [ ] Call quality metrics (MOS, jitter, packet loss)
+  - [ ] Performance metrics (calls per second, latency)
+  - [ ] SIP message statistics and error rates
+  - [ ] Media quality monitoring
+
+- [ ] **Logging and Debugging** - Production troubleshooting
+  - [ ] Structured logging with correlation IDs
+  - [ ] SIP message tracing and debugging
+  - [ ] Performance profiling and bottleneck detection
+  - [ ] Distributed tracing integration
+
+#### 7.3 Configuration and Management ⏳ CRITICAL
+- [ ] **Configuration Management** - Production configuration
+  - [ ] Environment-based configuration
+  - [ ] Runtime configuration updates
+  - [ ] Configuration validation and defaults
+  - [ ] Secrets management integration
+
+- [ ] **Administrative Interface** - System management
+  - [ ] REST API for system management
+  - [ ] User and account management
+  - [ ] Call detail records (CDR)
+  - [ ] System health and status monitoring
+
+---
+
 ## Next Steps
 
 1. **Basic Engine Structure**

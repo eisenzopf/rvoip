@@ -275,8 +275,6 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 
 **Status**: ⏳ **IMMEDIATE PRIORITY** - These 4 items are essential for a complete audio system
 
-**Why These Are Critical**: While we have basic audio transmission working, these enhancements are needed for a production-quality audio system that can handle real-world scenarios.
-
 ### 🔧 **IMPLEMENTATION PLAN**
 
 #### 7.3.1 Bidirectional Audio Flow ⏳ **CRITICAL**
@@ -355,162 +353,6 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 
 ---
 
-## 🚀 PHASE 8: ESSENTIAL SIP SYSTEM COMPONENTS ⏳ REQUIRED
-
-### 🎯 **CRITICAL SIP FEATURES - NOT OPTIONAL**
-
-**Status**: ⏳ **REQUIRED** - These are essential components of any production SIP system
-
-### 🔧 **IMPLEMENTATION PLAN**
-
-#### 8.1 SIP Authentication and Security ⏳ CRITICAL
-- [ ] **SIP Digest Authentication** - Essential for production SIP systems
-  - [ ] Implement SIP Digest Authentication (RFC 3261 Section 22)
-  - [ ] Handle 401 Unauthorized responses
-  - [ ] Support realm-based authentication
-  - [ ] Add user credential management
-
-- [ ] **Security Headers** - Basic SIP security
-  - [ ] Implement proper Via header handling
-  - [ ] Add Contact header validation
-  - [ ] Support secure SIP transport (TLS)
-  - [ ] Add basic DoS protection
-
-#### 8.2 SIP Registration (REGISTER) ⏳ CRITICAL
-- [ ] **User Registration** - Fundamental SIP functionality
-  - [ ] Implement REGISTER method handling
-  - [ ] Add user location database
-  - [ ] Support registration expiration and refresh
-  - [ ] Handle multiple device registration per user
-
-- [ ] **Location Service** - User location management
-  - [ ] Implement Address of Record (AOR) to Contact mapping
-  - [ ] Add registration state management
-  - [ ] Support contact prioritization
-  - [ ] Handle registration conflicts
-
-#### 8.3 Call Transfer (REFER) ⏳ CRITICAL
-- [ ] **REFER Method Implementation** - Essential call control
-  - [ ] Implement REFER method (RFC 3515)
-  - [ ] Handle attended call transfer
-  - [ ] Handle unattended call transfer
-  - [ ] Add NOTIFY for transfer status
-
-- [ ] **Transfer Coordination** - Call transfer management
-  - [ ] Coordinate between transferor, transferee, and target
-  - [ ] Handle transfer failure scenarios
-  - [ ] Implement proper dialog management during transfer
-  - [ ] Add transfer progress notifications
-
-#### 8.4 Session Modification (re-INVITE/UPDATE) ⏳ CRITICAL
-- [ ] **re-INVITE Handling** - Session modification
-  - [ ] Handle re-INVITE for session changes
-  - [ ] Support media parameter changes
-  - [ ] Implement call hold/resume functionality
-  - [ ] Handle codec renegotiation
-
-- [ ] **UPDATE Method** - Lightweight session modification
-  - [ ] Implement UPDATE method (RFC 3311)
-  - [ ] Handle session parameter updates without SDP
-  - [ ] Support session timer refresh
-  - [ ] Add session modification coordination
-
----
-
-## 🚀 PHASE 9: ADVANCED SIP FEATURES ⏳ REQUIRED
-
-### 🎯 **PRODUCTION SIP SYSTEM REQUIREMENTS**
-
-**Status**: ⏳ **REQUIRED** - Advanced features needed for production deployment
-
-#### 9.1 SIP Presence and Messaging ⏳ REQUIRED
-- [ ] **SUBSCRIBE/NOTIFY** - Presence and event notification
-  - [ ] Implement SUBSCRIBE method (RFC 3856)
-  - [ ] Implement NOTIFY method
-  - [ ] Add presence state management
-  - [ ] Support event packages (presence, dialog, etc.)
-
-- [ ] **MESSAGE Method** - Instant messaging
-  - [ ] Implement MESSAGE method (RFC 3428)
-  - [ ] Add message routing and delivery
-  - [ ] Support message composition indicators
-  - [ ] Handle offline message storage
-
-#### 9.2 Advanced Call Features ⏳ REQUIRED
-- [ ] **Call Forwarding** - Essential telephony feature
-  - [ ] Implement unconditional call forwarding
-  - [ ] Add busy/no-answer call forwarding
-  - [ ] Support forwarding loops prevention
-  - [ ] Handle forwarding chains
-
-- [ ] **Conference Calling** - Multi-party calls
-  - [ ] Implement basic conference bridge
-  - [ ] Add participant management
-  - [ ] Support conference control (mute, kick, etc.)
-  - [ ] Handle conference media mixing
-
-#### 9.3 NAT Traversal and Connectivity ⏳ REQUIRED
-- [ ] **ICE Integration** - NAT traversal
-  - [ ] Integrate with ice-core for NAT traversal
-  - [ ] Implement STUN/TURN support
-  - [ ] Add ICE candidate gathering and connectivity checks
-  - [ ] Handle symmetric NAT scenarios
-
-- [ ] **SIP ALG Handling** - NAT/Firewall traversal
-  - [ ] Handle SIP Application Layer Gateway (ALG) scenarios
-  - [ ] Implement proper Contact header rewriting
-  - [ ] Add Via header NAT detection
-  - [ ] Support symmetric response routing
-
----
-
-## 🚀 PHASE 10: PRODUCTION READINESS ⏳ REQUIRED
-
-### 🎯 **PRODUCTION DEPLOYMENT REQUIREMENTS**
-
-**Status**: ⏳ **REQUIRED** - Essential for production deployment
-
-#### 10.1 Performance and Scalability ⏳ CRITICAL
-- [ ] **High Performance Optimizations** - Production scalability
-  - [ ] Connection pooling and reuse
-  - [ ] Memory pool allocation for frequent objects
-  - [ ] Lock-free data structures where possible
-  - [ ] Async I/O optimizations
-
-- [ ] **Load Balancing and Clustering** - Horizontal scaling
-  - [ ] Support multiple server instances
-  - [ ] Implement session affinity
-  - [ ] Add health check endpoints
-  - [ ] Support graceful shutdown
-
-#### 10.2 Monitoring and Observability ⏳ CRITICAL
-- [ ] **Call Quality Metrics** - Production monitoring
-  - [ ] Call quality metrics (MOS, jitter, packet loss)
-  - [ ] Performance metrics (calls per second, latency)
-  - [ ] SIP message statistics and error rates
-  - [ ] Media quality monitoring
-
-- [ ] **Logging and Debugging** - Production troubleshooting
-  - [ ] Structured logging with correlation IDs
-  - [ ] SIP message tracing and debugging
-  - [ ] Performance profiling and bottleneck detection
-  - [ ] Distributed tracing integration
-
-#### 10.3 Configuration and Management ⏳ CRITICAL
-- [ ] **Configuration Management** - Production configuration
-  - [ ] Environment-based configuration
-  - [ ] Runtime configuration updates
-  - [ ] Configuration validation and defaults
-  - [ ] Secrets management integration
-
-- [ ] **Administrative Interface** - System management
-  - [ ] REST API for system management
-  - [ ] User and account management
-  - [ ] Call detail records (CDR)
-  - [ ] System health and status monitoring
-
----
-
 ## 📊 UPDATED PROGRESS TRACKING
 
 ### Current Status: **PHASE 7.2 COMPLETE - REAL AUDIO TRANSMISSION WORKING! 🎵🎉**
@@ -533,11 +375,8 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 - **Phase 7.1 - Real RTP Sessions**: ✅ COMPLETE (4/4 tasks)
 - **Phase 7.2 - RTP Media Transmission**: ✅ **COMPLETE SUCCESS!** (4/4 tasks)
 - **Phase 7.3 - Enhanced Audio Capabilities**: ⏳ **IMMEDIATE NEXT PRIORITY** (0/4 tasks)
-- **Phase 8 - Essential SIP Components**: ⏳ **NEXT PRIORITY** (0/12 tasks)
-- **Phase 9 - Advanced SIP Features**: ⏳ REQUIRED (0/8 tasks)
-- **Phase 10 - Production Readiness**: ⏳ REQUIRED (0/8 tasks)
 
-### **Total Progress**: 84/125 tasks (67%) - **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
+### **Total Progress**: 84/88 tasks (95%) - **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
 
 ### Current Status: 🎉 **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
 
@@ -558,8 +397,31 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 
 **Immediate Next Steps - Enhanced Audio Capabilities**:
 1. **Phase 7.3**: Implement enhanced audio capabilities (bidirectional audio, real audio content, audio processing, advanced codecs)
-2. **Phase 8**: Implement essential SIP system components (AUTH, REGISTER, REFER, re-INVITE)
-3. **Phase 9**: Add advanced SIP features (SUBSCRIBE/NOTIFY, MESSAGE, conferencing)
-4. **Phase 10**: Production readiness (performance, monitoring, management)
 
-**We have achieved the core goal - a complete SIP server with real audio transmission!** 🚀🎉 
+**Higher-Level Features (Moved to call-engine)**:
+- **Essential SIP System Components**: Authentication, Registration, Call Transfer, Session Modification
+- **Advanced SIP Features**: Presence/Messaging, Call Forwarding, Conference Calling, NAT Traversal  
+- **Production Readiness**: Performance optimization, monitoring, configuration management
+
+**We have achieved the core goal - a complete SIP server with real audio transmission!** 🚀🎉
+
+---
+
+## 🎯 **SESSION-CORE SCOPE DEFINITION**
+
+**session-core is responsible for**:
+- ✅ **Dialog Management**: RFC 3261 dialog lifecycle and state management
+- ✅ **Session Coordination**: Bridging SIP signaling with media processing
+- ✅ **Media Integration**: Coordinating SDP negotiation and RTP session setup
+- ✅ **Audio Processing**: Enhanced audio capabilities and codec negotiation
+- ✅ **Session Lifecycle**: Complete call flow coordination (INVITE → established → terminated)
+- ✅ **Session Metrics**: Session-level monitoring and performance tracking
+
+**session-core is NOT responsible for**:
+- ❌ **Business Logic**: Authentication, registration, call routing policies
+- ❌ **User Management**: User databases, location services, presence
+- ❌ **Call Features**: Call transfer, forwarding, conferencing (these are call-engine responsibilities)
+- ❌ **Administrative Functions**: System management, configuration, monitoring infrastructure
+- ❌ **Transport Security**: TLS, authentication challenges (handled by lower layers or call-engine)
+
+This maintains clean separation of concerns with session-core focused on its core responsibility: **session and dialog coordination**. 
