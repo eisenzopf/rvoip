@@ -277,9 +277,49 @@ impl MediaManager {
         &self.media_controller
     }
     
-    /// Create a media session using MediaSessionController for real RTP port allocation
+    /// Get RTP session for packet transmission
+    pub async fn get_rtp_session(&self, media_session_id: &MediaSessionId) -> Result<Option<Arc<tokio::sync::Mutex<rvoip_rtp_core::RtpSession>>>> {
+        debug!("Getting RTP session for media session: {}", media_session_id);
+        
+        // Extract dialog ID from media session ID
+        let dialog_id = media_session_id.as_str();
+        
+        // Get RTP session from MediaSessionController
+        let rtp_session = self.media_controller.get_rtp_session(dialog_id).await;
+        
+        if rtp_session.is_some() {
+            debug!("✅ Found RTP session for media session: {}", media_session_id);
+        } else {
+            debug!("❌ No RTP session found for media session: {}", media_session_id);
+        }
+        
+        Ok(rtp_session)
+    }
+    
+    /// Send RTP packet for a media session
+    pub async fn send_rtp_packet(&self, media_session_id: &MediaSessionId, payload: Vec<u8>, timestamp: u32) -> Result<()> {
+        debug!("Sending RTP packet for media session: {} (timestamp: {})", media_session_id, timestamp);
+        
+        // Extract dialog ID from media session ID
+        let dialog_id = media_session_id.as_str();
+        
+        // Send RTP packet through MediaSessionController
+        self.media_controller.send_rtp_packet(dialog_id, payload, timestamp).await
+            .map_err(|e| anyhow::anyhow!("Failed to send RTP packet: {}", e))?;
+        
+        debug!("✅ Sent RTP packet for media session: {}", media_session_id);
+        Ok(())
+    }
+    
+    /// Check if RTP session is active for a media session
+    pub async fn is_rtp_session_active(&self, media_session_id: &MediaSessionId) -> bool {
+        let rtp_session = self.get_rtp_session(media_session_id).await;
+        rtp_session.unwrap_or(None).is_some()
+    }
+    
+    /// Create a media session using MediaSessionController for real RTP port allocation AND RTP sessions
     pub async fn create_media_session(&self, config: MediaConfig) -> Result<MediaSessionId> {
-        debug!("Creating media session with config: {:?}", config);
+        debug!("Creating media session with REAL RTP session capabilities: {:?}", config);
         
         // Create dialog ID for media session
         let dialog_id_str = format!("media-{}", Uuid::new_v4());
@@ -292,14 +332,14 @@ impl MediaManager {
             parameters: std::collections::HashMap::new(),
         };
         
-        // Start media session through MediaSessionController for REAL RTP port allocation
+        // Start media session through MediaSessionController for REAL RTP port allocation AND RTP sessions
         self.media_controller.start_media(dialog_id_str.clone(), media_config).await
-            .map_err(|e| anyhow::anyhow!("Failed to start media session via MediaSessionController: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to start media session with RTP sessions via MediaSessionController: {}", e))?;
         
         // Create MediaSessionId from dialog ID
         let media_session_id = MediaSessionId::new(&dialog_id_str);
         
-        info!("✅ Created media session: {} with REAL RTP port allocation via MediaSessionController", media_session_id);
+        info!("✅ Created media session: {} with REAL RTP sessions and port allocation via MediaSessionController", media_session_id);
         Ok(media_session_id)
     }
     

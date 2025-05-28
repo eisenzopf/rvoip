@@ -8,9 +8,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
+use rand::Rng;
 
 use crate::error::{Error, Result};
 use super::{MediaRelay, RelaySessionConfig, RelayEvent, RelayStats, generate_session_id, create_relay_config};
+
+// Import RTP session capabilities
+use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 
 /// Represents a SIP Dialog ID (from session-core)
 pub type DialogId = String;
@@ -60,6 +64,18 @@ pub struct MediaSessionInfo {
     pub stats: Option<RelayStats>,
     /// Creation time
     pub created_at: std::time::Instant,
+}
+
+/// RTP session wrapper for MediaSessionController
+struct RtpSessionWrapper {
+    /// The actual RTP session
+    session: Arc<tokio::sync::Mutex<RtpSession>>,
+    /// Local RTP address
+    local_addr: SocketAddr,
+    /// Remote RTP address (if known)
+    remote_addr: Option<SocketAddr>,
+    /// Session creation time
+    created_at: std::time::Instant,
 }
 
 impl Default for MediaSessionInfo {
@@ -112,6 +128,8 @@ pub struct MediaSessionController {
     relay: Option<Arc<MediaRelay>>,
     /// Active media sessions indexed by dialog ID
     sessions: RwLock<HashMap<DialogId, MediaSessionInfo>>,
+    /// Active RTP sessions indexed by dialog ID
+    rtp_sessions: RwLock<HashMap<DialogId, RtpSessionWrapper>>,
     /// Port allocator for media sessions
     port_allocator: RwLock<PortAllocator>,
     /// Event channel for media session events
@@ -176,6 +194,7 @@ impl MediaSessionController {
         Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
+            rtp_sessions: RwLock::new(HashMap::new()),
             port_allocator: RwLock::new(PortAllocator::new(10000, 20000)),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
@@ -189,6 +208,7 @@ impl MediaSessionController {
         Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
+            rtp_sessions: RwLock::new(HashMap::new()),
             port_allocator: RwLock::new(PortAllocator::new(base_port, max_port)),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
@@ -214,6 +234,33 @@ impl MediaSessionController {
                 .ok_or_else(|| Error::config("No available ports for media session"))?
         };
         
+        // Create local RTP address with allocated port
+        let local_rtp_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), rtp_port);
+        
+        // Create RTP session configuration
+        let rtp_config = RtpSessionConfig {
+            local_addr: local_rtp_addr,
+            remote_addr: config.remote_addr,
+            ssrc: Some(rand::random()), // Generate random SSRC
+            payload_type: 0, // Default to PCMU
+            clock_rate: 8000, // Default to 8kHz
+            jitter_buffer_size: Some(50),
+            max_packet_age_ms: Some(200),
+            enable_jitter_buffer: true,
+        };
+        
+        // Create actual RTP session
+        let rtp_session = RtpSession::new(rtp_config).await
+            .map_err(|e| Error::config(format!("Failed to create RTP session: {}", e)))?;
+        
+        // Wrap RTP session
+        let rtp_wrapper = RtpSessionWrapper {
+            session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
+            local_addr: local_rtp_addr,
+            remote_addr: config.remote_addr,
+            created_at: std::time::Instant::now(),
+        };
+        
         // Create media session info
         let session_info = MediaSessionInfo {
             dialog_id: dialog_id.clone(),
@@ -231,10 +278,15 @@ impl MediaSessionController {
             allocator.assign_port(&dialog_id, rtp_port);
         }
 
-        // Store session
+        // Store session and RTP session
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(dialog_id.clone(), session_info);
+        }
+        
+        {
+            let mut rtp_sessions = self.rtp_sessions.write().await;
+            rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
         }
 
         // Send event
@@ -243,6 +295,7 @@ impl MediaSessionController {
             session_id: dialog_id.clone(),
         });
 
+        info!("✅ Created media session with REAL RTP session: {} (port: {})", dialog_id, rtp_port);
         Ok(())
     }
     
@@ -256,6 +309,17 @@ impl MediaSessionController {
             sessions.remove(&dialog_id)
                 .ok_or_else(|| Error::session_not_found(dialog_id.clone()))?
         };
+        
+        // Stop and remove RTP session
+        {
+            let mut rtp_sessions = self.rtp_sessions.write().await;
+            if let Some(rtp_wrapper) = rtp_sessions.remove(&dialog_id) {
+                // Close the RTP session
+                let mut rtp_session = rtp_wrapper.session.lock().await;
+                rtp_session.close().await;
+                info!("✅ Stopped RTP session for dialog: {}", dialog_id);
+            }
+        }
 
         // Clean up relay if exists
         if let Some((session_a, session_b)) = &session_info.relay_session_ids {
@@ -374,6 +438,57 @@ impl MediaSessionController {
     /// Get media relay reference (for advanced usage)
     pub fn relay(&self) -> Option<&Arc<MediaRelay>> {
         self.relay.as_ref()
+    }
+    
+    /// Get RTP session for a dialog (for packet transmission)
+    pub async fn get_rtp_session(&self, dialog_id: &str) -> Option<Arc<tokio::sync::Mutex<RtpSession>>> {
+        let rtp_sessions = self.rtp_sessions.read().await;
+        rtp_sessions.get(dialog_id).map(|wrapper| wrapper.session.clone())
+    }
+    
+    /// Send RTP packet for a dialog
+    pub async fn send_rtp_packet(&self, dialog_id: &str, payload: Vec<u8>, timestamp: u32) -> Result<()> {
+        let rtp_session = self.get_rtp_session(dialog_id).await
+            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+        
+        let mut session = rtp_session.lock().await;
+        session.send_packet(timestamp, bytes::Bytes::from(payload), false).await
+            .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+        
+        debug!("✅ Sent RTP packet for dialog: {} (timestamp: {})", dialog_id, timestamp);
+        Ok(())
+    }
+    
+    /// Update remote address for RTP session
+    pub async fn update_rtp_remote_addr(&self, dialog_id: &str, remote_addr: SocketAddr) -> Result<()> {
+        let rtp_session = self.get_rtp_session(dialog_id).await
+            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+        
+        let mut session = rtp_session.lock().await;
+        session.set_remote_addr(remote_addr);
+        
+        // Update wrapper info
+        {
+            let mut rtp_sessions = self.rtp_sessions.write().await;
+            if let Some(wrapper) = rtp_sessions.get_mut(dialog_id) {
+                wrapper.remote_addr = Some(remote_addr);
+            }
+        }
+        
+        info!("✅ Updated RTP remote address for dialog: {} -> {}", dialog_id, remote_addr);
+        Ok(())
+    }
+    
+    /// Get RTP session statistics
+    pub async fn get_rtp_stats(&self, dialog_id: &str) -> Option<String> {
+        let rtp_session = self.get_rtp_session(dialog_id).await?;
+        let session = rtp_session.lock().await;
+        
+        // Get basic session info
+        let local_addr = session.local_addr().ok()?;
+        let ssrc = session.get_ssrc();
+        
+        Some(format!("RTP Session - Local: {}, SSRC: 0x{:08x}", local_addr, ssrc))
     }
 }
 
