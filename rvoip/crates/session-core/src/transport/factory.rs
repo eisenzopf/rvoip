@@ -64,17 +64,19 @@ impl TransportFactory {
                 // UDP defaults are already set
             },
             TransportProtocol::Tcp => {
-                // TCP may need different timeout settings
+                // For TCP, we might want to increase timeouts to handle connection overhead
                 config.transaction_timeout = std::time::Duration::from_secs(64);
             },
             TransportProtocol::Tls => {
-                // TLS typically uses port 5061
-                config.bind_address = "127.0.0.1:5061".parse().unwrap();
+                // For TLS, we need longer timeouts due to handshake overhead
                 config.transaction_timeout = std::time::Duration::from_secs(64);
             },
             TransportProtocol::WebSocket => {
-                // WebSocket typically uses port 80 or 443
-                config.bind_address = "127.0.0.1:8080".parse().unwrap();
+                // WebSocket connections might need different timing
+            },
+            TransportProtocol::WebSocketSecure => {
+                // WebSocket Secure connections need additional handshake time
+                config.transaction_timeout = std::time::Duration::from_secs(64);
             },
         }
         
@@ -111,6 +113,12 @@ impl TransportFactory {
                     return Err(anyhow::anyhow!("WebSocket transport should not use standard SIP ports"));
                 }
             },
+            TransportProtocol::WebSocketSecure => {
+                // WebSocket Secure-specific validation
+                if config.bind_address.port() == 5060 || config.bind_address.port() == 5061 {
+                    return Err(anyhow::anyhow!("WebSocket Secure transport should not use standard SIP ports"));
+                }
+            },
         }
         
         Ok(())
@@ -123,6 +131,7 @@ impl TransportFactory {
             TransportProtocol::Tcp => (500, 500),   // TCP has connection management
             TransportProtocol::Tls => (200, 200),   // TLS has encryption overhead
             TransportProtocol::WebSocket => (300, 300), // WebSocket has framing overhead
+            TransportProtocol::WebSocketSecure => (250, 250), // WebSocket Secure has framing + encryption overhead
         }
     }
     

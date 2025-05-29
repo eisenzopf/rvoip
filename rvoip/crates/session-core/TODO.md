@@ -353,6 +353,104 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 
 ---
 
+## 🚀 PHASE 7.4: ARCHITECTURAL REFACTORING - SERVER/SESSION MANAGER SEPARATION ⏳ **CRITICAL**
+
+### 🎯 **CRITICAL ARCHITECTURAL IMPROVEMENTS - PROPER SEPARATION OF CONCERNS**
+
+**Status**: ⏳ **CRITICAL PRIORITY** - Fix architectural violations between ServerManager and SessionManager
+
+**Problem**: ServerManager is currently implementing SIP operations instead of making policy decisions and delegating to SessionManager.
+
+**Correct Architecture**:
+- **ServerManager**: Makes policy decisions (accept/reject calls), delegates implementation
+- **SessionManager**: Implements SIP operations (SDP processing, response building)
+- **Special Case**: When calling party ends call (BYE), SessionManager handles immediately and notifies ServerManager afterwards
+
+### 🔧 **IMPLEMENTATION PLAN**
+
+#### 7.4.1 Move SIP Implementation from ServerManager to SessionManager ⏳ **CRITICAL**
+- [ ] **Move SDP Processing** - Move from ServerManager to SessionManager
+  - [ ] Move `build_sdp_answer()` from ServerManager to SessionManager
+  - [ ] Move `negotiate_codecs()` from ServerManager to SessionManager
+  - [ ] Move `extract_media_config_from_sdp()` from ServerManager to SessionManager
+  - [ ] Update SessionManager to handle SDP processing for call acceptance
+  - [ ] Remove SDP processing code from ServerManager
+
+- [ ] **Move Call Implementation Methods** - Move from ServerManager to SessionManager
+  - [ ] Move `accept_call()` implementation logic from ServerManager to SessionManager
+  - [ ] Move `reject_call()` implementation logic from ServerManager to SessionManager  
+  - [ ] Move `end_call()` implementation logic from ServerManager to SessionManager
+  - [ ] Keep decision-making methods in ServerManager, move implementation to SessionManager
+  - [ ] Update method signatures to support delegation pattern
+
+- [ ] **Move Session Tracking** - Move from ServerManager to SessionManager
+  - [ ] Move `pending_calls` HashMap from ServerManager to SessionManager
+  - [ ] Move `active_sessions` HashMap from ServerManager to SessionManager
+  - [ ] Update SessionManager to track session lifecycle internally
+  - [ ] Remove session tracking from ServerManager (delegates to SessionManager)
+  - [ ] Update cleanup logic to work through SessionManager
+
+#### 7.4.2 Add Incoming Call Notification System ⏳ **CRITICAL**
+- [ ] **Create Incoming Call Event System** - ServerManager gets notified to make decisions
+  - [ ] Create `IncomingCallEvent` struct with session info, caller details, SDP offer
+  - [ ] Add `IncomingCallNotification` trait for ServerManager to implement
+  - [ ] Update DialogManager to emit incoming call events instead of direct handling
+  - [ ] Implement event flow: DialogManager → SessionManager → notify ServerManager → decision → delegate back
+  - [ ] Add callback mechanism for ServerManager to receive notifications
+
+- [ ] **Implement Call Decision Delegation** - ServerManager decides, SessionManager implements
+  - [ ] Add `on_incoming_call()` method to ServerManager for decision making
+  - [ ] Add policy methods: `should_accept_call()`, `should_reject_call()`
+  - [ ] Update ServerManager to delegate implementation after decision
+  - [ ] Remove direct SIP handling from ServerManager's transaction event handler
+  - [ ] Implement proper delegation: decision → delegate → notification
+
+#### 7.4.3 Handle BYE Termination Pattern ⏳ **CRITICAL**  
+- [ ] **Implement BYE Auto-Handling with Notification** - SessionManager handles, then notifies
+  - [ ] Update SessionManager to handle incoming BYE requests immediately
+  - [ ] Add `on_call_terminated_by_remote()` notification to ServerManager
+  - [ ] Remove BYE handling from ServerManager's transaction event handler
+  - [ ] Implement pattern: BYE received → SessionManager handles → notifies ServerManager afterwards
+  - [ ] Add proper cleanup coordination between managers
+
+- [ ] **Update Call Termination Methods** - Clean separation for different termination sources
+  - [ ] Update `end_call()` in ServerManager to be decision + delegation only
+  - [ ] Add `terminate_call()` in SessionManager for implementation
+  - [ ] Add `on_call_ended_by_server()` for server-initiated termination notifications
+  - [ ] Separate remote termination (BYE) from local termination (server decision)
+  - [ ] Implement proper notification callbacks for both scenarios
+
+#### 7.4.4 Update Transaction Event Handling ⏳ **CRITICAL**
+- [ ] **Simplify ServerManager Transaction Handling** - Remove implementation, keep coordination
+  - [ ] Remove INVITE handling implementation from ServerManager
+  - [ ] Remove BYE handling implementation from ServerManager  
+  - [ ] Remove SIP response building from ServerManager
+  - [ ] Keep only coordination and delegation in ServerManager
+  - [ ] Forward all transaction events to SessionManager for implementation
+
+- [ ] **Enhance SessionManager Transaction Handling** - Add implementation capabilities
+  - [ ] Add INVITE processing with notification to ServerManager
+  - [ ] Add BYE processing with automatic handling + notification
+  - [ ] Add SIP response building capabilities in SessionManager
+  - [ ] Add session state management in SessionManager
+  - [ ] Implement proper coordination with DialogManager
+
+### 🎯 **SUCCESS CRITERIA**
+
+**Phase 7.4 will be complete when**:
+1. ✅ **Clean Separation**: ServerManager only makes decisions, SessionManager only implements
+2. ✅ **Notification System**: ServerManager gets notified of incoming calls and makes policy decisions
+3. ✅ **BYE Auto-Handling**: SessionManager handles BYE immediately, notifies ServerManager afterwards
+4. ✅ **No SIP Implementation in ServerManager**: All SDP, response building, session tracking moved to SessionManager
+
+**Test Validation**:
+- [ ] Incoming INVITE: DialogManager → SessionManager → notify ServerManager → decision → delegate → 200 OK
+- [ ] Incoming BYE: DialogManager → SessionManager handles → sends 200 OK → notifies ServerManager
+- [ ] Server-initiated termination: ServerManager decides → delegates to SessionManager → BYE sent
+- [ ] SIP implementation completely removed from ServerManager
+
+---
+
 ## 📊 UPDATED PROGRESS TRACKING
 
 ### Current Status: **PHASE 7.2 COMPLETE - REAL AUDIO TRANSMISSION WORKING! 🎵🎉**
@@ -375,8 +473,9 @@ Transport received packet with SSRC=50f75bc3, seq=312, payload size=160 bytes
 - **Phase 7.1 - Real RTP Sessions**: ✅ COMPLETE (4/4 tasks)
 - **Phase 7.2 - RTP Media Transmission**: ✅ **COMPLETE SUCCESS!** (4/4 tasks)
 - **Phase 7.3 - Enhanced Audio Capabilities**: ⏳ **IMMEDIATE NEXT PRIORITY** (0/4 tasks)
+- **Phase 7.4 - Architectural Refactoring**: ⏳ **CRITICAL PRIORITY** (0/4 tasks)
 
-### **Total Progress**: 84/88 tasks (95%) - **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
+### **Total Progress**: 84/96 tasks (87.5%) - **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
 
 ### Current Status: 🎉 **COMPLETE SIP SERVER WITH REAL AUDIO TRANSMISSION!**
 

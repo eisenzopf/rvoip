@@ -32,26 +32,62 @@ In server applications (`rvoip-call-engine`), `session-core` provides:
 
 ## Architecture
 
-The library is structured around several core components:
+The library is structured around several core components with proper RFC 3261 separation of concerns:
 
-- **Dialog Management**: Tracks SIP dialogs (call relationships) according to RFC 3261
-- **Session Management**: Provides higher-level call session abstraction on top of dialogs
+- **Session Management**: Coordinates call flows and integrates with media processing
+- **Dialog Management**: Handles pure SIP protocol dialog state per RFC 3261  
 - **Media Handling**: Manages media stream setup, configuration, and negotiation via SDP
 - **Event System**: Provides asynchronous notifications for session and dialog state changes
 
+### **RFC 3261 Compliant Architecture**
+
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌───────────────┐
-│ SIP Client/     │    │ Transaction Core │    │ SIP Core      │
-│ Server App      │◄───┤ Dialog & Session │◄───┤ Messages &    │
-│ (UI/Logic)      │    │ Management       │    │ Transports    │
-└─────────────────┘    └──────────────────┘    └───────────────┘
-                           │       ▲
-                           ▼       │
-                        ┌──────────────────┐
-                        │ Media Core       │
-                        │ (RTP/Audio)      │
-                        └──────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│               ServerManager (Policy Layer)                  │
+│                 • Business Rules & Decisions                │
+│                 • Call Acceptance Policies                  │
+│                 • Resource Management                       │
+└─────────────────────────────────────────────────────────────┘
+           ↓ delegates implementation
+┌─────────────────────────────────────────────────────────────┐
+│             SessionManager (Coordination Layer)             │
+│          • CallLifecycleCoordinator (call flows)            │
+│          • Media stream coordination                        │
+│          • Session state management                         │ 
+│          • Multi-dialog coordination                        │
+│          • Reacts to Transaction Events                     │
+│          • SIGNALS transaction-core for responses           │
+└─────────────────────────────────────────────────────────────┘
+           ↓ delegates protocol work  
+┌─────────────────────────────────────────────────────────────┐
+│              DialogManager (Protocol Layer)                 │
+│                • Pure RFC 3261 Dialog State                 │
+│                • Dialog ID management                       │
+│                • In-dialog request routing                  │
+│                • SIP Protocol Compliance                    │
+└─────────────────────────────────────────────────────────────┘
+           ↓ integrates with core protocols
+┌─────────────────────────────────────────────────────────────┤
+│         Processing Layer                                    │
+│  transaction-core              │  media-core               │
+│  (SIP Protocol Handler)        │  (Media Processing)       │
+│  • Sends SIP Responses ✅      │  • Real RTP Port Alloc ✅ │
+│  • Manages SIP State Machine ✅│  • MediaSessionController ✅│
+│  • Handles Retransmissions ✅  │  • RTP Stream Management ✅│
+│  • Timer 100 (100 Trying) ✅   │  • SDP Generation ✅      │
+├─────────────────────────────────────────────────────────────┤
+│              Transport Layer                                │
+│  sip-transport ✅  │  rtp-core ✅  │  ice-core ✅          │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+**Key Architectural Principles:**
+
+- **Clean Separation**: Policy, coordination, and protocol layers are properly separated
+- **RFC 3261 Compliance**: DialogManager focuses purely on SIP protocol state machine
+- **Session Coordination**: SessionManager coordinates call flows and media integration
+- **No Double Handling**: Each SIP message processed once at appropriate layer
+- **Proper Delegation**: Each layer delegates to lower layers, doesn't bypass them
 
 ## RFC Compliance
 

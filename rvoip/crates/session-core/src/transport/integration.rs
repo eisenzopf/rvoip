@@ -109,6 +109,18 @@ impl TransportIntegration {
                 ).await.context("Failed to create WebSocket transport")?;
                 Ok((Arc::new(transport), events))
             },
+            TransportProtocol::WebSocketSecure => {
+                // WebSocket Secure transport specific logic
+                debug!("Using WebSocket Secure transport for server integration");
+                let (transport, events) = WebSocketTransport::bind(
+                    config.bind_address, 
+                    true, // secure
+                    None,  // no cert path
+                    None,  // no key path
+                    None   // default channel capacity
+                ).await.context("Failed to create WebSocket Secure transport")?;
+                Ok((Arc::new(transport), events))
+            },
         }
     }
     

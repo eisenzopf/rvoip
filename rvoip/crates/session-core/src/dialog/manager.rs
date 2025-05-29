@@ -12,11 +12,9 @@ use rvoip_transaction_core::{
 
 use super::dialog_state::DialogState;
 use super::transaction_coordination::TransactionCoordinator;
-use super::call_lifecycle::CallLifecycleCoordinator;
 use crate::errors::{Error, ErrorContext, ErrorCategory, ErrorSeverity, RecoveryAction};
 use crate::events::{EventBus, SessionEvent};
 use crate::session::SessionId;
-use crate::media::MediaManager;
 use crate::{dialog_not_found_error};
 
 use super::dialog_id::DialogId;
@@ -61,9 +59,6 @@ pub struct DialogManager {
     
     /// Recovery metrics
     pub(super) recovery_metrics: Arc<RwLock<RecoveryMetrics>>,
-    
-    /// Call lifecycle coordinator for automatic call handling
-    pub(super) call_lifecycle_coordinator: Option<Arc<CallLifecycleCoordinator>>,
 }
 
 impl DialogManager {
@@ -138,7 +133,6 @@ impl DialogManager {
             run_recovery_in_background,
             recovery_config,
             recovery_metrics,
-            call_lifecycle_coordinator: None,
         };
         
         // Start the event processor for the event_receiver
@@ -152,35 +146,77 @@ impl DialogManager {
         dialog_manager
     }
     
-    /// Subscribe to transaction events and start processing them
-    pub async fn start(&self) -> mpsc::Receiver<TransactionEvent> {
-        // Set up direct event forwarding 
-        let dialog_manager = self.clone();
+    /// Start the dialog manager with automatic cleanup
+    pub async fn start(&self) -> Result<(), Error> {
+        debug!("Starting dialog manager with automatic cleanup");
         
-        // Create a single task that directly subscribes to ALL transactions
-        // This avoids the polling approach and batch processing entirely
+        // Start periodic cleanup task like SessionManager does
+        let dm_clone = self.clone();
         tokio::spawn(async move {
-            let tx_manager = dialog_manager.transaction_manager.clone();
+            let mut cleanup_interval = tokio::time::interval(
+                std::time::Duration::from_secs(30) // Cleanup every 30 seconds
+            );
+            cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
-            // Subscribe to ALL transaction events - we'll filter them as needed
-            let mut all_events_rx = tx_manager.subscribe();
-            
-            // Process events directly
-            while let Some(event) = all_events_rx.recv().await {
-                if let Err(e) = dialog_manager.event_sender.send(event.clone()).await {
-                    error!("Failed to forward transaction event: {}", e);
-                    break;
+            loop {
+                cleanup_interval.tick().await;
+                
+                // Clean up terminated dialogs and their mappings
+                let cleaned_count = dm_clone.cleanup_terminated();
+                if cleaned_count > 0 {
+                    debug!("DialogManager cleaned up {} terminated dialogs", cleaned_count);
                 }
                 
-                // Process the event directly as well to avoid any delays
-                dialog_manager.process_transaction_event(event).await;
+                // Clean up stale transaction-to-dialog mappings
+                let stale_transactions = {
+                    let mut to_remove = Vec::new();
+                    
+                    // Check which transactions are no longer valid
+                    for entry in dm_clone.transaction_to_dialog.iter() {
+                        let tx_key = entry.key();
+                        let dialog_id = entry.value();
+                        
+                        // If dialog doesn't exist anymore, remove the transaction mapping
+                        if !dm_clone.dialogs.contains_key(dialog_id) {
+                            to_remove.push(tx_key.clone());
+                        }
+                    }
+                    to_remove
+                };
+                
+                if !stale_transactions.is_empty() {
+                    for tx_key in &stale_transactions {
+                        dm_clone.transaction_to_dialog.remove(tx_key);
+                    }
+                    debug!("DialogManager cleaned up {} stale transaction mappings", stale_transactions.len());
+                }
+                
+                // Clean up stale subscribed transactions
+                let stale_subscriptions = {
+                    let mut to_remove = Vec::new();
+                    
+                    for entry in dm_clone.subscribed_transactions.iter() {
+                        let tx_key = entry.key();
+                        
+                        // If transaction is no longer mapped to any dialog, remove subscription
+                        if !dm_clone.transaction_to_dialog.contains_key(tx_key) {
+                            to_remove.push(tx_key.clone());
+                        }
+                    }
+                    to_remove
+                };
+                
+                if !stale_subscriptions.is_empty() {
+                    for tx_key in &stale_subscriptions {
+                        dm_clone.subscribed_transactions.remove(tx_key);
+                    }
+                    debug!("DialogManager cleaned up {} stale subscriptions", stale_subscriptions.len());
+                }
             }
-            
-            debug!("Main transaction event subscription task terminated");
         });
         
-        // Return a subscription for the caller to use if needed
-        self.transaction_manager.subscribe()
+        debug!("✅ Dialog manager started with automatic cleanup");
+        Ok(())
     }
     
     /// Get the current number of active dialogs
@@ -364,64 +400,5 @@ impl DialogManager {
     /// Get the session ID associated with a dialog
     pub(super) fn get_session_for_dialog(&self, dialog_id: &DialogId) -> Option<SessionId> {
         self.dialog_to_session.get(dialog_id).map(|id| id.clone())
-    }
-    
-    /// Create a new dialog manager with call lifecycle coordinator
-    /// Returns both the dialog manager and the coordinator
-    pub fn new_with_call_coordinator(
-        transaction_manager: Arc<TransactionManager>,
-        event_bus: EventBus,
-        media_manager: Arc<MediaManager>,
-    ) -> (Arc<Self>, Arc<CallLifecycleCoordinator>) {
-        // Create dialog manager first without coordinator
-        let dialog_manager = Self::new_with_full_config(
-            transaction_manager.clone(),
-            event_bus,
-            true,
-            RecoveryConfig::default(),
-        );
-        
-        // Create transaction coordinator
-        let transaction_coordinator = TransactionCoordinator::new(transaction_manager);
-        
-        // Create call lifecycle coordinator
-        let mut call_lifecycle_coordinator = CallLifecycleCoordinator::new(
-            transaction_coordinator,
-            media_manager,
-        );
-        
-        // Wrap dialog manager in Arc first
-        let dialog_manager_arc = Arc::new(dialog_manager);
-        
-        // Set the dialog manager reference in the coordinator
-        call_lifecycle_coordinator.set_dialog_manager(dialog_manager_arc.clone());
-        
-        // Create the coordinator Arc
-        let coordinator_arc = Arc::new(call_lifecycle_coordinator);
-        
-        // Now create a new dialog manager instance that shares the same storage
-        // but has the coordinator set
-        let final_dialog_manager = Self {
-            dialogs: dialog_manager_arc.dialogs.clone(),
-            dialog_lookup: dialog_manager_arc.dialog_lookup.clone(),
-            dialog_to_session: dialog_manager_arc.dialog_to_session.clone(),
-            transaction_manager: dialog_manager_arc.transaction_manager.clone(),
-            transaction_to_dialog: dialog_manager_arc.transaction_to_dialog.clone(),
-            subscribed_transactions: dialog_manager_arc.subscribed_transactions.clone(),
-            event_sender: dialog_manager_arc.event_sender.clone(),
-            event_bus: dialog_manager_arc.event_bus.clone(),
-            run_recovery_in_background: dialog_manager_arc.run_recovery_in_background,
-            recovery_config: dialog_manager_arc.recovery_config.clone(),
-            recovery_metrics: dialog_manager_arc.recovery_metrics.clone(),
-            call_lifecycle_coordinator: Some(coordinator_arc.clone()),
-        };
-        
-        // Return both
-        (Arc::new(final_dialog_manager), coordinator_arc)
-    }
-    
-    /// Set the call lifecycle coordinator (called after creation)
-    pub fn set_call_lifecycle_coordinator(&mut self, coordinator: Arc<CallLifecycleCoordinator>) {
-        self.call_lifecycle_coordinator = Some(coordinator);
     }
 } 

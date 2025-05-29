@@ -11,6 +11,9 @@ pub mod session;
 // Manager implementation - now modular  
 pub mod manager;
 
+// **NEW**: Call lifecycle coordination for session layer (moved from dialog layer)
+pub mod call_lifecycle;
+
 // Re-export main types
 pub use session_id::SessionId;
 pub use session_types::{
@@ -19,4 +22,5 @@ pub use session_types::{
 };
 pub use session_config::SessionConfig;
 pub use session::{Session, SessionMediaState};
-pub use manager::SessionManager; 
+pub use manager::SessionManager;
+pub use call_lifecycle::CallLifecycleCoordinator; 

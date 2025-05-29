@@ -29,21 +29,17 @@ impl SessionManager {
         // Set running flag
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
         
-        // Start the dialog manager
-        let events_rx = self.dialog_manager.start().await;
+        // Start the dialog manager (it now handles its own cleanup)
+        if let Err(e) = self.dialog_manager.start().await {
+            error!("Failed to start dialog manager: {}", e);
+            return Err(e);
+        }
         
-        // Create a task to process dialog manager events and cleanup
+        // Create a task for cleanup
         let session_manager = self.clone();
         tokio::spawn(async move {
             // Setup task tracking
             let mut tasks = FuturesUnordered::new();
-            
-            // Create a task for processing dialog events
-            let manager_clone = session_manager.clone();
-            let dialog_task = tokio::spawn(async move {
-                manager_clone.process_dialog_events(events_rx).await;
-            });
-            tasks.push(dialog_task);
             
             // Setup cleanup interval
             let mut cleanup_interval = tokio::time::interval(

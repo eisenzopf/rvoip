@@ -1489,6 +1489,34 @@ impl TransactionManager {
             }
         }
         
+        // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            if let Some(subscriber_ids) = tx_to_subs.remove(transaction_id) {
+                debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
+                
+                // Also clean up reverse mappings
+                drop(tx_to_subs); // Release lock before acquiring another
+                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+                
+                for subscriber_id in subscriber_ids {
+                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
+                        tx_list.retain(|tx_id| tx_id != transaction_id);
+                        
+                        // If subscriber has no more transactions, remove it entirely
+                        if tx_list.is_empty() {
+                            sub_to_txs.remove(&subscriber_id);
+                            debug!(%transaction_id, subscriber_id, "Removed empty subscriber mapping");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Unregister from timer manager (defensive - it should auto-unregister)
+        self.timer_manager.unregister_transaction(transaction_id).await;
+        debug!(%transaction_id, "Unregistered transaction from timer manager");
+        
         if terminated {
             debug!(%transaction_id, "Successfully cleaned up terminated transaction");
         } else {

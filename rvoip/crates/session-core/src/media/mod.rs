@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use tokio::sync::RwLock;
 use anyhow::Result;
 use uuid::Uuid;
@@ -253,6 +254,9 @@ pub struct MediaManager {
     
     /// Dialog to session mapping  
     dialog_to_session: Arc<RwLock<HashMap<String, SessionId>>>,
+    
+    /// Track cleanup state to prevent duplicate cleanup attempts
+    cleanup_in_progress: Arc<RwLock<HashSet<String>>>,
 }
 
 impl MediaManager {
@@ -269,6 +273,7 @@ impl MediaManager {
             media_controller,
             session_to_media: Arc::new(RwLock::new(HashMap::new())),
             dialog_to_session: Arc::new(RwLock::new(HashMap::new())),
+            cleanup_in_progress: Arc::new(RwLock::new(HashSet::new())),
         })
     }
     
@@ -357,18 +362,58 @@ impl MediaManager {
     
     /// Stop media for a session using proper media-core integration
     pub async fn stop_media(&self, media_session_id: &MediaSessionId, reason: String) -> Result<()> {
-        debug!("Stopping media session: {} (reason: {})", media_session_id, reason);
+        let media_session_str = media_session_id.as_str();
+        debug!("Stopping media session: {} (reason: {})", media_session_str, reason);
+        
+        // Check if cleanup is already in progress or completed
+        {
+            let mut cleanup_tracker = self.cleanup_in_progress.write().await;
+            if cleanup_tracker.contains(media_session_str) {
+                debug!("Media session {} cleanup already in progress, skipping", media_session_str);
+                return Ok(());
+            }
+            // Mark cleanup as in progress
+            cleanup_tracker.insert(media_session_str.to_string());
+        }
         
         // Find the dialog ID for this media session
-        let dialog_id_str = media_session_id.as_str().replace("media-", "");
-        let dialog_id = rvoip_media_core::DialogId::new(dialog_id_str.clone());
+        let dialog_id_str = media_session_str.replace("media-", "");
         
         // Stop media session through MediaSessionController
-        self.media_controller.stop_media(dialog_id_str).await
-            .map_err(|e| anyhow::anyhow!("Failed to stop media session via MediaSessionController: {}", e))?;
+        let result = self.media_controller.stop_media(dialog_id_str).await;
         
-        info!("✅ Stopped media session: {} via proper media-core integration", media_session_id);
-        Ok(())
+        // Clean up tracking regardless of result
+        {
+            let mut cleanup_tracker = self.cleanup_in_progress.write().await;
+            cleanup_tracker.remove(media_session_str);
+        }
+        
+        match result {
+            Ok(()) => {
+                // Remove from session mapping on successful cleanup
+                {
+                    let mut session_mapping = self.session_to_media.write().await;
+                    session_mapping.retain(|_, v| v != media_session_str);
+                }
+                info!("✅ Stopped media session: {} via proper media-core integration", media_session_str);
+                Ok(())
+            }
+            Err(e) => {
+                // Check if the error is "session not found" - this is expected for already cleaned up sessions
+                let error_msg = format!("{}", e);
+                if error_msg.contains("Session not found") || error_msg.contains("not found") {
+                    debug!("Media session {} was already stopped/cleaned up", media_session_str);
+                    // Remove from session mapping since it's already gone
+                    {
+                        let mut session_mapping = self.session_to_media.write().await;
+                        session_mapping.retain(|_, v| v != media_session_str);
+                    }
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Failed to stop media session via MediaSessionController: {}", e))
+                }
+            }
+        }
     }
     
     /// Pause media for a session
@@ -446,7 +491,28 @@ impl MediaManager {
     /// Get media session for a session ID
     pub async fn get_media_session(&self, session_id: &SessionId) -> Option<MediaSessionId> {
         let session_mapping = self.session_to_media.read().await;
-        session_mapping.get(session_id).map(|s| MediaSessionId::new(s))
+        if let Some(media_session_str) = session_mapping.get(session_id) {
+            let media_session_id = MediaSessionId::new(media_session_str);
+            
+            // Validate that the session actually exists in media-core
+            let session_info = self.media_controller.get_session_info(media_session_str).await;
+            if session_info.is_some() {
+                Some(media_session_id)
+            } else {
+                // Session doesn't exist in media-core, clean up stale mapping
+                debug!("Cleaning up stale session mapping for session: {} -> {}", session_id, media_session_str);
+                drop(session_mapping); // Release read lock
+                
+                // Remove stale mapping
+                {
+                    let mut session_mapping = self.session_to_media.write().await;
+                    session_mapping.remove(session_id);
+                }
+                None
+            }
+        } else {
+            None
+        }
     }
     
     /// Shutdown the media manager
@@ -459,12 +525,30 @@ impl MediaManager {
             session_mapping.values().cloned().collect()
         };
         
+        info!("Stopping {} active media sessions during shutdown", active_sessions.len());
+        
         // Stop all active media sessions
         for media_session_str in active_sessions {
             let media_session_id = MediaSessionId::new(&media_session_str);
             if let Err(e) = self.stop_media(&media_session_id, "Shutdown".to_string()).await {
-                warn!("Failed to stop media session during shutdown: {}", e);
+                warn!("Failed to stop media session during shutdown: {} - {}", media_session_str, e);
+            } else {
+                debug!("Successfully stopped media session during shutdown: {}", media_session_str);
             }
+        }
+        
+        // Clear any remaining stale mappings
+        {
+            let mut session_mapping = self.session_to_media.write().await;
+            session_mapping.clear();
+        }
+        {
+            let mut dialog_mapping = self.dialog_to_session.write().await;
+            dialog_mapping.clear();
+        }
+        {
+            let mut cleanup_tracker = self.cleanup_in_progress.write().await;
+            cleanup_tracker.clear();
         }
         
         info!("✅ MediaManager shutdown complete");
@@ -488,17 +572,28 @@ impl MediaManager {
     
     /// Terminate media flow and stop audio transmission
     pub async fn terminate_media_flow(&self, media_session_id: &MediaSessionId) -> Result<()> {
-        debug!("🛑 Terminating media flow for session: {}", media_session_id);
+        let media_session_str = media_session_id.as_str();
+        debug!("🛑 Terminating media flow for session: {}", media_session_str);
         
         // Extract dialog ID from media session ID
-        let dialog_id = media_session_id.as_str();
+        let dialog_id = media_session_str;
         
         // Terminate media flow through MediaSessionController
-        self.media_controller.terminate_media_flow(dialog_id).await
-            .map_err(|e| anyhow::anyhow!("Failed to terminate media flow: {}", e))?;
-        
-        info!("✅ Terminated media flow for session: {}", media_session_id);
-        Ok(())
+        match self.media_controller.terminate_media_flow(dialog_id).await {
+            Ok(()) => {
+                info!("✅ Terminated media flow for session: {}", media_session_str);
+                Ok(())
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                if error_msg.contains("Session not found") || error_msg.contains("not found") {
+                    debug!("Media session {} was already stopped/cleaned up during flow termination", media_session_str);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Failed to terminate media flow: {}", e))
+                }
+            }
+        }
     }
     
     /// Check if audio transmission is active for a media session

@@ -19,9 +19,11 @@ use crate::{
 };
 use std::sync::Arc;
 use std::collections::HashMap;
-use rvoip_transaction_core::TransactionManager;
-use rvoip_sip_core::{Request, Response, Uri};
+use rvoip_transaction_core::{TransactionManager, TransactionKey};
+use rvoip_sip_core::{Request, Response, Uri, StatusCode};
 use tokio::sync::RwLock;
+use async_trait::async_trait;
+use std::net::SocketAddr;
 
 /// Legacy server configuration for backward compatibility
 #[derive(Debug, Clone)]
@@ -424,4 +426,71 @@ pub fn create_full_server_manager_sync(
 ) -> Arc<ServerSessionManager> {
     let server_manager = ServerSessionManager::new_sync(transaction_manager, config);
     Arc::new(server_manager)
+}
+
+/// Incoming call notification event
+#[derive(Debug, Clone)]
+pub struct IncomingCallEvent {
+    /// The session ID created for this call
+    pub session_id: SessionId,
+    
+    /// The transaction ID for this INVITE
+    pub transaction_id: TransactionKey,
+    
+    /// The original INVITE request
+    pub request: Request,
+    
+    /// Source address of the INVITE
+    pub source: SocketAddr,
+    
+    /// Caller information extracted from the request
+    pub caller_info: CallerInfo,
+    
+    /// SDP offer (if present in the INVITE)
+    pub sdp_offer: Option<String>,
+}
+
+/// Caller information extracted from SIP headers
+#[derive(Debug, Clone)]
+pub struct CallerInfo {
+    /// From header (caller identity)
+    pub from: String,
+    
+    /// To header (called party)
+    pub to: String,
+    
+    /// Call-ID header
+    pub call_id: String,
+    
+    /// Contact header (if present)
+    pub contact: Option<String>,
+    
+    /// User-Agent header (if present)  
+    pub user_agent: Option<String>,
+}
+
+/// Call decision result from ServerManager policy
+#[derive(Debug, Clone)]
+pub enum CallDecision {
+    /// Accept the call
+    Accept,
+    
+    /// Reject the call with a specific status code and reason
+    Reject { status_code: StatusCode, reason: Option<String> },
+    
+    /// Defer the decision (keep ringing, decide later)
+    Defer,
+}
+
+/// Notification trait for ServerManager to receive call events
+#[async_trait]
+pub trait IncomingCallNotification: Send + Sync {
+    /// Called when a new incoming call is received
+    async fn on_incoming_call(&self, event: IncomingCallEvent) -> CallDecision;
+    
+    /// Called when a call is terminated by the remote party (BYE received)
+    async fn on_call_terminated_by_remote(&self, session_id: SessionId, call_id: String);
+    
+    /// Called when a call is ended by the server
+    async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String);
 } 

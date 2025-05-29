@@ -505,6 +505,34 @@ impl TransactionManager {
             dest_map.remove(tx_id);
         }
         
+        // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            if let Some(subscriber_ids) = tx_to_subs.remove(tx_id) {
+                debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+                
+                // Also clean up reverse mappings
+                drop(tx_to_subs); // Release lock before acquiring another
+                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+                
+                for subscriber_id in subscriber_ids {
+                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
+                        tx_list.retain(|id| id != tx_id);
+                        
+                        // If subscriber has no more transactions, remove it entirely
+                        if tx_list.is_empty() {
+                            sub_to_txs.remove(&subscriber_id);
+                            debug!(%tx_id, subscriber_id, "Removed empty subscriber mapping");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Unregister from timer manager
+        self.timer_manager.unregister_transaction(tx_id).await;
+        debug!(%tx_id, "Unregistered transaction from timer manager");
+        
         if terminated {
             // Broadcast a transaction terminated event
             let event = TransactionEvent::TransactionTerminated { 
@@ -548,6 +576,7 @@ impl TransactionManager {
     /// * `Result<usize>` - The number of transactions cleaned up
     pub async fn cleanup_terminated_transactions(&self) -> Result<usize> {
         let mut cleaned_count = 0;
+        let mut terminated_transaction_ids = Vec::new();
         
         // Cleanup client transactions
         {
@@ -561,6 +590,7 @@ impl TransactionManager {
             for key in terminated_keys {
                 debug!(%key, "Removing terminated client transaction");
                 client_txs.remove(&key);
+                terminated_transaction_ids.push(key);
                 cleaned_count += 1;
             }
         }
@@ -577,6 +607,7 @@ impl TransactionManager {
             for key in terminated_keys {
                 debug!(%key, "Removing terminated server transaction");
                 server_txs.remove(&key);
+                terminated_transaction_ids.push(key);
                 cleaned_count += 1;
             }
         }
@@ -597,6 +628,47 @@ impl TransactionManager {
                 debug!(%key, "Removing orphaned destination entry");
                 dest_map.remove(&key);
             }
+        }
+        
+        // **CRITICAL FIX**: Clean up subscriber mappings for all terminated transactions
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            let mut subscriber_ids_to_clean = Vec::new();
+            
+            for tx_id in &terminated_transaction_ids {
+                if let Some(subscriber_ids) = tx_to_subs.remove(tx_id) {
+                    debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+                    subscriber_ids_to_clean.extend(subscriber_ids);
+                }
+            }
+            
+            drop(tx_to_subs); // Release lock before acquiring another
+            
+            // Clean up reverse mappings
+            if !subscriber_ids_to_clean.is_empty() {
+                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+                
+                for subscriber_id in subscriber_ids_to_clean {
+                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
+                        let original_len = tx_list.len();
+                        tx_list.retain(|tx_id| !terminated_transaction_ids.contains(tx_id));
+                        
+                        // If subscriber has no more transactions, remove it entirely
+                        if tx_list.is_empty() {
+                            sub_to_txs.remove(&subscriber_id);
+                            debug!(subscriber_id, "Removed empty subscriber mapping");
+                        } else if tx_list.len() != original_len {
+                            debug!(subscriber_id, old_count = original_len, new_count = tx_list.len(), "Cleaned up subscriber transaction list");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Unregister terminated transactions from timer manager
+        for tx_id in &terminated_transaction_ids {
+            self.timer_manager.unregister_transaction(tx_id).await;
+            debug!(%tx_id, "Unregistered terminated transaction from timer manager");
         }
         
         // Also manually check for client transactions that look terminated but don't have the state set

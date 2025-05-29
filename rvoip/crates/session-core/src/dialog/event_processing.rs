@@ -381,58 +381,27 @@ impl DialogManager {
         // If we get here, this is an initial INVITE (no existing dialog found)
         debug!("No existing dialog found - treating as initial INVITE");
         
-        // **NEW: AUTOMATIC CALL HANDLING WITH LIFECYCLE COORDINATOR**
-        // Create a session ID for this new call
-        let session_id = SessionId::new();
-        debug!("Created new session {} for INVITE transaction {}", session_id, tx_key);
+        // **NEW: AUTOMATIC CALL HANDLING WITHOUT LIFECYCLE COORDINATOR**
+        // The call lifecycle coordination is now handled in SessionManager layer
+        // DialogManager only does pure SIP dialog protocol handling
+        debug!("Processing initial INVITE - creating dialog at protocol layer");
         
-        // **CRITICAL: Start automatic call lifecycle coordination**
-        // This will handle: 180 Ringing → 200 OK with SDP → ACK handling
-        if let Some(call_coordinator) = &self.call_lifecycle_coordinator {
-            debug!("Starting automatic call lifecycle coordination for session {}", session_id);
-            
-            let tx_key_clone = tx_key.clone();
-            let request_clone = request.clone();
-            let session_id_str = session_id.to_string();
-            let coordinator = call_coordinator.clone();
-            
-            // Spawn the call handling task
-            tokio::spawn(async move {
-                if let Err(e) = coordinator.handle_incoming_invite(
-                    &tx_key_clone,
-                    &request_clone,
-                    &session_id_str,
-                ).await {
-                    error!(
-                        transaction_id = %tx_key_clone,
-                        session_id = %session_id_str,
-                        error = %e,
-                        "❌ Failed to handle incoming INVITE call flow"
-                    );
-                } else {
-                    debug!(
-                        transaction_id = %tx_key_clone,
-                        session_id = %session_id_str,
-                        "✅ INVITE call flow handled successfully"
-                    );
-                }
-            });
-        } else {
-            warn!("No call lifecycle coordinator available - call will not be automatically handled");
-        }
+        // **REMOVED**: call_lifecycle_coordinator handling - now in SessionManager layer
+        // The SessionManager will coordinate the complete call flow
+        warn!("Call lifecycle coordination moved to SessionManager - dialog layer only handles protocol");
         
         // The transaction is already created by transaction-core
-        // The call lifecycle coordinator will handle all responses
-        debug!("INVITE transaction {} already created by transaction-core", tx_key);
+        // SessionManager will handle the complete call coordination
+        debug!("INVITE transaction {} ready for session-level coordination", tx_key);
         
-        // Emit event for new INVITE (session-core can coordinate session creation)
+        // Emit event for new INVITE (SessionManager can coordinate session creation)
         self.event_bus.publish(crate::events::SessionEvent::Custom {
-            session_id: session_id.clone(),
+            session_id: SessionId::new(),
             event_type: "invite_received".to_string(),
             data: serde_json::json!({
                 "transaction_id": tx_key.to_string(),
-                "session_id": session_id.to_string(),
-                "auto_handling": self.call_lifecycle_coordinator.is_some(),
+                "session_id": SessionId::new().to_string(),
+                "auto_handling": false, // Now handled by SessionManager
             }),
         });
     }
@@ -455,47 +424,17 @@ impl DialogManager {
                     });
 
                 if let Some(session_id) = session_id {
-                    // **CRITICAL: Use call lifecycle coordinator for complete BYE handling**
-                    if let Some(call_coordinator) = &self.call_lifecycle_coordinator {
-                        debug!("Starting automatic BYE lifecycle coordination for session {}", session_id);
-                        
-                        let tx_key_clone = tx_key.clone();
-                        let request_clone = request.clone();
-                        let session_id_str = session_id.to_string();
-                        let coordinator = call_coordinator.clone();
-                        
-                        // Spawn the BYE handling task
-                        tokio::spawn(async move {
-                            if let Err(e) = coordinator.handle_incoming_bye(
-                                &tx_key_clone,
-                                &request_clone,
-                                &session_id_str,
-                            ).await {
-                                error!(
-                                    transaction_id = %tx_key_clone,
-                                    session_id = %session_id_str,
-                                    error = %e,
-                                    "❌ Failed to handle incoming BYE call termination"
-                                );
-                            } else {
-                                debug!(
-                                    transaction_id = %tx_key_clone,
-                                    session_id = %session_id_str,
-                                    "✅ BYE call termination handled successfully"
-                                );
-                            }
-                        });
+                    // **REMOVED**: call_lifecycle_coordinator handling - now in SessionManager layer
+                    // The SessionManager will coordinate the complete call termination
+                    warn!("BYE lifecycle coordination moved to SessionManager - dialog layer only handles protocol");
+                    
+                    // **FALLBACK: Manual BYE response (since coordination moved to SessionManager)**
+                    let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
+                    
+                    if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
+                        error!("Failed to send 200 OK response to BYE: {}", e);
                     } else {
-                        warn!("No call lifecycle coordinator available - using fallback BYE handling");
-                        
-                        // **FALLBACK: Manual BYE response (if no coordinator)**
-                        let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
-                        
-                        if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
-                            error!("Failed to send 200 OK response to BYE: {}", e);
-                        } else {
-                            debug!("✅ Sent 200 OK response to BYE request (fallback)");
-                        }
+                        debug!("✅ Sent 200 OK response to BYE request (dialog layer)");
                     }
                 } else {
                     warn!("No session found for BYE request - using basic BYE handling");
