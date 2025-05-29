@@ -322,87 +322,122 @@ After Fix:  ✅ Found media session for cleanup → 🛑 Media flow terminated s
 
 ---
 
-## 🚀 PHASE 7.3: ENHANCED AUDIO CAPABILITIES ⏳ **IMMEDIATE NEXT PRIORITY**
+## 🚀 PHASE 7.3: MULTI-SESSION AUDIO BRIDGING ⚡ **STARTING NOW!**
 
-### 🎯 **CRITICAL AUDIO ENHANCEMENTS - IMMEDIATE IMPLEMENTATION NEEDED**
+### 🎯 **TRUE SIP SERVER FUNCTIONALITY - B2BUA MEDIA BRIDGING**
 
-**Status**: ⏳ **IMMEDIATE PRIORITY** - These 4 items are essential for a complete audio system
+**Status**: ⚡ **STARTING NOW** - Transform into a production SIP server with multi-session audio bridging
+
+**Correct SIP Server Architecture**: **B2BUA (Back-to-Back User Agent)** with **Media Bridging**
+```
+UAC A ↔ UAS (session-core) ↔ UAC B
+     └─── Audio Bridging ────┘
+```
+
+**Core Functionality**:
+- ✅ **Multi-Session Management**: Handle multiple concurrent UAC connections
+- ✅ **Session Pairing Logic**: ServerManager decides which sessions to bridge
+- ✅ **RTP Audio Routing**: Forward RTP packets between paired sessions
+- ✅ **Bidirectional Media Flow**: UAC A → Server → UAC B (and vice versa)
+
+**RFC 3261 Compliance**: This is the **standard SIP server pattern** used by Asterisk, FreeSWITCH, Kamailio
 
 ### 🔧 **IMPLEMENTATION PLAN**
 
-#### 7.3.1 Bidirectional Audio Flow ⏳ **CRITICAL**
-- [ ] **Incoming RTP Packet Handling** - Process received RTP packets from remote endpoints
-  - [ ] Handle incoming RTP packets from remote endpoints
-  - [ ] Decode audio payloads (PCMU/G.711 μ-law)
-  - [ ] Implement jitter buffer for packet ordering and timing
-  - [ ] Add silence detection and comfort noise generation
-  - [ ] Handle packet loss and out-of-order delivery
-  - [ ] Implement proper audio playback pipeline
+#### 7.3.1 Multi-Session Architecture ⚡ **CRITICAL - FOUNDATION**
+- [ ] **Multiple Concurrent Session Handling** - Support many UAC connections
+  - [ ] Enhance SessionManager to track multiple active sessions simultaneously
+  - [ ] Implement session identification and lookup by Call-ID, From/To tags
+  - [ ] Add session state tracking for bridging (unbridged, paired, bridged)
+  - [ ] Support session lifecycle management for multiple concurrent calls
+  - [ ] Add session capacity management and limits
 
-- [ ] **Full Duplex Audio** - Simultaneous send and receive
-  - [ ] Coordinate simultaneous audio transmission and reception
-  - [ ] Handle audio mixing for full-duplex communication
-  - [ ] Implement proper audio synchronization
-  - [ ] Add echo cancellation to prevent feedback loops
+- [ ] **Session Pairing Data Structures** - Track which sessions are connected
+  - [ ] Create SessionBridge struct to represent paired sessions
+  - [ ] Implement session pairing lookup tables (session_id → bridge_id)
+  - [ ] Add bridge state management (establishing, active, terminating)
+  - [ ] Support one-to-one session bridging initially
+  - [ ] Design for future multi-party bridging capabilities
 
-#### 7.3.2 Real Audio Content ⏳ **CRITICAL**
-- [ ] **Replace Test Tone with Real Audio** - Move beyond 440Hz test tone
-  - [ ] Implement microphone input capture
-  - [ ] Add audio file playback capabilities
-  - [ ] Support multiple audio sources (mic, file, generated)
-  - [ ] Implement audio source switching and management
-  - [ ] Add audio level monitoring and automatic gain control
+#### 7.3.2 Session Bridging Logic ⚡ **CRITICAL - DECISION MAKING**
+- [ ] **ServerManager Bridging Decisions** - Policy for connecting sessions
+  - [ ] Add `should_bridge_sessions()` policy method to ServerManager
+  - [ ] Implement session pairing algorithms (first-available, directed calling)
+  - [ ] Add session bridging configuration (auto-bridge, manual bridge)
+  - [ ] Support different bridging policies per session type
+  - [ ] Add session compatibility checking before bridging
 
-- [ ] **Audio Input/Output Management** - Real audio device integration
-  - [ ] Integrate with system audio devices (microphone, speakers)
-  - [ ] Handle audio device enumeration and selection
-  - [ ] Implement audio device hot-plugging support
-  - [ ] Add audio format conversion and resampling
-  - [ ] Support multiple audio formats and sample rates
+- [ ] **Session Bridge Coordination** - Manage bridge lifecycle
+  - [ ] Add `bridge_sessions()` method to SessionManager
+  - [ ] Implement bridge establishment coordination
+  - [ ] Add bridge termination when either session ends
+  - [ ] Support bridge transfer and re-pairing
+  - [ ] Handle bridge failure and fallback scenarios
 
-#### 7.3.3 Audio Processing Pipeline ⏳ **CRITICAL**
-- [ ] **Echo Cancellation** - Essential for full-duplex communication
-  - [ ] Implement acoustic echo cancellation (AEC)
-  - [ ] Add adaptive filtering for echo removal
-  - [ ] Handle double-talk detection and suppression
-  - [ ] Implement comfort noise generation during silence
-  - [ ] Add echo suppression fallback mechanisms
+#### 7.3.3 RTP Audio Routing ⚡ **CRITICAL - MEDIA FORWARDING**
+- [ ] **RTP Packet Forwarding** - Route audio between sessions
+  - [ ] Implement RTP packet reception from UAC sessions
+  - [ ] Add RTP packet forwarding to paired session
+  - [ ] Create AudioBridge component for packet routing
+  - [ ] Support bidirectional RTP forwarding (A→B and B→A)
+  - [ ] Add RTP packet validation and filtering
 
-- [ ] **Audio Quality Enhancement** - Professional audio processing
-  - [ ] Implement automatic gain control (AGC)
-  - [ ] Add noise suppression and reduction
-  - [ ] Implement voice activity detection (VAD)
-  - [ ] Add audio compression and limiting
-  - [ ] Support audio quality monitoring and metrics
+- [ ] **Media Session Bridge Coordination** - Link media sessions
+  - [ ] Coordinate MediaManager to bridge media sessions
+  - [ ] Implement media session pairing for RTP forwarding
+  - [ ] Add media codec compatibility checking between sessions
+  - [ ] Support codec transcoding between different session codecs
+  - [ ] Handle media session cleanup when bridge terminates
 
-#### 7.3.4 Advanced Codec Negotiation ⏳ **CRITICAL**
-- [ ] **Multi-Codec Support** - Beyond basic PCMU
-  - [ ] Implement Opus codec support (high-quality wideband)
-  - [ ] Add PCMA (G.711 A-law) codec support
-  - [ ] Support G.722 (wideband) codec
-  - [ ] Implement dynamic payload type handling
-  - [ ] Add codec preference ordering and selection
+#### 7.3.4 Call Bridging Protocols ⚡ **CRITICAL - SIP COORDINATION**
+- [ ] **SIP Call Flow for Bridging** - Proper SIP signaling
+  - [ ] Handle INVITE from UAC A (creates Session A)
+  - [ ] Handle INVITE from UAC B (creates Session B)
+  - [ ] Coordinate 200 OK responses for both sessions
+  - [ ] Establish media bridging after both sessions connected
+  - [ ] Handle BYE from either session (terminates bridge)
 
-- [ ] **Intelligent Codec Selection** - Adaptive codec negotiation
-  - [ ] Implement bandwidth-aware codec selection
-  - [ ] Add network condition monitoring for codec adaptation
-  - [ ] Support codec switching during calls (re-negotiation)
-  - [ ] Implement codec quality vs. bandwidth optimization
-  - [ ] Add fallback codec mechanisms for compatibility
+- [ ] **Advanced Bridge Scenarios** - Production SIP server features
+  - [ ] Support call hold/unhold with bridge pause/resume
+  - [ ] Implement call transfer between bridges
+  - [ ] Add early media bridging (during ringing)
+  - [ ] Support session re-INVITE with bridge updates
+  - [ ] Handle session timeout and bridge cleanup
 
-### 🎯 **SUCCESS CRITERIA**
+### 🎯 **SUCCESS CRITERIA - PRODUCTION SIP SERVER**
 
 **Phase 7.3 will be complete when**:
-1. ✅ **Bidirectional Audio**: Can receive, decode, and play incoming RTP packets
-2. ✅ **Real Audio Content**: Can capture from microphone and play real audio (not just test tones)
-3. ✅ **Audio Processing**: Has echo cancellation, noise suppression, and AGC working
-4. ✅ **Advanced Codecs**: Supports multiple codecs with intelligent negotiation
+1. ✅ **Multi-Session Support**: Can handle multiple concurrent UAC connections
+2. ✅ **Session Bridging**: ServerManager can pair and bridge two sessions
+3. ✅ **RTP Audio Routing**: Audio flows bidirectionally between bridged UACs
+4. ✅ **Call Flow Integration**: Complete INVITE→Bridge→Audio→BYE flow working
 
 **Test Validation**:
-- [ ] Two-way audio conversation test (both parties can hear each other)
-- [ ] Real microphone input and speaker output test
-- [ ] Echo cancellation effectiveness test
-- [ ] Multi-codec negotiation test (Opus, PCMU, PCMA, G.722)
+- [ ] Two SIPp UACs connect to server simultaneously
+- [ ] Server bridges the two sessions automatically
+- [ ] Audio flows from UAC A → Server → UAC B
+- [ ] Audio flows from UAC B → Server → UAC A
+- [ ] Either UAC can terminate, ending the bridge
+
+### 🏆 **ARCHITECTURAL ACHIEVEMENT: TRUE PRODUCTION SIP SERVER**
+
+**Call Flow Example**:
+```
+1. UAC A → INVITE → UAS (Session A created, state: unbridged)
+2. UAC B → INVITE → UAS (Session B created, state: unbridged)
+3. ServerManager: "Bridge Session A ↔ Session B"
+4. SessionManager: Establishes RTP forwarding bridge
+5. Audio: UAC A ↔ Session A ↔ Bridge ↔ Session B ↔ UAC B
+6. Either UAC sends BYE → Bridge terminates → Both sessions end
+```
+
+**Production SIP Server Capabilities**:
+- ✅ **B2BUA Architecture**: Act as intermediary between UACs
+- ✅ **Media Bridging**: Forward RTP between sessions
+- ✅ **Session Coordination**: Manage multiple concurrent calls
+- ✅ **Call Routing**: Intelligent session pairing and bridging
+
+**This transforms session-core into a true production SIP server foundation!**
 
 ---
 
@@ -526,7 +561,7 @@ After Fix:  ✅ Found media session for cleanup → 🛑 Media flow terminated s
 - **Phase 7.1 - Real RTP Sessions**: ✅ COMPLETE (4/4 tasks)
 - **Phase 7.2 - RTP Media Transmission**: ✅ COMPLETE (4/4 tasks)
 - **Phase 7.2.1 - Media Session Termination Fix**: ✅ **COMPLETE SUCCESS!** (2/2 tasks)
-- **Phase 7.3 - Enhanced Audio Capabilities**: ⏳ **IMMEDIATE NEXT PRIORITY** (0/4 tasks)
+- **Phase 7.3 - Multi-Session Audio Bridging**: ⏳ **IMMEDIATE NEXT PRIORITY** (0/4 tasks)
 - **Phase 7.4 - Architectural Refactoring**: ⏳ **CRITICAL PRIORITY** (0/4 tasks)
 
 ### **Total Progress**: 88/100 tasks (88.0%) - **COMPLETE SIP SERVER WITH PROPER CALL LIFECYCLE AND MEDIA CLEANUP!**
@@ -549,7 +584,7 @@ After Fix:  ✅ Found media session for cleanup → 🛑 Media flow terminated s
 **🎯 This is now a production-ready SIP server foundation with complete call lifecycle management!**
 
 **Immediate Next Steps**:
-1. **Phase 7.3**: Implement enhanced audio capabilities (bidirectional audio, real audio content, audio processing, advanced codecs)
+1. **Phase 7.3**: Implement multi-session audio bridging
 2. **Phase 7.4**: Architectural refactoring (proper ServerManager/SessionManager separation)
 
 ---
@@ -560,12 +595,12 @@ After Fix:  ✅ Found media session for cleanup → 🛑 Media flow terminated s
 
 We now have a **complete, working SIP server with proper call lifecycle management**! You have **two excellent paths forward**:
 
-### **Option A: Enhanced Audio Capabilities (Phase 7.3) ⚡ RECOMMENDED**
+### **Option A: Multi-Session Audio Bridging (Phase 7.3) ⚡ RECOMMENDED**
 **🎵 Make it a full-featured audio system**
-- **Bidirectional Audio**: Process incoming RTP packets, decode and play audio
-- **Real Audio Content**: Replace test tone with microphone input and audio files  
-- **Audio Processing**: Echo cancellation, noise suppression, automatic gain control
-- **Advanced Codecs**: Opus, PCMA, G.722 with intelligent negotiation
+- **Multi-Session Management**: Handle multiple concurrent UAC connections
+- **Session Pairing Logic**: ServerManager decides which sessions to bridge
+- **RTP Audio Routing**: Forward RTP packets between paired sessions
+- **Bidirectional Media Flow**: UAC A → Server → UAC B (and vice versa)
 
 **Why This Is Exciting**: Transform from a test tone generator to a real communication system!
 
@@ -578,22 +613,22 @@ We now have a **complete, working SIP server with proper call lifecycle manageme
 
 **Why This Is Important**: Fixes architectural violations for maintainable, scalable code.
 
-### **🎯 MY RECOMMENDATION: Phase 7.3 (Enhanced Audio)**
+### **🎯 MY RECOMMENDATION: Phase 7.3 (Multi-Session Audio Bridging)**
 
 **Rationale**: 
-1. **User Impact**: Audio capabilities provide immediate, tangible value
+1. **User Impact**: Multi-session audio bridging provides immediate, tangible value
 2. **Foundation Complete**: Core architecture is solid and working
 3. **Natural Next Step**: Build on the audio transmission success
 4. **Architectural Issues**: Can be addressed later without breaking functionality
 
 **Phase 7.3 will give you**:
-- **Two-way audio conversations** (both parties can hear each other)
-- **Real microphone input** and speaker output  
-- **Professional audio quality** with echo cancellation and noise suppression
-- **Multiple codec support** for compatibility and quality
+- **Multi-session audio bridging** (multiple UAC connections)
+- **Real RTP port allocation** and SDP negotiation
+- **Bidirectional media flow** establishment
+- **Proper media termination** when calls end
 
 ### **What Would You Like To Tackle Next?**
-- **A**: Enhanced Audio Capabilities (🎵 full communication system)
+- **A**: Multi-Session Audio Bridging (🎵 full communication system)
 - **B**: Architectural Refactoring (🏗️ perfect code structure)
 - **C**: Something else specific you'd like to focus on?
 
