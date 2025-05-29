@@ -80,16 +80,17 @@ create_test_audio() {
 # Function to start bridge server
 start_bridge_server() {
     local server_log="$RESULTS_DIR/bridge_server.log"
+    local server_example="${BRIDGE_SERVER:-bridge_server}"
     
-    printf "${YELLOW}Starting Bridge Server...${NC}\n"
+    printf "${YELLOW}Starting Bridge Server ($server_example)...${NC}\n"
     
     # Kill any existing server
-    pkill -f "bridge_server" 2>/dev/null || true
+    pkill -f "$server_example" 2>/dev/null || true
     sleep 1
     
     # Start the bridge server in background
     cd "$(dirname "$SCENARIOS_DIR")"
-    cargo run --example bridge_server > "$server_log" 2>&1 &
+    cargo run --example "$server_example" > "$server_log" 2>&1 &
     local server_pid=$!
     
     # Wait for server to start
@@ -114,6 +115,7 @@ start_bridge_server() {
 # Function to stop bridge server
 stop_bridge_server() {
     local pid_file="$RESULTS_DIR/server.pid"
+    local server_example="${BRIDGE_SERVER:-bridge_server}"
     
     if [ -f "$pid_file" ]; then
         local server_pid=$(cat "$pid_file")
@@ -124,7 +126,7 @@ stop_bridge_server() {
     fi
     
     # Kill any remaining bridge servers
-    pkill -f "bridge_server" 2>/dev/null || true
+    pkill -f "$server_example" 2>/dev/null || true
 }
 
 # Function to check if server is running
@@ -453,6 +455,33 @@ case "${1:-all}" in
         start_bridge_server
         sleep 2
         run_bridge_test "quick_bridge_only" 10
+        ;;
+    "multi")
+        echo "Testing multi-session bridge demo..."
+        export BRIDGE_SERVER="multi_session_bridge_demo"
+        main
+        ;;
+    "help")
+        echo "Bridge Test Suite Usage:"
+        echo ""
+        echo "  ./run_bridge_tests.sh [command]"
+        echo ""
+        echo "Commands:"
+        echo "  all     - Run complete bridge test suite (default)"
+        echo "  setup   - Setup test environment only"
+        echo "  server  - Start bridge server and wait"
+        echo "  quick   - Run quick 10-second test"
+        echo "  multi   - Test multi-session bridge demo"
+        echo "  help    - Show this help"
+        echo ""
+        echo "Environment Variables:"
+        echo "  BRIDGE_SERVER - Choose server example (default: bridge_server)"
+        echo "                  Options: bridge_server, multi_session_bridge_demo"
+        echo ""
+        echo "Examples:"
+        echo "  ./run_bridge_tests.sh                    # Test 2-way bridge"
+        echo "  ./run_bridge_tests.sh multi              # Test N-way conference"
+        echo "  BRIDGE_SERVER=bridge_server ./run_bridge_tests.sh  # Explicit 2-way"
         ;;
     "all"|*)
         main

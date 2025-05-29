@@ -1,0 +1,97 @@
+----------------------------------------------- 2025-05-29 13:34:36.164305
+UDP message sent (500 bytes):
+
+INVITE sip:test@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-41280-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   129
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-05-29 13:34:36.371127
+UDP message received [213] bytes :
+
+SIP/2.0 100 Trying
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK-41280-1-0
+
+
+----------------------------------------------- 2025-05-29 13:34:36.673334
+UDP message received [431] bytes :
+
+SIP/2.0 200 OK
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK-41280-1-0
+Content-Length: 170
+Content-Type: application/sdp
+
+v=0
+o=server 1748550876 1 IN IP4 127.0.0.1
+s=Media Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-05-29 13:34:36.673495
+UDP message sent (330 bytes):
+
+ACK sip:test@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-41280-1-4
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Length: 0
+
+
+----------------------------------------------- 2025-05-29 13:34:38.677114
+UDP message sent (319 bytes):
+
+BYE sip:test@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-41280-1-6
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 2 BYE
+Max-Forwards: 70
+Contact: <sip:sipp@127.0.0.1:5061;transport=UDP>
+Content-Length: 0
+
+
+----------------------------------------------- 2025-05-29 13:34:38.680666
+UDP message received [230] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-41280-1-6
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=41280SIPpTag001
+To: test <sip:test@127.0.0.1:5060>
+Call-ID: 1-41280@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+

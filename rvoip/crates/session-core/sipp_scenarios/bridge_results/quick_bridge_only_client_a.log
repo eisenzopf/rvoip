@@ -1,0 +1,98 @@
+----------------------------------------------- 2025-05-29 13:39:28.502374
+UDP message sent (509 bytes):
+
+INVITE sip:service@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-43456-1-0
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Type: application/sdp
+Content-Length:   129
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2025-05-29 13:39:28.707625
+UDP message received [219] bytes :
+
+SIP/2.0 100 Trying
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK-43456-1-0
+
+
+----------------------------------------------- 2025-05-29 13:39:29.010423
+UDP message received [437] bytes :
+
+SIP/2.0 200 OK
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK-43456-1-0
+Content-Length: 170
+Content-Type: application/sdp
+
+v=0
+o=server 1748551169 1 IN IP4 127.0.0.1
+s=Media Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-05-29 13:39:29.010462
+UDP message sent (339 bytes):
+
+ACK sip:service@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-43456-1-5
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Length: 0
+
+
+----------------------------------------------- 2025-05-29 13:39:39.012327
+UDP message sent (339 bytes):
+
+BYE sip:service@127.0.0.1:5060 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-43456-1-7
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: Performance Test
+Content-Length: 0
+
+
+----------------------------------------------- 2025-05-29 13:39:39.015127
+UDP message received [236] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-43456-1-7
+From: sipp <sip:sipp@127.0.0.1:5061>;tag=43456SIPpTag001
+To: service <sip:service@127.0.0.1:5060>
+Call-ID: 1-43456@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+

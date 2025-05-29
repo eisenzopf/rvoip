@@ -40,6 +40,7 @@ use tracing::{info, debug, warn, error};
 use tokio::signal;
 use tokio::time::{sleep, timeout};
 use tokio::sync::{RwLock, mpsc};
+use async_trait::async_trait;
 
 use rvoip_session_core::{
     SessionManager, SessionConfig,
@@ -47,7 +48,7 @@ use rvoip_session_core::{
     events::EventBus,
     media::AudioCodecType,
     SessionId,
-    api::{create_full_server_manager, ServerConfig, TransportProtocol},
+    api::server::{IncomingCallNotification, IncomingCallEvent, CallDecision},
 };
 use rvoip_transaction_core::TransactionManager;
 use rvoip_sip_transport::UdpTransport;
@@ -260,14 +261,14 @@ impl BridgeCallHandler {
     }
 }
 
-#[async_trait::async_trait]
-impl rvoip_session_core::api::IncomingCallNotification for BridgeCallHandler {
+#[async_trait]
+impl IncomingCallNotification for BridgeCallHandler {
     async fn on_incoming_call(
         &self,
-        event: rvoip_session_core::api::IncomingCallEvent,
-    ) -> rvoip_session_core::api::CallDecision {
+        event: IncomingCallEvent,
+    ) -> CallDecision {
         let caller_info = format!("{}@{}", 
-            event.caller_info.from_uri,
+            event.caller_info.from,
             event.source.ip()
         );
         
@@ -285,7 +286,7 @@ impl rvoip_session_core::api::IncomingCallNotification for BridgeCallHandler {
             }
         });
         
-        rvoip_session_core::api::CallDecision::Accept
+        CallDecision::Accept
     }
     
     async fn on_call_terminated_by_remote(
@@ -312,7 +313,7 @@ impl rvoip_session_core::api::IncomingCallNotification for BridgeCallHandler {
 async fn create_bridge_server() -> Result<(Arc<SessionManager>, Arc<BridgeCoordinator>)> {
     // Create TransactionManager with real transport
     let (transport, transport_rx) = UdpTransport::bind("127.0.0.1:5060".parse().unwrap(), None).await?;
-    let (transaction_manager, _event_rx) = TransactionManager::new(
+    let (transaction_manager, event_rx) = TransactionManager::new(
         Arc::new(transport),
         transport_rx,
         Some(1000)
@@ -320,7 +321,8 @@ async fn create_bridge_server() -> Result<(Arc<SessionManager>, Arc<BridgeCoordi
     let transaction_manager = Arc::new(transaction_manager);
     
     // Create EventBus
-    let event_bus = EventBus::new(1000).await?;
+    let event_bus = EventBus::new(1000).await
+        .expect("Failed to create EventBus");
     
     // Create SessionConfig
     let config = SessionConfig {
@@ -339,6 +341,18 @@ async fn create_bridge_server() -> Result<(Arc<SessionManager>, Arc<BridgeCoordi
         config,
         event_bus,
     ).await?);
+    
+    // **CRITICAL FIX**: Forward transaction events to session manager
+    let session_manager_clone = session_manager.clone();
+    tokio::spawn(async move {
+        let mut event_rx = event_rx;
+        while let Some(transaction_event) = event_rx.recv().await {
+            if let Err(e) = session_manager_clone.handle_transaction_event(transaction_event).await {
+                error!("Failed to handle transaction event: {}", e);
+            }
+        }
+        warn!("Transaction event forwarding loop terminated");
+    });
     
     // Create bridge coordinator
     let coordinator = Arc::new(BridgeCoordinator::new(session_manager.clone()));
