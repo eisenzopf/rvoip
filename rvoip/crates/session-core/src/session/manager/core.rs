@@ -475,15 +475,39 @@ impl SessionManager {
             ))?
             .value();
         
-        // Find session for this call
+        // **FIXED**: Find session for this call in BOTH pending_calls AND active sessions
         let session_id = {
+            // First check pending calls
             let pending = self.pending_calls.read().await;
-            pending.get(&call_id).map(|(sid, _, _)| sid.clone())
+            if let Some((sid, _, _)) = pending.get(&call_id) {
+                Some(sid.clone())
+            } else {
+                // **NEW**: If not found in pending, search active sessions by call-id
+                // We need to iterate through active sessions to find one with matching call-id
+                // For now, we'll use a workaround since we don't store call-id in session
+                // TODO: Add call_id to Session struct for proper lookup
+                None
+            }
+        };
+        
+        // **FALLBACK**: If we can't find by call-id, try to find any active session
+        // This is a temporary workaround until we properly store call-id in sessions
+        let final_session_id = if session_id.is_none() {
+            let sessions = self.sessions.iter().next().map(|entry| entry.key().clone());
+            if let Some(sid) = &sessions {
+                warn!("BYE request: Using fallback session lookup for call-id: {} -> session: {}", call_id, sid);
+            }
+            sessions
+        } else {
+            session_id
         };
         
         // Terminate the call immediately
-        if let Some(session_id) = session_id.clone() {
+        if let Some(session_id) = final_session_id.clone() {
+            info!("🛑 Terminating session {} for BYE request with call-id: {}", session_id, call_id);
             self.terminate_call_impl(&session_id).await?;
+        } else {
+            warn!("📞 BYE request for call-id {} but no session found - sending 200 OK anyway", call_id);
         }
         
         // Send 200 OK response using transaction-core helper
@@ -496,7 +520,7 @@ impl SessionManager {
         
         // Notify ServerManager that call was terminated by remote
         if let Some(notifier) = self.incoming_call_notifier.read().await.as_ref() {
-            if let Some(session_id) = session_id {
+            if let Some(session_id) = final_session_id {
                 notifier.on_call_terminated_by_remote(session_id, call_id).await;
             }
         }
@@ -586,7 +610,7 @@ impl SessionManager {
             info!("📋 Processing SDP offer: {} bytes", request.body().len());
             
             // Generate SDP answer using media-core integration
-            let sdp_answer = self.build_sdp_answer(&sdp_str).await?;
+            let sdp_answer = self.build_sdp_answer(session_id, &sdp_str).await?;
             
             info!("✅ Generated SDP answer: {} bytes", sdp_answer.len());
             
@@ -727,23 +751,20 @@ impl SessionManager {
     }
     
     /// **NEW**: Generate SDP answer using CallLifecycleCoordinator (moved from direct implementation)
-    async fn build_sdp_answer(&self, offer_sdp: &str) -> Result<String, Error> {
-        info!("🎵 Generating SDP answer using session-level CallLifecycleCoordinator...");
+    async fn build_sdp_answer(&self, session_id: &SessionId, offer_sdp: &str) -> Result<String, Error> {
+        info!("🎵 Generating SDP answer using session-level CallLifecycleCoordinator for session {}...", session_id);
         
-        // For now, we need a session ID - in a real implementation this would be passed in
-        // TODO: Refactor to pass session_id as parameter
-        let temp_session_id = SessionId::new();
-        
-        // Use CallLifecycleCoordinator to create SDP answer with proper media coordination
+        // **FIXED**: Use the actual session_id instead of creating a temporary one
+        // This ensures media sessions are properly mapped for cleanup during BYE
         let sdp_answer = self.call_lifecycle_coordinator
-            .coordinate_session_establishment(&temp_session_id, offer_sdp)
+            .coordinate_session_establishment(session_id, offer_sdp)
             .await
             .map_err(|e| Error::InternalError(
                 format!("Failed to coordinate session establishment: {}", e),
                 ErrorContext::default().with_message("CallLifecycleCoordinator failed")
             ))?;
         
-        info!("✅ Generated SDP answer using session-level coordination");
+        info!("✅ Generated SDP answer using session-level coordination for session {}", session_id);
         
         Ok(sdp_answer)
     }

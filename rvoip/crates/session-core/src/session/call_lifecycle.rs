@@ -144,7 +144,14 @@ impl CallLifecycleCoordinator {
         );
 
         if let Some(media_session_id) = self.media_manager.get_media_session(session_id).await {
+            info!(
+                session_id = %session_id,
+                media_session_id = %media_session_id,
+                "📍 Found media session for cleanup"
+            );
+            
             // Terminate media flow (stops audio transmission)
+            info!(session_id = %session_id, "🛑 Attempting to terminate media flow...");
             if let Err(e) = self.media_manager.terminate_media_flow(&media_session_id).await {
                 warn!(
                     session_id = %session_id,
@@ -161,6 +168,7 @@ impl CallLifecycleCoordinator {
             }
 
             // Stop the media session completely
+            info!(session_id = %session_id, "🧹 Attempting to stop media session completely...");
             if let Err(e) = self.media_manager.stop_media(&media_session_id, "Session termination".to_string()).await {
                 warn!(
                     session_id = %session_id,
@@ -176,11 +184,16 @@ impl CallLifecycleCoordinator {
                 );
             }
         } else {
-            debug!(
+            warn!(
                 session_id = %session_id,
-                "No media session found for cleanup - may have already been cleaned up"
+                "❌ No media session found for cleanup - may have already been cleaned up or never created"
             );
         }
+
+        info!(
+            session_id = %session_id,
+            "✅ Media cleanup coordination completed"
+        );
 
         Ok(())
     }
