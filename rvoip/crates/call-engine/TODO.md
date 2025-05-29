@@ -512,6 +512,141 @@ call-engine/
 
 ---
 
+## 🚀 PHASE 8: MULTI-SESSION CALL ORCHESTRATION ⏳ **CRITICAL - MOVED FROM SESSION-CORE**
+
+### 🎯 **CALL-ENGINE ORCHESTRATION - PROPER SEPARATION OF CONCERNS**
+
+**Status**: ⏳ **CRITICAL** - Implement multi-session call orchestration using session-core infrastructure
+
+**Correct Separation Achieved**:
+```
+call-engine (Policy/Orchestration) ← YOU ARE HERE
+     ↓ (uses APIs)
+session-core (Mechanics/Infrastructure) ← PROVIDES TOOLS
+     ↓ (coordinates)
+media-core + transaction-core
+```
+
+**Call-Engine Responsibilities** (Policy & Orchestration):
+- ✅ **Bridging Policies**: Which sessions to bridge and when
+- ✅ **Business Logic**: Accept/reject decisions, routing rules  
+- ✅ **Call Orchestration**: High-level call flow management
+- ✅ **Feature Logic**: Hold, transfer, forwarding decisions
+
+**Uses Session-Core Infrastructure**:
+- 🛠️ **Session Bridge API**: `create_bridge()`, `add_session_to_bridge()`, etc.
+- 🛠️ **RTP Forwarding**: Low-level packet routing mechanics
+- 🛠️ **Event System**: Bridge state notifications from session-core
+
+### 🔧 **IMPLEMENTATION PLAN - ORCHESTRATION LAYER**
+
+#### 8.1 Call Orchestrator Core ⏳ **CRITICAL - FOUNDATION**
+- [ ] **CallOrchestrator Implementation** - Replace/absorb ServerManager
+  - [ ] Create CallOrchestrator as main orchestration component
+  - [ ] Implement session-core SessionManager integration
+  - [ ] Add call policy configuration and management
+  - [ ] Support multiple concurrent call orchestration
+  - [ ] Create orchestrator lifecycle management
+
+- [ ] **Session Orchestration State** - High-level call state tracking
+  - [ ] Track sessions in orchestration states (unbridged, bridging, bridged)
+  - [ ] Implement call routing state management
+  - [ ] Add call feature state tracking (hold, transfer, etc.)
+  - [ ] Support call quality and performance monitoring
+  - [ ] Create call history and analytics tracking
+
+#### 8.2 Session Bridging Policies ⏳ **CRITICAL - DECISION MAKING**
+- [ ] **Bridging Decision Engine** - Policy for connecting sessions
+  - [ ] Implement `should_bridge_sessions()` policy method
+  - [ ] Add session pairing algorithms (first-available, directed calling)
+  - [ ] Create session bridging configuration (auto-bridge, manual bridge)
+  - [ ] Support different bridging policies per session type
+  - [ ] Add session compatibility checking before bridging
+
+- [ ] **Call Routing Logic** - Intelligent session pairing
+  - [ ] Implement call routing rules and policies
+  - [ ] Add caller-based routing decisions
+  - [ ] Support time-based and capacity-based routing
+  - [ ] Create call queuing and distribution logic
+  - [ ] Add call priority and escalation policies
+
+#### 8.3 Business Logic Engine ⏳ **CRITICAL - POLICY DECISIONS**
+- [ ] **Call Accept/Reject Policies** - Business rules for calls
+  - [ ] Implement capacity-based call acceptance
+  - [ ] Add time-based call filtering (business hours, etc.)
+  - [ ] Support caller blacklist/whitelist policies
+  - [ ] Create authentication and authorization policies
+  - [ ] Add custom business rule engine
+
+- [ ] **Resource Management Policies** - System resource decisions
+  - [ ] Implement call capacity limits and throttling
+  - [ ] Add quality-based call acceptance/rejection
+  - [ ] Support resource allocation policies
+  - [ ] Create load balancing and distribution policies
+  - [ ] Add emergency call handling priorities
+
+#### 8.4 Advanced Call Features Orchestration ⏳ **CRITICAL - FEATURE LOGIC**
+- [ ] **Call Hold/Resume Orchestration** - Feature coordination
+  - [ ] Orchestrate call hold/unhold with bridge pause/resume
+  - [ ] Coordinate with session-core bridge mechanics
+  - [ ] Handle hold state management and notifications
+  - [ ] Support music-on-hold and hold announcements
+  - [ ] Add hold timeout and automatic resume policies
+
+- [ ] **Call Transfer Orchestration** - Transfer feature management
+  - [ ] Implement call transfer between bridges
+  - [ ] Coordinate attended and unattended transfers
+  - [ ] Handle transfer failure and fallback scenarios
+  - [ ] Support transfer authorization and validation
+  - [ ] Add transfer progress monitoring and notifications
+
+- [ ] **Advanced Bridge Scenarios** - Complex call orchestration
+  - [ ] Orchestrate early media bridging (during ringing)
+  - [ ] Handle session re-INVITE with bridge updates
+  - [ ] Implement session timeout and bridge cleanup policies
+  - [ ] Support call recording and monitoring coordination
+  - [ ] Add call quality monitoring and adaptation
+
+### 🎯 **SUCCESS CRITERIA - ORCHESTRATION LAYER**
+
+**Phase 8 will be complete when**:
+1. ✅ **Policy Engine**: CallOrchestrator makes intelligent bridging decisions
+2. ✅ **Business Logic**: Implements complete call acceptance/routing policies
+3. ✅ **Feature Orchestration**: Manages hold, transfer, and advanced features
+4. ✅ **Session-Core Integration**: Uses session-core APIs for all mechanics
+
+**Test Validation**:
+- [ ] CallOrchestrator receives two incoming calls and decides to bridge them
+- [ ] Business rules properly accept/reject calls based on policies
+- [ ] Call hold/resume orchestration works using session-core bridge API
+- [ ] Call transfer orchestration coordinates between multiple bridges
+- [ ] All mechanics delegated to session-core, all policies in call-engine
+
+### 🏆 **ARCHITECTURAL ACHIEVEMENT: PROPER ORCHESTRATION LAYER**
+
+**Call Flow Example**:
+```
+1. Session A calls in → CallOrchestrator receives notification
+2. CallOrchestrator: "Accept call" (policy decision)
+3. Session B calls in → CallOrchestrator receives notification  
+4. CallOrchestrator: "Bridge Session A ↔ Session B" (routing decision)
+5. CallOrchestrator calls: session_manager.create_bridge()
+6. CallOrchestrator calls: session_manager.add_session_to_bridge(session_a)
+7. CallOrchestrator calls: session_manager.add_session_to_bridge(session_b)
+8. Session-core handles all RTP forwarding mechanics
+9. Audio flows: UAC A ↔ Bridge ↔ UAC B (orchestrated by call-engine!)
+```
+
+**Clean Separation Achieved**:
+- ✅ **Call-Engine**: Makes all policy decisions and orchestrates features
+- ✅ **Session-Core**: Provides technical infrastructure and mechanics
+- ✅ **Clean APIs**: Call-engine uses session-core bridge APIs
+- ✅ **Event-Driven**: Session-core notifies call-engine of state changes
+
+**This creates the proper production SIP server orchestration layer!**
+
+---
+
 ## Next Steps
 
 1. **Basic Engine Structure**
