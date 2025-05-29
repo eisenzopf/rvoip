@@ -347,31 +347,58 @@ impl SessionManager {
     async fn create_rtp_relay_pair(&self, session_a_id: &SessionId, session_b_id: &SessionId) -> Result<(), BridgeError> {
         debug!("🔗 Creating RTP relay: {} ↔ {}", session_a_id, session_b_id);
         
-        // Get media sessions for both SIP sessions
-        let media_session_a = self.media_manager.get_media_session(session_a_id).await
-            .ok_or_else(|| BridgeError::Internal {
-                message: format!("No media session found for session {}", session_a_id),
-            })?;
+        // **FIX**: Wait for both media sessions to be established with retry logic
+        let max_retries = 10;
+        let mut retry_count = 0;
+        let mut delay_ms = 50; // Start with 50ms delay
+        
+        loop {
+            // Try to get media sessions for both SIP sessions
+            let media_session_a = self.media_manager.get_media_session(session_a_id).await;
+            let media_session_b = self.media_manager.get_media_session(session_b_id).await;
             
-        let media_session_b = self.media_manager.get_media_session(session_b_id).await
-            .ok_or_else(|| BridgeError::Internal {
-                message: format!("No media session found for session {}", session_b_id),
-            })?;
-        
-        // Extract dialog IDs from media session IDs (they map 1:1)
-        let dialog_a = media_session_a.as_str();
-        let dialog_b = media_session_b.as_str();
-        
-        // Create the RTP relay through MediaSessionController
-        self.media_manager.media_controller()
-            .create_relay(dialog_a.to_string(), dialog_b.to_string()).await
-            .map_err(|e| BridgeError::Internal {
-                message: format!("Failed to create RTP relay via MediaSessionController: {}", e),
-            })?;
-        
-        info!("✅ Created RTP relay: {} ↔ {} (dialogs: {} ↔ {})", 
-              session_a_id, session_b_id, dialog_a, dialog_b);
-        Ok(())
+            // Check if both are ready before proceeding
+            let a_ready = media_session_a.is_some();
+            let b_ready = media_session_b.is_some();
+            
+            match (media_session_a, media_session_b) {
+                (Some(media_a), Some(media_b)) => {
+                    // Both media sessions are ready - create the relay
+                    let dialog_a = media_a.as_str();
+                    let dialog_b = media_b.as_str();
+                    
+                    // Create the RTP relay through MediaSessionController
+                    self.media_manager.media_controller()
+                        .create_relay(dialog_a.to_string(), dialog_b.to_string()).await
+                        .map_err(|e| BridgeError::Internal {
+                            message: format!("Failed to create RTP relay via MediaSessionController: {}", e),
+                        })?;
+                    
+                    info!("✅ Created RTP relay: {} ↔ {} (dialogs: {} ↔ {})", 
+                          session_a_id, session_b_id, dialog_a, dialog_b);
+                    return Ok(());
+                },
+                _ => {
+                    // One or both media sessions not ready yet
+                    retry_count += 1;
+                    
+                    if retry_count >= max_retries {
+                        return Err(BridgeError::Internal {
+                            message: format!("Timeout waiting for media sessions: {} (ready: {}) and {} (ready: {})",
+                                session_a_id, a_ready,
+                                session_b_id, b_ready),
+                        });
+                    }
+                    
+                    debug!("Media sessions not ready yet (attempt {}/{}), retrying in {}ms...", 
+                           retry_count, max_retries, delay_ms);
+                    
+                    // Wait before retrying with exponential backoff
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = std::cmp::min(delay_ms * 2, 500); // Cap at 500ms
+                }
+            }
+        }
     }
     
     /// Remove RTP relay pair between two sessions

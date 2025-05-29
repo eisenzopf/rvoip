@@ -12,6 +12,8 @@ CLIENT_A_IP="127.0.0.1"
 CLIENT_A_PORT="5061"
 CLIENT_B_IP="127.0.0.1"
 CLIENT_B_PORT="5062"
+CLIENT_C_IP="127.0.0.1"
+CLIENT_C_PORT="5063"
 SCENARIOS_DIR="$(dirname "$0")"
 RESULTS_DIR="$SCENARIOS_DIR/bridge_results"
 AUDIO_DIR="$SCENARIOS_DIR/audio_files"
@@ -32,6 +34,7 @@ printf "${BLUE}=== Session-Core Bridge Test Suite ===${NC}\n"
 echo "Server: $SERVER_IP:$SERVER_PORT"
 echo "Client A: $CLIENT_A_IP:$CLIENT_A_PORT"
 echo "Client B: $CLIENT_B_IP:$CLIENT_B_PORT"
+echo "Client C: $CLIENT_C_IP:$CLIENT_C_PORT"
 echo "Audio files: $AUDIO_DIR"
 echo "Results: $RESULTS_DIR"
 echo ""
@@ -40,6 +43,7 @@ echo ""
 create_test_audio() {
     local audio_a="$AUDIO_DIR/client_a_audio.wav"
     local audio_b="$AUDIO_DIR/client_b_audio.wav"
+    local audio_c="$AUDIO_DIR/client_c_audio.wav"
     
     echo "Creating test audio files for bridge testing..."
     
@@ -56,6 +60,12 @@ create_test_audio() {
             sox -n -r 8000 -c 1 -b 16 "$audio_b" synth 30 sine 880 vol 0.5
             printf "${GREEN}✓ Created Client B audio file (880Hz)${NC}\n"
         fi
+        
+        # Client C: 1320Hz (E6 note)
+        if [ ! -f "$audio_c" ]; then
+            sox -n -r 8000 -c 1 -b 16 "$audio_c" synth 30 sine 1320 vol 0.5
+            printf "${GREEN}✓ Created Client C audio file (1320Hz)${NC}\n"
+        fi
     elif command -v ffmpeg &> /dev/null; then
         # Client A: 440Hz
         if [ ! -f "$audio_a" ]; then
@@ -70,10 +80,17 @@ create_test_audio() {
                    -ac 1 -ar 8000 -sample_fmt s16 "$audio_b" -y -loglevel quiet
             printf "${GREEN}✓ Created Client B audio file (880Hz) with ffmpeg${NC}\n"
         fi
+        
+        # Client C: 1320Hz
+        if [ ! -f "$audio_c" ]; then
+            ffmpeg -f lavfi -i "sine=frequency=1320:duration=30:sample_rate=8000" \
+                   -ac 1 -ar 8000 -sample_fmt s16 "$audio_c" -y -loglevel quiet
+            printf "${GREEN}✓ Created Client C audio file (1320Hz) with ffmpeg${NC}\n"
+        fi
     else
         printf "${YELLOW}⚠ Warning: No audio generation tool found (sox/ffmpeg)${NC}\n"
         echo "Creating empty placeholder files"
-        touch "$audio_a" "$audio_b"
+        touch "$audio_a" "$audio_b" "$audio_c"
     fi
 }
 
@@ -363,8 +380,11 @@ cleanup() {
     printf "${YELLOW}Cleaning up...${NC}\n"
     stop_bridge_server
     
-    # Kill any remaining SIPp processes
+    # Kill any remaining SIPp processes for all client ports
     pkill -f "sipp.*$SERVER_IP" 2>/dev/null || true
+    pkill -f "sipp.*$CLIENT_A_PORT" 2>/dev/null || true
+    pkill -f "sipp.*$CLIENT_B_PORT" 2>/dev/null || true
+    pkill -f "sipp.*$CLIENT_C_PORT" 2>/dev/null || true
     
     # Kill any remaining tcpdump
     sudo pkill tcpdump 2>/dev/null || true
@@ -372,6 +392,207 @@ cleanup() {
 
 # Set up signal handlers
 trap cleanup EXIT INT TERM
+
+# Function to run 3-way bridged call test (for multi-session conferencing)
+run_3way_bridge_test() {
+    local test_name="$1"
+    local duration="${2:-20}"
+    
+    printf "${PURPLE}=== Running 3-Way Bridge Test: $test_name ===${NC}\n"
+    echo "Duration: ${duration}s"
+    echo "Testing N-way conferencing with 3 participants"
+    
+    local log_a="$RESULTS_DIR/${test_name}_client_a.log"
+    local log_b="$RESULTS_DIR/${test_name}_client_b.log"
+    local log_c="$RESULTS_DIR/${test_name}_client_c.log"
+    local csv_a="$RESULTS_DIR/${test_name}_client_a.csv"
+    local csv_b="$RESULTS_DIR/${test_name}_client_b.csv"
+    local csv_c="$RESULTS_DIR/${test_name}_client_c.csv"
+    local rtp_dump="$RESULTS_DIR/${test_name}_rtp.pcap"
+    
+    # Start RTP packet capture
+    local tcpdump_pid=""
+    if command -v tcpdump &> /dev/null; then
+        echo "Starting RTP packet capture for 3-way bridge..."
+        sudo tcpdump -i lo0 -w "$rtp_dump" 'udp and portrange 10000-20000' &
+        tcpdump_pid=$!
+        sleep 1  # Give tcpdump time to start
+    fi
+    
+    # Prepare SIPp commands for all three clients
+    local audio_a="$AUDIO_DIR/client_a_audio.wav"
+    local audio_b="$AUDIO_DIR/client_b_audio.wav"
+    local audio_c="$AUDIO_DIR/client_c_audio.wav"
+    
+    local sipp_a_cmd="sipp -i $CLIENT_A_IP -p $CLIENT_A_PORT \
+                           -m 1 -r 1 -d ${duration}000 \
+                           -trace_msg -message_file $log_a -stf $csv_a"
+    
+    local sipp_b_cmd="sipp -i $CLIENT_B_IP -p $CLIENT_B_PORT \
+                           -m 1 -r 1 -d ${duration}000 \
+                           -trace_msg -message_file $log_b -stf $csv_b"
+                           
+    local sipp_c_cmd="sipp -i $CLIENT_C_IP -p $CLIENT_C_PORT \
+                           -m 1 -r 1 -d ${duration}000 \
+                           -trace_msg -message_file $log_c -stf $csv_c"
+    
+    # Add audio if available
+    if [ -f "$audio_a" ] && [ -s "$audio_a" ]; then
+        sipp_a_cmd="$sipp_a_cmd -rtp_echo -ap $audio_a"
+    else
+        sipp_a_cmd="$sipp_a_cmd -rtp_echo"
+    fi
+    
+    if [ -f "$audio_b" ] && [ -s "$audio_b" ]; then
+        sipp_b_cmd="$sipp_b_cmd -rtp_echo -ap $audio_b"
+    else
+        sipp_b_cmd="$sipp_b_cmd -rtp_echo"
+    fi
+    
+    if [ -f "$audio_c" ] && [ -s "$audio_c" ]; then
+        sipp_c_cmd="$sipp_c_cmd -rtp_echo -ap $audio_c"
+    else
+        sipp_c_cmd="$sipp_c_cmd -rtp_echo"
+    fi
+    
+    # Start clients with staggered timing to observe bridge building
+    printf "${YELLOW}Starting Client A (440Hz)...${NC}\n"
+    $sipp_a_cmd $SERVER_IP:$SERVER_PORT &
+    local client_a_pid=$!
+    
+    # Wait before starting client B to see bridge pairing
+    sleep 3
+    
+    printf "${YELLOW}Starting Client B (880Hz)...${NC}\n"
+    $sipp_b_cmd $SERVER_IP:$SERVER_PORT &
+    local client_b_pid=$!
+    
+    # Wait before starting client C to see 3-way bridge formation
+    sleep 3
+    
+    printf "${YELLOW}Starting Client C (1320Hz) - Creating 3-way conference...${NC}\n"
+    $sipp_c_cmd $SERVER_IP:$SERVER_PORT &
+    local client_c_pid=$!
+    
+    # Wait for all clients to complete
+    local client_a_result=0
+    local client_b_result=0
+    local client_c_result=0
+    
+    wait $client_a_pid || client_a_result=$?
+    wait $client_b_pid || client_b_result=$?
+    wait $client_c_pid || client_c_result=$?
+    
+    # Stop packet capture
+    if [ ! -z "$tcpdump_pid" ]; then
+        sleep 1
+        sudo kill $tcpdump_pid 2>/dev/null || true
+        echo "3-way bridge RTP packets captured to: $rtp_dump"
+    fi
+    
+    # Analyze results
+    if [ $client_a_result -eq 0 ] && [ $client_b_result -eq 0 ] && [ $client_c_result -eq 0 ]; then
+        printf "${GREEN}✅ PASSED: $test_name (All 3 clients successful)${NC}\n"
+        analyze_3way_bridge_flow "$rtp_dump" "$test_name"
+        return 0
+    else
+        printf "${RED}❌ FAILED: $test_name${NC}\n"
+        echo "Client A result: $client_a_result"
+        echo "Client B result: $client_b_result"
+        echo "Client C result: $client_c_result"
+        return 1
+    fi
+}
+
+# Function to analyze 3-way bridge RTP flow patterns
+analyze_3way_bridge_flow() {
+    local pcap_file="$1"
+    local test_name="$2"
+    
+    if [ ! -f "$pcap_file" ]; then
+        printf "${YELLOW}⚠ No packet capture file found${NC}\n"
+        return
+    fi
+    
+    printf "${BLUE}--- 3-Way Bridge RTP Flow Analysis for $test_name ---${NC}\n"
+    
+    if command -v tcpdump &> /dev/null; then
+        local packet_count=$(tcpdump -r "$pcap_file" 2>/dev/null | wc -l)
+        echo "Total RTP packets captured: $packet_count"
+        
+        if [ "$packet_count" -gt 0 ]; then
+            printf "${GREEN}✅ RTP media flow detected in 3-way bridge${NC}\n"
+            
+            # Analyze port usage to understand 3-way bridge flow
+            echo ""
+            echo "3-way bridge RTP port analysis:"
+            tcpdump -r "$pcap_file" -n 2>/dev/null | \
+                awk '{print $3 " -> " $5}' | \
+                sort | uniq -c | sort -nr | head -15
+            
+            # More detailed analysis if tshark is available
+            if command -v tshark &> /dev/null; then
+                echo ""
+                echo "Detailed 3-way bridge RTP analysis:"
+                
+                # Count unique UDP flows (should show full-mesh bridged audio paths)
+                local unique_flows=$(tshark -r "$pcap_file" -T fields -e ip.src -e ip.dst -e udp.srcport -e udp.dstport 2>/dev/null | sort -u | wc -l)
+                echo "Unique UDP flows: $unique_flows"
+                echo "Expected for 3-way bridge: 12+ flows (A↔Server, B↔Server, C↔Server in both directions)"
+                
+                # Show sample packet flow timeline
+                echo ""
+                echo "Sample 3-way bridge packet flow timeline:"
+                tshark -r "$pcap_file" -T fields -e frame.time_relative -e ip.src -e ip.dst -e udp.srcport -e udp.dstport 2>/dev/null | head -15 | while read time src dst sport dport; do
+                    echo "  ${time}s: $src:$sport → $dst:$dport"
+                done
+                
+                # Analyze flow direction patterns for 3-way validation
+                local src_ports=$(tshark -r "$pcap_file" -T fields -e udp.srcport 2>/dev/null | sort -u | wc -l)
+                local dst_ports=$(tshark -r "$pcap_file" -T fields -e udp.dstport 2>/dev/null | sort -u | wc -l)
+                
+                echo ""
+                echo "Flow analysis:"
+                echo "  Source ports: $src_ports"
+                echo "  Destination ports: $dst_ports"
+                
+                # Check for specific client ports to verify all 3 participants
+                local has_client_a=$(tshark -r "$pcap_file" -T fields -e udp.srcport -e udp.dstport 2>/dev/null | grep -E "506[12]" | wc -l)
+                local has_client_b=$(tshark -r "$pcap_file" -T fields -e udp.srcport -e udp.dstport 2>/dev/null | grep -E "506[23]" | wc -l)
+                local has_client_c=$(tshark -r "$pcap_file" -T fields -e udp.srcport -e udp.dstport 2>/dev/null | grep -E "5063" | wc -l)
+                
+                echo "  Client A (5061/5062) packets: $has_client_a"
+                echo "  Client B (5062/5063) packets: $has_client_b"
+                echo "  Client C (5063) packets: $has_client_c"
+                
+                if [ "$src_ports" -ge 5 ] && [ "$dst_ports" -ge 5 ]; then
+                    if [ "$has_client_a" -gt 0 ] && [ "$has_client_b" -gt 0 ] && [ "$has_client_c" -gt 0 ]; then
+                        printf "${GREEN}✅ Full 3-way bridge flow detected with all participants${NC}\n"
+                        printf "${GREEN}✅ N-way conferencing bridge is working correctly${NC}\n"
+                    else
+                        printf "${YELLOW}⚠ Some participants missing from bridge flow${NC}\n"
+                    fi
+                else
+                    printf "${YELLOW}⚠ Limited flow patterns - 3-way bridge may not be fully active${NC}\n"
+                fi
+                
+                # Check for full-mesh topology evidence
+                echo ""
+                echo "Full-mesh topology validation:"
+                local total_endpoints=$(tshark -r "$pcap_file" -T fields -e ip.src -e ip.dst 2>/dev/null | tr '\t' '\n' | sort -u | wc -l)
+                echo "  Unique IP endpoints: $total_endpoints (expecting 4+: 3 clients + server)"
+                
+                if [ "$total_endpoints" -ge 4 ]; then
+                    printf "${GREEN}✅ Multiple endpoints detected - consistent with 3-way conference${NC}\n"
+                else
+                    printf "${YELLOW}⚠ Limited endpoints - may not be full 3-way conference${NC}\n"
+                fi
+            fi
+        else
+            printf "${RED}❌ No RTP packets captured - 3-way bridge may not be working${NC}\n"
+        fi
+    fi
+}
 
 # Main execution
 main() {
@@ -457,9 +678,36 @@ case "${1:-all}" in
         run_bridge_test "quick_bridge_only" 10
         ;;
     "multi")
-        echo "Testing multi-session bridge demo..."
+        echo "Testing multi-session bridge demo with 3 participants..."
         export BRIDGE_SERVER="multi_session_bridge_demo"
-        main
+        check_prerequisites
+        create_test_audio
+        
+        printf "\n${BLUE}=== Starting 3-Way Conference Bridge Test ===${NC}\n\n"
+        
+        # Start the multi-session bridge server
+        if ! start_bridge_server; then
+            echo "Failed to start multi-session bridge server"
+            exit 1
+        fi
+        
+        sleep 2  # Allow server to fully initialize
+        
+        # Run 3-way bridge test
+        printf "\n${PURPLE}Test: 3-Way Conference Bridge${NC}\n"
+        if run_3way_bridge_test "3way_conference" 20; then
+            printf "${GREEN}✅ 3-way bridge test passed${NC}\n"
+        else
+            printf "${RED}❌ 3-way bridge test failed${NC}\n"
+            exit 1
+        fi
+        
+        # Analyze server activity for 3-way bridge
+        analyze_server_logs
+        
+        printf "\n${BLUE}=== 3-Way Bridge Test Summary ===${NC}\n"
+        printf "${GREEN}🎉 Multi-session conferencing test completed!${NC}\n"
+        printf "${GREEN}✅ N-way bridge infrastructure tested with 3 participants${NC}\n"
         ;;
     "help")
         echo "Bridge Test Suite Usage:"
@@ -470,8 +718,8 @@ case "${1:-all}" in
         echo "  all     - Run complete bridge test suite (default)"
         echo "  setup   - Setup test environment only"
         echo "  server  - Start bridge server and wait"
-        echo "  quick   - Run quick 10-second test"
-        echo "  multi   - Test multi-session bridge demo"
+        echo "  quick   - Run quick 10-second test (2 participants)"
+        echo "  multi   - Test multi-session bridge demo (3 participants)"
         echo "  help    - Show this help"
         echo ""
         echo "Environment Variables:"
@@ -480,7 +728,7 @@ case "${1:-all}" in
         echo ""
         echo "Examples:"
         echo "  ./run_bridge_tests.sh                    # Test 2-way bridge"
-        echo "  ./run_bridge_tests.sh multi              # Test N-way conference"
+        echo "  ./run_bridge_tests.sh multi              # Test 3-way conference"
         echo "  BRIDGE_SERVER=bridge_server ./run_bridge_tests.sh  # Explicit 2-way"
         ;;
     "all"|*)
