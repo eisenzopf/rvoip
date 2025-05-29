@@ -10,6 +10,8 @@ mod tests {
     use rvoip_sip_core::types::{call_id::CallId, cseq::CSeq, address::Address, param::Param};
     use rvoip_sip_core::types::{from::From as FromHeader, to::To as ToHeader};
     use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
+    use crate::dialog::DialogManager;
+    use crate::DialogState;
     
     // Dummy transport implementation for testing
     #[derive(Clone, Debug)]
@@ -130,7 +132,7 @@ mod tests {
         let dialog = dialog.unwrap();
         
         // Verify the dialog properties
-        assert_eq!(dialog.state, super::dialog_state::DialogState::Confirmed);
+        assert_eq!(dialog.state, DialogState::Confirmed);
         assert_eq!(dialog.call_id, "test-call-id");
         assert_eq!(dialog.local_tag, Some("alice-tag".to_string()));
         assert_eq!(dialog.remote_tag, Some("bob-tag".to_string()));

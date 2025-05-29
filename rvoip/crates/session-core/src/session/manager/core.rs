@@ -29,6 +29,12 @@ use super::super::SessionDirection;
 use crate::api::server::{IncomingCallEvent, CallerInfo, CallDecision, IncomingCallNotification};
 use crate::session::CallLifecycleCoordinator;
 
+// **NEW**: Import bridge types for multi-session bridging
+use super::super::bridge::{
+    SessionBridge, BridgeId, BridgeState, BridgeInfo, BridgeConfig,
+    BridgeEvent, BridgeEventType, BridgeStats, BridgeError
+};
+
 // Constants for configuration
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 
@@ -73,6 +79,15 @@ pub struct SessionManager {
     
     /// **FIXED**: Incoming call notification callback with interior mutability
     incoming_call_notifier: Arc<RwLock<Option<Arc<dyn IncomingCallNotification>>>>,
+    
+    /// **NEW**: Active session bridges for multi-session coordination
+    pub(crate) session_bridges: Arc<DashMap<BridgeId, Arc<SessionBridge>>>,
+    
+    /// **NEW**: Session to bridge mapping for quick lookup
+    pub(crate) session_to_bridge: Arc<DashMap<SessionId, BridgeId>>,
+    
+    /// **NEW**: Bridge event sender for call-engine notifications
+    pub(crate) bridge_event_sender: Arc<RwLock<Option<mpsc::UnboundedSender<BridgeEvent>>>>,
 }
 
 impl SessionManager {
@@ -112,6 +127,9 @@ impl SessionManager {
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
+            session_bridges: Arc::new(DashMap::new()),
+            session_to_bridge: Arc::new(DashMap::new()),
+            bridge_event_sender: Arc::new(RwLock::new(None)),
         };
         
         // Start the session event processing
@@ -176,6 +194,9 @@ impl SessionManager {
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
+            session_bridges: Arc::new(DashMap::new()),
+            session_to_bridge: Arc::new(DashMap::new()),
+            bridge_event_sender: Arc::new(RwLock::new(None)),
         };
         
         // Start the session event processing
@@ -329,6 +350,9 @@ impl SessionManager {
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
+            session_bridges: Arc::new(DashMap::new()),
+            session_to_bridge: Arc::new(DashMap::new()),
+            bridge_event_sender: Arc::new(RwLock::new(None)),
         };
         
         // Start the session event processing

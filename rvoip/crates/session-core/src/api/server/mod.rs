@@ -21,9 +21,16 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
 use rvoip_sip_core::{Request, Response, Uri, StatusCode};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use async_trait::async_trait;
 use std::net::SocketAddr;
+use anyhow::{Result, Context};
+use tracing::warn;
+
+// **NEW**: Import bridge types for call-engine API
+use crate::session::bridge::{
+    BridgeId, BridgeConfig, BridgeInfo, BridgeEvent, BridgeStats, BridgeError
+};
 
 /// Legacy server configuration for backward compatibility
 #[derive(Debug, Clone)]
@@ -493,4 +500,168 @@ pub trait IncomingCallNotification: Send + Sync {
     
     /// Called when a call is ended by the server
     async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String);
+}
+
+// ========================================================================================
+// BRIDGE MANAGEMENT APIs - FOR CALL-ENGINE ORCHESTRATION
+// ========================================================================================
+
+impl ServerSessionManager {
+    /// **CALL-ENGINE API**: Create a new session bridge
+    /// 
+    /// Creates a bridge for connecting multiple sessions. Call-engine uses this
+    /// to set up audio routing between UACs.
+    pub async fn create_bridge(&self, config: BridgeConfig) -> Result<BridgeId, BridgeError> {
+        // Check server capacity before creating bridge
+        let active_sessions = self.session_manager.list_sessions();
+        if active_sessions.len() + config.max_sessions > self.config.max_sessions {
+            return Err(BridgeError::Internal {
+                message: format!(
+                    "Creating bridge would exceed server capacity ({} + {} > {})",
+                    active_sessions.len(), config.max_sessions, self.config.max_sessions
+                ),
+            });
+        }
+        
+        self.session_manager.create_bridge(config).await
+    }
+    
+    /// **CALL-ENGINE API**: Destroy a session bridge
+    /// 
+    /// Removes all sessions from the bridge and cleans up resources.
+    pub async fn destroy_bridge(&self, bridge_id: &BridgeId) -> Result<(), BridgeError> {
+        self.session_manager.destroy_bridge(bridge_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Add a session to a bridge
+    /// 
+    /// Connects a session to a bridge for audio routing. This is the core
+    /// API that call-engine uses to bridge calls together.
+    pub async fn add_session_to_bridge(&self, bridge_id: &BridgeId, session_id: &SessionId) -> Result<(), BridgeError> {
+        self.session_manager.add_session_to_bridge(bridge_id, session_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Remove a session from a bridge
+    /// 
+    /// Disconnects a session from its bridge.
+    pub async fn remove_session_from_bridge(&self, bridge_id: &BridgeId, session_id: &SessionId) -> Result<(), BridgeError> {
+        self.session_manager.remove_session_from_bridge(bridge_id, session_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Get bridge information
+    /// 
+    /// Returns detailed information about a bridge for monitoring and management.
+    pub async fn get_bridge_info(&self, bridge_id: &BridgeId) -> Result<BridgeInfo, BridgeError> {
+        self.session_manager.get_bridge_info(bridge_id).await
+    }
+    
+    /// **CALL-ENGINE API**: List all active bridges
+    /// 
+    /// Returns information about all bridges for overview and management.
+    pub async fn list_bridges(&self) -> Vec<BridgeInfo> {
+        self.session_manager.list_bridges().await
+    }
+    
+    /// **CALL-ENGINE API**: Pause a bridge
+    /// 
+    /// Stops audio flow through the bridge while keeping sessions connected.
+    /// Useful for call hold scenarios.
+    pub async fn pause_bridge(&self, bridge_id: &BridgeId) -> Result<(), BridgeError> {
+        self.session_manager.pause_bridge(bridge_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Resume a bridge
+    /// 
+    /// Resumes audio flow through a paused bridge.
+    pub async fn resume_bridge(&self, bridge_id: &BridgeId) -> Result<(), BridgeError> {
+        self.session_manager.resume_bridge(bridge_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Get bridge for a session
+    /// 
+    /// Returns the bridge ID that a session is currently in (if any).
+    pub async fn get_session_bridge(&self, session_id: &SessionId) -> Option<BridgeId> {
+        self.session_manager.get_session_bridge(session_id).await
+    }
+    
+    /// **CALL-ENGINE API**: Subscribe to bridge events
+    /// 
+    /// Allows call-engine to receive real-time bridge event notifications.
+    /// This is essential for orchestration and monitoring.
+    pub async fn subscribe_to_bridge_events(&self) -> mpsc::UnboundedReceiver<BridgeEvent> {
+        self.session_manager.subscribe_to_bridge_events().await
+    }
+    
+    /// **CALL-ENGINE API**: Get bridge statistics
+    /// 
+    /// Returns aggregated statistics across all bridges for monitoring.
+    pub async fn get_bridge_statistics(&self) -> HashMap<BridgeId, BridgeStats> {
+        self.session_manager.get_bridge_statistics().await
+    }
+    
+    /// **CALL-ENGINE API**: Bridge two specific sessions
+    /// 
+    /// High-level convenience method that creates a bridge and adds two sessions.
+    /// This is a common pattern for simple call bridging.
+    pub async fn bridge_sessions(&self, session_a: &SessionId, session_b: &SessionId) -> Result<BridgeId, BridgeError> {
+        // Create a simple 2-party bridge
+        let config = BridgeConfig {
+            max_sessions: 2,
+            name: Some(format!("Bridge: {} ↔ {}", session_a, session_b)),
+            ..Default::default()
+        };
+        
+        let bridge_id = self.create_bridge(config).await?;
+        
+        // Add both sessions
+        if let Err(e) = self.add_session_to_bridge(&bridge_id, session_a).await {
+            // Clean up bridge on failure
+            let _ = self.destroy_bridge(&bridge_id).await;
+            return Err(e);
+        }
+        
+        if let Err(e) = self.add_session_to_bridge(&bridge_id, session_b).await {
+            // Clean up bridge on failure
+            let _ = self.destroy_bridge(&bridge_id).await;
+            return Err(e);
+        }
+        
+        Ok(bridge_id)
+    }
+    
+    /// **CALL-ENGINE API**: Auto-bridge available sessions
+    /// 
+    /// Automatically finds unbridged sessions and bridges them together.
+    /// This is useful for simple auto-attendant scenarios.
+    pub async fn auto_bridge_available_sessions(&self) -> Result<Vec<BridgeId>, BridgeError> {
+        let mut created_bridges = Vec::new();
+        
+        // Get all active sessions
+        let sessions = self.session_manager.list_sessions();
+        let mut unbridged_sessions = Vec::new();
+        
+        // Find sessions that aren't in bridges
+        for session in sessions {
+            if self.get_session_bridge(&session.id).await.is_none() {
+                unbridged_sessions.push(session.id.clone());
+            }
+        }
+        
+        // Bridge sessions in pairs
+        while unbridged_sessions.len() >= 2 {
+            let session_a = unbridged_sessions.remove(0);
+            let session_b = unbridged_sessions.remove(0);
+            
+            match self.bridge_sessions(&session_a, &session_b).await {
+                Ok(bridge_id) => {
+                    created_bridges.push(bridge_id);
+                },
+                Err(e) => {
+                    warn!("Failed to auto-bridge sessions {} and {}: {}", session_a, session_b, e);
+                }
+            }
+        }
+        
+        Ok(created_bridges)
+    }
 } 

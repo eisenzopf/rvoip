@@ -40,6 +40,11 @@
 //!
 //! let server = create_full_server_manager(transaction_manager, config).await?;
 //! let session = server.handle_incoming_call(&request).await?;
+//! 
+//! // Bridge sessions for call routing
+//! let bridge_id = server.create_bridge(BridgeConfig::default()).await?;
+//! server.add_session_to_bridge(&bridge_id, &session_a).await?;
+//! server.add_session_to_bridge(&bridge_id, &session_b).await?;
 //! ```
 
 pub mod client;
@@ -61,6 +66,12 @@ pub use server::{
 
 // Re-export server config types for convenience
 pub use crate::api::server::config::TransportProtocol;
+
+// Re-export bridge types for call-engine orchestration
+pub use crate::session::bridge::{
+    BridgeId, BridgeState, BridgeConfig, BridgeInfo, BridgeEvent, BridgeEventType, 
+    BridgeStats, BridgeError, SessionBridge,
+};
 
 // Re-export factory functions
 pub use factory::{create_sip_server, create_sip_client, SipServer, SipClient};
@@ -95,6 +106,9 @@ pub struct ApiCapabilities {
     /// Supports conference calls
     pub conference_calls: bool,
     
+    /// Supports session bridging
+    pub session_bridging: bool,
+    
     /// Maximum concurrent sessions
     pub max_sessions: usize,
 }
@@ -108,6 +122,7 @@ impl Default for ApiCapabilities {
             call_routing: true,
             user_registration: true,
             conference_calls: false, // Not yet implemented
+            session_bridging: true,
             max_sessions: 10000,
         }
     }
@@ -129,6 +144,7 @@ pub fn is_feature_supported(feature: &str) -> bool {
         "call_routing" => capabilities.call_routing,
         "user_registration" => capabilities.user_registration,
         "conference_calls" => capabilities.conference_calls,
+        "session_bridging" => capabilities.session_bridging,
         _ => false,
     }
 }
