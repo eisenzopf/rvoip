@@ -412,10 +412,33 @@ pub trait RtpSessionCoordinator {
   - All examples working (processing_demo, aec_demo, quality_demo)
   - **NEED**: Integration tests, stress tests, edge case testing
 
-- ❌ **Performance Optimization**
-  - **NEED**: Profiling and optimization
-  - **NEED**: Memory usage optimization
-  - **NEED**: CPU usage benchmarking
+- ❌ **Performance Optimization & Zero-Copy Architecture**
+  - **CRITICAL Zero-Copy Media Pipeline** - Eliminate buffer copies throughout media processing
+    - [ ] Zero-copy audio frame processing (avoid copies between AEC, AGC, VAD stages)
+    - [ ] Zero-copy codec encode/decode (use `Arc<AudioFrame>` for shared ownership)
+    - [ ] Zero-copy jitter buffer (avoid frame copies during storage/retrieval)
+    - [ ] Zero-copy integration with rtp-core (`Arc<RtpPacket>` handling)
+    - [ ] Zero-copy transcoding pipeline (shared buffers during codec conversion)
+  
+  - **Memory Optimization** - Minimize allocations in real-time processing
+    - [ ] Object pooling for audio frames and media packets
+    - [ ] Pre-allocated buffers for codec processing
+    - [ ] Memory-mapped audio buffers for large frame processing
+    - [ ] SIMD optimizations for audio processing (AEC, AGC, format conversion)
+    - [ ] Lockless data structures for concurrent access patterns
+  
+  - **Performance Profiling & Benchmarking**
+    - [ ] CPU usage benchmarking per media session (target: <5% per session)
+    - [ ] Memory allocation profiling (target: minimal allocations in hot paths)
+    - [ ] Latency benchmarking (target: <1ms total processing latency)
+    - [ ] Throughput testing (target: 100+ concurrent sessions)
+    - [ ] Real-time performance validation under load
+  
+  - **Platform-Specific Optimizations**
+    - [ ] ARM NEON optimizations for mobile/embedded platforms
+    - [ ] x86-64 AVX2/SSE optimizations for server deployments
+    - [ ] Memory alignment optimizations for cache efficiency
+    - [ ] Thread affinity and NUMA optimizations for multi-core systems
 
 - ⚠️ **Documentation & Examples** - **PARTIALLY COMPLETE**
   - Good inline documentation and examples
@@ -630,9 +653,13 @@ Our current codec implementations use the following frame characteristics:
 *All critical Phase 1-3 components are now complete!*
 
 #### **Enhancement Opportunities:**
-1. **Noise Suppression** (`processing/audio/ns.rs`) - listed in architecture but not implemented
-2. **Packet Loss Concealment** (`processing/audio/plc.rs`) - listed but not implemented  
-3. **DTMF Detection** (`processing/audio/dtmf_detector.rs`) - listed but not implemented
+1. **Zero-Copy Media Pipeline** - **HIGH PRIORITY** for production performance
+   - Eliminate buffer copies in audio processing pipeline (AEC, AGC, VAD)
+   - Implement `Arc<AudioFrame>` shared ownership throughout codec system
+   - Zero-copy integration with rtp-core packet handling
+2. **Noise Suppression** (`processing/audio/ns.rs`) - listed in architecture but not implemented
+3. **Packet Loss Concealment** (`processing/audio/plc.rs`) - listed but not implemented  
+4. **DTMF Detection** (`processing/audio/dtmf_detector.rs`) - listed but not implemented
 
 ---
 
@@ -665,6 +692,8 @@ Our current codec implementations use the following frame characteristics:
 - ❌ Codec transcoding supports fallback scenarios and mixed-codec calls (G.711/G.729/Opus)
 - ❌ Integration testing with session-core and rtp-core
 - ❌ Comprehensive test coverage (currently ~85%, need >90%)
+- ❌ **Zero-copy media pipeline** with <1ms total latency (including RTP/SIP overhead)
+- ❌ **Memory optimization** with minimal allocations in real-time processing paths
 - ❌ Production-ready performance optimization and monitoring
 
 ---
@@ -696,35 +725,42 @@ Our current codec implementations use the following frame characteristics:
    - Verify quality monitoring integration across all layers
    - Test SRTP/DTLS integration with media sessions
 
-5. **Performance Integration Testing**
+5. **Zero-Copy Media Pipeline Implementation** - **HIGH PRIORITY** for production performance
+   - Implement `Arc<AudioFrame>` shared ownership throughout codec system
+   - Eliminate buffer copies in audio processing pipeline (AEC, AGC, VAD)
+   - Zero-copy jitter buffer implementation for frame storage/retrieval
+   - Zero-copy integration with rtp-core (`Arc<RtpPacket>` handling)
+   - Memory optimization with object pooling for audio frames
+
+6. **Performance Integration Testing**
    - Create `tests/integration_performance.rs` for load testing
    - Test concurrent sessions (target: 100+ sessions)
    - Benchmark integrated transcoding performance
    - Memory/CPU usage validation under full stack load
 
-6. **Advanced Integration Features**
+7. **Advanced Integration Features**
    - RTCP feedback integration with QualityMonitor
    - Transport-wide congestion control coordination
    - Dynamic codec switching during active calls
 
 ### **🔧 Medium Term (Week 3-4):**
-7. **Production Hardening** - Real-world deployment prep
+8. **Production Hardening** - Real-world deployment prep
    - Network condition testing (packet loss, jitter, bandwidth limits)
    - Error handling validation in integration scenarios
    - Resource leak detection in long-running integrated tests
    - Production monitoring setup across all crates
 
-8. **Enhanced Integration Testing**
+9. **Enhanced Integration Testing**
    - Multi-party call scenarios (conference calling foundation)
    - Call transfer and hold/resume integration
    - Quality adaptation affecting SIP re-negotiation
    - Real network testing with actual SIP clients
 
-9. **Documentation & Examples**
-   - Integration testing documentation
-   - End-to-end usage examples
-   - Performance benchmarks documentation
-   - Deployment guides for integrated system
+10. **Documentation & Examples**
+    - Integration testing documentation
+    - End-to-end usage examples
+    - Performance benchmarks documentation
+    - Deployment guides for integrated system
 
 **Updated Target**: Production-ready integrated media-core within **2-3 weeks** (accelerated with detailed plan).
 

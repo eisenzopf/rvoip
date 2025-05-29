@@ -9,6 +9,7 @@ members = [
     "crates/media-core",
     "crates/session-core",
     "crates/call-engine",
+    "crates/client-core",
     "crates/sip-client",
     "crates/infra-common",
     "examples/simple-softswitch",
@@ -47,3 +48,34 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 # Testing
 proptest = "1.4" 
+
+# 🔧 Optimization Profiles for Binary Size Reduction
+
+[profile.release]
+# Standard release with size optimizations
+opt-level = "s"           # Optimize for size instead of speed
+lto = true               # Link-time optimization for dead code elimination
+codegen-units = 1        # Better optimization (slower compile, smaller binary)
+panic = "abort"          # Remove panic handling code (smaller binary)
+strip = true             # Remove debug symbols from binary
+
+[profile.release-small]
+# Aggressive size optimization (smallest possible binary)
+inherits = "release"
+opt-level = "z"          # Aggressive size optimization
+lto = "fat"              # Maximum link-time optimization
+codegen-units = 1        # Single compilation unit for best optimization
+panic = "abort"          # No panic unwinding code
+strip = "symbols"        # Strip all symbols
+overflow-checks = false  # Disable overflow checks in release
+debug = false            # No debug info
+rpath = false            # No runtime library path
+
+[profile.release-fast]
+# Speed-optimized release (larger binary, maximum performance)
+inherits = "release"
+opt-level = 3            # Maximum speed optimization
+lto = "thin"             # Light link-time optimization
+codegen-units = 16       # Parallel compilation
+panic = "unwind"         # Standard panic behavior
+debug = false            # No debug info 
