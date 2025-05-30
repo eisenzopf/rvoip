@@ -7,6 +7,7 @@ pub mod core;
 pub mod bridge;
 pub mod lifecycle;
 
-pub use core::CallOrchestrator;
+// Export the main call center engine with real session-core integration
+pub use core::{CallCenterEngine, CallInfo, CallStatus, RoutingDecision, OrchestratorStats};
 pub use bridge::BridgeManager;
 pub use lifecycle::CallLifecycleManager; 

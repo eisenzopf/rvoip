@@ -7,6 +7,9 @@ pub mod registry;
 pub mod routing;
 pub mod availability;
 
+/// Agent identifier type alias
+pub type AgentId = String;
+
 pub use registry::{AgentRegistry, Agent, AgentStatus};
 pub use routing::SkillBasedRouter;
 pub use availability::AvailabilityTracker; 

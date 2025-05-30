@@ -71,59 +71,9 @@ pub mod database;
 // Re-exports for convenience
 pub use error::{CallCenterError, Result};
 pub use config::CallCenterConfig;
-pub use orchestrator::CallOrchestrator;
 
-/// Main call center engine
-/// 
-/// This is the primary entry point for the call center functionality.
-/// It coordinates all subsystems and provides a unified interface.
-pub struct CallCenterEngine {
-    /// Call center configuration
-    config: CallCenterConfig,
-    
-    /// Database for persistence
-    database: database::CallCenterDatabase,
-}
-
-impl CallCenterEngine {
-    /// Create a new call center engine
-    pub async fn new(
-        config: CallCenterConfig,
-        database: database::CallCenterDatabase,
-    ) -> Result<Self> {
-        tracing::info!("🎯 Initializing CallCenterEngine (Phase 1 - Basic Structure)");
-        tracing::warn!("🚧 Session manager integration will be completed in Phase 2");
-        
-        Ok(Self {
-            config,
-            database,
-        })
-    }
-    
-    /// Start the call center engine
-    pub async fn start(&self) -> Result<()> {
-        tracing::info!("🚀 Call center engine started (Phase 1 - Basic Structure)");
-        tracing::warn!("🚧 Full functionality will be available after Phase 2 implementation");
-        Ok(())
-    }
-    
-    /// Handle an incoming call (Phase 1 stub)
-    pub async fn handle_incoming_call(&self, request: rvoip_sip_core::Request) -> Result<rvoip_session_core::SessionId> {
-        tracing::warn!("🚧 handle_incoming_call is a Phase 1 stub - returning dummy session ID");
-        // Return a dummy session ID for now
-        Ok(rvoip_session_core::SessionId::new())
-    }
-    
-    /// Get call center statistics
-    pub fn get_statistics(&self) -> CallCenterStats {
-        // Return empty stats for Phase 1
-        CallCenterStats {
-            active_calls: 0,
-            active_bridges: 0,
-            total_calls_handled: 0,
-        }
-    }
-}
+// **NEW**: Import the REAL CallCenterEngine with session-core integration
+pub use orchestrator::core::CallCenterEngine;
 
 /// Call center statistics
 #[derive(Debug, Clone)]
@@ -135,8 +85,11 @@ pub struct CallCenterStats {
 
 /// Prelude module for convenient imports
 pub mod prelude {
-    // Core types
-    pub use crate::{CallCenterEngine, CallCenterError, CallCenterConfig, Result, CallCenterStats};
+    // **UPDATED**: Core types - now using REAL CallCenterEngine
+    pub use crate::{CallCenterError, CallCenterConfig, Result, CallCenterStats};
+    
+    // **NEW**: Real CallCenterEngine with session-core integration
+    pub use crate::orchestrator::core::CallCenterEngine;
     
     // Configuration types
     pub use crate::config::{
@@ -146,10 +99,8 @@ pub mod prelude {
     
     // Orchestrator types - import from correct modules
     pub use crate::orchestrator::{
-        CallOrchestrator, BridgeManager, CallLifecycleManager,
-    };
-    pub use crate::orchestrator::core::{
-        CallInfo, CallStatus, BridgeInfo, RoutingDecision, OrchestratorStats,
+        BridgeManager, CallLifecycleManager,
+        CallInfo, CallStatus, RoutingDecision, OrchestratorStats,
     };
     pub use crate::orchestrator::bridge::BridgeType;
     
@@ -184,9 +135,14 @@ pub mod prelude {
         routing_store::{RoutingPolicy, RoutingPolicyType, RoutingStore},
     };
     
-    // Session-core re-exports
-    pub use rvoip_session_core::{SessionManager, SessionId, SessionState};
+    // **NEW**: Session-core integration types
+    pub use rvoip_session_core::{
+        SessionId, Session,
+        api::{ServerSessionManager, ServerConfig, create_full_server_manager},
+        session::bridge::{BridgeId, BridgeConfig, BridgeInfo, BridgeEvent}
+    };
     pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+    pub use rvoip_transaction_core::TransactionManager;
     
     // Common external types
     pub use chrono::{DateTime, Utc};

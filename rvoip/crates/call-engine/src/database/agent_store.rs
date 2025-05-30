@@ -418,16 +418,40 @@ impl AgentStore {
         
         let conn = self.db.connection().await;
         
-        let mut stmt = conn.prepare(
-            "SELECT id, sip_uri, display_name, status, max_concurrent_calls, created_at, updated_at, last_seen_at, department, extension, phone_number FROM agents ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
-        ).await?;
-        
-        let mut rows = stmt.query([limit.to_string().as_str(), offset.to_string().as_str()]).await?;
+        // Use different queries based on offset to work around Limbo's OFFSET parsing
         let mut agents = Vec::new();
         
-        while let Some(row) = rows.next().await? {
-            let agent = self.parse_agent_from_row(&row)?;
-            agents.push(agent);
+        if offset == 0 {
+            // Simple LIMIT query when no offset needed - use static SQL to avoid parameter issues
+            let mut stmt = conn.prepare(
+                "SELECT id, sip_uri, display_name, status, max_concurrent_calls, created_at, updated_at, last_seen_at, department, extension, phone_number FROM agents ORDER BY created_at DESC LIMIT 100"
+            ).await?;
+            
+            let mut rows = stmt.query(&[] as &[&str; 0]).await?;
+            
+            while let Some(row) = rows.next().await? {
+                let agent = self.parse_agent_from_row(&row)?;
+                agents.push(agent);
+            }
+        } else {
+            // For now, just return all agents and handle pagination in memory
+            // This is a workaround for Limbo's OFFSET parsing issue
+            let mut stmt = conn.prepare(
+                "SELECT id, sip_uri, display_name, status, max_concurrent_calls, created_at, updated_at, last_seen_at, department, extension, phone_number FROM agents ORDER BY created_at DESC"
+            ).await?;
+            
+            let mut rows = stmt.query(&[] as &[&str; 0]).await?;
+            let mut all_agents = Vec::new();
+            
+            while let Some(row) = rows.next().await? {
+                let agent = self.parse_agent_from_row(&row)?;
+                all_agents.push(agent);
+            }
+            
+            // Apply pagination in memory
+            let start = offset as usize;
+            let end = start + limit as usize;
+            agents = all_agents.into_iter().skip(start).take(limit as usize).collect();
         }
         
         Ok(agents)
