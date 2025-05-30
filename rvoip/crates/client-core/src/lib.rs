@@ -1,55 +1,43 @@
-//! # rvoip-client-core
+//! Client-core: High-level SIP client coordination layer
 //!
-//! SIP client coordination layer that leverages the rvoip infrastructure for client applications.
+//! This crate provides a high-level API for SIP client applications by delegating
+//! to session-core for all SIP session and media orchestration.
 //!
-//! This crate provides client-specific session management on top of the existing rvoip
-//! infrastructure (transaction-core, media-core, rtp-core, etc.) to enable SIP client
-//! applications.
-//!
-//! ## Architecture
-//!
+//! ## Proper Layer Separation
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    sip-client (Future)                      │
-//! │              (Client Application Logic)                     │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                  client-core (This Crate)                   │
-//! │             (Client Session Management)                     │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  transaction-core │  media-core  │  rtp-core   ← REUSE!    │
-//! │  (SIP Protocol)   │  (Media)     │  (RTP)      ← REUSE!    │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │              sip-transport │ UDP/TCP          ← REUSE!      │
-//! └─────────────────────────────────────────────────────────────┘
+//! client-core -> session-core -> {transaction-core, media-core, sip-transport, sip-core}
 //! ```
 //!
-//! ## Key Features
+//! Client-core focuses on:
+//! - User-friendly call management API
+//! - Event handling for UI integration
+//! - Configuration management
+//! - Call state mapping and tracking
 //!
-//! - **Code Reuse**: 80% of infrastructure shared with server-side
-//! - **Memory Safety**: Full Rust memory safety guarantees
-//! - **Async Performance**: Built on tokio for high performance
-//! - **Protocol Compliance**: Leverages same RFC-compliant SIP handling
-//! - **Clean APIs**: Event-driven architecture for UI integration
+//! All SIP protocol details, media management, and infrastructure
+//! are handled by session-core and lower layers.
 
 pub mod client;
-pub mod registration;
 pub mod call;
+pub mod registration;
 pub mod events;
 pub mod error;
 
-// Re-export core types and traits
-pub use client::{ClientManager, ClientConfig};
-pub use registration::{RegistrationManager, RegistrationStatus, RegistrationConfig};
-pub use call::{CallManager, CallState, CallInfo, CallId};
+// Public API exports (only high-level client-core types)
+pub use client::{ClientManager, ClientConfig, ClientStats};
+pub use call::{CallState, CallInfo, CallId, CallDirection, CallStats};
+pub use registration::{RegistrationConfig, RegistrationInfo, RegistrationStatus};
 pub use events::{
-    ClientEventHandler, ClientEvent, IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo,
-    CallAction, Credentials, MediaEventType
+    ClientEventHandler, ClientEvent, IncomingCallInfo, CallStatusInfo,
+    RegistrationStatusInfo, CallAction, MediaEventType
 };
 pub use error::{ClientError, ClientResult};
 
-// Re-export commonly used types from infrastructure
-pub use rvoip_sip_core::{Uri, Request, Response};
-pub use infra_common::EventBus;
+// Re-export commonly used types from session-core (for convenience)
+pub use rvoip_session_core::{SessionId, SessionState};
+
+/// Client-core version information
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {

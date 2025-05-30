@@ -9,12 +9,12 @@ keywords = ["sip", "voip", "client", "telecommunications", "rtp"]
 categories = ["network-programming", "multimedia"]
 
 [dependencies]
-# Core rvoip infrastructure (REUSE!)
-rvoip-transaction-core = { path = "../transaction-core" }
-rvoip-media-core = { path = "../media-core" }
-rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-sip-transport = { path = "../sip-transport" }
-rvoip-sip-core = { path = "../sip-core" }
+# Core rvoip infrastructure (PROPER LAYER SEPARATION!)
+rvoip-session-core = { path = "../session-core" }
+# Remove direct access to lower layers - session-core handles these
+# rvoip-media-core = { path = "../media-core" }
+# rvoip-rtp-core = { path = "../rtp-core" }
+# rvoip-sip-core = { path = "../sip-core" }
 infra-common = { path = "../infra-common" }
 
 # Async runtime and utilities

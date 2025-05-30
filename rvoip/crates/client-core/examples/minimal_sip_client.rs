@@ -10,8 +10,9 @@ use tracing::{info, error, warn};
 use rvoip_client_core::{
     ClientManager, ClientConfig, RegistrationConfig,
     ClientEventHandler, IncomingCallInfo, CallStatusInfo, 
-    RegistrationStatusInfo, CallAction, Credentials, MediaEventType,
+    RegistrationStatusInfo, CallAction, MediaEventType,
     CallId, CallState,
+    events::Credentials,
 };
 
 /// A simple event handler that logs all events
@@ -59,8 +60,7 @@ impl ClientEventHandler for LoggingEventHandler {
             rvoip_client_core::RegistrationStatus::Registering => "🔄",
             rvoip_client_core::RegistrationStatus::Registered => "✅",
             rvoip_client_core::RegistrationStatus::Failed => "💥",
-            rvoip_client_core::RegistrationStatus::Expired => "⏰",
-            rvoip_client_core::RegistrationStatus::AuthenticationRequired => "🔐",
+            rvoip_client_core::RegistrationStatus::Unregistering => "🔄",
         };
         
         info!("{} Registration status for {}: {:?}", 
@@ -166,11 +166,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reg_config = RegistrationConfig::new(
         "sip:demo.example.com".to_string(),
         "sip:alice@demo.example.com".to_string(),
-        "alice".to_string(),
-        "secret123".to_string(),
+        "sip:alice@127.0.0.1:5060".to_string(),
     )
-    .with_expires(3600)
-    .with_contact_param("transport".to_string(), "udp".to_string());
+    .with_auth("alice".to_string(), "secret123".to_string())
+    .with_expires(3600);
 
     match client.register(reg_config).await {
         Ok(reg_id) => {

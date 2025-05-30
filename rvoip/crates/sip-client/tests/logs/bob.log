@@ -1,0 +1,252 @@
+warning: unused import: `TypedBroadcastSender`
+ --> crates/infra-common/src/events/bus.rs:3:45
+  |
+3 | use crate::events::registry::{TypeRegistry, TypedBroadcastSender, TypedBroadcastReceiver, GlobalTypeRe...
+  |                                             ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Instant`
+ --> crates/infra-common/src/events/bus.rs:5:27
+  |
+5 | use std::time::{Duration, Instant};
+  |                           ^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> crates/infra-common/src/events/bus.rs:9:5
+  |
+9 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `EventType`
+ --> crates/infra-common/src/events/registry.rs:1:35
+  |
+1 | use crate::events::types::{Event, EventType, StaticEvent};
+  |                                   ^^^^^^^^^
+
+warning: unused import: `once_cell::sync::OnceCell`
+ --> crates/infra-common/src/events/registry.rs:6:5
+  |
+6 | use once_cell::sync::OnceCell;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::RwLock`
+ --> crates/infra-common/src/events/registry.rs:9:5
+  |
+9 | use std::sync::RwLock;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::marker::PhantomData`
+ --> crates/infra-common/src/events/subscriber.rs:4:5
+  |
+4 | use std::marker::PhantomData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+ --> crates/infra-common/src/events/types.rs:6:5
+  |
+6 | use std::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `EventError`
+ --> crates/infra-common/src/events/api.rs:9:48
+  |
+9 | use crate::events::types::{Event, EventResult, EventError, EventFilter};
+  |                                                ^^^^^^^^^^
+
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> crates/infra-common/src/config/loader.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ConfigProvider`
+ --> crates/infra-common/src/config/loader.rs:5:31
+  |
+5 | use crate::config::provider::{ConfigProvider, ConfigSource, BasicConfigProvider};
+  |                               ^^^^^^^^^^^^^^
+
+warning: unused import: `Instant`
+ --> crates/infra-common/src/config/dynamic.rs:8:27
+  |
+8 | use std::time::{Duration, Instant};
+  |                           ^^^^^^^
+
+warning: unused import: `HashSet`
+ --> crates/infra-common/src/lifecycle/manager.rs:4:33
+  |
+4 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused import: `async_trait::async_trait`
+ --> crates/infra-common/src/lifecycle/manager.rs:8:5
+  |
+8 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Error` and `Result`
+ --> crates/infra-common/src/lifecycle/health.rs:1:28
+  |
+1 | use crate::errors::types::{Error, Result};
+  |                            ^^^^^  ^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `infra-common` (lib) generated 29 warnings (run `cargo fix --lib -p infra-common` to apply 22 suggestions)
+warning: method `emit_event` is never used
+   --> crates/client-core/src/client.rs:607:14
+    |
+182 | impl ClientManager {
+    | ------------------ method in this implementation
+...
+607 |     async fn emit_event(&self, event: ClientEvent) {
+    |              ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `rvoip-client-core` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/rvoip-sip-client --port 5062 --username bob --domain 127.0.0.1 call 'sip:alice@127.0.0.1:5061' --duration 10 --auto-hangup`
+[2m2025-05-30T21:00:50.573695Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
+[2m2025-05-30T21:00:50.573846Z[0m [32m INFO[0m 📞 Making outgoing call
+[2m2025-05-30T21:00:50.573857Z[0m [32m INFO[0m    Target: sip:alice@127.0.0.1:5061
+[2m2025-05-30T21:00:50.573878Z[0m [32m INFO[0m    Duration: 10s
+[2m2025-05-30T21:00:50.573887Z[0m [32m INFO[0m    Auto-hangup: true
+[2m2025-05-30T21:00:50.573990Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "bob"
+[2m2025-05-30T21:00:50.574132Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
+[2m2025-05-30T21:00:50.574205Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5062), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:bob@127.0.0.1:5062"), from_uri: Some("sip:bob@127.0.0.1"), registrar_uri: None, credentials: None }
+[2m2025-05-30T21:00:50.574271Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
+[2m2025-05-30T21:00:50.574709Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-05-30T21:00:50.575560Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-05-30T21:00:50.575605Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5062
+[2m2025-05-30T21:00:50.576002Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
+[2m2025-05-30T21:00:50.576743Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
+[2m2025-05-30T21:00:50.577012Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
+[2m2025-05-30T21:00:50.577081Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
+[2m2025-05-30T21:00:50.577147Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
+[2m2025-05-30T21:00:50.577156Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
+[2m2025-05-30T21:00:50.577182Z[0m [32m INFO[0m 📝 Registering bob with 127.0.0.1
+[2m2025-05-30T21:00:50.577224Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
+[2m2025-05-30T21:00:50.577234Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
+[2m2025-05-30T21:00:50.577242Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
+[2m2025-05-30T21:00:50.577258Z[0m [32m INFO[0m ✅ Registration request queued with ID: 657d4e05-6892-42d6-8d7a-d6df9edf7a39
+[2m2025-05-30T21:00:50.577267Z[0m [32m INFO[0m ✅ Registration initiated for bob
+[2m2025-05-30T21:00:50.577274Z[0m [32m INFO[0m ✅ Registered with SIP server
+[2m2025-05-30T21:00:50.577280Z[0m [32m INFO[0m 📞 Calling sip:alice@127.0.0.1:5061...
+[2m2025-05-30T21:00:50.577287Z[0m [32m INFO[0m 📞 Making call to sip:alice@127.0.0.1:5061
+[2m2025-05-30T21:00:50.577295Z[0m [32m INFO[0m 📞 Making call from sip:bob@127.0.0.1 to sip:alice@127.0.0.1:5061 via session-core factory API
+[2m2025-05-30T21:00:50.578602Z[0m [32m INFO[0m ✅ Call 2025b61e-8191-4de9-950d-db0ad06cd9d3 created via session d628035b-efb1-4794-9111-d3b4b5c886c6 (factory API with real infrastructure)
+[2m2025-05-30T21:00:50.578612Z[0m [32m INFO[0m 📋 Call details: local=sip:bob@127.0.0.1, remote=sip:alice@127.0.0.1:5061, subject=None
+[2m2025-05-30T21:00:50.578619Z[0m [32m INFO[0m 🚧 Note: INVITE transmission will happen when session-core implements full call flow
+[2m2025-05-30T21:00:50.578644Z[0m [32m INFO[0m ⏳ Waiting for answer...
+[2m2025-05-30T21:00:50.578650Z[0m [32m INFO[0m ⏳ Waiting for call 2025b61e-8191-4de9-950d-db0ad06cd9d3 to be answered
+❌ Error: Timed out: Call answer timeout

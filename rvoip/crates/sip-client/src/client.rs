@@ -148,13 +148,34 @@ impl SipClient {
     pub async fn new(config: Config) -> Result<Self> {
         info!("🚀 Creating SIP client with config: {:?}", config.username().unwrap_or("anonymous"));
         
-        // Convert our config to client-core config
-        let core_config = CoreConfig::new()
+        // Convert our config to client-core config with proper SIP identity
+        let mut core_config = CoreConfig::new()
             .with_sip_addr(config.local_sip_addr())
             .with_media_addr(config.local_media_addr())
             .with_user_agent(config.user_agent.clone())
             .with_codecs(config.preferred_codecs().to_vec())
             .with_max_calls(config.max_concurrent_calls);
+            
+        // Configure SIP identity if credentials are available
+        if let Some(ref creds) = config.credentials {
+            let from_uri = format!("sip:{}@{}", creds.username, creds.domain);
+            let contact_uri = format!("sip:{}@{}", creds.username, config.local_sip_addr());
+            
+            core_config = core_config
+                .with_from_uri(from_uri)
+                .with_contact_uri(contact_uri);
+                
+            // TODO: Add display_name field to Config if needed
+            // if let Some(ref display_name) = config.display_name {
+            //     core_config = core_config.with_display_name(display_name.clone());
+            // }
+        } else {
+            // No credentials - use anonymous configuration
+            let anon_uri = format!("sip:anonymous@{}", config.local_sip_addr());
+            core_config = core_config
+                .with_from_uri(anon_uri.clone())
+                .with_contact_uri(anon_uri);
+        }
 
         // Create the core client manager
         let core = ClientManager::new(core_config).await
@@ -200,14 +221,12 @@ impl SipClient {
         info!("📝 Registering {} with {}", username, domain);
         
         let server_uri = format!("sip:{}", domain);
-        let user_uri = format!("sip:{}@{}", username, domain);
         
         let reg_config = RegistrationConfig::new(
-            server_uri,
-            user_uri,
-            username.to_string(),
-            password.to_string(),
-        );
+            server_uri.to_string(),
+            format!("sip:{}@{}", username, server_uri),
+            format!("sip:{}@127.0.0.1:5060", username),
+        ).with_auth(username.to_string(), password.to_string());
 
         self.core.register(reg_config).await
             .map_err(|e| Error::Core(e.to_string()))?;

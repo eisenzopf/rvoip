@@ -196,33 +196,56 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
     config.validate()
         .context("Invalid client configuration")?;
     
-    // Create session manager - use a basic configuration for now
+    // **REAL INFRASTRUCTURE**: Create proper transport like the server factory does
+    info!("🚀 Creating real transport manager for SIP client communication");
+    
+    // Create transport configuration for client
+    let local_address = config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+    let transport_config = rvoip_transaction_core::transport::TransportManagerConfig {
+        enable_udp: true,
+        enable_tcp: false,
+        enable_ws: false,
+        enable_tls: false,
+        bind_addresses: vec![local_address],
+        default_channel_capacity: 100,
+        tls_cert_path: None,
+        tls_key_path: None,
+    };
+    
+    // Create and initialize transport manager (like server does)
+    let (mut transport_manager, transport_events) = rvoip_transaction_core::transport::TransportManager::new(transport_config).await
+        .context("Failed to create transport manager for client")?;
+        
+    transport_manager.initialize().await
+        .context("Failed to initialize transport manager for client")?;
+        
+    info!("✅ Client transport manager created and initialized on {}", local_address);
+    
+    // Create transaction manager using the transport manager (like server does)
+    let (transaction_manager, _transaction_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
+        transport_manager,
+        transport_events,
+        Some(100), // Event buffer capacity
+    ).await.context("Failed to create transaction manager for client")?;
+    
+    let transaction_manager = Arc::new(transaction_manager);
+    info!("✅ Client transaction manager created with real transport");
+    
+    // Create session manager with real infrastructure
     let session_config = crate::session::SessionConfig {
-        local_media_addr: config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
+        local_media_addr: local_address,
         ..Default::default()
     };
     let event_bus = crate::events::EventBus::new(100).await
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
-    // Create a dummy transaction manager for now - this would need to be properly integrated
-    // For now, create a minimal transport for the transaction manager
-    let (dummy_transport, dummy_events) = rvoip_sip_transport::UdpTransport::bind("127.0.0.1:0".parse().unwrap(), None).await
-        .context("Failed to create dummy transport")?;
-    
-    let transaction_manager = std::sync::Arc::new(
-        rvoip_transaction_core::TransactionManager::dummy(
-            std::sync::Arc::new(dummy_transport),
-            dummy_events
-        )
-    );
-    
     let session_manager = Arc::new(crate::session::SessionManager::new(
         transaction_manager,
         session_config,
         event_bus
-    ).await.context("Failed to create session manager")?);
+    ).await.context("Failed to create session manager with real infrastructure")?);
     
-    info!("SIP client created successfully");
+    info!("✅ SIP client created successfully with real transport infrastructure");
     
     Ok(SipClient {
         session_manager,
