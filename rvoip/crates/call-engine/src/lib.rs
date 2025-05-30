@@ -28,23 +28,78 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```no_run
 //! use rvoip_call_engine::prelude::*;
+//! use rvoip_transaction_core::TransactionManager;
 //! use std::sync::Arc;
-//!
+//! use tokio::sync::mpsc;
+//! use async_trait::async_trait;
+//! 
+//! // Simple dummy transport for demo
+//! #[derive(Debug, Clone)]
+//! struct DemoTransport {
+//!     local_addr: std::net::SocketAddr,
+//! }
+//! 
+//! #[async_trait]
+//! impl rvoip_sip_transport::Transport for DemoTransport {
+//!     async fn send_message(
+//!         &self, 
+//!         _message: rvoip_sip_core::Message, 
+//!         _destination: std::net::SocketAddr
+//!     ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
+//!         Ok(())
+//!     }
+//!     
+//!     fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
+//!         Ok(self.local_addr)
+//!     }
+//!     
+//!     async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
+//!         Ok(())
+//!     }
+//!     
+//!     fn is_closed(&self) -> bool {
+//!         false
+//!     }
+//! }
+//! 
 //! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     // Initialize database
+//! async fn main() -> anyhow::Result<()> {
+//!     // Create database
 //!     let database = CallCenterDatabase::new_in_memory().await?;
 //!     
 //!     // Create configuration
 //!     let config = CallCenterConfig::default();
 //!     
-//!     // Initialize call center
-//!     let call_center = CallCenterEngine::new(config, database).await?;
+//!     // Create transaction manager for session-core
+//!     let local_addr = "127.0.0.1:5060".parse()?;
+//!     let (_tx, rx) = mpsc::channel(10);
+//!     let transport = Arc::new(DemoTransport { local_addr });
+//!     let (tm, _events) = TransactionManager::new(transport, rx, Some(10)).await
+//!         .map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
 //!     
-//!     // Start processing calls
-//!     call_center.start().await?;
+//!     // Create call center with real session-core integration
+//!     let call_center = CallCenterEngine::new(Arc::new(tm), config, database).await?;
+//!     
+//!     // Register agents with session-core
+//!     let agent = Agent {
+//!         id: "agent-001".to_string(),
+//!         sip_uri: "sip:alice@example.com".parse()?,
+//!         display_name: "Alice".to_string(),
+//!         skills: vec!["english".to_string(), "sales".to_string()],
+//!         max_concurrent_calls: 2,
+//!         status: AgentStatus::Available,
+//!         department: Some("sales".to_string()),
+//!         extension: Some("1001".to_string()),
+//!     };
+//!     
+//!     let session_id = call_center.register_agent(&agent).await?;
+//!     println!("Agent registered with session ID: {}", session_id);
+//!     
+//!     // Get call center statistics
+//!     let stats = call_center.get_stats().await;
+//!     println!("Available agents: {}", stats.available_agents);
 //!     
 //!     Ok(())
 //! }
@@ -102,7 +157,7 @@ pub mod prelude {
         BridgeManager, CallLifecycleManager,
         CallInfo, CallStatus, RoutingDecision, OrchestratorStats,
     };
-    pub use crate::orchestrator::bridge::BridgeType;
+    pub use crate::orchestrator::bridge::{BridgeType, CallCenterBridgeConfig, BridgeStats};
     
     // Agent types - import from correct modules
     pub use crate::agent::{
@@ -135,11 +190,14 @@ pub mod prelude {
         routing_store::{RoutingPolicy, RoutingPolicyType, RoutingStore},
     };
     
-    // **NEW**: Session-core integration types
-    pub use rvoip_session_core::{
+    // **NEW**: Session-core integration types - all from API
+    pub use rvoip_session_core::api::{
+        // Basic session types
         SessionId, Session,
-        api::{ServerSessionManager, ServerConfig, create_full_server_manager},
-        session::bridge::{BridgeId, BridgeConfig, BridgeInfo, BridgeEvent}
+        // Server management
+        ServerSessionManager, ServerConfig, create_full_server_manager,
+        // Bridge management  
+        BridgeId, BridgeConfig, BridgeInfo, BridgeEvent,
     };
     pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
     pub use rvoip_transaction_core::TransactionManager;

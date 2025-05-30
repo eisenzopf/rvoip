@@ -62,10 +62,15 @@ pub use server::{
     ServerConfig, ServerSessionManager, RouteInfo, UserRegistration, ServerStats,
     create_server_session_manager, create_server_session_manager_sync,
     create_full_server_manager, create_full_server_manager_sync,
+    // Incoming call notification types for call-engine
+    IncomingCallEvent, CallerInfo, CallDecision, IncomingCallNotification,
 };
 
 // Re-export server config types for convenience
 pub use crate::api::server::config::TransportProtocol;
+
+// Re-export fundamental session types for API consumers
+pub use crate::{SessionId, Session};
 
 // Re-export bridge types for call-engine orchestration
 pub use crate::session::bridge::{
