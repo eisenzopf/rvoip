@@ -14,6 +14,8 @@ RVOIP stack can leverage to ensure consistency and reduce duplication.
 */
 
 // Set mimalloc as the global allocator for better memory performance
+// Only when this crate is used as a binary, not as a library dependency
+#[cfg(not(feature = "no-global-allocator"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -7,6 +7,10 @@ authors = ["Rudeless Ventures"]
 repository = "https://github.com/rudeless/rvoip"
 license = "MIT"
 
+[features]
+default = []
+no-global-allocator = []
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full", "sync", "time"] }

@@ -18,6 +18,9 @@ rvoip-media-core = { path = "../media-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
 
+# Database
+limbo = "0.0.20"
+
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"
@@ -28,17 +31,31 @@ anyhow = { workspace = true }
 
 # Utilities
 bytes = { workspace = true }
-uuid = { workspace = true, features = ["serde"] }
-dashmap = "5.5"
-parking_lot = "0.12"
+uuid = { workspace = true, features = ["v4", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Infrastructure
+infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
+
+# Collections
+dashmap = "5.5"
+parking_lot = "0.12"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-subscriber = { workspace = true } 
+# Testing
+tokio-test = "0.4"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "call_center_benchmarks"
+harness = false 
