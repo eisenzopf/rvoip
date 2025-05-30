@@ -10,9 +10,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use tracing::{info, debug, warn, error};
 
 use rvoip_transaction_core::TransactionManager;
 use rvoip_media_core::MediaEngine;
+use rvoip_sip_core::{Request, Response, StatusCode, HeaderName};
+use rvoip_sip_core::types::headers::HeaderAccess;
 
 use crate::error::{ClientResult, ClientError};
 
@@ -160,6 +163,8 @@ pub struct CallManager {
     transaction_manager: Arc<TransactionManager>,
     /// Reference to media manager (reused from server infrastructure)
     media_manager: Arc<MediaEngine>,
+    /// Manager state
+    is_running: Arc<RwLock<bool>>,
 }
 
 impl CallManager {
@@ -172,7 +177,290 @@ impl CallManager {
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             transaction_manager,
             media_manager,
+            is_running: Arc::new(RwLock::new(false)),
         }
+    }
+
+    /// Start the call manager
+    pub async fn start(&self) -> ClientResult<()> {
+        let mut running = self.is_running.write().await;
+        if *running {
+            return Ok(());
+        }
+
+        info!("▶️ Starting CallManager");
+        *running = true;
+        info!("✅ CallManager started");
+        Ok(())
+    }
+
+    /// Stop the call manager
+    pub async fn stop(&self) -> ClientResult<()> {
+        let mut running = self.is_running.write().await;
+        if !*running {
+            return Ok(());
+        }
+
+        info!("🛑 Stopping CallManager");
+
+        // Hangup all active calls
+        let call_ids: Vec<CallId> = {
+            let calls = self.active_calls.read().await;
+            calls.keys().cloned().collect()
+        };
+
+        for call_id in call_ids {
+            if let Err(e) = self.hangup_call(&call_id).await {
+                warn!("Failed to hangup call {}: {}", call_id, e);
+            }
+        }
+
+        *running = false;
+        info!("✅ CallManager stopped");
+        Ok(())
+    }
+
+    /// Handle incoming INVITE request
+    pub async fn handle_incoming_invite(&self, request: Request) -> ClientResult<()> {
+        debug!("📞 Handling incoming INVITE from {}", 
+               request.raw_header_value(&HeaderName::From).unwrap_or_else(|| "unknown".to_string()));
+
+        // Extract call information from INVITE
+        let call_id_header = request.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("INVITE missing Call-ID header"))?;
+        
+        let from_header = request.raw_header_value(&HeaderName::From)
+            .ok_or_else(|| ClientError::protocol_error("INVITE missing From header"))?;
+        
+        let to_header = request.raw_header_value(&HeaderName::To)
+            .ok_or_else(|| ClientError::protocol_error("INVITE missing To header"))?;
+
+        // Create incoming call
+        let call_id = self.create_incoming_call(
+            to_header,
+            from_header,
+            None, // TODO: Parse display name from From header
+            None, // TODO: Parse subject from headers
+            "127.0.0.1:5060".parse().unwrap(), // TODO: Get actual remote address
+            call_id_header,
+        ).await?;
+
+        info!("📞 Created incoming call {} from {}", call_id, request.raw_header_value(&HeaderName::From).unwrap_or_default());
+
+        // Send 100 Trying immediately
+        self.send_provisional_response(&request, StatusCode::Trying, "Trying").await?;
+
+        // Send 180 Ringing
+        self.send_provisional_response(&request, StatusCode::Ringing, "Ringing").await?;
+        self.update_call_state(&call_id, CallState::Ringing).await?;
+
+        // TODO: Emit incoming call event to UI
+        // TODO: Set up timer for no-answer scenarios
+
+        info!("✅ Incoming INVITE handled, call in ringing state");
+        Ok(())
+    }
+
+    /// Handle incoming BYE request
+    pub async fn handle_incoming_bye(&self, request: Request) -> ClientResult<()> {
+        debug!("📴 Handling incoming BYE");
+
+        let call_id_header = request.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("BYE missing Call-ID header"))?;
+
+        // Find the call by SIP Call-ID
+        let call_id = self.find_call_by_sip_call_id(&call_id_header).await;
+
+        if let Some(call_id) = call_id {
+            info!("📴 Processing BYE for call {}", call_id);
+            
+            // Update call state
+            self.update_call_state(&call_id, CallState::Terminated).await?;
+            
+            // Send 200 OK response
+            self.send_final_response(&request, StatusCode::Ok, "OK").await?;
+            
+            // Clean up media session
+            // TODO: Stop media session via media_manager
+            
+            // Remove from active calls
+            self.remove_call(&call_id).await?;
+            
+            info!("✅ Call {} terminated by remote party", call_id);
+        } else {
+            warn!("⚠️ Received BYE for unknown call: {}", call_id_header);
+            // Still send 200 OK to be polite
+            self.send_final_response(&request, StatusCode::Ok, "OK").await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle incoming ACK request
+    pub async fn handle_incoming_ack(&self, request: Request) -> ClientResult<()> {
+        debug!("✅ Handling incoming ACK");
+
+        let call_id_header = request.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("ACK missing Call-ID header"))?;
+
+        // Find the call by SIP Call-ID
+        let call_id = self.find_call_by_sip_call_id(&call_id_header).await;
+
+        if let Some(call_id) = call_id {
+            info!("✅ ACK received for call {}, establishing media", call_id);
+            
+            // Update call state to connected
+            self.update_call_state(&call_id, CallState::Connected).await?;
+            
+            // TODO: Start media session via media_manager
+            
+            info!("🟢 Call {} is now connected", call_id);
+        } else {
+            debug!("ACK received for unknown call: {}", call_id_header);
+        }
+
+        Ok(())
+    }
+
+    /// Handle incoming CANCEL request
+    pub async fn handle_incoming_cancel(&self, request: Request) -> ClientResult<()> {
+        debug!("🚫 Handling incoming CANCEL");
+
+        let call_id_header = request.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("CANCEL missing Call-ID header"))?;
+
+        // Find the call by SIP Call-ID
+        let call_id = self.find_call_by_sip_call_id(&call_id_header).await;
+
+        if let Some(call_id) = call_id {
+            info!("🚫 Cancelling call {}", call_id);
+            
+            // Update call state
+            self.update_call_state(&call_id, CallState::Cancelled).await?;
+            
+            // Send 200 OK to CANCEL
+            self.send_final_response(&request, StatusCode::Ok, "OK").await?;
+            
+            // TODO: Send 487 Request Terminated to original INVITE
+            
+            // Remove from active calls
+            self.remove_call(&call_id).await?;
+            
+            info!("✅ Call {} cancelled", call_id);
+        } else {
+            warn!("⚠️ Received CANCEL for unknown call: {}", call_id_header);
+            // Still send 200 OK
+            self.send_final_response(&request, StatusCode::Ok, "OK").await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle INVITE response
+    pub async fn handle_invite_response(&self, response: Response) -> ClientResult<()> {
+        debug!("📨 Handling INVITE response: {} {}", response.status_code(), response.reason_phrase());
+
+        let call_id_header = response.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("Response missing Call-ID header"))?;
+
+        let call_id = self.find_call_by_sip_call_id(&call_id_header).await;
+
+        if let Some(call_id) = call_id {
+            match response.status_code() {
+                100 => { // StatusCode::Trying
+                    info!("⏳ Call {} proceeding", call_id);
+                    self.update_call_state(&call_id, CallState::Proceeding).await?;
+                },
+                180 => { // StatusCode::Ringing
+                    info!("📳 Call {} ringing", call_id);
+                    self.update_call_state(&call_id, CallState::Ringing).await?;
+                },
+                200 => { // StatusCode::Ok
+                    info!("✅ Call {} answered, sending ACK", call_id);
+                    self.update_call_state(&call_id, CallState::Connected).await?;
+                    
+                    // TODO: Send ACK
+                    // TODO: Start media session
+                },
+                code if code >= 400 => {
+                    warn!("❌ Call {} failed with {}", call_id, code);
+                    self.update_call_state(&call_id, CallState::Failed).await?;
+                    
+                    // TODO: Clean up and remove call
+                },
+                _ => {
+                    debug!("📨 Unhandled response {} for call {}", response.status_code(), call_id);
+                }
+            }
+        } else {
+            debug!("Received response for unknown call: {}", call_id_header);
+        }
+
+        Ok(())
+    }
+
+    /// Handle BYE response
+    pub async fn handle_bye_response(&self, response: Response) -> ClientResult<()> {
+        debug!("📨 Handling BYE response: {} {}", response.status_code(), response.reason_phrase());
+
+        let call_id_header = response.raw_header_value(&HeaderName::CallId)
+            .ok_or_else(|| ClientError::protocol_error("Response missing Call-ID header"))?;
+
+        let call_id = self.find_call_by_sip_call_id(&call_id_header).await;
+
+        if let Some(call_id) = call_id {
+            info!("📴 BYE response received for call {}, terminating", call_id);
+            self.update_call_state(&call_id, CallState::Terminated).await?;
+            
+            // TODO: Clean up media session
+            
+            // Remove from active calls
+            self.remove_call(&call_id).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle transaction timeout
+    pub async fn handle_transaction_timeout(&self, transaction_key: &str) -> ClientResult<()> {
+        debug!("⏰ Handling call transaction timeout: {}", transaction_key);
+
+        // Find call by transaction key
+        // TODO: Implement proper transaction key tracking
+        
+        warn!("⏰ Call transaction timeout: {}", transaction_key);
+        Ok(())
+    }
+
+    /// Find call by SIP Call-ID header
+    async fn find_call_by_sip_call_id(&self, sip_call_id: &str) -> Option<CallId> {
+        let calls = self.active_calls.read().await;
+        for (call_id, call) in calls.iter() {
+            if call.info.sip_call_id == sip_call_id {
+                return Some(*call_id);
+            }
+        }
+        None
+    }
+
+    /// Send provisional response (1xx)
+    async fn send_provisional_response(&self, _request: &Request, status_code: StatusCode, reason: &str) -> ClientResult<()> {
+        debug!("📤 Sending {} {} response", status_code.as_u16(), reason);
+        
+        // TODO: Build proper SIP response
+        // TODO: Send via transaction_manager
+        
+        Ok(())
+    }
+
+    /// Send final response (2xx, 4xx, 5xx, 6xx)
+    async fn send_final_response(&self, _request: &Request, status_code: StatusCode, reason: &str) -> ClientResult<()> {
+        debug!("📤 Sending {} {} response", status_code.as_u16(), reason);
+        
+        // TODO: Build proper SIP response
+        // TODO: Send via transaction_manager
+        
+        Ok(())
     }
 
     /// Create a new outgoing call
@@ -278,36 +566,77 @@ impl CallManager {
 
     /// Answer an incoming call
     pub async fn answer_call(&self, call_id: &CallId) -> ClientResult<()> {
-        // TODO: Implement call answering logic
-        // 1. Verify call exists and is in IncomingPending state
-        // 2. Create media session via media_manager
-        // 3. Send 200 OK via transaction_manager
-        // 4. Update call state to Connected
+        info!("✅ Answering call {}", call_id);
+        
+        // Verify call exists and is in appropriate state
+        {
+            let calls = self.active_calls.read().await;
+            let call = calls.get(call_id)
+                .ok_or_else(|| ClientError::CallNotFound { call_id: *call_id })?;
+            
+            if call.info.state != CallState::IncomingPending && call.info.state != CallState::Ringing {
+                return Err(ClientError::InvalidCallState { 
+                    call_id: *call_id, 
+                    current_state: call.info.state.clone() 
+                });
+            }
+        }
 
+        // TODO: Create media session via media_manager
+        // TODO: Send 200 OK response via transaction_manager
+        
         self.update_call_state(call_id, CallState::Connected).await?;
+        
+        info!("✅ Call {} answered successfully", call_id);
         Ok(())
     }
 
     /// Reject an incoming call
     pub async fn reject_call(&self, call_id: &CallId) -> ClientResult<()> {
-        // TODO: Implement call rejection logic
-        // 1. Verify call exists and is in appropriate state
-        // 2. Send 4xx response via transaction_manager
-        // 3. Update call state to Terminated
+        info!("❌ Rejecting call {}", call_id);
+        
+        // Verify call exists and is in appropriate state
+        {
+            let calls = self.active_calls.read().await;
+            let call = calls.get(call_id)
+                .ok_or_else(|| ClientError::CallNotFound { call_id: *call_id })?;
+            
+            if call.info.direction != CallDirection::Incoming {
+                return Err(ClientError::InvalidCallState { 
+                    call_id: *call_id, 
+                    current_state: call.info.state.clone() 
+                });
+            }
+        }
 
+        // TODO: Send 4xx response via transaction_manager
+        
         self.update_call_state(call_id, CallState::Terminated).await?;
+        
+        // Remove from active calls
+        self.remove_call(call_id).await?;
+        
+        info!("✅ Call {} rejected", call_id);
         Ok(())
     }
 
     /// Hangup an active call
     pub async fn hangup_call(&self, call_id: &CallId) -> ClientResult<()> {
-        // TODO: Implement call hangup logic
-        // 1. Verify call exists
-        // 2. Send BYE via transaction_manager
-        // 3. Clean up media session via media_manager
-        // 4. Update call state to Terminating
+        info!("📴 Hanging up call {}", call_id);
+        
+        // Verify call exists
+        {
+            let calls = self.active_calls.read().await;
+            let _call = calls.get(call_id)
+                .ok_or_else(|| ClientError::CallNotFound { call_id: *call_id })?;
+        }
 
+        // TODO: Send BYE via transaction_manager
+        // TODO: Clean up media session via media_manager
+        
         self.update_call_state(call_id, CallState::Terminating).await?;
+        
+        info!("✅ Call {} hangup initiated", call_id);
         Ok(())
     }
 

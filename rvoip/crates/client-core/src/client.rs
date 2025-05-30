@@ -8,15 +8,18 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use tracing::{info, debug, warn, error};
 
-use rvoip_transaction_core::TransactionManager;
+use rvoip_transaction_core::{TransactionManager, TransactionEvent};
 use rvoip_media_core::MediaEngine;
-use rvoip_sip_transport::UdpTransport;
+use rvoip_sip_transport::{UdpTransport, Transport};
+use rvoip_sip_core::{Request, Response, Method, StatusCode, HeaderName};
+use rvoip_sip_core::types::headers::HeaderAccess;
 use infra_common::EventBus;
 
 use crate::call::{CallManager, CallId, CallInfo, CallState};
 use crate::registration::{RegistrationManager, RegistrationConfig, RegistrationInfo};
-use crate::events::{ClientEventHandler, ClientEvent};
+use crate::events::{ClientEventHandler, ClientEvent, CallStatusInfo, RegistrationStatusInfo, MediaEventType};
 use crate::error::{ClientResult, ClientError};
 
 /// Configuration for the SIP client
@@ -113,26 +116,36 @@ pub struct ClientManager {
     event_handler: Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
     /// Client state
     is_running: Arc<RwLock<bool>>,
+    /// Transaction event processing task handle
+    event_task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ClientManager {
     /// Create a new client manager
     pub async fn new(config: ClientConfig) -> ClientResult<Self> {
+        info!("🔧 Creating ClientManager with rvoip infrastructure integration");
+        
         // Create transport layer (reuse infrastructure)
         let (transport, transport_rx) = UdpTransport::bind(config.local_sip_addr, None)
             .await
             .map_err(|e| ClientError::network_error(format!("Failed to bind transport: {}", e)))?;
 
+        let actual_sip_addr = transport.local_addr()
+            .map_err(|e| ClientError::network_error(format!("Failed to get local address: {}", e)))?;
+
+        info!("✅ Transport bound to: {}", actual_sip_addr);
+
         // Create transaction manager (reuse infrastructure)
-        let (transaction_manager, _event_rx) = TransactionManager::new(
+        let (transaction_manager, event_rx) = TransactionManager::new(
             Arc::new(transport),
             transport_rx,
-            Some(1000), // Transaction timeout in ms
+            Some(32000), // 32 second transaction timeout (RFC 3261 Timer B)
         )
         .await
         .map_err(|e| ClientError::TransactionError(e.into()))?;
 
         let transaction_manager = Arc::new(transaction_manager);
+        info!("✅ TransactionManager created");
 
         // Create event bus
         let event_bus = Arc::new(EventBus::new());
@@ -141,6 +154,8 @@ impl ClientManager {
         let media_manager = MediaEngine::new(Default::default())
             .await
             .map_err(|e| ClientError::MediaError(format!("Failed to create media engine: {}", e)))?;
+        
+        info!("✅ MediaEngine created");
 
         // Create subsystem managers
         let call_manager = Arc::new(CallManager::new(
@@ -150,8 +165,14 @@ impl ClientManager {
 
         let registration_manager = Arc::new(RegistrationManager::new(Arc::clone(&transaction_manager)));
 
-        Ok(Self {
-            config,
+        info!("✅ Subsystem managers created");
+
+        // Update config with actual bound address
+        let mut updated_config = config;
+        updated_config.local_sip_addr = actual_sip_addr;
+
+        let client = Self {
+            config: updated_config,
             call_manager,
             registration_manager,
             transaction_manager,
@@ -159,7 +180,162 @@ impl ClientManager {
             event_bus,
             event_handler: Arc::new(RwLock::new(None)),
             is_running: Arc::new(RwLock::new(false)),
-        })
+            event_task_handle: Arc::new(RwLock::new(None)),
+        };
+
+        // Start transaction event processing
+        client.start_transaction_event_processing(event_rx).await;
+
+        Ok(client)
+    }
+
+    /// Start transaction event processing in background
+    async fn start_transaction_event_processing(&self, mut event_rx: tokio::sync::mpsc::Receiver<TransactionEvent>) {
+        let call_manager = Arc::clone(&self.call_manager);
+        let registration_manager = Arc::clone(&self.registration_manager);
+        let event_handler = Arc::clone(&self.event_handler);
+        
+        let handle = tokio::spawn(async move {
+            debug!("🔄 Starting transaction event processing loop");
+            
+            while let Some(event) = event_rx.recv().await {
+                debug!("📨 Received transaction event: {:?}", event);
+                
+                match event {
+                    TransactionEvent::NewRequest { request, source, .. } => {
+                        Self::handle_incoming_request(
+                            &call_manager,
+                            &registration_manager, 
+                            &event_handler,
+                            request
+                        ).await;
+                    },
+                    TransactionEvent::ProvisionalResponse { response, .. } |
+                    TransactionEvent::SuccessResponse { response, .. } |
+                    TransactionEvent::FailureResponse { response, .. } => {
+                        Self::handle_response(
+                            &call_manager,
+                            &registration_manager,
+                            &event_handler,
+                            response
+                        ).await;
+                    },
+                    TransactionEvent::TransactionTimeout { transaction_id } => {
+                        Self::handle_transaction_timeout(
+                            &call_manager,
+                            &registration_manager,
+                            &event_handler,
+                            Some(transaction_id.to_string())
+                        ).await;
+                    },
+                    _ => {
+                        debug!("🔄 Unhandled transaction event type: {:?}", event);
+                    }
+                }
+            }
+            
+            debug!("🛑 Transaction event processing loop ended");
+        });
+
+        let mut task_handle = self.event_task_handle.write().await;
+        *task_handle = Some(handle);
+        
+        info!("✅ Transaction event processing started");
+    }
+
+    /// Handle incoming SIP requests
+    async fn handle_incoming_request(
+        call_manager: &Arc<CallManager>,
+        _registration_manager: &Arc<RegistrationManager>,
+        _event_handler: &Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
+        request: Request,
+    ) {
+        debug!("📨 Handling incoming {} request", request.method());
+        
+        match request.method() {
+            Method::Invite => {
+                debug!("📞 Incoming INVITE request");
+                if let Err(e) = call_manager.handle_incoming_invite(request).await {
+                    error!("Failed to handle incoming INVITE: {}", e);
+                }
+            },
+            Method::Bye => {
+                debug!("📴 Incoming BYE request");
+                if let Err(e) = call_manager.handle_incoming_bye(request).await {
+                    error!("Failed to handle incoming BYE: {}", e);
+                }
+            },
+            Method::Ack => {
+                debug!("✅ Incoming ACK request");
+                if let Err(e) = call_manager.handle_incoming_ack(request).await {
+                    error!("Failed to handle incoming ACK: {}", e);
+                }
+            },
+            Method::Cancel => {
+                debug!("🚫 Incoming CANCEL request");
+                if let Err(e) = call_manager.handle_incoming_cancel(request).await {
+                    error!("Failed to handle incoming CANCEL: {}", e);
+                }
+            },
+            _ => {
+                debug!("🔄 Unhandled request method: {}", request.method());
+            }
+        }
+    }
+
+    /// Handle SIP responses
+    async fn handle_response(
+        call_manager: &Arc<CallManager>,
+        registration_manager: &Arc<RegistrationManager>,
+        _event_handler: &Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
+        response: Response,
+    ) {
+        debug!("📨 Handling response: {} {}", response.status_code(), response.reason_phrase());
+        
+        // Determine if this is a registration or call response based on CSeq method
+        if let Some(cseq_header) = response.raw_header_value(&HeaderName::CSeq) {
+            if cseq_header.contains("REGISTER") {
+                debug!("📝 Registration response");
+                if let Err(e) = registration_manager.handle_registration_response(response).await {
+                    error!("Failed to handle registration response: {}", e);
+                }
+            } else if cseq_header.contains("INVITE") {
+                debug!("📞 INVITE response");
+                if let Err(e) = call_manager.handle_invite_response(response).await {
+                    error!("Failed to handle INVITE response: {}", e);
+                }
+            } else if cseq_header.contains("BYE") {
+                debug!("📴 BYE response");
+                if let Err(e) = call_manager.handle_bye_response(response).await {
+                    error!("Failed to handle BYE response: {}", e);
+                }
+            } else {
+                debug!("🔄 Unhandled response method in CSeq: {}", cseq_header);
+            }
+        } else {
+            warn!("⚠️ Response missing CSeq header");
+        }
+    }
+
+    /// Handle transaction timeouts
+    async fn handle_transaction_timeout(
+        call_manager: &Arc<CallManager>,
+        registration_manager: &Arc<RegistrationManager>,
+        _event_handler: &Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
+        transaction_key: Option<String>,
+    ) {
+        if let Some(key) = transaction_key {
+            warn!("⏰ Transaction timeout for key: {}", key);
+            
+            // Notify subsystems about timeout
+            if let Err(e) = call_manager.handle_transaction_timeout(&key).await {
+                error!("Failed to handle call transaction timeout: {}", e);
+            }
+            
+            if let Err(e) = registration_manager.handle_transaction_timeout(&key).await {
+                error!("Failed to handle registration transaction timeout: {}", e);
+            }
+        }
     }
 
     /// Start the client (begin processing events)
@@ -169,12 +345,14 @@ impl ClientManager {
             return Err(ClientError::internal_error("Client is already running"));
         }
 
-        // TODO: Start transaction event processing
-        // TODO: Set up registration refresh timers
-        // TODO: Start media processing
+        info!("▶️ Starting SIP client systems...");
+
+        // Start subsystems
+        self.call_manager.start().await?;
+        self.registration_manager.start().await?;
 
         *running = true;
-        tracing::info!("SIP client started on {}", self.config.local_sip_addr);
+        info!("✅ SIP client started on {}", self.config.local_sip_addr);
         Ok(())
     }
 
@@ -185,13 +363,20 @@ impl ClientManager {
             return Ok(());
         }
 
-        // TODO: Stop all active calls
-        // TODO: Unregister from all servers
-        // TODO: Stop transaction processing
-        // TODO: Stop media processing
+        info!("🛑 Stopping SIP client...");
+
+        // Stop subsystems
+        self.call_manager.stop().await?;
+        self.registration_manager.stop().await?;
+
+        // Stop transaction event processing
+        if let Some(handle) = self.event_task_handle.write().await.take() {
+            handle.abort();
+            info!("✅ Transaction event processing stopped");
+        }
 
         *running = false;
-        tracing::info!("SIP client stopped");
+        info!("✅ SIP client stopped");
         Ok(())
     }
 
@@ -354,8 +539,28 @@ impl ClientManager {
         if let Some(ref handler) = *handler {
             match &event {
                 ClientEvent::IncomingCall(info) => {
-                    let _action = handler.on_incoming_call(info.clone()).await;
-                    // TODO: Handle the user's action (accept/reject/etc.)
+                    let action = handler.on_incoming_call(info.clone()).await;
+                    // Handle the user's action
+                    match action {
+                        crate::events::CallAction::Accept => {
+                            if let Err(e) = self.answer_call(&info.call_id).await {
+                                error!("Failed to accept call: {}", e);
+                            }
+                        },
+                        crate::events::CallAction::Reject => {
+                            if let Err(e) = self.reject_call(&info.call_id).await {
+                                error!("Failed to reject call: {}", e);
+                            }
+                        },
+                        crate::events::CallAction::Forward { target } => {
+                            debug!("Call forwarded to: {}", target);
+                            // TODO: Implement call forwarding
+                        },
+                        crate::events::CallAction::Voicemail => {
+                            debug!("Call sent to voicemail");
+                            // TODO: Implement voicemail handling
+                        }
+                    }
                 }
                 ClientEvent::CallStateChanged(info) => {
                     handler.on_call_state_changed(info.clone()).await;
@@ -374,6 +579,50 @@ impl ClientManager {
                 }
             }
         }
+    }
+
+    /// Internal method to emit call state change events
+    pub(crate) async fn emit_call_state_change(&self, call_id: CallId, old_state: CallState, new_state: CallState, reason: Option<String>) {
+        let event = ClientEvent::CallStateChanged(CallStatusInfo {
+            call_id,
+            previous_state: Some(old_state),
+            new_state,
+            reason,
+            changed_at: chrono::Utc::now(),
+        });
+        self.emit_event(event).await;
+    }
+
+    /// Internal method to emit registration status change events  
+    pub(crate) async fn emit_registration_status_change(&self, server_uri: String, status: crate::registration::RegistrationStatus, message: Option<String>) {
+        let event = ClientEvent::RegistrationStatusChanged(RegistrationStatusInfo {
+            server_uri,
+            user_uri: "".to_string(), // TODO: Get actual user URI
+            status,
+            message,
+            changed_at: chrono::Utc::now(),
+        });
+        self.emit_event(event).await;
+    }
+
+    /// Internal method to emit media events
+    pub(crate) async fn emit_media_event(&self, call_id: Option<CallId>, event_type: MediaEventType, description: String) {
+        let event = ClientEvent::MediaEvent {
+            call_id,
+            event_type,
+            description,
+        };
+        self.emit_event(event).await;
+    }
+
+    /// Internal method to emit error events
+    pub(crate) async fn emit_error(&self, error: String, recoverable: bool, context: Option<String>) {
+        let event = ClientEvent::ErrorOccurred {
+            error,
+            recoverable,
+            context,
+        };
+        self.emit_event(event).await;
     }
 }
 

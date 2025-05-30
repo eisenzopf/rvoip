@@ -13,6 +13,7 @@ warnings = "allow"
 
 [dependencies]
 # Core crates
+rvoip-client-core = { path = "../client-core" }
 rvoip-sip-core = { path = "../sip-core" }
 rvoip-sip-transport = { path = "../sip-transport", features = ["tls"] }
 rvoip-transaction-core = { path = "../transaction-core" }

@@ -29,8 +29,14 @@ pub enum ClientError {
     #[error("Call already exists: {call_id}")]
     CallAlreadyExists { call_id: Uuid },
 
+    #[error("Invalid call state for call {call_id}: current state is {current_state:?}")]
+    InvalidCallState { 
+        call_id: Uuid, 
+        current_state: crate::call::CallState 
+    },
+
     #[error("Invalid call state: expected {expected}, got {actual}")]
-    InvalidCallState { expected: String, actual: String },
+    InvalidCallStateGeneric { expected: String, actual: String },
 
     #[error("Call setup failed: {reason}")]
     CallSetupFailed { reason: String },
