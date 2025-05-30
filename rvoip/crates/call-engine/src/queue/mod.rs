@@ -7,6 +7,6 @@ pub mod manager;
 pub mod policies;
 pub mod overflow;
 
-pub use manager::{CallQueue, QueueManager};
+pub use manager::{CallQueue, QueueManager, QueuedCall, QueueStats};
 pub use policies::QueuePolicies;
 pub use overflow::OverflowHandler; 
