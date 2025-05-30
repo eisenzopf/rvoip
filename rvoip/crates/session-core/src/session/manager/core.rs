@@ -16,6 +16,7 @@ use rvoip_transaction_core::{
 };
 use rvoip_sip_core::{Request, Response, StatusCode, Method};
 use rvoip_sip_core::json::ext::SipMessageJson;
+use rvoip_sip_core::RequestBuilder;
 
 use crate::dialog::{Dialog, DialogId, DialogManager};
 use crate::events::{EventBus, SessionEvent};
@@ -830,6 +831,123 @@ impl SessionManager {
             let call_id = "unknown".to_string(); // TODO: extract from session
             notifier.on_call_ended_by_server(session_id.clone(), call_id).await;
         }
+        
+        Ok(())
+    }
+
+    /// ❗ **CRITICAL NEW METHOD**: Initiate outgoing call by sending INVITE
+    /// This is the missing piece that the integration test revealed!
+    pub async fn initiate_outgoing_call(
+        &self,
+        session_id: &SessionId,
+        target_uri: &str,
+        from_uri: &str,
+        sdp_offer: Option<String>,
+    ) -> Result<(), Error> {
+        info!("📞 Initiating outgoing call for session {} to {}", session_id, target_uri);
+        
+        // Get the session
+        let session = self.get_session(session_id)?;
+        
+        // Verify session is in correct state for outgoing call
+        let current_state = session.state().await;
+        if current_state != crate::session::session_types::SessionState::Initializing {
+            return Err(Error::InternalError(
+                format!("Session {} not in Initializing state for outgoing call (current: {})", session_id, current_state),
+                ErrorContext::default().with_message("Invalid session state for outgoing call")
+            ));
+        }
+        
+        // Parse target URI
+        let target_uri_parsed: rvoip_sip_core::Uri = target_uri.parse()
+            .map_err(|e| Error::InternalError(
+                format!("Invalid target URI '{}': {}", target_uri, e),
+                ErrorContext::default().with_message("URI parsing failed")
+            ))?;
+        
+        // Parse from URI
+        let from_uri_parsed: rvoip_sip_core::Uri = from_uri.parse()
+            .map_err(|e| Error::InternalError(
+                format!("Invalid from URI '{}': {}", from_uri, e),
+                ErrorContext::default().with_message("URI parsing failed")
+            ))?;
+        
+        // Generate SDP offer if not provided
+        let sdp_offer_body = if let Some(offer) = sdp_offer {
+            offer
+        } else {
+            // Generate SDP offer using media coordination
+            info!("🎵 Generating SDP offer for outgoing call...");
+            self.call_lifecycle_coordinator
+                .coordinate_session_establishment(session_id, "")
+                .await
+                .map_err(|e| Error::InternalError(
+                    format!("Failed to generate SDP offer: {}", e),
+                    ErrorContext::default().with_message("SDP generation failed")
+                ))?
+        };
+        
+        // Build INVITE request
+        let mut invite_builder = RequestBuilder::invite(&target_uri_parsed.to_string())
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create INVITE builder: {}", e),
+                ErrorContext::default().with_message("RequestBuilder creation failed")
+            ))?;
+        
+        // Add From header
+        invite_builder = invite_builder.from("", &from_uri_parsed.to_string(), None);
+        
+        // Add To header  
+        invite_builder = invite_builder.to("", &target_uri_parsed.to_string(), None);
+        
+        // Add Contact header (use from URI as contact)
+        invite_builder = invite_builder.contact(&from_uri_parsed.to_string(), None);
+        
+        // Build the INVITE request
+        let mut invite_request = invite_builder.build();
+        
+        // Add SDP offer as body
+        if !sdp_offer_body.is_empty() {
+            invite_request = invite_request.with_body(bytes::Bytes::from(sdp_offer_body));
+            
+            // Add Content-Type header for SDP
+            let content_type = rvoip_sip_core::types::content_type::ContentType::from_type_subtype("application", "sdp");
+            invite_request.headers.push(rvoip_sip_core::TypedHeader::ContentType(content_type));
+        }
+        
+        // Send INVITE via transaction manager
+        info!("📤 Sending INVITE request to {} from {}", target_uri, from_uri);
+        
+        // Create client transaction for the INVITE request
+        let destination = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), // TODO: Extract from target_uri
+            5060 // TODO: Extract port from target_uri or use default
+        );
+        
+        let transaction_id = self.transaction_manager
+            .create_client_transaction(invite_request, destination)
+            .await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create client transaction: {}", e),
+                ErrorContext::default().with_message("Transaction creation failed")
+            ))?;
+        
+        // Send the INVITE request
+        self.transaction_manager.send_request(&transaction_id).await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to send INVITE request: {}", e),
+                ErrorContext::default().with_message("INVITE transmission failed")
+            ))?;
+        
+        // Update session state to Proceeding (call in progress)
+        session.set_state(crate::session::session_types::SessionState::Dialing).await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to update session state to Dialing: {}", e),
+                ErrorContext::default().with_message("State transition failed")
+            ))?;
+        
+        info!("✅ INVITE sent successfully for session {} (transaction: {:?})", session_id, transaction_id);
+        info!("📞 Call state: Dialing → waiting for response from {}", target_uri);
         
         Ok(())
     }

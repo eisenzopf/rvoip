@@ -203,41 +203,41 @@ warning: fields `id`, `event_type`, and `priority` are never read
 
 warning: `infra-common` (lib) generated 29 warnings (run `cargo fix --lib -p infra-common` to apply 22 suggestions)
 warning: method `emit_event` is never used
-   --> crates/client-core/src/client.rs:607:14
+   --> crates/client-core/src/client.rs:606:14
     |
 182 | impl ClientManager {
     | ------------------ method in this implementation
 ...
-607 |     async fn emit_event(&self, event: ClientEvent) {
+606 |     async fn emit_event(&self, event: ClientEvent) {
     |              ^^^^^^^^^^
     |
     = note: `#[warn(dead_code)]` on by default
 
 warning: `rvoip-client-core` (lib) generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
      Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/rvoip-sip-client --port 5061 --username alice --domain 127.0.0.1 receive --auto-answer --max-duration 30`
-[2m2025-05-30T21:00:45.507763Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
-[2m2025-05-30T21:00:45.507912Z[0m [32m INFO[0m 📞 Waiting for incoming calls
-[2m2025-05-30T21:00:45.507924Z[0m [32m INFO[0m    Auto-answer: true
-[2m2025-05-30T21:00:45.507945Z[0m [32m INFO[0m    Max duration: 30s
-[2m2025-05-30T21:00:45.508048Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "alice"
-[2m2025-05-30T21:00:45.508188Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
-[2m2025-05-30T21:00:45.508261Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5061), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:alice@127.0.0.1:5061"), from_uri: Some("sip:alice@127.0.0.1"), registrar_uri: None, credentials: None }
-[2m2025-05-30T21:00:45.508343Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
-[2m2025-05-30T21:00:45.508789Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5061
-[2m2025-05-30T21:00:45.509664Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5061
-[2m2025-05-30T21:00:45.509719Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5061
-[2m2025-05-30T21:00:45.510120Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
-[2m2025-05-30T21:00:45.510879Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
-[2m2025-05-30T21:00:45.511149Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
-[2m2025-05-30T21:00:45.511218Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
-[2m2025-05-30T21:00:45.511288Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
-[2m2025-05-30T21:00:45.511297Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
-[2m2025-05-30T21:00:45.511322Z[0m [32m INFO[0m 📝 Registering alice with 127.0.0.1
-[2m2025-05-30T21:00:45.511365Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
-[2m2025-05-30T21:00:45.511375Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
-[2m2025-05-30T21:00:45.511383Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
-[2m2025-05-30T21:00:45.511396Z[0m [32m INFO[0m ✅ Registration request queued with ID: 1e2f1605-699b-41fb-8f57-ed58b50d9f34
-[2m2025-05-30T21:00:45.511406Z[0m [32m INFO[0m ✅ Registration initiated for alice
-[2m2025-05-30T21:00:45.511413Z[0m [32m INFO[0m ✅ Registered with SIP server, ready to receive calls
-[2m2025-05-30T21:00:45.511420Z[0m [32m INFO[0m 📞 Waiting for incoming calls (press Ctrl+C to exit)...
+[2m2025-05-30T23:20:00.302934Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
+[2m2025-05-30T23:20:00.302992Z[0m [32m INFO[0m 📞 Waiting for incoming calls
+[2m2025-05-30T23:20:00.303020Z[0m [32m INFO[0m    Auto-answer: true
+[2m2025-05-30T23:20:00.303033Z[0m [32m INFO[0m    Max duration: 30s
+[2m2025-05-30T23:20:00.303096Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "alice"
+[2m2025-05-30T23:20:00.303158Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
+[2m2025-05-30T23:20:00.303199Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5061), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:alice@127.0.0.1:5061"), from_uri: Some("sip:alice@127.0.0.1"), registrar_uri: None, credentials: None }
+[2m2025-05-30T23:20:00.303244Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
+[2m2025-05-30T23:20:00.303493Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5061
+[2m2025-05-30T23:20:00.303917Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5061
+[2m2025-05-30T23:20:00.304014Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5061
+[2m2025-05-30T23:20:00.304337Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
+[2m2025-05-30T23:20:00.304770Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
+[2m2025-05-30T23:20:00.304890Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
+[2m2025-05-30T23:20:00.304895Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
+[2m2025-05-30T23:20:00.304949Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
+[2m2025-05-30T23:20:00.304958Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
+[2m2025-05-30T23:20:00.304966Z[0m [32m INFO[0m 📝 Registering alice with 127.0.0.1
+[2m2025-05-30T23:20:00.304994Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
+[2m2025-05-30T23:20:00.305004Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
+[2m2025-05-30T23:20:00.305013Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
+[2m2025-05-30T23:20:00.305030Z[0m [32m INFO[0m ✅ Registration request queued with ID: fdfd51dc-c9e2-456c-ad68-03ddf864bcdf
+[2m2025-05-30T23:20:00.305036Z[0m [32m INFO[0m ✅ Registration initiated for alice
+[2m2025-05-30T23:20:00.305039Z[0m [32m INFO[0m ✅ Registered with SIP server, ready to receive calls
+[2m2025-05-30T23:20:00.305042Z[0m [32m INFO[0m 📞 Waiting for incoming calls (press Ctrl+C to exit)...

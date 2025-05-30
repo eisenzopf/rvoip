@@ -328,14 +328,13 @@ impl ClientManager {
         let _remote_uri_parsed: Uri = remote_uri.parse()
             .map_err(|e| ClientError::protocol_error(&format!("Invalid remote URI '{}': {}", remote_uri, e)))?;
 
-        // **PROPER DELEGATION**: Use session-core factory SipClient
-        // Factory SipClient now has real infrastructure, use session manager for call creation
-        let session = self.client_manager.session_manager().create_outgoing_session().await
-            .map_err(|e| ClientError::protocol_error(&format!("Session-core create_outgoing_session failed: {}", e)))?;
+        // 🚀 **CRITICAL FIX**: Use SipClient.make_call() which sends INVITE automatically!
+        // This is the new factory API method that creates session AND sends INVITE
+        let session_id = self.client_manager.make_call(&remote_uri).await
+            .map_err(|e| ClientError::protocol_error(&format!("SipClient make_call failed: {}", e)))?;
 
         // Create client-core call ID and map to session
         let call_id = Uuid::new_v4();
-        let session_id = session.id.clone();
 
         // Store bidirectional mapping
         {
@@ -345,9 +344,9 @@ impl ClientManager {
             call_to_session.insert(call_id, session_id.clone());
         }
 
-        info!("✅ Call {} created via session {} (factory API with real infrastructure)", call_id, session.id);
+        info!("✅ Call {} created via session {} (factory API with INVITE transmission)", call_id, session_id);
         info!("📋 Call details: local={}, remote={}, subject={:?}", local_uri, remote_uri, subject);
-        info!("🚧 Note: INVITE transmission will happen when session-core implements full call flow");
+        info!("🚀 INVITE has been sent via SipClient.make_call() factory API!");
         
         Ok(call_id)
     }

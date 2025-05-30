@@ -203,50 +203,99 @@ warning: fields `id`, `event_type`, and `priority` are never read
 
 warning: `infra-common` (lib) generated 29 warnings (run `cargo fix --lib -p infra-common` to apply 22 suggestions)
 warning: method `emit_event` is never used
-   --> crates/client-core/src/client.rs:607:14
+   --> crates/client-core/src/client.rs:606:14
     |
 182 | impl ClientManager {
     | ------------------ method in this implementation
 ...
-607 |     async fn emit_event(&self, event: ClientEvent) {
+606 |     async fn emit_event(&self, event: ClientEvent) {
     |              ^^^^^^^^^^
     |
     = note: `#[warn(dead_code)]` on by default
 
 warning: `rvoip-client-core` (lib) generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
      Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/rvoip-sip-client --port 5062 --username bob --domain 127.0.0.1 call 'sip:alice@127.0.0.1:5061' --duration 10 --auto-hangup`
-[2m2025-05-30T21:00:50.573695Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
-[2m2025-05-30T21:00:50.573846Z[0m [32m INFO[0m 📞 Making outgoing call
-[2m2025-05-30T21:00:50.573857Z[0m [32m INFO[0m    Target: sip:alice@127.0.0.1:5061
-[2m2025-05-30T21:00:50.573878Z[0m [32m INFO[0m    Duration: 10s
-[2m2025-05-30T21:00:50.573887Z[0m [32m INFO[0m    Auto-hangup: true
-[2m2025-05-30T21:00:50.573990Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "bob"
-[2m2025-05-30T21:00:50.574132Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
-[2m2025-05-30T21:00:50.574205Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5062), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:bob@127.0.0.1:5062"), from_uri: Some("sip:bob@127.0.0.1"), registrar_uri: None, credentials: None }
-[2m2025-05-30T21:00:50.574271Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
-[2m2025-05-30T21:00:50.574709Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5062
-[2m2025-05-30T21:00:50.575560Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5062
-[2m2025-05-30T21:00:50.575605Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5062
-[2m2025-05-30T21:00:50.576002Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
-[2m2025-05-30T21:00:50.576743Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
-[2m2025-05-30T21:00:50.577012Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
-[2m2025-05-30T21:00:50.577081Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
-[2m2025-05-30T21:00:50.577147Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
-[2m2025-05-30T21:00:50.577156Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
-[2m2025-05-30T21:00:50.577182Z[0m [32m INFO[0m 📝 Registering bob with 127.0.0.1
-[2m2025-05-30T21:00:50.577224Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
-[2m2025-05-30T21:00:50.577234Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
-[2m2025-05-30T21:00:50.577242Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
-[2m2025-05-30T21:00:50.577258Z[0m [32m INFO[0m ✅ Registration request queued with ID: 657d4e05-6892-42d6-8d7a-d6df9edf7a39
-[2m2025-05-30T21:00:50.577267Z[0m [32m INFO[0m ✅ Registration initiated for bob
-[2m2025-05-30T21:00:50.577274Z[0m [32m INFO[0m ✅ Registered with SIP server
-[2m2025-05-30T21:00:50.577280Z[0m [32m INFO[0m 📞 Calling sip:alice@127.0.0.1:5061...
-[2m2025-05-30T21:00:50.577287Z[0m [32m INFO[0m 📞 Making call to sip:alice@127.0.0.1:5061
-[2m2025-05-30T21:00:50.577295Z[0m [32m INFO[0m 📞 Making call from sip:bob@127.0.0.1 to sip:alice@127.0.0.1:5061 via session-core factory API
-[2m2025-05-30T21:00:50.578602Z[0m [32m INFO[0m ✅ Call 2025b61e-8191-4de9-950d-db0ad06cd9d3 created via session d628035b-efb1-4794-9111-d3b4b5c886c6 (factory API with real infrastructure)
-[2m2025-05-30T21:00:50.578612Z[0m [32m INFO[0m 📋 Call details: local=sip:bob@127.0.0.1, remote=sip:alice@127.0.0.1:5061, subject=None
-[2m2025-05-30T21:00:50.578619Z[0m [32m INFO[0m 🚧 Note: INVITE transmission will happen when session-core implements full call flow
-[2m2025-05-30T21:00:50.578644Z[0m [32m INFO[0m ⏳ Waiting for answer...
-[2m2025-05-30T21:00:50.578650Z[0m [32m INFO[0m ⏳ Waiting for call 2025b61e-8191-4de9-950d-db0ad06cd9d3 to be answered
-❌ Error: Timed out: Call answer timeout
+[2m2025-05-30T23:20:05.317858Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
+[2m2025-05-30T23:20:05.317929Z[0m [32m INFO[0m 📞 Making outgoing call
+[2m2025-05-30T23:20:05.317939Z[0m [32m INFO[0m    Target: sip:alice@127.0.0.1:5061
+[2m2025-05-30T23:20:05.317953Z[0m [32m INFO[0m    Duration: 10s
+[2m2025-05-30T23:20:05.317958Z[0m [32m INFO[0m    Auto-hangup: true
+[2m2025-05-30T23:20:05.318015Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "bob"
+[2m2025-05-30T23:20:05.318074Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
+[2m2025-05-30T23:20:05.318111Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5062), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:bob@127.0.0.1:5062"), from_uri: Some("sip:bob@127.0.0.1"), registrar_uri: None, credentials: None }
+[2m2025-05-30T23:20:05.318151Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
+[2m2025-05-30T23:20:05.318393Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-05-30T23:20:05.318819Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-05-30T23:20:05.318912Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5062
+[2m2025-05-30T23:20:05.319216Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
+[2m2025-05-30T23:20:05.319666Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
+[2m2025-05-30T23:20:05.319764Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
+[2m2025-05-30T23:20:05.319771Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
+[2m2025-05-30T23:20:05.319830Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
+[2m2025-05-30T23:20:05.319834Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
+[2m2025-05-30T23:20:05.319840Z[0m [32m INFO[0m 📝 Registering bob with 127.0.0.1
+[2m2025-05-30T23:20:05.319863Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
+[2m2025-05-30T23:20:05.319867Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
+[2m2025-05-30T23:20:05.319870Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
+[2m2025-05-30T23:20:05.319882Z[0m [32m INFO[0m ✅ Registration request queued with ID: 05582b53-2492-47cc-8c54-d478f98dd4ac
+[2m2025-05-30T23:20:05.319887Z[0m [32m INFO[0m ✅ Registration initiated for bob
+[2m2025-05-30T23:20:05.319892Z[0m [32m INFO[0m ✅ Registered with SIP server
+[2m2025-05-30T23:20:05.319895Z[0m [32m INFO[0m 📞 Calling sip:alice@127.0.0.1:5061...
+[2m2025-05-30T23:20:05.319898Z[0m [32m INFO[0m 📞 Making call to sip:alice@127.0.0.1:5061
+[2m2025-05-30T23:20:05.319902Z[0m [32m INFO[0m 📞 Making call from sip:bob@127.0.0.1 to sip:alice@127.0.0.1:5061 via session-core factory API
+[2m2025-05-30T23:20:05.320542Z[0m [32m INFO[0m 📞 SipClient making call to sip:alice@127.0.0.1:5061
+[2m2025-05-30T23:20:05.320601Z[0m [32m INFO[0m 📞 Initiating outgoing call for session b2a60633-c68a-4d87-8f1c-10207559e886 to sip:alice@127.0.0.1:5061
+[2m2025-05-30T23:20:05.320632Z[0m [32m INFO[0m 🎵 Generating SDP offer for outgoing call...
+[2m2025-05-30T23:20:05.320657Z[0m [32m INFO[0m 🎯 Coordinating session establishment with media setup [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886
+[2m2025-05-30T23:20:05.320671Z[0m [32m INFO[0m 🎵 Creating SDP answer with media-core integration [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886
+[2m2025-05-30T23:20:05.320676Z[0m [32m INFO[0m 🎼 Media-core supported codecs: [0, 8, 9]
+[2m2025-05-30T23:20:05.320713Z[0m [32m INFO[0m Starting media session for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86
+[2m2025-05-30T23:20:05.320840Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-05-30T23:20:05.822799Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-05-30T23:20:05.823082Z[0m [32m INFO[0m Started RTP session with SSRC=b770e96c
+[2m2025-05-30T23:20:05.823145Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-e289345c-7fde-41f1-932d-84e2c9bc6e86 (port: 10000)
+[2m2025-05-30T23:20:05.823169Z[0m [32m INFO[0m ✅ Created media session: media-e289345c-7fde-41f1-932d-84e2c9bc6e86 with REAL RTP sessions and port allocation via MediaSessionController
+[2m2025-05-30T23:20:05.823194Z[0m [32m INFO[0m 🔌 Using allocated RTP port: 10000 (remote: 6000)
+[2m2025-05-30T23:20:05.823210Z[0m [32m INFO[0m 📋 Offered codecs: []
+[2m2025-05-30T23:20:05.823222Z[0m [32m INFO[0m 🎼 Supported codecs: ["0", "8", "9"]
+[2m2025-05-30T23:20:05.823239Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
+[2m2025-05-30T23:20:05.823254Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
+[2m2025-05-30T23:20:05.823324Z[0m [32m INFO[0m ✅ Started media for session: b2a60633-c68a-4d87-8f1c-10207559e886 via media-core
+[2m2025-05-30T23:20:05.823348Z[0m [32m INFO[0m ✅ SDP answer created with media-core integration [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886
+[2m2025-05-30T23:20:05.823384Z[0m [32m INFO[0m 🔗 Establishing media flow for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86 -> 127.0.0.1:6000
+[2m2025-05-30T23:20:05.823409Z[0m [32m INFO[0m ✅ Updated RTP remote address for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86 -> 127.0.0.1:6000
+[2m2025-05-30T23:20:05.823421Z[0m [32m INFO[0m 🎵 Starting audio transmission for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86
+[2m2025-05-30T23:20:05.823437Z[0m [32m INFO[0m 🎵 Started audio transmission (440Hz tone, 20ms packets)
+[2m2025-05-30T23:20:05.823462Z[0m [32m INFO[0m ✅ Audio transmission started for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86
+[2m2025-05-30T23:20:05.823475Z[0m [32m INFO[0m ✅ Media flow established for dialog: media-e289345c-7fde-41f1-932d-84e2c9bc6e86
+[2m2025-05-30T23:20:05.823486Z[0m [32m INFO[0m ✅ Established bi-directional media flow for session: media-e289345c-7fde-41f1-932d-84e2c9bc6e86
+[2m2025-05-30T23:20:05.823497Z[0m [32m INFO[0m ✅ Bi-directional media flow established [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886 [3mmedia_session_id[0m[2m=[0mmedia-e289345c-7fde-41f1-932d-84e2c9bc6e86 [3mremote_addr[0m[2m=[0m127.0.0.1:6000
+[2m2025-05-30T23:20:05.823515Z[0m [32m INFO[0m ✅ Bi-directional media flow established successfully [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886
+[2m2025-05-30T23:20:05.823528Z[0m [32m INFO[0m ✅ Session establishment coordination completed successfully [3msession_id[0m[2m=[0mb2a60633-c68a-4d87-8f1c-10207559e886
+[2m2025-05-30T23:20:05.823913Z[0m [32m INFO[0m 📤 Sending INVITE request to sip:alice@127.0.0.1:5061 from sip:bob@127.0.0.1
+Request Via headers before transaction creation:
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK588cf482ce57497b935584f0c6bbf2dc
+Creating ClientInviteTransaction: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Creating new ClientInviteTransaction: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Starting event loop for INVITE Client transaction: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Transaction loop starting for Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Initial state: Initial
+ClientInviteTransaction::initiate called for Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Current state is Initial
+Sending TransitionTo(Calling) command for Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Received command: TransitionTo(Calling) for transaction Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Processing TransitionTo(Calling) current state: Initial
+Valid state transition: Initial -> Calling
+State successfully changed to: Calling
+Sent StateChanged event result: Failed
+[2m2025-05-30T23:20:05.824883Z[0m [31mERROR[0m Failed to send StateChanged event [3mid[0m[2m=[0mKey(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+Transaction loop ending for Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client). Final state: Terminated
+Event loop for INVITE Client transaction ended: Key(z9hG4bK588cf482ce57497b935584f0c6bbf2dc:INVITE:client)
+State after sending command: Terminated
+WARNING: State didn't change to Calling, still: Terminated
+❌ Error: Internal error: SIP protocol error: SipClient make_call failed: Failed to initiate outgoing call

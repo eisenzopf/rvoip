@@ -108,6 +108,70 @@ impl SipClient {
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
+
+    /// ❗ **CRITICAL NEW METHOD**: Make an outgoing call (create session + send INVITE)
+    /// This is what client-core.make_call() expects!
+    pub async fn make_call(&self, target_uri: &str) -> Result<crate::SessionId> {
+        info!("📞 SipClient making call to {}", target_uri);
+        
+        // Get from URI from configuration
+        let from_uri = self.config.from_uri.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("from_uri not configured in ClientConfig"))?;
+        
+        // Create outgoing session
+        let session = self.session_manager.create_outgoing_session().await
+            .context("Failed to create outgoing session")?;
+        
+        let session_id = session.id.clone();
+        
+        // 🚀 **THIS IS THE MISSING PIECE**: Send the INVITE!
+        self.session_manager.initiate_outgoing_call(
+            &session_id,
+            target_uri,
+            from_uri,
+            None // Let session-core generate SDP offer
+        ).await.context("Failed to initiate outgoing call")?;
+        
+        info!("✅ SipClient call initiated: session {} → {}", session_id, target_uri);
+        Ok(session_id)
+    }
+
+    /// Answer an incoming call
+    pub async fn answer_call(&self, session_id: &crate::SessionId) -> Result<()> {
+        info!("✅ SipClient answering call for session {}", session_id);
+        
+        self.session_manager.accept_call(session_id).await
+            .context("Failed to answer call")
+    }
+
+    /// Reject an incoming call
+    pub async fn reject_call(&self, session_id: &crate::SessionId, status_code: rvoip_sip_core::StatusCode) -> Result<()> {
+        info!("❌ SipClient rejecting call for session {} with status {:?}", session_id, status_code);
+        
+        self.session_manager.reject_call(session_id, status_code).await
+            .context("Failed to reject call")
+    }
+
+    /// Hang up an active call
+    pub async fn hangup_call(&self, session_id: &crate::SessionId) -> Result<()> {
+        info!("📴 SipClient hanging up call for session {}", session_id);
+        
+        self.session_manager.terminate_call(session_id).await
+            .context("Failed to hang up call")
+    }
+
+    /// Get all active sessions
+    pub async fn get_active_sessions(&self) -> Vec<crate::SessionId> {
+        self.session_manager.list_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
+    /// Check if a session exists and is active
+    pub async fn has_active_session(&self, session_id: &crate::SessionId) -> bool {
+        self.session_manager.has_session(session_id)
+    }
 }
 
 /// Create a SIP server with automatic setup
