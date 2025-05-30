@@ -38,6 +38,7 @@ thiserror = "1.0"
 
 # Async utilities
 futures = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 # Testing utilities

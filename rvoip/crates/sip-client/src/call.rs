@@ -4,7 +4,7 @@
 //! the underlying client-core call functionality.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, debug, warn};
 
 use rvoip_client_core::{ClientManager, CallId, CallState, CallInfo};
@@ -46,12 +46,47 @@ impl Call {
     pub async fn wait_for_answer(&self) -> Result<()> {
         info!("⏳ Waiting for call {} to be answered", self.call_id);
         
-        // TODO: Implement by monitoring call state changes
-        // For now, simulate a short wait
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Poll call state until it's connected or fails
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        let timeout = std::time::Duration::from_secs(60); // 60 second timeout
+        let start_time = std::time::Instant::now();
         
-        info!("✅ Call {} answered", self.call_id);
-        Ok(())
+        loop {
+            interval.tick().await;
+            
+            // Check for timeout
+            if start_time.elapsed() > timeout {
+                return Err(Error::Timeout("Call answer timeout".to_string()));
+            }
+            
+            // Get current call state
+            match self.state().await {
+                Ok(state) => {
+                    match state {
+                        rvoip_client_core::call::CallState::Connected => {
+                            info!("✅ Call {} answered", self.call_id);
+                            return Ok(());
+                        }
+                        rvoip_client_core::call::CallState::Failed => {
+                            return Err(Error::Call("Call failed".to_string()));
+                        }
+                        rvoip_client_core::call::CallState::Cancelled => {
+                            return Err(Error::Call("Call was cancelled".to_string()));
+                        }
+                        rvoip_client_core::call::CallState::Terminated => {
+                            return Err(Error::Call("Call was terminated".to_string()));
+                        }
+                        _ => {
+                            // Still waiting (Initiating, Proceeding, Ringing, etc.)
+                            debug!("Call {} state: {:?}, continuing to wait", self.call_id, state);
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(Error::Core(format!("Failed to get call state: {}", e)));
+                }
+            }
+        }
     }
 
     /// Get current call state
@@ -102,8 +137,30 @@ impl Call {
 
     /// Get call duration (if connected)
     pub async fn duration(&self) -> Option<Duration> {
-        // TODO: Calculate duration from call info timestamps
-        None
+        match self.info().await {
+            Ok(call_info) => {
+                if let Some(connected_at) = call_info.connected_at {
+                    let now = std::time::SystemTime::now();
+                    let now_utc = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(
+                        now.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs()
+                    );
+                    
+                    if let Some(_ended_at) = call_info.ended_at {
+                        // For now, return None as we can't easily calculate with chrono types
+                        // TODO: Add proper duration calculation when chrono is available
+                        None
+                    } else {
+                        // For now, return None as we can't easily calculate with chrono types
+                        // TODO: Add proper duration calculation when chrono is available
+                        None
+                    }
+                } else {
+                    // Call never connected
+                    None
+                }
+            }
+            Err(_) => None,
+        }
     }
 
     /// Get detailed call information

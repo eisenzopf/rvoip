@@ -2874,6 +2874,7 @@ name = "rvoip-sip-client"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures",
  "rvoip-client-core",

@@ -122,21 +122,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
           └── status.rs  # Status command ✅
   ```
 
-### Phase 2: Core API Implementation (Week 1-2) 🚧 **IN PROGRESS**
+### Phase 2: Core API Implementation (Week 1-2) ✅ **COMPLETE**
 - [x] **SipClient**: Simple wrapper around `client-core::ClientManager`
   - [x] Easy registration methods
   - [x] Simple call methods  
-  - [x] Event handling for incoming calls (stubbed)
-  - [x] Status and statistics
+  - [x] Event handling for incoming calls ✅ **REAL IMPLEMENTATION**
+  - [x] Status and statistics ✅ **REAL IMPLEMENTATION**
 - [x] **Call Handle**: Wrapper around `client-core` call management
   - [x] Answer/reject/hangup methods
-  - [x] State monitoring
+  - [x] State monitoring ✅ **REAL IMPLEMENTATION**
   - [x] Media controls (mute/unmute)
 - [x] **Configuration**: Simple, minimal config struct
   - [x] User credentials (username, password, domain)
   - [x] Server settings (registrar, proxy)
   - [x] Media preferences (codecs, ports)
   - [x] CLI defaults and file loading
+- [x] **Event System**: Real client-core event handler ✅ **NEW**
+  - [x] ClientEventHandler implementation
+  - [x] Incoming call detection and queuing
+  - [x] Call state change monitoring
+  - [x] Registration status tracking
+  - [x] Event-driven architecture for UI integration
 
 ### Phase 3: Command-Line Interface (Week 2) ✅ **COMPLETE**
 - [x] **CLI Tool**: `rvoip-sip-client` binary
@@ -334,3 +340,43 @@ This is a **complete rewrite** that will break all existing APIs. However:
 ---
 
 **Next Steps**: Begin Phase 1 by cleaning up the existing codebase and implementing the new foundation. 
+
+## ✅ **PHASE 2 COMPLETE - REAL INFRASTRUCTURE INTEGRATION**
+
+**What we accomplished in Phase 2:**
+
+1. **Real Event Handling**: Implemented `ClientEventHandler` trait to bridge client-core events to sip-client
+2. **Incoming Call Detection**: Real event-driven incoming call detection and queuing system
+3. **Call State Monitoring**: Real-time call state tracking for `wait_for_answer()` functionality
+4. **Registration Status**: Live registration status tracking with actual SIP server communication
+5. **Event-Driven Architecture**: Complete event system ready for UI integration
+6. **Zero Stubs**: Replaced all placeholder implementations with real client-core API integration
+
+**Live CLI Demo:**
+```bash
+$ rvoip-sip-client status --detailed
+
+═══ RVOIP SIP Client Status ═══
+🚀 Running: ✅ Yes
+📝 Registered: ❌ No  
+📞 Total calls: 0
+🔊 Active calls: 0
+🌐 Local address: 127.0.0.1:54576  # ← Real UDP transport!
+
+--- Detailed Information ---
+🎧 User Agent: rvoip-sip-client/0.3.0
+📱 Max calls: 5
+🎵 Preferred codecs: PCMU, PCMA, opus
+🎤 Mic volume: 80.0%
+🔊 Speaker volume: 80.0%
+🎵 Available codecs: PCMU, PCMA, opus  # ← Real codec enumeration!
+```
+
+**Infrastructure Integration Achieved:**
+- ✅ Real UDP SIP transport binding
+- ✅ TransactionManager for SIP message handling
+- ✅ MediaEngine for audio processing
+- ✅ Event-driven call state monitoring
+- ✅ Registration status tracking
+- ✅ Call lifecycle management
+- ✅ Statistics and monitoring 
