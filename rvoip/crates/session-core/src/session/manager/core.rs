@@ -388,6 +388,16 @@ impl SessionManager {
                 self.handle_bye_request(transaction_id.clone(), request.clone()).await?;
             },
             
+            // ❗ **CRITICAL NEW**: Handle 200 OK responses to outgoing INVITE with ACK generation
+            TransactionEvent::SuccessResponse { transaction_id, response, need_ack, source: _source } => {
+                if *need_ack && response.status() == StatusCode::Ok {
+                    info!("📞 Received 200 OK for INVITE - generating required ACK");
+                    self.handle_200_ok_to_invite(transaction_id, response).await?;
+                }
+                // Delegate to DialogManager for all response processing
+                self.dialog_manager.process_transaction_event(event).await;
+            },
+            
             _ => {
                 // Delegate all other events to the DialogManager
                 self.dialog_manager.process_transaction_event(event).await;
@@ -924,34 +934,22 @@ impl SessionManager {
         // Send INVITE via transaction manager
         info!("📤 Sending INVITE request to {} from {}", target_uri, from_uri);
         
-        // Extract destination host and port from target URI
+        // Extract destination from original request URI (simpler and more reliable)
         let destination = {
-            let host = &target_uri_parsed.host;
-            let port = target_uri_parsed.port.unwrap_or(5060); // Default to 5060 if no port specified
-            
-            // Convert Host to IpAddr
-            let ip_addr = match host {
+            let target_uri = invite_request.uri();
+            let host = match &target_uri.host {
                 rvoip_sip_core::types::uri::Host::Domain(domain) => {
-                    // Parse domain - could be IPv4, IPv6, or hostname
                     if let Ok(ipv4) = domain.parse::<std::net::Ipv4Addr>() {
                         std::net::IpAddr::V4(ipv4)
-                    } else if let Ok(ipv6) = domain.parse::<std::net::Ipv6Addr>() {
-                        std::net::IpAddr::V6(ipv6)
                     } else {
-                        // For hostname, resolve to IP or use localhost as fallback for testing
-                        if domain == "localhost" {
-                            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                        } else {
-                            // TODO: Proper DNS resolution - for now use 127.0.0.1 for testing
-                            warn!("Using 127.0.0.1 for hostname '{}' - DNS resolution not implemented", domain);
-                            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                        }
+                        // Default to localhost for testing
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
                     }
                 },
                 rvoip_sip_core::types::uri::Host::Address(ip_addr) => *ip_addr,
             };
-            
-            std::net::SocketAddr::new(ip_addr, port)
+            let port = target_uri.port.unwrap_or(5060);
+            std::net::SocketAddr::new(host, port)
         };
         
         // Create client transaction for the INVITE request
@@ -979,6 +977,74 @@ impl SessionManager {
         
         info!("✅ INVITE sent successfully for session {} (transaction: {:?})", session_id, transaction_id);
         info!("📞 Call state: Dialing → waiting for response from {}", target_uri);
+        
+        Ok(())
+    }
+
+    /// ❗ **CRITICAL NEW METHOD**: Handle 200 OK response to INVITE by sending required ACK
+    /// This implements RFC 3261 Section 17.1.1.3 - UAC must send ACK for 200 OK responses
+    async fn handle_200_ok_to_invite(
+        &self,
+        transaction_id: &TransactionKey,
+        response: &Response,
+    ) -> Result<(), Error> {
+        info!("🤝 Generating ACK for 200 OK response to complete three-way handshake");
+        
+        // Get the original INVITE request from the transaction
+        let original_request = self.transaction_manager.original_request(transaction_id).await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to get original request: {}", e),
+                ErrorContext::default().with_message("Original request retrieval failed")
+            ))?
+            .ok_or_else(|| Error::InternalError(
+                "No original request found for transaction".to_string(),
+                ErrorContext::default().with_message("Original request not found")
+            ))?;
+        
+        // Use transaction-core utility to create proper ACK
+        let ack_request = rvoip_transaction_core::utils::create_ack_from_invite(&original_request, response)
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create ACK request: {}", e),
+                ErrorContext::default().with_message("ACK generation failed")
+            ))?;
+        
+        // Extract destination from original request URI (simpler and more reliable)
+        let destination = {
+            let target_uri = original_request.uri();
+            let host = match &target_uri.host {
+                rvoip_sip_core::types::uri::Host::Domain(domain) => {
+                    if let Ok(ipv4) = domain.parse::<std::net::Ipv4Addr>() {
+                        std::net::IpAddr::V4(ipv4)
+                    } else {
+                        // Default to localhost for testing
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+                    }
+                },
+                rvoip_sip_core::types::uri::Host::Address(ip_addr) => *ip_addr,
+            };
+            let port = target_uri.port.unwrap_or(5060);
+            std::net::SocketAddr::new(host, port)
+        };
+        
+        // Send ACK directly (not through transaction layer, per RFC 3261)
+        info!("📤 Sending ACK to {} to complete INVITE transaction", destination);
+        
+        // Get transport from transaction manager and send ACK directly
+        let transport = self.transaction_manager.transport();
+        
+        // Wrap in proper Message type for transport
+        let ack_message = rvoip_sip_core::Message::Request(ack_request);
+        
+        if let Err(e) = transport.send_message(ack_message, destination).await {
+            error!("Failed to send ACK: {}", e);
+            return Err(Error::InternalError(
+                format!("Failed to send ACK: {}", e),
+                ErrorContext::default().with_message("ACK transmission failed")
+            ));
+        }
+        
+        info!("✅ ACK sent successfully - three-way handshake complete!");
+        info!("🎉 INVITE transaction fully established per RFC 3261");
         
         Ok(())
     }

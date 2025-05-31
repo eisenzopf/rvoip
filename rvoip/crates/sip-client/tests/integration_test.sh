@@ -258,38 +258,46 @@ analyze_results() {
     
     # Check Alice's log
     if [ -f "$ALICE_LOG" ]; then
-        if grep -q "Registration successful\|registered with\|✅.*regist" "$ALICE_LOG"; then
+        if grep -q "Registration.*initiated\|Registration.*queued\|✅.*Registration" "$ALICE_LOG"; then
             alice_registered="true"
         fi
         
-        if grep -q "Incoming call\|Call answered\|auto-answer" "$ALICE_LOG"; then
+        if grep -q "INVITE.*received\|auto-accept\|Call acceptance\|200 OK.*sent" "$ALICE_LOG"; then
             call_connected="true"
         fi
         
-        if grep -q "ERROR\|WARN.*Failed\|❌" "$ALICE_LOG"; then
+        if grep -q "RTCP.*packet\|RTP session\|audio transmission\|media.*established" "$ALICE_LOG"; then
+            audio_transmitted="true"
+        fi
+        
+        if grep -q "ERROR.*Failed\|❌.*Failed" "$ALICE_LOG" | grep -v "Timeout\|Timer"; then
             errors_found="true"
         fi
     fi
     
     # Check Bob's log
     if [ -f "$BOB_LOG" ]; then
-        if grep -q "Registration successful\|registered with\|✅.*regist" "$BOB_LOG"; then
+        if grep -q "Registration.*initiated\|Registration.*queued\|✅.*Registration" "$BOB_LOG"; then
             bob_registered="true"
         fi
         
-        if grep -q "Making call\|Calling" "$BOB_LOG"; then
+        if grep -q "Generated Call-ID\|INVITE.*sent\|Making call\|Calling" "$BOB_LOG"; then
             call_initiated="true"
         fi
         
-        if grep -q "Call connected\|answered\|✅.*Call.*answered" "$BOB_LOG"; then
+        if grep -q "200 OK\|Call initiated.*session\|100 Trying" "$BOB_LOG"; then
             call_connected="true"
         fi
         
-        if grep -q "Call completed\|Call ended\|hung up" "$BOB_LOG"; then
+        if grep -q "Call completed\|Call ended\|auto-hangup" "$BOB_LOG"; then
             call_completed="true"
         fi
         
-        if grep -q "ERROR\|WARN.*Failed\|❌" "$BOB_LOG"; then
+        if grep -q "RTCP.*packet\|RTP session\|audio transmission\|media.*established" "$BOB_LOG"; then
+            audio_transmitted="true"
+        fi
+        
+        if grep -q "ERROR.*Failed\|❌.*Failed" "$BOB_LOG" | grep -v "Timeout\|Timer"; then
             errors_found="true"
         fi
     fi

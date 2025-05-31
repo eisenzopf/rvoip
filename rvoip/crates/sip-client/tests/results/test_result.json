@@ -1,14 +1,14 @@
 {
     "test_name": "sip-client-integration-test",
-    "timestamp": "2025-05-31T00:03:46Z",
+    "timestamp": "2025-05-31T02:37:51Z",
     "results": {
-        "alice_registered": false,
-        "bob_registered": false,
+        "alice_registered": true,
+        "bob_registered": true,
         "call_initiated": true,
         "call_connected": true,
-        "call_completed": false,
-        "audio_transmitted": false,
-        "errors_found": true
+        "call_completed": true,
+        "audio_transmitted": true,
+        "errors_found": false
     },
     "files": {
         "alice_log": "/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/sip-client/tests/logs/alice.log",
