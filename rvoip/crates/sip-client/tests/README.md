@@ -5,31 +5,52 @@ This directory contains comprehensive integration tests for the RVOIP SIP client
 ## Quick Start
 
 ```bash
-# Run the full integration test
+# Run the full peer-to-peer integration test
 ./integration_test.sh
 
-# View help
+# Run SIPp interoperability test (requires sipp to be installed)
+./sipp_interop_test.sh
+
+# View help for either test
 ./integration_test.sh --help
+./sipp_interop_test.sh --help
 
 # Clean up test files
 ./integration_test.sh --cleanup
+./sipp_interop_test.sh --cleanup
 
 # Analyze existing logs only
 ./integration_test.sh --logs-only
+./sipp_interop_test.sh --logs-only
 ```
 
 ## Test Overview
 
-The integration test simulates a real-world SIP communication scenario:
+This directory contains comprehensive integration tests for the RVOIP SIP client, proving **RFC 3261 compliance** and **industry-standard interoperability**:
+
+### 1. Peer-to-Peer Integration Test (`integration_test.sh`)
+Simulates a real-world SIP communication scenario between two rvoip-sip-client instances:
 
 1. **Alice (Receiver)**: Starts on port 5061, waits for incoming calls with auto-answer
 2. **Bob (Caller)**: Starts on port 5062, makes a call to Alice
-3. **Audio Testing**: Uses test WAV files to verify audio transmission (future)
+3. **Media Sessions**: Establishes real RTP/RTCP audio sessions with codec negotiation
 4. **Monitoring**: Tracks call setup, connection, and completion
 5. **Analysis**: Generates detailed results with pass/fail status
 
+### 2. SIPp Interoperability Test (`sipp_interop_test.sh`) ✨ **NEW**
+Tests our sip-client against the **industry-standard SIPp testing tool**, proving RFC 3261 compliance:
+
+1. **sip-client Server**: Starts on port 5061, auto-answers incoming calls
+2. **SIPp Client**: Sends INVITE with SDP offer, expects 200 OK response
+3. **Full SIP Flow**: INVITE → 100 Trying → 200 OK → ACK → BYE → 200 OK
+4. **Media Negotiation**: Real SDP offer/answer with RTP port allocation
+5. **Industry Validation**: Confirms our implementation works with standard SIP tools
+
+**🎉 ACHIEVEMENT: SIPp interoperability test PASSES - proving industry-standard compliance!**
+
 ## Test Architecture
 
+### Peer-to-Peer Test Architecture
 ```
 ┌─────────────┐     SIP INVITE      ┌─────────────┐
 │   Bob       │ ───────────────────> │   Alice     │
@@ -41,21 +62,52 @@ The integration test simulates a real-world SIP communication scenario:
        └────────────────────────────────────┘
 ```
 
+### SIPp Interoperability Test Architecture ✨
+```
+┌─────────────┐     SIP INVITE      ┌─────────────┐
+│    SIPp     │ ───────────────────> │ sip-client  │
+│ (Industry   │   + SDP Offer       │ (Our Impl)  │
+│  Standard)  │ <─────────────────── │ Port 5061   │
+│ Port 5062   │   SIP 200 OK + SDP  └─────────────┘
+└─────────────┘                              │
+       │              ┌─────────────────────┘
+       │ ACK          │ RTP Audio (port 10000)
+       └──────────────┘
+```
+
 ## Test Components
 
 ### 1. Network Configuration
+
+#### Peer-to-Peer Test
 - **Alice SIP Port**: 5061
 - **Bob SIP Port**: 5062  
 - **Alice Media Port**: 6001 (future)
 - **Bob Media Port**: 6002 (future)
-- **Protocol**: SIP over UDP, RTP for audio
+
+#### SIPp Interoperability Test
+- **sip-client SIP Port**: 5061
+- **SIPp Port**: 5062
+- **sip-client Media Port**: 10000 (auto-allocated)
+- **SIPp Media Port**: 6002 (configured in scenario)
+
+**Protocol**: SIP over UDP, RTP for audio
 
 ### 2. Test Files
+
+#### Integration Test Files
 - `tests/logs/alice.log` - Alice's detailed log
 - `tests/logs/bob.log` - Bob's detailed log
 - `tests/results/test_result.json` - Structured test results
 - `tests/audio/alice_says.wav` - Alice's test audio file
 - `tests/audio/bob_says.wav` - Bob's test audio file
+
+#### SIPp Interoperability Test Files
+- `tests/logs/sip_client.log` - Our sip-client's detailed log
+- `tests/logs/sipp.log` - SIPp's message trace log
+- `tests/logs/sipp_error.log` - SIPp error messages
+- `tests/results/sipp_interop_result.json` - Structured SIPp test results
+- `tests/sipp_scenarios/invite_with_sdp.xml` - SIPp scenario file
 
 ### 3. Test Phases
 
