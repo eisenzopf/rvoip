@@ -185,12 +185,34 @@ impl DialogManager {
         dialog_id: &DialogId,
         method: Method,
     ) -> Result<TransactionKey, Error> {
+        // Delegate to the new method with no body
+        self.send_dialog_request_with_body(dialog_id, method, None).await
+    }
+
+    /// Send a request through this dialog with optional body content and create a client transaction
+    pub async fn send_dialog_request_with_body(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+    ) -> Result<TransactionKey, Error> {
         // Get the dialog
         let mut dialog = self.dialogs.get_mut(dialog_id)
             .ok_or_else(|| dialog_not_found_error(dialog_id))?;
         
         // Create the request within the dialog
-        let request = dialog.create_request(method.clone());
+        let mut request = dialog.create_request(method.clone());
+        
+        // Add body content if provided (for INVITE with SDP, etc.)
+        if let Some(body_content) = body {
+            request = request.with_body(body_content);
+            
+            // Add Content-Type header for SDP if this is an INVITE
+            if method == Method::Invite {
+                let content_type = rvoip_sip_core::types::content_type::ContentType::from_type_subtype("application", "sdp");
+                request.headers.push(rvoip_sip_core::TypedHeader::ContentType(content_type));
+            }
+        }
         
         // Get the destination for this dialog (stored in remote_target)
         let destination = match uri_resolver::resolve_uri_to_socketaddr(&dialog.remote_target).await {
@@ -585,5 +607,19 @@ impl DialogManager {
         } else {
             None
         }
+    }
+    
+    /// ❗ **NEW METHOD**: Send ACK for 2xx response (proper architectural delegation)
+    /// This maintains separation of concerns: SessionManager coordinates, DialogManager handles SIP protocol
+    pub async fn send_ack_for_2xx_response(
+        &self,
+        transaction_id: &TransactionKey,
+        response: &Response
+    ) -> Result<(), rvoip_transaction_core::Error> {
+        debug!("DialogManager sending ACK for 2xx response via transaction-core");
+        
+        // ✅ **CORRECT ARCHITECTURE**: DialogManager handles SIP protocol operations
+        // ACK for 2xx is special - it's end-to-end, not part of original transaction
+        self.transaction_manager.send_ack_for_2xx(transaction_id, response).await
     }
 } 

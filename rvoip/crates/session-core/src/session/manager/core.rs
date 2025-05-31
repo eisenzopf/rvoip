@@ -78,6 +78,9 @@ pub struct SessionManager {
     /// **NEW**: Pending incoming calls (Call-ID -> (SessionId, TransactionKey, Request))
     pending_calls: Arc<RwLock<HashMap<String, (SessionId, TransactionKey, Request)>>>,
     
+    /// **NEW**: Pending outgoing calls (SessionId -> TransactionKey for ACK handling)
+    pending_outgoing_calls: Arc<RwLock<HashMap<SessionId, TransactionKey>>>,
+    
     /// **FIXED**: Incoming call notification callback with interior mutability
     incoming_call_notifier: Arc<RwLock<Option<Arc<dyn IncomingCallNotification>>>>,
     
@@ -127,6 +130,7 @@ impl SessionManager {
             dialog_to_session: DashMap::new(),
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
+            pending_outgoing_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
             session_bridges: Arc::new(DashMap::new()),
             session_to_bridge: Arc::new(DashMap::new()),
@@ -194,6 +198,7 @@ impl SessionManager {
             dialog_to_session: DashMap::new(),
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
+            pending_outgoing_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
             session_bridges: Arc::new(DashMap::new()),
             session_to_bridge: Arc::new(DashMap::new()),
@@ -350,6 +355,7 @@ impl SessionManager {
             dialog_to_session: DashMap::new(),
             event_sender,
             pending_calls: Arc::new(RwLock::new(HashMap::new())),
+            pending_outgoing_calls: Arc::new(RwLock::new(HashMap::new())),
             incoming_call_notifier: Arc::new(RwLock::new(None)),
             session_bridges: Arc::new(DashMap::new()),
             session_to_bridge: Arc::new(DashMap::new()),
@@ -388,13 +394,100 @@ impl SessionManager {
                 self.handle_bye_request(transaction_id.clone(), request.clone()).await?;
             },
             
-            // ❗ **CRITICAL NEW**: Handle 200 OK responses to outgoing INVITE with ACK generation
-            TransactionEvent::SuccessResponse { transaction_id, response, need_ack, source: _source } => {
-                if *need_ack && response.status() == StatusCode::Ok {
-                    info!("📞 Received 200 OK for INVITE - generating required ACK");
-                    self.handle_200_ok_to_invite(transaction_id, response).await?;
+            // ❗ **CRITICAL FIX**: Handle client-side transaction responses properly
+            TransactionEvent::ProvisionalResponse { transaction_id, response } => {
+                info!("📞 Received provisional response: {} {}", response.status_code(), response.reason_phrase());
+                // Find session by transaction ID
+                if let Some(session_id) = self.find_session_by_outgoing_transaction(transaction_id).await {
+                    let session = self.get_session(&session_id)?;
+                    // Update session state based on provisional response
+                    match response.status() {
+                        StatusCode::Trying => {
+                            // Keep current state
+                        },
+                        StatusCode::Ringing => {
+                            session.set_state(crate::session::session_types::SessionState::Ringing).await
+                                .map_err(|e| Error::InternalError(
+                                    format!("Failed to update session state to Ringing: {}", e),
+                                    ErrorContext::default().with_message("State transition failed")
+                                ))?;
+                        },
+                        _ => {
+                            // Other provisional responses
+                        }
+                    }
                 }
+                // Also delegate to DialogManager
+                self.dialog_manager.process_transaction_event(event).await;
+            },
+            
+            // ❗ **CRITICAL FIX**: Handle 200 OK responses with proper ACK using transaction-core API
+            TransactionEvent::SuccessResponse { transaction_id, response, need_ack, source: _source } => {
+                info!("📞 Received success response: {} {}", response.status_code(), response.reason_phrase());
+                
+                if *need_ack && response.status() == StatusCode::Ok {
+                    info!("🤝 200 OK received for INVITE - delegating ACK to DialogManager");
+                    
+                    // ✅ **CORRECT ARCHITECTURE**: Delegate ACK handling to DialogManager's proper method
+                    // DialogManager handles SIP protocol details, SessionManager coordinates
+                    if let Err(e) = self.dialog_manager.send_ack_for_2xx_response(transaction_id, response).await {
+                        error!("Failed to send ACK for 200 OK via DialogManager: {}", e);
+                        return Err(Error::InternalError(
+                            format!("Failed to send ACK for 200 OK: {}", e),
+                            ErrorContext::default().with_message("ACK transmission failed")
+                        ));
+                    }
+                    
+                    info!("✅ ACK sent successfully via DialogManager - three-way handshake complete!");
+                    
+                    // Update session state to Connected
+                    if let Some(session_id) = self.find_session_by_outgoing_transaction(transaction_id).await {
+                        let session = self.get_session(&session_id)?;
+                        session.set_state(crate::session::session_types::SessionState::Connected).await
+                            .map_err(|e| Error::InternalError(
+                                format!("Failed to update session state to Connected: {}", e),
+                                ErrorContext::default().with_message("State transition failed")
+                            ))?;
+                        
+                        // Remove from pending outgoing calls
+                        {
+                            let mut pending = self.pending_outgoing_calls.write().await;
+                            pending.remove(&session_id);
+                        }
+                        
+                        info!("🎉 Session {} successfully established and connected!", session_id);
+                    }
+                }
+                
                 // Delegate to DialogManager for all response processing
+                self.dialog_manager.process_transaction_event(event).await;
+            },
+            
+            // ❗ **NEW**: Handle failure responses for outgoing calls
+            TransactionEvent::FailureResponse { transaction_id, response } => {
+                warn!("📞 Received failure response: {} {}", response.status_code(), response.reason_phrase());
+                
+                // Find and terminate the associated session
+                if let Some(session_id) = self.find_session_by_outgoing_transaction(transaction_id).await {
+                    let session = self.get_session(&session_id)?;
+                    session.set_state(crate::session::session_types::SessionState::Terminated).await
+                        .map_err(|e| Error::InternalError(
+                            format!("Failed to update session state to Terminated: {}", e),
+                            ErrorContext::default().with_message("State transition failed")
+                        ))?;
+                    
+                    // Remove from sessions and pending calls
+                    self.sessions.remove(&session_id);
+                    {
+                        let mut pending = self.pending_outgoing_calls.write().await;
+                        pending.remove(&session_id);
+                    }
+                    
+                    warn!("Session {} terminated due to failure response: {} {}", 
+                          session_id, response.status_code(), response.reason_phrase());
+                }
+                
+                // Delegate to DialogManager
                 self.dialog_manager.process_transaction_event(event).await;
             },
             
@@ -847,6 +940,7 @@ impl SessionManager {
 
     /// ❗ **CRITICAL NEW METHOD**: Initiate outgoing call by sending INVITE
     /// This is the missing piece that the integration test revealed!
+    /// **ARCHITECTURAL FIX**: Properly delegates to DialogManager for SIP protocol operations
     pub async fn initiate_outgoing_call(
         &self,
         session_id: &SessionId,
@@ -897,155 +991,71 @@ impl SessionManager {
                 ))?
         };
         
-        // Build INVITE request
-        let mut invite_builder = RequestBuilder::invite(&target_uri_parsed.to_string())
-            .map_err(|e| Error::InternalError(
-                format!("Failed to create INVITE builder: {}", e),
-                ErrorContext::default().with_message("RequestBuilder creation failed")
-            ))?;
+        // ❗ **ARCHITECTURAL FIX**: Create dialog first, then delegate INVITE sending to DialogManager
+        // This follows proper RFC 3261 separation: SessionManager coordinates, DialogManager handles protocol
         
-        // ❗ **CRITICAL FIX**: Generate unique Call-ID (RFC 3261 requirement!)
-        // This is what was missing and causing "INVITE missing Call-ID header" error
+        // Generate unique Call-ID (RFC 3261 requirement)
         let call_id = format!("{}@{}", uuid::Uuid::new_v4(), "rvoip-session-core");
-        info!("📞 Generated Call-ID for outgoing INVITE: {}", call_id);
-        invite_builder = invite_builder.call_id(&call_id);
+        let from_tag = format!("tag-{}", uuid::Uuid::new_v4().simple());
         
-        // Add From header
-        invite_builder = invite_builder.from("", &from_uri_parsed.to_string(), None);
+        info!("📞 Generated Call-ID: {} and From-tag: {}", call_id, from_tag);
         
-        // Add To header  
-        invite_builder = invite_builder.to("", &target_uri_parsed.to_string(), None);
+        // Create dialog directly for outgoing call (before INVITE)
+        let dialog_id = crate::dialog::DialogId::new();
+        let dialog_id = self.dialog_manager.create_dialog_directly(
+            dialog_id,
+            call_id,
+            from_uri_parsed.clone(),
+            target_uri_parsed.clone(),
+            Some(from_tag),
+            None, // Remote tag will be set when we get response
+            true  // We are the initiator
+        );
         
-        // Add Contact header (use from URI as contact)
-        invite_builder = invite_builder.contact(&from_uri_parsed.to_string(), None);
-        
-        // Build the INVITE request
-        let mut invite_request = invite_builder.build();
-        
-        // Add SDP offer as body
-        if !sdp_offer_body.is_empty() {
-            invite_request = invite_request.with_body(bytes::Bytes::from(sdp_offer_body));
-            
-            // Add Content-Type header for SDP
-            let content_type = rvoip_sip_core::types::content_type::ContentType::from_type_subtype("application", "sdp");
-            invite_request.headers.push(rvoip_sip_core::TypedHeader::ContentType(content_type));
-        }
-        
-        // Send INVITE via transaction manager
-        info!("📤 Sending INVITE request to {} from {}", target_uri, from_uri);
-        
-        // Extract destination from original request URI (simpler and more reliable)
-        let destination = {
-            let target_uri = invite_request.uri();
-            let host = match &target_uri.host {
-                rvoip_sip_core::types::uri::Host::Domain(domain) => {
-                    if let Ok(ipv4) = domain.parse::<std::net::Ipv4Addr>() {
-                        std::net::IpAddr::V4(ipv4)
-                    } else {
-                        // Default to localhost for testing
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                    }
-                },
-                rvoip_sip_core::types::uri::Host::Address(ip_addr) => *ip_addr,
-            };
-            let port = target_uri.port.unwrap_or(5060);
-            std::net::SocketAddr::new(host, port)
-        };
-        
-        // Create client transaction for the INVITE request
-        let transaction_id = self.transaction_manager
-            .create_client_transaction(invite_request, destination)
-            .await
+        // Associate dialog with session
+        self.dialog_manager.associate_with_session(&dialog_id, session_id)
             .map_err(|e| Error::InternalError(
-                format!("Failed to create client transaction: {}", e),
-                ErrorContext::default().with_message("Transaction creation failed")
+                format!("Failed to associate dialog with session: {}", e),
+                ErrorContext::default().with_message("Dialog association failed")
             ))?;
         
-        // Send the INVITE request
-        self.transaction_manager.send_request(&transaction_id).await
+        // ✅ **CORRECT ARCHITECTURE**: Delegate INVITE sending to DialogManager
+        // DialogManager will handle transaction creation and management
+        let transaction_id = self.dialog_manager.send_dialog_request_with_body(
+            &dialog_id, 
+            rvoip_sip_core::Method::Invite,
+            Some(bytes::Bytes::from(sdp_offer_body))
+        ).await
             .map_err(|e| Error::InternalError(
-                format!("Failed to send INVITE request: {}", e),
+                format!("Failed to send INVITE via DialogManager: {}", e),
                 ErrorContext::default().with_message("INVITE transmission failed")
             ))?;
         
-        // Update session state to Proceeding (call in progress)
+        // Store transaction ID for ACK handling (SessionManager still coordinates this)
+        {
+            let mut pending = self.pending_outgoing_calls.write().await;
+            pending.insert(session_id.clone(), transaction_id.clone());
+        }
+        
+        // Update session state to Dialing (call in progress)
         session.set_state(crate::session::session_types::SessionState::Dialing).await
             .map_err(|e| Error::InternalError(
                 format!("Failed to update session state to Dialing: {}", e),
                 ErrorContext::default().with_message("State transition failed")
             ))?;
         
-        info!("✅ INVITE sent successfully for session {} (transaction: {:?})", session_id, transaction_id);
+        info!("✅ INVITE sent successfully via DialogManager for session {} (dialog: {}, transaction: {:?})", 
+              session_id, dialog_id, transaction_id);
         info!("📞 Call state: Dialing → waiting for response from {}", target_uri);
         
         Ok(())
     }
 
-    /// ❗ **CRITICAL NEW METHOD**: Handle 200 OK response to INVITE by sending required ACK
-    /// This implements RFC 3261 Section 17.1.1.3 - UAC must send ACK for 200 OK responses
-    async fn handle_200_ok_to_invite(
-        &self,
-        transaction_id: &TransactionKey,
-        response: &Response,
-    ) -> Result<(), Error> {
-        info!("🤝 Generating ACK for 200 OK response to complete three-way handshake");
-        
-        // Get the original INVITE request from the transaction
-        let original_request = self.transaction_manager.original_request(transaction_id).await
-            .map_err(|e| Error::InternalError(
-                format!("Failed to get original request: {}", e),
-                ErrorContext::default().with_message("Original request retrieval failed")
-            ))?
-            .ok_or_else(|| Error::InternalError(
-                "No original request found for transaction".to_string(),
-                ErrorContext::default().with_message("Original request not found")
-            ))?;
-        
-        // Use transaction-core utility to create proper ACK
-        let ack_request = rvoip_transaction_core::utils::create_ack_from_invite(&original_request, response)
-            .map_err(|e| Error::InternalError(
-                format!("Failed to create ACK request: {}", e),
-                ErrorContext::default().with_message("ACK generation failed")
-            ))?;
-        
-        // Extract destination from original request URI (simpler and more reliable)
-        let destination = {
-            let target_uri = original_request.uri();
-            let host = match &target_uri.host {
-                rvoip_sip_core::types::uri::Host::Domain(domain) => {
-                    if let Ok(ipv4) = domain.parse::<std::net::Ipv4Addr>() {
-                        std::net::IpAddr::V4(ipv4)
-                    } else {
-                        // Default to localhost for testing
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                    }
-                },
-                rvoip_sip_core::types::uri::Host::Address(ip_addr) => *ip_addr,
-            };
-            let port = target_uri.port.unwrap_or(5060);
-            std::net::SocketAddr::new(host, port)
-        };
-        
-        // Send ACK directly (not through transaction layer, per RFC 3261)
-        info!("📤 Sending ACK to {} to complete INVITE transaction", destination);
-        
-        // Get transport from transaction manager and send ACK directly
-        let transport = self.transaction_manager.transport();
-        
-        // Wrap in proper Message type for transport
-        let ack_message = rvoip_sip_core::Message::Request(ack_request);
-        
-        if let Err(e) = transport.send_message(ack_message, destination).await {
-            error!("Failed to send ACK: {}", e);
-            return Err(Error::InternalError(
-                format!("Failed to send ACK: {}", e),
-                ErrorContext::default().with_message("ACK transmission failed")
-            ));
-        }
-        
-        info!("✅ ACK sent successfully - three-way handshake complete!");
-        info!("🎉 INVITE transaction fully established per RFC 3261");
-        
-        Ok(())
+    /// ❗ **NEW HELPER METHOD**: Find session by outgoing transaction ID
+    async fn find_session_by_outgoing_transaction(&self, transaction_id: &TransactionKey) -> Option<SessionId> {
+        let pending = self.pending_outgoing_calls.read().await;
+        pending.iter()
+            .find(|(_, tx_id)| tx_id == &transaction_id)
+            .map(|(session_id, _)| session_id.clone())
     }
 } 

@@ -1,6 +1,6 @@
 {
     "test_name": "sip-client-integration-test",
-    "timestamp": "2025-05-31T02:37:51Z",
+    "timestamp": "2025-05-31T02:56:02Z",
     "results": {
         "alice_registered": true,
         "bob_registered": true,

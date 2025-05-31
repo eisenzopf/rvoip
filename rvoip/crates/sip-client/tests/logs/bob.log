@@ -214,209 +214,170 @@ warning: method `emit_event` is never used
     = note: `#[warn(dead_code)]` on by default
 
 warning: `rvoip-client-core` (lib) generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
      Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/rvoip-sip-client --port 5062 --username bob --domain 127.0.0.1 call 'sip:alice@127.0.0.1:5061' --duration 10 --auto-hangup`
-[2m2025-05-31T02:36:42.347657Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
-[2m2025-05-31T02:36:42.347759Z[0m [32m INFO[0m 📞 Making outgoing call
-[2m2025-05-31T02:36:42.347769Z[0m [32m INFO[0m    Target: sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.347789Z[0m [32m INFO[0m    Duration: 10s
-[2m2025-05-31T02:36:42.347797Z[0m [32m INFO[0m    Auto-hangup: true
-[2m2025-05-31T02:36:42.347875Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "bob"
-[2m2025-05-31T02:36:42.348018Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
-[2m2025-05-31T02:36:42.348068Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5062), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:bob@127.0.0.1:5062"), from_uri: Some("sip:bob@127.0.0.1"), registrar_uri: None, credentials: None }
-[2m2025-05-31T02:36:42.348128Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
-[2m2025-05-31T02:36:42.348591Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5062
-[2m2025-05-31T02:36:42.349174Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5062
-[2m2025-05-31T02:36:42.349382Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5062
-[2m2025-05-31T02:36:42.349815Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
-[2m2025-05-31T02:36:42.350582Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
-[2m2025-05-31T02:36:42.350772Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
-[2m2025-05-31T02:36:42.350783Z[0m [32m INFO[0m ✅ Transaction event processing started in background task
-[2m2025-05-31T02:36:42.350791Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
-[2m2025-05-31T02:36:42.350862Z[0m [32m INFO[0m 🔄 Starting SIP client transaction event processing in background
-[2m2025-05-31T02:36:42.350891Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
-[2m2025-05-31T02:36:42.350899Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
-[2m2025-05-31T02:36:42.350908Z[0m [32m INFO[0m 📝 Registering bob with 127.0.0.1
-[2m2025-05-31T02:36:42.350942Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
-[2m2025-05-31T02:36:42.350951Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
-[2m2025-05-31T02:36:42.350956Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
-[2m2025-05-31T02:36:42.350969Z[0m [32m INFO[0m ✅ Registration request queued with ID: 7616b64d-5a9e-4390-9400-34fd617f7aba
-[2m2025-05-31T02:36:42.350976Z[0m [32m INFO[0m ✅ Registration initiated for bob
-[2m2025-05-31T02:36:42.350981Z[0m [32m INFO[0m ✅ Registered with SIP server
-[2m2025-05-31T02:36:42.350987Z[0m [32m INFO[0m 📞 Calling sip:alice@127.0.0.1:5061...
-[2m2025-05-31T02:36:42.350992Z[0m [32m INFO[0m 📞 Making call to sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.350999Z[0m [32m INFO[0m 📞 Making call from sip:bob@127.0.0.1 to sip:alice@127.0.0.1:5061 via session-core factory API
-[2m2025-05-31T02:36:42.351992Z[0m [32m INFO[0m 📞 SipClient making call to sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.352083Z[0m [32m INFO[0m 📞 Initiating outgoing call for session bdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c to sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.352122Z[0m [32m INFO[0m 🎵 Generating SDP offer for outgoing call...
-[2m2025-05-31T02:36:42.352142Z[0m [32m INFO[0m 🎯 Coordinating session establishment with media setup [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c
-[2m2025-05-31T02:36:42.352163Z[0m [32m INFO[0m 🎵 Creating SDP answer with media-core integration [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c
-[2m2025-05-31T02:36:42.352171Z[0m [32m INFO[0m 🎼 Media-core supported codecs: [0, 8, 9]
-[2m2025-05-31T02:36:42.352206Z[0m [32m INFO[0m Starting media session for dialog: media-81158420-28a2-4474-875a-975b0e877ecd
-[2m2025-05-31T02:36:42.352415Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
-[2m2025-05-31T02:36:42.855047Z[0m [32m INFO[0m Started UDP transport receiver tasks
-[2m2025-05-31T02:36:42.855196Z[0m [32m INFO[0m Started RTP session with SSRC=a6bfdfd3
-[2m2025-05-31T02:36:42.855232Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-81158420-28a2-4474-875a-975b0e877ecd (port: 10000)
-[2m2025-05-31T02:36:42.855242Z[0m [32m INFO[0m ✅ Created media session: media-81158420-28a2-4474-875a-975b0e877ecd with REAL RTP sessions and port allocation via MediaSessionController
-[2m2025-05-31T02:36:42.855253Z[0m [32m INFO[0m 🔌 Using allocated RTP port: 10000 (remote: 6000)
-[2m2025-05-31T02:36:42.855261Z[0m [32m INFO[0m 📋 Offered codecs: []
-[2m2025-05-31T02:36:42.855267Z[0m [32m INFO[0m 🎼 Supported codecs: ["0", "8", "9"]
-[2m2025-05-31T02:36:42.855275Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
-[2m2025-05-31T02:36:42.855280Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
-[2m2025-05-31T02:36:42.855317Z[0m [32m INFO[0m ✅ Started media for session: bdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c via media-core
-[2m2025-05-31T02:36:42.855324Z[0m [32m INFO[0m ✅ SDP answer created with media-core integration [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c
-[2m2025-05-31T02:36:42.855339Z[0m [32m INFO[0m 🔗 Establishing media flow for dialog: media-81158420-28a2-4474-875a-975b0e877ecd -> 127.0.0.1:6000
-[2m2025-05-31T02:36:42.855350Z[0m [32m INFO[0m ✅ Updated RTP remote address for dialog: media-81158420-28a2-4474-875a-975b0e877ecd -> 127.0.0.1:6000
-[2m2025-05-31T02:36:42.855356Z[0m [32m INFO[0m 🎵 Starting audio transmission for dialog: media-81158420-28a2-4474-875a-975b0e877ecd
-[2m2025-05-31T02:36:42.855363Z[0m [32m INFO[0m 🎵 Started audio transmission (440Hz tone, 20ms packets)
-[2m2025-05-31T02:36:42.855374Z[0m [32m INFO[0m ✅ Audio transmission started for dialog: media-81158420-28a2-4474-875a-975b0e877ecd
-[2m2025-05-31T02:36:42.855379Z[0m [32m INFO[0m ✅ Media flow established for dialog: media-81158420-28a2-4474-875a-975b0e877ecd
-[2m2025-05-31T02:36:42.855384Z[0m [32m INFO[0m ✅ Established bi-directional media flow for session: media-81158420-28a2-4474-875a-975b0e877ecd
-[2m2025-05-31T02:36:42.855388Z[0m [32m INFO[0m ✅ Bi-directional media flow established [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c [3mmedia_session_id[0m[2m=[0mmedia-81158420-28a2-4474-875a-975b0e877ecd [3mremote_addr[0m[2m=[0m127.0.0.1:6000
-[2m2025-05-31T02:36:42.855395Z[0m [32m INFO[0m ✅ Bi-directional media flow established successfully [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c
-[2m2025-05-31T02:36:42.855400Z[0m [32m INFO[0m ✅ Session establishment coordination completed successfully [3msession_id[0m[2m=[0mbdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c
-[2m2025-05-31T02:36:42.855523Z[0m [32m INFO[0m 📞 Generated Call-ID for outgoing INVITE: 2d3fc6c6-b249-434e-82d4-d7eb9de72eac@rvoip-session-core
-[2m2025-05-31T02:36:42.855599Z[0m [32m INFO[0m 📤 Sending INVITE request to sip:alice@127.0.0.1:5061 from sip:bob@127.0.0.1
+[2m2025-05-31T02:55:46.304184Z[0m [32m INFO[0m 🚀 Starting RVOIP SIP Client v0.3.0
+[2m2025-05-31T02:55:46.304347Z[0m [32m INFO[0m 📞 Making outgoing call
+[2m2025-05-31T02:55:46.304359Z[0m [32m INFO[0m    Target: sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.304384Z[0m [32m INFO[0m    Duration: 10s
+[2m2025-05-31T02:55:46.304393Z[0m [32m INFO[0m    Auto-hangup: true
+[2m2025-05-31T02:55:46.304512Z[0m [32m INFO[0m 🚀 Creating SIP client with config: "bob"
+[2m2025-05-31T02:55:46.304653Z[0m [32m INFO[0m 🔧 Creating ClientManager with proper session-core full client API
+[2m2025-05-31T02:55:46.304711Z[0m [32m INFO[0m Creating SIP client with config: ClientConfig { local_address: Some(127.0.0.1:5062), transport_protocol: Udp, max_sessions: 5, session_timeout: 300s, transaction_timeout: 32s, enable_media: true, user_agent: "rvoip-sip-client/0.3.0", contact_uri: Some("sip:bob@127.0.0.1:5062"), from_uri: Some("sip:bob@127.0.0.1"), registrar_uri: None, credentials: None }
+[2m2025-05-31T02:55:46.304779Z[0m [32m INFO[0m 🚀 Creating real transport manager for SIP client communication
+[2m2025-05-31T02:55:46.305275Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-05-31T02:55:46.306168Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-05-31T02:55:46.306230Z[0m [32m INFO[0m ✅ Client transport manager created and initialized on 127.0.0.1:5062
+[2m2025-05-31T02:55:46.306663Z[0m [32m INFO[0m ✅ Client transaction manager created with real transport
+[2m2025-05-31T02:55:46.307473Z[0m [32m INFO[0m ✅ MediaManager created with MediaSessionController (real RTP port allocation: 10000-20000)
+[2m2025-05-31T02:55:46.307685Z[0m [32m INFO[0m ✅ SIP client created successfully with real transport infrastructure
+[2m2025-05-31T02:55:46.307699Z[0m [32m INFO[0m ✅ Transaction event processing started in background task
+[2m2025-05-31T02:55:46.307709Z[0m [32m INFO[0m ✅ SIP client created via session-core factory with real infrastructure
+[2m2025-05-31T02:55:46.307776Z[0m [32m INFO[0m ▶️ Starting SIP client (delegating to session-core)...
+[2m2025-05-31T02:55:46.307785Z[0m [32m INFO[0m ✅ SIP client started via session-core delegation
+[2m2025-05-31T02:55:46.307816Z[0m [32m INFO[0m 🔄 Starting SIP client transaction event processing in background
+[2m2025-05-31T02:55:46.307830Z[0m [32m INFO[0m 📝 Registering bob with 127.0.0.1
+[2m2025-05-31T02:55:46.307889Z[0m [32m INFO[0m 📝 Registering with server: sip:127.0.0.1
+[2m2025-05-31T02:55:46.307902Z[0m [33m WARN[0m 🚧 Registration delegation to session-core not yet fully implemented
+[2m2025-05-31T02:55:46.307910Z[0m [33m WARN[0m 🚧 Session-core needs registration manager integration
+[2m2025-05-31T02:55:46.307924Z[0m [32m INFO[0m ✅ Registration request queued with ID: d14f1b14-db39-470a-9130-91628c596f86
+[2m2025-05-31T02:55:46.307934Z[0m [32m INFO[0m ✅ Registration initiated for bob
+[2m2025-05-31T02:55:46.307942Z[0m [32m INFO[0m ✅ Registered with SIP server
+[2m2025-05-31T02:55:46.307949Z[0m [32m INFO[0m 📞 Calling sip:alice@127.0.0.1:5061...
+[2m2025-05-31T02:55:46.307956Z[0m [32m INFO[0m 📞 Making call to sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.307965Z[0m [32m INFO[0m 📞 Making call from sip:bob@127.0.0.1 to sip:alice@127.0.0.1:5061 via session-core factory API
+[2m2025-05-31T02:55:46.309233Z[0m [32m INFO[0m 📞 SipClient making call to sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.309364Z[0m [32m INFO[0m 📞 Initiating outgoing call for session e457ad04-db56-4951-aa9e-6d4b20e0cd13 to sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.309414Z[0m [32m INFO[0m 🎵 Generating SDP offer for outgoing call...
+[2m2025-05-31T02:55:46.309456Z[0m [32m INFO[0m 🎯 Coordinating session establishment with media setup [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:46.309483Z[0m [32m INFO[0m 🎵 Creating SDP answer with media-core integration [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:46.309493Z[0m [32m INFO[0m 🎼 Media-core supported codecs: [0, 8, 9]
+[2m2025-05-31T02:55:46.309547Z[0m [32m INFO[0m Starting media session for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:46.309820Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-05-31T02:55:46.812555Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-05-31T02:55:46.812714Z[0m [32m INFO[0m Started RTP session with SSRC=18f68355
+[2m2025-05-31T02:55:46.812759Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-2eb7b194-e362-47da-95e8-e35515c8f6df (port: 10000)
+[2m2025-05-31T02:55:46.812774Z[0m [32m INFO[0m ✅ Created media session: media-2eb7b194-e362-47da-95e8-e35515c8f6df with REAL RTP sessions and port allocation via MediaSessionController
+[2m2025-05-31T02:55:46.812791Z[0m [32m INFO[0m 🔌 Using allocated RTP port: 10000 (remote: 6000)
+[2m2025-05-31T02:55:46.812802Z[0m [32m INFO[0m 📋 Offered codecs: []
+[2m2025-05-31T02:55:46.812813Z[0m [32m INFO[0m 🎼 Supported codecs: ["0", "8", "9"]
+[2m2025-05-31T02:55:46.812823Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
+[2m2025-05-31T02:55:46.812832Z[0m [32m INFO[0m 🤝 Negotiated codecs: ["0"]
+[2m2025-05-31T02:55:46.812870Z[0m [32m INFO[0m ✅ Started media for session: e457ad04-db56-4951-aa9e-6d4b20e0cd13 via media-core
+[2m2025-05-31T02:55:46.812883Z[0m [32m INFO[0m ✅ SDP answer created with media-core integration [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:46.812907Z[0m [32m INFO[0m 🔗 Establishing media flow for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df -> 127.0.0.1:6000
+[2m2025-05-31T02:55:46.812922Z[0m [32m INFO[0m ✅ Updated RTP remote address for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df -> 127.0.0.1:6000
+[2m2025-05-31T02:55:46.812931Z[0m [32m INFO[0m 🎵 Starting audio transmission for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:46.812941Z[0m [32m INFO[0m 🎵 Started audio transmission (440Hz tone, 20ms packets)
+[2m2025-05-31T02:55:46.812957Z[0m [32m INFO[0m ✅ Audio transmission started for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:46.812964Z[0m [32m INFO[0m ✅ Media flow established for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:46.812971Z[0m [32m INFO[0m ✅ Established bi-directional media flow for session: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:46.812979Z[0m [32m INFO[0m ✅ Bi-directional media flow established [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13 [3mmedia_session_id[0m[2m=[0mmedia-2eb7b194-e362-47da-95e8-e35515c8f6df [3mremote_addr[0m[2m=[0m127.0.0.1:6000
+[2m2025-05-31T02:55:46.812990Z[0m [32m INFO[0m ✅ Bi-directional media flow established successfully [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:46.812998Z[0m [32m INFO[0m ✅ Session establishment coordination completed successfully [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:46.813015Z[0m [32m INFO[0m 📞 Generated Call-ID: 9bd22f3e-5d7f-49b9-99ab-4730da1a222b@rvoip-session-core and From-tag: tag-edd400df6e594f50a2d826c158b7b7d1
 Request Via headers before transaction creation:
 Request Via headers after potential modification:
-  Via[0]: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9
-Creating ClientInviteTransaction: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Creating new ClientInviteTransaction: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Created ClientInviteTransaction: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Created ClientInviteTransaction: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Starting event loop for INVITE Client transaction: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Transaction loop starting for Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Initial state: Initial
-ClientInviteTransaction::initiate called for Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5062;branch=z9hG4bK42c1395cf7a84776bba19e5642bf0880
+Creating ClientInviteTransaction: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Creating new ClientInviteTransaction: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Starting event loop for INVITE Client transaction: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+ClientInviteTransaction::initiate called for Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
 Current state is Initial
-Sending TransitionTo(Calling) command for Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Successfully sent TransitionTo command for Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Received command: TransitionTo(Calling) for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
+Sending TransitionTo(Calling) command for Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Transaction loop starting for Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Initial state: Initial
+Successfully sent TransitionTo command for Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Received command: TransitionTo(Calling) for transaction Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
 Processing TransitionTo(Calling) current state: Initial
 Valid state transition: Initial -> Calling
 State successfully changed to: Calling
 Sent StateChanged event result: Success
-[2m2025-05-31T02:36:42.856102Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
+[2m2025-05-31T02:55:46.814032Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
 State after sending command: Calling
-[2m2025-05-31T02:36:42.967778Z[0m [32m INFO[0m ✅ INVITE sent successfully for session bdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c (transaction: z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:42.967834Z[0m [32m INFO[0m 📞 Call state: Dialing → waiting for response from sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.967851Z[0m [32m INFO[0m ✅ SipClient call initiated: session bdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c → sip:alice@127.0.0.1:5061
-[2m2025-05-31T02:36:42.967897Z[0m [32m INFO[0m ✅ Call 0ea00e54-e56d-4f81-8f6f-0412811cd0bf created via session bdb7b5a3-bcf1-4793-8ba1-e7dea7345a3c (factory API with INVITE transmission)
-[2m2025-05-31T02:36:42.967908Z[0m [32m INFO[0m 📋 Call details: local=sip:bob@127.0.0.1, remote=sip:alice@127.0.0.1:5061, subject=None
-[2m2025-05-31T02:36:42.967916Z[0m [32m INFO[0m 🚀 INVITE has been sent via SipClient.make_call() factory API!
-[2m2025-05-31T02:36:42.967928Z[0m [32m INFO[0m ⏳ Waiting for answer...
-[2m2025-05-31T02:36:42.967934Z[0m [32m INFO[0m ⏳ Waiting for call 0ea00e54-e56d-4f81-8f6f-0412811cd0bf to be answered
+[2m2025-05-31T02:55:46.926086Z[0m [32m INFO[0m ✅ INVITE sent successfully via DialogManager for session e457ad04-db56-4951-aa9e-6d4b20e0cd13 (dialog: f1726df8-d107-47e8-8cc8-b4079c16cf97, transaction: z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+[2m2025-05-31T02:55:46.926146Z[0m [32m INFO[0m 📞 Call state: Dialing → waiting for response from sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.926162Z[0m [32m INFO[0m ✅ SipClient call initiated: session e457ad04-db56-4951-aa9e-6d4b20e0cd13 → sip:alice@127.0.0.1:5061
+[2m2025-05-31T02:55:46.926221Z[0m [32m INFO[0m ✅ Call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf created via session e457ad04-db56-4951-aa9e-6d4b20e0cd13 (factory API with INVITE transmission)
+[2m2025-05-31T02:55:46.926233Z[0m [32m INFO[0m 📋 Call details: local=sip:bob@127.0.0.1, remote=sip:alice@127.0.0.1:5061, subject=None
+[2m2025-05-31T02:55:46.926242Z[0m [32m INFO[0m 🚀 INVITE has been sent via SipClient.make_call() factory API!
+[2m2025-05-31T02:55:46.926255Z[0m [32m INFO[0m ⏳ Waiting for answer...
+[2m2025-05-31T02:55:46.926265Z[0m [32m INFO[0m ⏳ Waiting for call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf to be answered
 === PARSING SIP MESSAGE ===
-Input length: 222 bytes
-Input as string: "SIP/2.0 100 Trying\r\nFrom: <sip:bob@127.0.0.1>\r\nTo: <sip:alice@127.0.0.1:5061>\r\nCall-ID: 2d3fc6c6-b249-434e-82d4-d7eb9de72eac@rvoip-session-core\r\nVia: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9\r\n\r\n"
-Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 31, 30, 30, 20, 54, 72, 79, 69, 6e, 67, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 64, 33, 66, 63, 36, 63, 36, 2d, 62, 32, 34, 39, 2d, 34, 33, 34, 65, 2d, 38, 32, 64, 34, 2d, 64, 37, 65, 62, 39, 64, 65, 37, 32, 65, 61, 63, 40, 72, 76, 6f, 69, 70, 2d, 73, 65, 73, 73, 69, 6f, 6e, 2d, 63, 6f, 72, 65, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 34, 61, 62, 30, 61, 62, 33, 34, 33, 62, 32, 31, 34, 36, 62, 62, 39, 37, 63, 39, 66, 64, 65, 62, 34, 66, 63, 64, 66, 64, 66, 39, 0d, 0a, 0d, 0a]
+Input length: 279 bytes
+Input as string: "SIP/2.0 100 Trying\r\nFrom: <sip:bob@127.0.0.1>;tag=tag-edd400df6e594f50a2d826c158b7b7d1\r\nTo: <sip:alice@127.0.0.1:5061>\r\nCall-ID: 9bd22f3e-5d7f-49b9-99ab-4730da1a222b@rvoip-session-core\r\nCSeq: 2 INVITE\r\nVia: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK42c1395cf7a84776bba19e5642bf0880\r\n\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 31, 30, 30, 20, 54, 72, 79, 69, 6e, 67, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 65, 64, 64, 34, 30, 30, 64, 66, 36, 65, 35, 39, 34, 66, 35, 30, 61, 32, 64, 38, 32, 36, 63, 31, 35, 38, 62, 37, 62, 37, 64, 31, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 39, 62, 64, 32, 32, 66, 33, 65, 2d, 35, 64, 37, 66, 2d, 34, 39, 62, 39, 2d, 39, 39, 61, 62, 2d, 34, 37, 33, 30, 64, 61, 31, 61, 32, 32, 32, 62, 40, 72, 76, 6f, 69, 70, 2d, 73, 65, 73, 73, 69, 6f, 6e, 2d, 63, 6f, 72, 65, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 34, 32, 63, 31, 33, 39, 35, 63, 66, 37, 61, 38, 34, 37, 37, 36, 62, 62, 61, 31, 39, 65, 35, 36, 34, 32, 62, 66, 30, 38, 38, 30, 0d, 0a, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:43.357958Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Trying, reason: Some("Trying"), headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-edd400df6e594f50a2d826c158b7b7d1")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("9bd22f3e-5d7f-49b9-99ab-4730da1a222b@rvoip-session-core")), CSeq(CSeq { seq: 2, method: Invite }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: None, params: [Branch("z9hG4bK42c1395cf7a84776bba19e5642bf0880")] }]))], body: b"" })) for transaction Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Processing TransitionTo(Proceeding) current state: Calling
+Valid state transition: Calling -> Proceeding
+State successfully changed to: Proceeding
+Sent StateChanged event result: Success
+[2m2025-05-31T02:55:47.024811Z[0m [32m INFO[0m 📞 Received provisional response: 100 Trying
 === PARSING SIP MESSAGE ===
-Input length: 222 bytes
-Input as string: "SIP/2.0 100 Trying\r\nFrom: <sip:bob@127.0.0.1>\r\nTo: <sip:alice@127.0.0.1:5061>\r\nCall-ID: 2d3fc6c6-b249-434e-82d4-d7eb9de72eac@rvoip-session-core\r\nVia: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9\r\n\r\n"
-Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 31, 30, 30, 20, 54, 72, 79, 69, 6e, 67, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 64, 33, 66, 63, 36, 63, 36, 2d, 62, 32, 34, 39, 2d, 34, 33, 34, 65, 2d, 38, 32, 64, 34, 2d, 64, 37, 65, 62, 39, 64, 65, 37, 32, 65, 61, 63, 40, 72, 76, 6f, 69, 70, 2d, 73, 65, 73, 73, 69, 6f, 6e, 2d, 63, 6f, 72, 65, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 34, 61, 62, 30, 61, 62, 33, 34, 33, 62, 32, 31, 34, 36, 62, 62, 39, 37, 63, 39, 66, 64, 65, 62, 34, 66, 63, 64, 66, 64, 66, 39, 0d, 0a, 0d, 0a]
+Input length: 497 bytes
+Input as string: "SIP/2.0 200 OK\r\nFrom: <sip:bob@127.0.0.1>;tag=tag-edd400df6e594f50a2d826c158b7b7d1\r\nTo: <sip:alice@127.0.0.1:5061>\r\nCall-ID: 9bd22f3e-5d7f-49b9-99ab-4730da1a222b@rvoip-session-core\r\nCSeq: 2 INVITE\r\nVia: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK42c1395cf7a84776bba19e5642bf0880\r\nContent-Length: 170\r\nContent-Type: application/sdp\r\n\r\nv=0\r\no=server 1748660147 1 IN IP4 127.0.0.1\r\ns=Media Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 65, 64, 64, 34, 30, 30, 64, 66, 36, 65, 35, 39, 34, 66, 35, 30, 61, 32, 64, 38, 32, 36, 63, 31, 35, 38, 62, 37, 62, 37, 64, 31, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 39, 62, 64, 32, 32, 66, 33, 65, 2d, 35, 64, 37, 66, 2d, 34, 39, 62, 39, 2d, 39, 39, 61, 62, 2d, 34, 37, 33, 30, 64, 61, 31, 61, 32, 32, 32, 62, 40, 72, 76, 6f, 69, 70, 2d, 73, 65, 73, 73, 69, 6f, 6e, 2d, 63, 6f, 72, 65, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 34, 32, 63, 31, 33, 39, 35, 63, 66, 37, 61, 38, 34, 37, 37, 36, 62, 62, 61, 31, 39, 65, 35, 36, 34, 32, 62, 66, 30, 38, 38, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 31, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 73, 65, 72, 76, 65, 72, 20, 31, 37, 34, 38, 36, 36, 30, 31, 34, 37, 20, 31, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 4d, 65, 64, 69, 61, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 31, 30, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-=== PARSING SIP MESSAGE ===
-Input length: 440 bytes
-Input as string: "SIP/2.0 200 OK\r\nFrom: <sip:bob@127.0.0.1>\r\nTo: <sip:alice@127.0.0.1:5061>\r\nCall-ID: 2d3fc6c6-b249-434e-82d4-d7eb9de72eac@rvoip-session-core\r\nVia: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9\r\nContent-Length: 170\r\nContent-Type: application/sdp\r\n\r\nv=0\r\no=server 1748659003 1 IN IP4 127.0.0.1\r\ns=Media Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
-Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 64, 33, 66, 63, 36, 63, 36, 2d, 62, 32, 34, 39, 2d, 34, 33, 34, 65, 2d, 38, 32, 64, 34, 2d, 64, 37, 65, 62, 39, 64, 65, 37, 32, 65, 61, 63, 40, 72, 76, 6f, 69, 70, 2d, 73, 65, 73, 73, 69, 6f, 6e, 2d, 63, 6f, 72, 65, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 34, 61, 62, 30, 61, 62, 33, 34, 33, 62, 32, 31, 34, 36, 62, 62, 39, 37, 63, 39, 66, 64, 65, 62, 34, 66, 63, 64, 66, 64, 66, 39, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 31, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 73, 65, 72, 76, 65, 72, 20, 31, 37, 34, 38, 36, 35, 39, 30, 30, 33, 20, 31, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 4d, 65, 64, 69, 61, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 31, 30, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
-===========================
-=== PARSE SUCCESS ===
-Successfully parsed message
-=====================
-[2m2025-05-31T02:36:43.856605Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:44.359496Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:36:44.858256Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:45.859018Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:46.361754Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:36:46.860738Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:47.861769Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:48.862676Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:49.863982Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:50.363683Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:36:50.865706Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:51.867723Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:52.869269Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:53.869820Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:54.365478Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:36:54.870764Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:55.872238Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:56.873579Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:57.875287Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:36:58.367559Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:36:58.875690Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:36:59.877172Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:00.878778Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:01.879853Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:02.369546Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:37:02.881378Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:03.882180Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:04.883453Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:05.884159Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:06.370945Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:37:06.884721Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:07.885960Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:08.887488Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:09.888828Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:10.371917Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-[2m2025-05-31T02:37:10.890125Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:11.891271Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:12.892117Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:13.893710Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-Received command: Timer("A") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:14.373518Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5061
-Received command: Timer("B") for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:14.857333Z[0m [33m WARN[0m Timer B (Timeout) fired in state Calling [3mid[0m[2m=[0mKey(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-Processing TransitionTo(Terminated) current state: Calling
-Valid state transition: Calling -> Terminated
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-edd400df6e594f50a2d826c158b7b7d1")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("9bd22f3e-5d7f-49b9-99ab-4730da1a222b@rvoip-session-core")), CSeq(CSeq { seq: 2, method: Invite }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: None, params: [Branch("z9hG4bK42c1395cf7a84776bba19e5642bf0880")] }])), ContentLength(ContentLength(170)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} }))], body: b"v=0\r\no=server 1748660147 1 IN IP4 127.0.0.1\r\ns=Media Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" })) for transaction Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
 State successfully changed to: Terminated
 Sent StateChanged event result: Success
-Transaction loop ending for Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client). Final state: Terminated
-Event loop for INVITE Client transaction ended: Key(z9hG4bK4ab0ab343b2146bb97c9fdeb4fcdfdf9:INVITE:client)
-[2m2025-05-31T02:37:14.895470Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:15.896149Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:16.897513Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:17.899572Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:18.900061Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:19.901255Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:20.902266Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:21.903754Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:22.905676Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:23.907738Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:24.909960Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:25.911786Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:26.913212Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:27.913909Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:28.915558Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:29.916923Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:30.918495Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:31.919884Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:32.921716Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:33.923115Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:34.924950Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:35.925953Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:36.927461Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:37.928397Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:38.929719Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:39.931383Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:40.932921Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:41.934346Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-[2m2025-05-31T02:37:42.935308Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
-❌ Error: Timed out: Call answer timeout
+Transaction loop ending for Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client). Final state: Terminated
+Event loop for INVITE Client transaction ended: Key(z9hG4bK42c1395cf7a84776bba19e5642bf0880:INVITE:client)
+[2m2025-05-31T02:55:47.326421Z[0m [32m INFO[0m 📞 Received success response: 200 OK
+[2m2025-05-31T02:55:47.326460Z[0m [32m INFO[0m 🤝 200 OK received for INVITE - delegating ACK to DialogManager
+[2m2025-05-31T02:55:47.326605Z[0m [32m INFO[0m Sending ACK message to 127.0.0.1:5061
+[2m2025-05-31T02:55:47.326645Z[0m [32m INFO[0m ✅ ACK sent successfully via DialogManager - three-way handshake complete!
+[2m2025-05-31T02:55:47.326683Z[0m [32m INFO[0m 🎉 Session e457ad04-db56-4951-aa9e-6d4b20e0cd13 successfully established and connected!
+[2m2025-05-31T02:55:47.327556Z[0m [32m INFO[0m ✅ Call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf answered
+[2m2025-05-31T02:55:47.327570Z[0m [32m INFO[0m ✅ Call connected!
+[2m2025-05-31T02:55:47.327578Z[0m [32m INFO[0m 🔄 Call active for 10s...
+[2m2025-05-31T02:55:47.813907Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:48.814600Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:49.815707Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:50.817061Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:51.819247Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:52.820547Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:53.822360Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:54.823603Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:55.825255Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:56.826625Z[0m [32m INFO[0m Sent RTCP compound packet of 60 bytes
+[2m2025-05-31T02:55:57.328765Z[0m [32m INFO[0m 📴 Hanging up call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf
+[2m2025-05-31T02:55:57.328914Z[0m [32m INFO[0m 📴 Hanging up call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf via session-core factory API
+[2m2025-05-31T02:55:57.329038Z[0m [32m INFO[0m 📞 SessionManager implementing call termination for session e457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329132Z[0m [32m INFO[0m Session e457ad04-db56-4951-aa9e-6d4b20e0cd13 current state before ending: Connected
+[2m2025-05-31T02:55:57.329177Z[0m [32m INFO[0m 🛑 Coordinating session termination with media cleanup [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329211Z[0m [32m INFO[0m 🎵 Coordinating media session cleanup [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329281Z[0m [32m INFO[0m 📍 Found media session for cleanup [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13 [3mmedia_session_id[0m[2m=[0mmedia-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329320Z[0m [32m INFO[0m 🛑 Attempting to terminate media flow... [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329398Z[0m [32m INFO[0m 🛑 Terminating media flow for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329427Z[0m [32m INFO[0m 🛑 Stopping audio transmission for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329460Z[0m [32m INFO[0m 🛑 Stopping audio transmission
+[2m2025-05-31T02:55:57.329483Z[0m [32m INFO[0m ✅ Audio transmission stopped for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329502Z[0m [32m INFO[0m ✅ Media flow terminated for dialog: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329519Z[0m [32m INFO[0m ✅ Terminated media flow for session: media-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329539Z[0m [32m INFO[0m 🛑 Media flow terminated successfully [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13 [3mmedia_session_id[0m[2m=[0mmedia-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329560Z[0m [32m INFO[0m 🧹 Attempting to stop media session completely... [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329608Z[0m [32m INFO[0m Stopping media session for dialog: 2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329661Z[0m [32m INFO[0m 🧹 Media session stopped completely [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13 [3mmedia_session_id[0m[2m=[0mmedia-2eb7b194-e362-47da-95e8-e35515c8f6df
+[2m2025-05-31T02:55:57.329688Z[0m [32m INFO[0m ✅ Media cleanup coordination completed [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329707Z[0m [32m INFO[0m 📡 Emitting session termination events [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329724Z[0m [32m INFO[0m ✅ Session termination events emitted (placeholder implementation) [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329741Z[0m [32m INFO[0m ✅ Session termination coordination completed successfully [3msession_id[0m[2m=[0me457ad04-db56-4951-aa9e-6d4b20e0cd13
+[2m2025-05-31T02:55:57.329758Z[0m [32m INFO[0m ✅ Session termination coordinated via CallLifecycleCoordinator
+[2m2025-05-31T02:55:57.329790Z[0m [32m INFO[0m ✅ Call termination implemented for session e457ad04-db56-4951-aa9e-6d4b20e0cd13 (state: Terminated, coordinated cleanup)
+[2m2025-05-31T02:55:57.329869Z[0m [32m INFO[0m ✅ Call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf hung up via session-core factory API
+[2m2025-05-31T02:55:57.329895Z[0m [32m INFO[0m ✅ Call bcf703e3-6f00-4a3a-a68e-ed2d1c4c2bdf hung up
+[2m2025-05-31T02:55:57.329914Z[0m [32m INFO[0m 📴 Call hung up automatically
