@@ -894,6 +894,12 @@ impl SessionManager {
                 ErrorContext::default().with_message("RequestBuilder creation failed")
             ))?;
         
+        // ❗ **CRITICAL FIX**: Generate unique Call-ID (RFC 3261 requirement!)
+        // This is what was missing and causing "INVITE missing Call-ID header" error
+        let call_id = format!("{}@{}", uuid::Uuid::new_v4(), "rvoip-session-core");
+        info!("📞 Generated Call-ID for outgoing INVITE: {}", call_id);
+        invite_builder = invite_builder.call_id(&call_id);
+        
         // Add From header
         invite_builder = invite_builder.from("", &from_uri_parsed.to_string(), None);
         
@@ -918,12 +924,37 @@ impl SessionManager {
         // Send INVITE via transaction manager
         info!("📤 Sending INVITE request to {} from {}", target_uri, from_uri);
         
-        // Create client transaction for the INVITE request
-        let destination = std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), // TODO: Extract from target_uri
-            5060 // TODO: Extract port from target_uri or use default
-        );
+        // Extract destination host and port from target URI
+        let destination = {
+            let host = &target_uri_parsed.host;
+            let port = target_uri_parsed.port.unwrap_or(5060); // Default to 5060 if no port specified
+            
+            // Convert Host to IpAddr
+            let ip_addr = match host {
+                rvoip_sip_core::types::uri::Host::Domain(domain) => {
+                    // Parse domain - could be IPv4, IPv6, or hostname
+                    if let Ok(ipv4) = domain.parse::<std::net::Ipv4Addr>() {
+                        std::net::IpAddr::V4(ipv4)
+                    } else if let Ok(ipv6) = domain.parse::<std::net::Ipv6Addr>() {
+                        std::net::IpAddr::V6(ipv6)
+                    } else {
+                        // For hostname, resolve to IP or use localhost as fallback for testing
+                        if domain == "localhost" {
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+                        } else {
+                            // TODO: Proper DNS resolution - for now use 127.0.0.1 for testing
+                            warn!("Using 127.0.0.1 for hostname '{}' - DNS resolution not implemented", domain);
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+                        }
+                    }
+                },
+                rvoip_sip_core::types::uri::Host::Address(ip_addr) => *ip_addr,
+            };
+            
+            std::net::SocketAddr::new(ip_addr, port)
+        };
         
+        // Create client transaction for the INVITE request
         let transaction_id = self.transaction_manager
             .create_client_transaction(invite_request, destination)
             .await

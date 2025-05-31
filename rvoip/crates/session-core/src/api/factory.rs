@@ -286,7 +286,7 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
     info!("✅ Client transport manager created and initialized on {}", local_address);
     
     // Create transaction manager using the transport manager (like server does)
-    let (transaction_manager, _transaction_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
+    let (transaction_manager, mut transaction_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
         transport_manager,
         transport_events,
         Some(100), // Event buffer capacity
@@ -309,7 +309,28 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
         event_bus
     ).await.context("Failed to create session manager with real infrastructure")?);
     
+    // ❗ **CRITICAL FIX**: Start event processing in background task automatically
+    // This ensures transaction events are processed without client-core needing to manage it
+    let session_manager_for_events = session_manager.clone();
+    tokio::spawn(async move {
+        info!("🔄 Starting SIP client transaction event processing in background");
+        
+        let mut event_count = 0;
+        while let Some(event) = transaction_events.recv().await {
+            event_count += 1;
+            debug!("SipClient background task received transaction event #{}: {:?}", event_count, event);
+            
+            // Delegate to session manager for handling (like server does)
+            if let Err(e) = session_manager_for_events.handle_transaction_event(event).await {
+                tracing::error!("Error handling transaction event in background task: {}", e);
+            }
+        }
+        
+        info!("SIP client background event processing ended (received {} events total)", event_count);
+    });
+    
     info!("✅ SIP client created successfully with real transport infrastructure");
+    info!("✅ Transaction event processing started in background task");
     
     Ok(SipClient {
         session_manager,
