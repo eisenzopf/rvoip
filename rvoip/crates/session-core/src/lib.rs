@@ -1,19 +1,19 @@
 // RVOIP Session Core Library
 //
 // This crate provides the core functionality for SIP session management, 
-// including dialog handling, media setup, and call flow management.
+// including session handling, media setup, and call flow management.
 //
 // # Architecture
 //
 // The library follows a layered architecture:
 //
 // - **Session Layer**: Manages SIP sessions (calls) with state transitions and media integration
-// - **Dialog Layer**: Implements SIP dialogs according to RFC 3261
+// - **Dialog Layer**: Delegates to dialog-core for SIP dialog management according to RFC 3261
 // - **Transaction Layer**: Handles SIP transactions via the transaction-core crate
 // - **Transport Layer**: Abstracts the underlying transport via the sip-transport crate
 //
 // For production use, the recommended usage pattern is to create a SessionManager instance,
-// which will manage dialog creation and transaction handling internally.
+// which will coordinate sessions and delegate dialog handling to dialog-core.
 
 pub mod dialog;
 pub mod session;
@@ -26,8 +26,12 @@ pub mod metrics;
 pub mod api;
 pub mod transport;
 
-// Re-export important types for convenience
-pub use dialog::{Dialog, DialogId, DialogState};
+// Re-export dialog types from dialog-core (the new authoritative source)
+pub use rvoip_dialog_core::{DialogId, DialogManager, SessionCoordinationEvent};
+
+// Keep local Dialog and DialogState for backward compatibility during transition
+pub use dialog::{Dialog, DialogState};
+
 // Session implementation is now complete with enhanced media support
 pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirection, SessionManager};
 pub use session::session::SessionMediaState;
@@ -94,13 +98,16 @@ pub mod prelude {
         TransactionKind
     };
     
+    // From dialog-core (the new dialog layer)
+    pub use rvoip_dialog_core::{DialogId, DialogManager, SessionCoordinationEvent};
+    
     // From media libraries
     pub use rvoip_rtp_core::{RtpSession, RtpPacket};
     pub use rvoip_media_core::{AudioBuffer, Codec};
     
     // From our own crate - enhanced session-core with media integration
     pub use crate::{
-        Dialog, DialogState, DialogId,
+        Dialog, DialogState, // Legacy compatibility - will be phased out
         Session, SessionManager, SessionMediaState, // Now fully implemented with media support
         SessionId, SessionState, SessionConfig, SessionDirection,
         Error, ErrorCategory, ErrorSeverity, RecoveryAction, ErrorContext,
@@ -115,7 +122,5 @@ pub mod prelude {
         api, client, server,
         // API types
         ApiCapabilities, ApiConfig, get_api_capabilities, is_feature_supported,
-        // Following SDPs are not fully implemented yet or need to be imported differently
-        // SessionDescription, MediaDescription, MediaFormat, MediaDirection,
     };
 }

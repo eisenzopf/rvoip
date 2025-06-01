@@ -1,4 +1,4 @@
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 use std::str::FromStr;
 use std::net::SocketAddr;
 use std::time::SystemTime;
@@ -621,5 +621,358 @@ impl DialogManager {
         // ✅ **CORRECT ARCHITECTURE**: DialogManager handles SIP protocol operations
         // ACK for 2xx is special - it's end-to-end, not part of original transaction
         self.transaction_manager.send_ack_for_2xx(transaction_id, response).await
+    }
+
+    /// **NEW**: Handle incoming INVITE requests (moved from SessionManager)
+    /// This is pure SIP protocol work - DialogManager's responsibility
+    pub async fn handle_invite_protocol(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        source: SocketAddr,
+    ) -> Result<(), crate::errors::Error> {
+        info!("📞 DialogManager processing INVITE protocol request");
+        
+        // Extract Call-ID for session tracking
+        let call_id = request.call_id()
+            .ok_or_else(|| crate::errors::Error::InternalError(
+                "INVITE missing Call-ID header".to_string(), 
+                crate::errors::ErrorContext::default().with_message("Missing required Call-ID header")
+            ))?
+            .value();
+
+        // Find existing dialog for this request (for re-INVITEs)
+        let existing_dialog = self.find_dialog_for_request(&request);
+        
+        if let Some(dialog_id) = existing_dialog {
+            // This is a re-INVITE - handle session update
+            info!("🔄 Processing re-INVITE for existing dialog {}", dialog_id);
+            self.handle_reinvite_protocol(transaction_id, request, dialog_id).await?;
+        } else {
+            // This is an initial INVITE - handle new dialog creation
+            info!("🆕 Processing initial INVITE for new dialog");
+            self.handle_initial_invite_protocol(transaction_id, request, source).await?;
+        }
+        
+        Ok(())
+    }
+
+    /// **NEW**: Handle initial INVITE protocol (new dialog creation)
+    async fn handle_initial_invite_protocol(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        source: SocketAddr,
+    ) -> Result<(), crate::errors::Error> {
+        info!("🆕 DialogManager handling initial INVITE protocol");
+        
+        // Create session coordination event for SessionManager
+        let session_id = crate::session::SessionId::new();
+        
+        // Store the request for SessionManager processing
+        let incoming_call_info = crate::dialog::IncomingCallInfo {
+            transaction_id: transaction_id.clone(),
+            request: request.clone(),
+            source,
+            session_id: session_id.clone(),
+        };
+        
+        // Notify SessionManager for session coordination
+        self.event_bus.publish(crate::events::SessionEvent::Custom {
+            session_id: session_id.clone(),
+            event_type: "incoming_invite_protocol_ready".to_string(),
+            data: serde_json::json!({
+                "transaction_id": transaction_id.to_string(),
+                "call_id": request.call_id().map(|h| h.value()).unwrap_or("unknown"),
+                "from": request.from().map(|h| h.address().uri().to_string()).unwrap_or("unknown".to_string()),
+                "to": request.to().map(|h| h.address().uri().to_string()).unwrap_or("unknown".to_string()),
+                "source": source.to_string(),
+            }),
+        });
+        
+        // Send 100 Trying immediately per RFC 3261
+        let trying_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &request,
+            rvoip_sip_core::StatusCode::Trying,
+            Some("Trying")
+        ).build();
+        
+        self.transaction_manager.send_response(&transaction_id, trying_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send 100 Trying: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        info!("✅ Sent 100 Trying for initial INVITE");
+        Ok(())
+    }
+
+    /// **NEW**: Handle re-INVITE protocol (session update)
+    async fn handle_reinvite_protocol(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        dialog_id: crate::dialog::DialogId,
+    ) -> Result<(), crate::errors::Error> {
+        info!("🔄 DialogManager handling re-INVITE protocol for dialog {}", dialog_id);
+        
+        // Associate transaction with existing dialog
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        
+        // Find associated session
+        let session_id = self.dialog_to_session.get(&dialog_id)
+            .map(|s| s.clone())
+            .unwrap_or_else(|| crate::session::SessionId::new());
+        
+        // Notify SessionManager for session update coordination
+        self.event_bus.publish(crate::events::SessionEvent::Custom {
+            session_id: session_id.clone(),
+            event_type: "reinvite_protocol_ready".to_string(),
+            data: serde_json::json!({
+                "transaction_id": transaction_id.to_string(),
+                "dialog_id": dialog_id.to_string(),
+                "session_id": session_id.to_string(),
+            }),
+        });
+        
+        Ok(())
+    }
+
+    /// **NEW**: Handle BYE protocol (moved from SessionManager)
+    pub async fn handle_bye_protocol(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+    ) -> Result<(), crate::errors::Error> {
+        info!("📞 DialogManager processing BYE protocol request");
+        
+        let call_id = request.call_id()
+            .ok_or_else(|| crate::errors::Error::InternalError(
+                "BYE missing Call-ID header".to_string(),
+                crate::errors::ErrorContext::default().with_message("Missing required Call-ID header")
+            ))?
+            .value();
+
+        // Find the associated dialog
+        let dialog_id = self.find_dialog_for_request(&request);
+        
+        if let Some(dialog_id) = dialog_id {
+            info!("🛑 Found dialog {} for BYE, marking for termination", dialog_id);
+            
+            // Mark dialog as terminated
+            if let Err(e) = self.terminate_dialog(&dialog_id).await {
+                error!("Failed to terminate dialog {}: {}", dialog_id, e);
+            }
+            
+            // Find associated session
+            let session_id = self.dialog_to_session.get(&dialog_id)
+                .map(|s| s.clone())
+                .unwrap_or_else(|| crate::session::SessionId::new());
+            
+            // Notify SessionManager for session termination coordination
+            self.event_bus.publish(crate::events::SessionEvent::Custom {
+                session_id: session_id.clone(),
+                event_type: "bye_protocol_ready".to_string(),
+                data: serde_json::json!({
+                    "transaction_id": transaction_id.to_string(),
+                    "dialog_id": dialog_id.to_string(),
+                    "session_id": session_id.to_string(),
+                    "call_id": call_id,
+                }),
+            });
+        } else {
+            warn!("📞 BYE request for call-id {} but no dialog found", call_id);
+            
+            // Still notify SessionManager in case it has session info
+            self.event_bus.publish(crate::events::SessionEvent::Custom {
+                session_id: crate::session::SessionId::new(),
+                event_type: "bye_protocol_orphaned".to_string(),
+                data: serde_json::json!({
+                    "transaction_id": transaction_id.to_string(),
+                    "call_id": call_id,
+                }),
+            });
+        }
+        
+        // Send 200 OK response for BYE (protocol responsibility)
+        let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
+        self.transaction_manager.send_response(&transaction_id, bye_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send BYE response: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        info!("✅ Sent 200 OK for BYE protocol");
+        Ok(())
+    }
+
+    /// **NEW**: Handle REGISTER protocol (moved from SessionManager)
+    pub async fn handle_register_protocol(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        source: SocketAddr,
+    ) -> Result<(), crate::errors::Error> {
+        info!("📝 DialogManager processing REGISTER protocol request from {}", source);
+        
+        // Extract registration information for protocol validation
+        let from_uri = request.from()
+            .ok_or_else(|| crate::errors::Error::InternalError(
+                "REGISTER missing From header".to_string(),
+                crate::errors::ErrorContext::default().with_message("Missing required From header")
+            ))?
+            .address().uri().clone();
+        
+        let contact_uri = request.contact_uri()
+            .cloned()
+            .unwrap_or_else(|| from_uri.clone());
+        
+        let expires = request.headers.iter()
+            .find_map(|h| {
+                if let rvoip_sip_core::TypedHeader::Expires(exp) = h {
+                    Some(exp.seconds())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(3600); // Default 1 hour
+        
+        let user_agent = request.headers.iter()
+            .find_map(|h| {
+                if let rvoip_sip_core::TypedHeader::UserAgent(ua) = h {
+                    Some(ua.join(" "))
+                } else {
+                    None
+                }
+            });
+        
+        // Create registration protocol event for SessionManager/call-engine coordination
+        let registration_info = serde_json::json!({
+            "transaction_id": transaction_id.to_string(),
+            "from_uri": from_uri.to_string(),
+            "contact_uri": contact_uri.to_string(),
+            "expires": expires,
+            "user_agent": user_agent,
+            "source": source.to_string(),
+            "is_unregistration": expires == 0,
+        });
+        
+        if expires == 0 {
+            info!("📤 Processing unregistration protocol for {}", from_uri);
+            
+            // Notify for unregistration coordination
+            self.event_bus.publish(crate::events::SessionEvent::Custom {
+                session_id: crate::session::SessionId::new(),
+                event_type: "unregistration_protocol_ready".to_string(),
+                data: registration_info,
+            });
+        } else {
+            info!("📝 Processing registration protocol for {} (expires: {}s)", from_uri, expires);
+            
+            // Notify for registration coordination
+            self.event_bus.publish(crate::events::SessionEvent::Custom {
+                session_id: crate::session::SessionId::new(),
+                event_type: "registration_protocol_ready".to_string(),
+                data: registration_info,
+            });
+        }
+        
+        // Protocol layer sends 200 OK by default (call-engine can override via policy)
+        let ok_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &request,
+            rvoip_sip_core::StatusCode::Ok,
+            Some("OK")
+        )
+        .contact(contact_uri.to_string(), None)
+        .expires(expires)
+        .build();
+        
+        self.transaction_manager.send_response(&transaction_id, ok_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send REGISTER 200 OK: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        info!("✅ Sent 200 OK for REGISTER protocol (expires: {}s)", expires);
+        Ok(())
+    }
+
+    /// **NEW**: Send 180 Ringing response (protocol operation)
+    pub async fn send_ringing_response(&self, transaction_id: &TransactionKey, request: &Request) -> Result<(), crate::errors::Error> {
+        let ringing_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            request,
+            rvoip_sip_core::StatusCode::Ringing,
+            Some("Ringing")
+        ).build();
+        
+        self.transaction_manager.send_response(transaction_id, ringing_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send 180 Ringing: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        Ok(())
+    }
+
+    /// **NEW**: Accept call with 200 OK + SDP (protocol operation)
+    pub async fn accept_call_protocol(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        sdp_answer: String,
+    ) -> Result<(), crate::errors::Error> {
+        info!("🎵 DialogManager sending 200 OK with SDP for call acceptance");
+        
+        // Create 200 OK response with SDP
+        let mut ok_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            request,
+            rvoip_sip_core::StatusCode::Ok,
+            Some("OK")
+        ).build();
+        
+        // Add SDP answer as body
+        ok_response = ok_response.with_body(bytes::Bytes::from(sdp_answer));
+        
+        // Add Content-Type header
+        let content_type = rvoip_sip_core::types::content_type::ContentType::from_type_subtype("application", "sdp");
+        ok_response.headers.push(rvoip_sip_core::TypedHeader::ContentType(content_type));
+        
+        // Send 200 OK through transaction-core
+        self.transaction_manager.send_response(transaction_id, ok_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send 200 OK response: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        info!("✅ Sent 200 OK with SDP answer via DialogManager");
+        Ok(())
+    }
+
+    /// **NEW**: Reject call with error response (protocol operation)
+    pub async fn reject_call_protocol(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        status_code: rvoip_sip_core::StatusCode,
+        reason: Option<String>,
+    ) -> Result<(), crate::errors::Error> {
+        info!("📞 DialogManager sending {} rejection response", status_code);
+        
+        // Create rejection response
+        let rejection_response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            request,
+            status_code,
+            reason.as_deref()
+        ).build();
+        
+        // Send rejection response through transaction-core
+        self.transaction_manager.send_response(transaction_id, rejection_response).await
+            .map_err(|e| crate::errors::Error::InternalError(
+                format!("Failed to send rejection response: {}", e),
+                crate::errors::ErrorContext::default().with_message("Failed to send response")
+            ))?;
+        
+        info!("✅ Sent {} rejection response via DialogManager", status_code);
+        Ok(())
     }
 } 

@@ -19,7 +19,7 @@ use crate::{
 };
 use std::sync::Arc;
 use std::collections::HashMap;
-use rvoip_transaction_core::{TransactionManager, TransactionKey};
+use rvoip_transaction_core::TransactionManager;
 use rvoip_sip_core::{Request, Response, Uri, StatusCode};
 use tokio::sync::{RwLock, mpsc};
 use async_trait::async_trait;
@@ -135,6 +135,9 @@ pub struct ServerSessionManager {
 
 impl ServerSessionManager {
     /// Create a new server session manager
+    /// 
+    /// **ARCHITECTURE**: Server receives TransactionManager via dependency injection
+    /// and passes it down through the session layer to dialog layer.
     pub async fn new(
         transaction_manager: Arc<TransactionManager>,
         config: ServerConfig
@@ -163,6 +166,9 @@ impl ServerSessionManager {
     }
     
     /// Create a new server session manager (synchronous)
+    /// 
+    /// **ARCHITECTURE**: Server receives TransactionManager via dependency injection
+    /// and passes it down through the session layer to dialog layer.
     pub fn new_sync(
         transaction_manager: Arc<TransactionManager>,
         config: ServerConfig
@@ -441,9 +447,6 @@ pub struct IncomingCallEvent {
     /// The session ID created for this call
     pub session_id: SessionId,
     
-    /// The transaction ID for this INVITE
-    pub transaction_id: TransactionKey,
-    
     /// The original INVITE request
     pub request: Request,
     
@@ -476,6 +479,38 @@ pub struct CallerInfo {
     pub user_agent: Option<String>,
 }
 
+impl CallerInfo {
+    /// Extract caller information from a SIP request
+    pub fn from_request(request: &Request, source: SocketAddr) -> Self {
+        let from = request.from()
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+            
+        let to = request.to()
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+            
+        let call_id = request.call_id()
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+            
+        let contact = request.typed_header::<rvoip_sip_core::types::contact::Contact>()
+            .and_then(|h| h.0.first())
+            .map(|_| format!("sip:{}@{}", "user", source.ip()));
+            
+        let user_agent = request.typed_header::<rvoip_sip_core::types::user_agent::UserAgent>()
+            .map(|h| h.0.clone());
+        
+        Self {
+            from,
+            to,
+            call_id,
+            contact,
+            user_agent,
+        }
+    }
+}
+
 /// Call decision result from ServerManager policy
 #[derive(Debug, Clone)]
 pub enum CallDecision {
@@ -489,6 +524,16 @@ pub enum CallDecision {
     Defer,
 }
 
+/// Registration decision result from ServerManager policy
+#[derive(Debug, Clone)]
+pub enum RegistrationDecision {
+    /// Accept the registration
+    Accept,
+    
+    /// Reject the registration with a specific status code and reason
+    Reject { status_code: StatusCode, reason: Option<String> },
+}
+
 /// Notification trait for ServerManager to receive call events
 #[async_trait]
 pub trait IncomingCallNotification: Send + Sync {
@@ -500,6 +545,12 @@ pub trait IncomingCallNotification: Send + Sync {
     
     /// Called when a call is ended by the server
     async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String);
+    
+    /// **NEW**: Called when a SIP REGISTER request is received
+    async fn on_user_registration_request(&self, registration: UserRegistration) -> RegistrationDecision;
+    
+    /// **NEW**: Called when a user unregisters (REGISTER with Expires: 0)
+    async fn on_user_unregistered(&self, user_uri: Uri);
 }
 
 // ========================================================================================

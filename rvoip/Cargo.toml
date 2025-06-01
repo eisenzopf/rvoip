@@ -5,6 +5,7 @@ members = [
     "crates/sip-core",
     "crates/sip-transport",
     "crates/transaction-core",
+    "crates/dialog-core",
     "crates/rtp-core",
     "crates/media-core",
     "crates/session-core",

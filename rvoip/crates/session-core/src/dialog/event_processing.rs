@@ -348,132 +348,43 @@ impl DialogManager {
         }
     }
     
-    /// Handle INVITE request events
+    /// Handle incoming INVITE request events
     async fn handle_invite_request_event(&self, tx_key: TransactionKey, request: Request, source: std::net::SocketAddr) {
         debug!("Received INVITE request from transaction-core: {}", tx_key);
         
-        // **CHECK FOR RE-INVITE**: First check if this is a re-INVITE (in-dialog INVITE)
-        debug!("Processing INVITE request - checking if it's a re-INVITE");
-        if let Some(dialog_id) = self.find_dialog_for_request(&request) {
-            debug!("Detected re-INVITE for existing dialog {}", dialog_id);
-            
-            // This is a re-INVITE - the transaction is already created by transaction-core
-            // We just need to associate it with the existing dialog
-            self.transaction_to_dialog.insert(tx_key.clone(), dialog_id.clone());
-            
-            // Emit event for re-INVITE (session-core can coordinate session update)
-            if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                let session_id = session_id.clone();
-                self.event_bus.publish(crate::events::SessionEvent::Custom {
-                    session_id,
-                    event_type: "re_invite_processed".to_string(),
-                    data: serde_json::json!({
-                        "dialog_id": dialog_id.to_string(),
-                        "transaction_id": tx_key.to_string(),
-                    }),
-                });
-            }
-            
-            debug!("Re-INVITE processed for dialog {} with transaction {}", dialog_id, tx_key);
-            return; // Important: return here to avoid treating as new call
+        // ✅ **CORRECT ARCHITECTURE**: DialogManager handles SIP protocol directly
+        if let Err(e) = self.handle_invite_protocol(tx_key, request, source).await {
+            error!("Failed to handle INVITE protocol: {}", e);
         }
-        
-        // If we get here, this is an initial INVITE (no existing dialog found)
-        debug!("No existing dialog found - treating as initial INVITE");
-        
-        // **NEW: AUTOMATIC CALL HANDLING WITHOUT LIFECYCLE COORDINATOR**
-        // The call lifecycle coordination is now handled in SessionManager layer
-        // DialogManager only does pure SIP dialog protocol handling
-        debug!("Processing initial INVITE - creating dialog at protocol layer");
-        
-        // **REMOVED**: call_lifecycle_coordinator handling - now in SessionManager layer
-        // The SessionManager will coordinate the complete call flow
-        warn!("Call lifecycle coordination moved to SessionManager - dialog layer only handles protocol");
-        
-        // The transaction is already created by transaction-core
-        // SessionManager will handle the complete call coordination
-        debug!("INVITE transaction {} ready for session-level coordination", tx_key);
-        
-        // Emit event for new INVITE (SessionManager can coordinate session creation)
-        self.event_bus.publish(crate::events::SessionEvent::Custom {
-            session_id: SessionId::new(),
-            event_type: "invite_received".to_string(),
-            data: serde_json::json!({
-                "transaction_id": tx_key.to_string(),
-                "session_id": SessionId::new().to_string(),
-                "auto_handling": false, // Now handled by SessionManager
-            }),
-        });
     }
     
     /// Handle non-INVITE request events
-    async fn handle_non_invite_request_event(&self, tx_key: TransactionKey, request: Request, _source: std::net::SocketAddr) {
+    async fn handle_non_invite_request_event(&self, tx_key: TransactionKey, request: Request, source: std::net::SocketAddr) {
         debug!("Received non-INVITE request from transaction-core: {} (method: {})", tx_key, request.method());
         
         match request.method() {
             Method::Bye => {
                 debug!("Processing BYE request for transaction {}", tx_key);
                 
-                // **NEW: AUTOMATIC BYE HANDLING WITH LIFECYCLE COORDINATOR**
-                // Find the session associated with this BYE request
-                let session_id = self.find_session_for_transaction(&tx_key)
-                    .or_else(|| {
-                        // Try to find session by dialog lookup
-                        self.find_dialog_for_request(&request)
-                            .and_then(|dialog_id| self.dialog_to_session.get(&dialog_id).map(|s| s.clone()))
-                    });
-
-                if let Some(session_id) = session_id {
-                    // **REMOVED**: call_lifecycle_coordinator handling - now in SessionManager layer
-                    // The SessionManager will coordinate the complete call termination
-                    warn!("BYE lifecycle coordination moved to SessionManager - dialog layer only handles protocol");
-                    
-                    // **FALLBACK: Manual BYE response (since coordination moved to SessionManager)**
-                    let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
-                    
-                    if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
-                        error!("Failed to send 200 OK response to BYE: {}", e);
-                    } else {
-                        debug!("✅ Sent 200 OK response to BYE request (dialog layer)");
-                    }
-                } else {
-                    warn!("No session found for BYE request - using basic BYE handling");
-                    
-                    // **BASIC: Simple BYE response (no session context)**
-                    let bye_response = rvoip_transaction_core::utils::create_ok_response_for_bye(&request);
-                    
-                    if let Err(e) = self.transaction_manager.send_response(&tx_key, bye_response).await {
-                        error!("Failed to send 200 OK response to BYE: {}", e);
-                    } else {
-                        debug!("✅ Sent 200 OK response to BYE request (basic)");
-                    }
+                // ✅ **CORRECT ARCHITECTURE**: DialogManager handles BYE protocol directly
+                if let Err(e) = self.handle_bye_protocol(tx_key, request).await {
+                    error!("Failed to handle BYE protocol: {}", e);
                 }
+            },
+            Method::Register => {
+                debug!("Processing REGISTER request for transaction {}", tx_key);
                 
-                // Find and terminate the associated dialog
-                if let Some(dialog_id) = self.find_dialog_for_request(&request) {
-                    debug!("Found dialog {} for BYE, terminating", dialog_id);
-                    if let Err(e) = self.terminate_dialog(&dialog_id).await {
-                        error!("Failed to terminate dialog {}: {}", dialog_id, e);
-                    }
-                } else {
-                    debug!("No dialog found for BYE request - call may have already been terminated");
+                // ✅ **CORRECT ARCHITECTURE**: DialogManager handles REGISTER protocol directly
+                if let Err(e) = self.handle_register_protocol(tx_key, request, source).await {
+                    error!("Failed to handle REGISTER protocol: {}", e);
                 }
-                
-                // Emit call terminated event
-                self.event_bus.publish(crate::events::SessionEvent::Custom {
-                    session_id: SessionId::new(),
-                    event_type: "call_terminated".to_string(),
-                    data: serde_json::json!({
-                        "transaction_id": tx_key.to_string(),
-                    }),
-                });
             },
             _ => {
-                debug!("Received {} request - transaction-core handles automatically", request.method());
+                debug!("Received {} request - protocol handling not yet implemented", request.method());
                 
-                // Emit event for the request
+                // Emit event for the request for other protocol handlers
                 self.event_bus.publish(crate::events::SessionEvent::Custom {
-                    session_id: SessionId::new(), // We don't know the session yet
+                    session_id: SessionId::new(),
                     event_type: format!("new_{}", request.method().to_string().to_lowercase()),
                     data: serde_json::json!({
                         "transaction_id": tx_key.to_string(),

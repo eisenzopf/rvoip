@@ -8,6 +8,10 @@
 //! to the session layer to fix RFC 3261 separation violations. Dialog layer
 //! now focuses purely on SIP protocol dialog state management.
 
+use std::net::SocketAddr;
+use rvoip_sip_core::Request;
+use rvoip_transaction_core::TransactionKey;
+
 pub mod dialog_id;
 pub mod dialog_impl;
 pub mod dialog_state;
@@ -33,4 +37,21 @@ pub use dialog_id::DialogId;
 pub use dialog_impl::Dialog;
 pub use dialog_state::DialogState;
 pub use transaction_coordination::TransactionCoordinator;
-pub use recovery::{RecoveryConfig, RecoveryMetrics}; 
+pub use recovery::{RecoveryConfig, RecoveryMetrics};
+
+/// Information about an incoming call that needs session coordination
+/// This is passed from DialogManager to SessionManager for proper layer separation
+#[derive(Debug, Clone)]
+pub struct IncomingCallInfo {
+    /// The transaction ID for this INVITE
+    pub transaction_id: TransactionKey,
+    
+    /// The original INVITE request
+    pub request: Request,
+    
+    /// Source address of the INVITE
+    pub source: SocketAddr,
+    
+    /// Session ID created for this call
+    pub session_id: crate::session::SessionId,
+} 

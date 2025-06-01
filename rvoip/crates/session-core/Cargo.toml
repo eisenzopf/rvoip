@@ -13,6 +13,7 @@ warnings = "allow"
 # Our own crates
 rvoip-sip-core = { path = "../sip-core" }
 rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-dialog-core = { path = "../dialog-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
 rvoip-media-core = { path = "../media-core" }

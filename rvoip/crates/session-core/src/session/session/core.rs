@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::time::SystemTime;
+use std::net::SocketAddr;
 use tracing::{debug, info, error, warn};
 use serde_json;
 
@@ -12,6 +13,7 @@ use rvoip_transaction_core::{
     TransactionKey,
     TransactionKind
 };
+use rvoip_sip_core::Request;
 
 use crate::dialog::{Dialog, DialogId};
 use crate::dialog::DialogState;
@@ -67,7 +69,7 @@ pub struct Session {
     config: SessionConfig,
     
     /// Transaction manager reference
-    transaction_manager: Arc<TransactionManager>,
+    transaction_manager: Option<Arc<TransactionManager>>,
     
     /// Active dialog (if any)
     dialog: Arc<Mutex<Option<Dialog>>>,
@@ -99,10 +101,12 @@ pub struct Session {
 
 impl Session {
     /// Create a new session with media support
+    /// 
+    /// **ARCHITECTURE**: Session doesn't handle transactions directly.
+    /// All SIP protocol work is delegated to dialog-core.
     pub fn new(
         direction: SessionDirection,
         config: SessionConfig,
-        transaction_manager: Arc<TransactionManager>,
         event_bus: EventBus
     ) -> Self {
         let id = SessionId::new();
@@ -112,7 +116,7 @@ impl Session {
             media_state: Arc::new(Mutex::new(SessionMediaState::None)),
             direction,
             config,
-            transaction_manager,
+            transaction_manager: None, // Session doesn't manage transactions
             dialog: Arc::new(Mutex::new(None)),
             transactions: Arc::new(Mutex::new(HashMap::new())),
             media_session_id: Arc::new(Mutex::new(None)),
@@ -125,9 +129,76 @@ impl Session {
         };
         
         // Publish session creation event
-        event_bus.publish(SessionEvent::Created { session_id: id });
+        let _ = event_bus.publish(SessionEvent::Created { session_id: id });
         
         session
+    }
+    
+    /// Create a new incoming session
+    /// 
+    /// **ARCHITECTURE**: Session doesn't handle transactions directly.
+    /// All SIP protocol work is handled by dialog-core.
+    pub async fn new_incoming(
+        session_id: SessionId,
+        request: Request,
+        source: SocketAddr,
+        config: SessionConfig,
+    ) -> Result<Self, Error> {
+        // Create a basic event bus for this session
+        let event_bus = crate::events::EventBus::new(100).await
+            .map_err(|e| Error::InternalError(
+                format!("Failed to create event bus: {}", e),
+                ErrorContext::default().with_message("Event bus creation failed")
+            ))?;
+        
+        let session = Self {
+            id: session_id.clone(),
+            state: Arc::new(Mutex::new(SessionState::Ringing)),
+            media_state: Arc::new(Mutex::new(SessionMediaState::None)),
+            direction: SessionDirection::Incoming,
+            config,
+            transaction_manager: None, // Session doesn't manage transactions
+            dialog: Arc::new(Mutex::new(None)),
+            transactions: Arc::new(Mutex::new(HashMap::new())),
+            media_session_id: Arc::new(Mutex::new(None)),
+            media_metrics: Arc::new(Mutex::new(None)),
+            rtp_stream_info: Arc::new(Mutex::new(None)),
+            transfer_context: Arc::new(Mutex::new(None)),
+            transfer_history: Arc::new(Mutex::new(Vec::new())),
+            consultation_session_id: Arc::new(Mutex::new(None)),
+            event_bus: event_bus.clone(),
+        };
+        
+        // Publish session creation event
+        let _ = event_bus.publish(SessionEvent::Created { session_id });
+        
+        Ok(session)
+    }
+    
+    /// Update remote SDP for the session
+    pub async fn update_remote_sdp(&self, sdp: String) -> Result<(), Error> {
+        debug!("Updating remote SDP for session {}", self.id);
+        
+        // Store SDP and update media state
+        self.set_media_state(SessionMediaState::Negotiating).await?;
+        
+        // TODO: Parse and apply SDP
+        info!("Remote SDP updated for session {}", self.id);
+        
+        Ok(())
+    }
+    
+    /// Update local SDP for the session
+    pub async fn update_local_sdp(&self, sdp: String) -> Result<(), Error> {
+        debug!("Updating local SDP for session {}", self.id);
+        
+        // Store SDP and update media state
+        self.set_media_state(SessionMediaState::Configured).await?;
+        
+        // TODO: Parse and apply SDP
+        info!("Local SDP updated for session {}", self.id);
+        
+        Ok(())
     }
     
     /// Get the current session state

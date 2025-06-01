@@ -499,6 +499,161 @@ pub fn create_test_request(method: Method) -> Request {
         .build()
 }
 
+/// Create an in-dialog request based on an existing dialog request
+///
+/// This is the **primary helper** that dialog-core should use instead of creating
+/// SIP requests directly. It ensures proper RFC 3261 compliance for in-dialog requests.
+///
+/// An in-dialog request:
+/// - Must be sent within an existing dialog (To tag must be present)
+/// - Should have a new CSeq number (higher than previous requests)
+/// - Should contain a Contact header
+/// - Uses the dialog's established route and contact information
+///
+/// # RFC References
+/// - RFC 3261 Section 12.2: Requests within a Dialog
+/// - RFC 3261 Section 12.2.1.1: Generating the Request
+///
+/// # Arguments
+/// * `dialog_request` - A previous in-dialog request to base the new request on
+/// * `new_method` - The SIP method for the new request (BYE, INFO, REFER, etc.)
+/// * `local_addr` - Local address to use in the Via header
+/// * `body` - Optional body content (e.g., SDP for re-INVITE)
+/// * `content_type` - Optional content type for the body
+///
+/// # Returns
+/// * `Result<Request>` - The new in-dialog request or an error
+///
+/// # Example
+/// ```
+/// # use std::net::SocketAddr;
+/// # use rvoip_sip_core::prelude::*;
+/// # use rvoip_transaction_core::utils::create_in_dialog_request;
+/// # 
+/// # // This would be a previous dialog request like an INVITE response
+/// # let dialog_request = create_dialog_request(); 
+/// # let local_addr = SocketAddr::from(([127, 0, 0, 1], 5060));
+/// 
+/// // Create a BYE request within the dialog
+/// let bye_request = create_in_dialog_request(
+///     &dialog_request,
+///     Method::Bye,
+///     &local_addr,
+///     None,
+///     None,
+/// )?;
+/// 
+/// // Create an INFO request with message content
+/// let info_body = Some("Application-specific info".to_string());
+/// let info_request = create_in_dialog_request(
+///     &dialog_request,
+///     Method::Info,
+///     &local_addr,
+///     info_body,
+///     Some("application/info"),
+/// )?;
+/// ```
+pub fn create_in_dialog_request(
+    dialog_request: &Request,
+    new_method: Method,
+    local_addr: &SocketAddr,
+    body: Option<String>,
+    content_type: Option<&str>,
+) -> Result<Request> {
+    // Validate that this request can be used as basis for an in-dialog request
+    if dialog_request.to().is_none() || dialog_request.from().is_none() || 
+       dialog_request.call_id().is_none() || dialog_request.cseq().is_none() {
+        return Err(Error::Other("Invalid dialog request - missing required headers".to_string()));
+    }
+    
+    // Check that this is an in-dialog request (To header must have a tag)
+    if dialog_request.to().unwrap().tag().is_none() {
+        return Err(Error::Other(format!(
+            "Cannot create {} - not an in-dialog request (To tag missing)", 
+            new_method
+        )));
+    }
+    
+    // Get dialog identifiers from the request
+    let call_id = dialog_request.call_id().unwrap().clone();
+    let to = dialog_request.to().unwrap().clone();
+    let from = dialog_request.from().unwrap().clone();
+    
+    // Get CSeq and increment it for the new request
+    let old_cseq = dialog_request.cseq().unwrap();
+    let new_cseq_num = old_cseq.sequence() + 1;
+    
+    // Use the same Request-URI as the dialog request (RFC 3261 Section 12.2.1.1)
+    let uri = dialog_request.uri().clone();
+    let mut request = Request::new(new_method.clone(), uri);
+    
+    // Add dialog headers (RFC 3261 Section 12.2.1.1)
+    request = request.with_header(TypedHeader::CallId(call_id));
+    request = request.with_header(TypedHeader::To(to));
+    request = request.with_header(TypedHeader::From(from));
+    request = request.with_header(TypedHeader::CSeq(CSeq::new(new_cseq_num, new_method.clone())));
+    
+    // Create a Via header with a new branch parameter (RFC 3261 Section 8.1.1.7)
+    let branch = generate_branch();
+    let host = local_addr.ip().to_string();
+    let port = Some(local_addr.port());
+    let params = vec![rvoip_sip_core::types::Param::branch(branch)];
+    let via = rvoip_sip_core::types::via::Via::new(
+        "SIP", "2.0", "UDP", &host, port, params
+    )?;
+    request = request.with_header(TypedHeader::Via(via));
+    
+    // Copy Route headers from dialog request (if present) - RFC 3261 Section 12.2.1.1
+    for header in dialog_request.headers.iter() {
+        if let TypedHeader::Route(route) = header {
+            request = request.with_header(TypedHeader::Route(route.clone()));
+        }
+    }
+    
+    // Create a Contact header - recommended for most in-dialog requests
+    let contact_uri = format!("sip:{}:{}", local_addr.ip(), local_addr.port());
+    let contact_addr = rvoip_sip_core::types::address::Address::new(
+        rvoip_sip_core::types::uri::Uri::sip(&contact_uri)
+    );
+    let contact_param = rvoip_sip_core::types::contact::ContactParamInfo { address: contact_addr };
+    let contact = rvoip_sip_core::types::contact::Contact::new_params(vec![contact_param]);
+    request = request.with_header(TypedHeader::Contact(contact));
+    
+    // Add Max-Forwards header (RFC 3261 Section 8.1.1.4)
+    request = request.with_header(TypedHeader::MaxForwards(rvoip_sip_core::types::max_forwards::MaxForwards::new(70)));
+    
+    // Add optional body content
+    if let Some(body_content) = body {
+        // Set Content-Type header if provided
+        if let Some(ct) = content_type {
+            let parts: Vec<&str> = ct.split('/').collect();
+            if parts.len() == 2 {
+                let content_type_header = ContentType::new(ContentTypeValue {
+                    m_type: parts[0].to_string(),
+                    m_subtype: parts[1].to_string(),
+                    parameters: std::collections::HashMap::new(),
+                });
+                request = request.with_header(TypedHeader::ContentType(content_type_header));
+            } else {
+                return Err(Error::Other(format!("Invalid content type format: {}", ct)));
+            }
+        }
+        
+        // Set Content-Length header first (before converting to bytes consumes the body_content string)
+        let content_length = rvoip_sip_core::types::content_length::ContentLength::new(body_content.len() as u32);
+        request = request.with_header(TypedHeader::ContentLength(content_length));
+        
+        // Then add the body
+        request = request.with_body(body_content.into_bytes());
+    } else {
+        // Set empty Content-Length
+        let content_length = rvoip_sip_core::types::content_length::ContentLength::new(0);
+        request = request.with_header(TypedHeader::ContentLength(content_length));
+    }
+    
+    Ok(request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

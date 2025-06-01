@@ -1,5 +1,6 @@
 use std::fmt;
 use thiserror::Error;
+use rvoip_dialog_core::DialogError;
 
 /// Error category for grouping and classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +675,24 @@ impl Error {
                 details: Some(details.to_string()),
                 ..Default::default()
             }
+        )
+    }
+}
+
+impl From<DialogError> for Error {
+    fn from(dialog_error: DialogError) -> Self {
+        Error::InternalError(
+            format!("Dialog error: {}", dialog_error),
+            ErrorContext::default().with_message("Dialog layer error")
+        )
+    }
+}
+
+impl From<rvoip_sip_core::Error> for Error {
+    fn from(sip_error: rvoip_sip_core::Error) -> Self {
+        Error::InternalError(
+            format!("SIP core error: {}", sip_error),
+            ErrorContext::default().with_message("SIP layer error")
         )
     }
 } 
