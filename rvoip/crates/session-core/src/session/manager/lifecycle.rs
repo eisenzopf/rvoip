@@ -6,6 +6,7 @@ use futures::stream::{StreamExt, FuturesUnordered};
 use serde_json;
 
 use rvoip_sip_core::Request;
+use rvoip_dialog_core::api::DialogApi;
 
 use crate::dialog::{DialogState, DialogId};
 use crate::events::SessionEvent;
@@ -425,7 +426,7 @@ impl SessionManager {
             let dialog_id = entry.key();
             let session_id = entry.value();
             
-            if let Ok(dialog) = self.dialog_manager.get_dialog(dialog_id) {
+            if let Ok(dialog) = self.dialog_manager.get_dialog_info(dialog_id).await {
                 if dialog.call_id == call_id &&
                    dialog.local_tag.as_deref() == Some(from_tag) &&
                    dialog.remote_tag.as_deref() == Some(to_tag) {

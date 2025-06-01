@@ -12,7 +12,7 @@ use crate::api::server::config::ServerConfig;
 use crate::api::client::config::ClientConfig;
 use crate::api::server::manager::ServerManager;
 use crate::session::manager::SessionManager;
-use rvoip_dialog_core::DialogManager;
+use rvoip_dialog_core::api::DialogServer;
 use crate::media::MediaManager;
 
 /// High-level SIP server manager
@@ -180,7 +180,7 @@ impl SipClient {
 /// instead of creating infrastructure directly
 pub async fn create_sip_server_with_managers(
     config: ServerConfig,
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     media_manager: Arc<MediaManager>,
 ) -> Result<SipServer> {
     info!("Creating SIP server with dependency injection - proper architecture!");
@@ -228,7 +228,7 @@ pub async fn create_sip_server_with_managers(
 /// instead of creating infrastructure directly
 pub async fn create_sip_client_with_managers(
     config: ClientConfig,
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     media_manager: Arc<MediaManager>,
 ) -> Result<SipClient> {
     info!("Creating SIP client with dependency injection - proper architecture!");
@@ -292,7 +292,7 @@ mod tests {
         assert!(result.is_err(), "Deprecated function should fail");
         
         // New way requires proper dependencies (test would need real managers)
-        // let dialog_manager = Arc::new(DialogManager::new(...));
+        // let dialog_manager = Arc::new(DialogServer::new(...));
         // let media_manager = Arc::new(MediaManager::new().await.unwrap());
         // let result = create_sip_server_with_managers(config, dialog_manager, media_manager).await;
         // This would work with real dependencies

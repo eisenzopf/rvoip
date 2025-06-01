@@ -6,7 +6,8 @@
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use rvoip_sip_core::{Method, StatusCode};
+use rvoip_sip_core::{Method, StatusCode, Response};
+use rvoip_transaction_core::TransactionKey;
 use crate::manager::DialogManager;
 use crate::dialog::{DialogId, Dialog, DialogState};
 use super::{ApiResult, ApiError};
@@ -65,6 +66,84 @@ impl DialogHandle {
         Ok(transaction_key.to_string())
     }
     
+    /// **NEW**: Send a request within this dialog (returns TransactionKey)
+    /// 
+    /// Enhanced version that returns the actual TransactionKey for advanced usage.
+    /// 
+    /// # Arguments
+    /// * `method` - SIP method to send
+    /// * `body` - Optional message body
+    /// 
+    /// # Returns
+    /// Transaction key for tracking the request
+    pub async fn send_request_with_key(&self, method: Method, body: Option<bytes::Bytes>) -> ApiResult<TransactionKey> {
+        debug!("Sending {} request in dialog {}", method, self.dialog_id);
+        
+        self.dialog_manager.send_request(&self.dialog_id, method, body).await
+            .map_err(ApiError::from)
+    }
+    
+    /// **NEW**: Send a SIP response for a transaction
+    /// 
+    /// Allows sending responses directly through the dialog handle.
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `response` - Complete SIP response
+    /// 
+    /// # Returns
+    /// Success or error
+    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> ApiResult<()> {
+        debug!("Sending response for transaction {} in dialog {}", transaction_id, self.dialog_id);
+        
+        self.dialog_manager.send_response(transaction_id, response).await
+            .map_err(ApiError::from)
+    }
+    
+    /// **NEW**: Send specific SIP methods with convenience
+    
+    /// Send a BYE request to terminate the dialog
+    pub async fn send_bye(&self) -> ApiResult<TransactionKey> {
+        info!("Sending BYE for dialog {}", self.dialog_id);
+        self.send_request_with_key(Method::Bye, None).await
+    }
+    
+    /// Send a REFER request for call transfer
+    pub async fn send_refer(&self, target_uri: String, refer_body: Option<String>) -> ApiResult<TransactionKey> {
+        info!("Sending REFER for dialog {} to {}", self.dialog_id, target_uri);
+        
+        let body = if let Some(custom_body) = refer_body {
+            custom_body
+        } else {
+            format!("Refer-To: {}\r\n", target_uri)
+        };
+        
+        self.send_request_with_key(Method::Refer, Some(bytes::Bytes::from(body))).await
+    }
+    
+    /// Send a NOTIFY request for event notifications
+    pub async fn send_notify(&self, event: String, body: Option<String>) -> ApiResult<TransactionKey> {
+        info!("Sending NOTIFY for dialog {} event {}", self.dialog_id, event);
+        
+        let notify_body = body.map(|b| bytes::Bytes::from(b));
+        self.send_request_with_key(Method::Notify, notify_body).await
+    }
+    
+    /// Send an UPDATE request for media modifications
+    pub async fn send_update(&self, sdp: Option<String>) -> ApiResult<TransactionKey> {
+        info!("Sending UPDATE for dialog {}", self.dialog_id);
+        
+        let update_body = sdp.map(|s| bytes::Bytes::from(s));
+        self.send_request_with_key(Method::Update, update_body).await
+    }
+    
+    /// Send an INFO request for application-specific information
+    pub async fn send_info(&self, info_body: String) -> ApiResult<TransactionKey> {
+        info!("Sending INFO for dialog {}", self.dialog_id);
+        
+        self.send_request_with_key(Method::Info, Some(bytes::Bytes::from(info_body))).await
+    }
+    
     /// Send BYE to terminate the dialog
     pub async fn terminate(&self) -> ApiResult<()> {
         info!("Terminating dialog {}", self.dialog_id);
@@ -77,6 +156,17 @@ impl DialogHandle {
             .map_err(ApiError::from)?;
         
         Ok(())
+    }
+    
+    /// **NEW**: Terminate dialog directly without sending BYE
+    /// 
+    /// For cases where you want to clean up the dialog state without
+    /// sending a BYE request (e.g., after receiving a BYE).
+    pub async fn terminate_immediately(&self) -> ApiResult<()> {
+        info!("Terminating dialog {} immediately", self.dialog_id);
+        
+        self.dialog_manager.terminate_dialog(&self.dialog_id).await
+            .map_err(ApiError::from)
     }
     
     /// Check if the dialog is still active
@@ -207,13 +297,89 @@ impl CallHandle {
     pub async fn transfer(&self, transfer_target: String) -> ApiResult<()> {
         info!("Transferring call {} to {}", self.call_id(), transfer_target);
         
-        // Build REFER body
-        let refer_body = format!("Refer-To: {}", transfer_target);
-        
-        // Send REFER request
-        self.dialog_handle.send_request(Method::Refer, Some(refer_body)).await?;
+        // Use the enhanced dialog handle method
+        self.dialog_handle.send_refer(transfer_target, None).await?;
         
         Ok(())
+    }
+    
+    /// **NEW**: Advanced transfer with custom REFER body
+    /// 
+    /// Allows sending custom REFER bodies for advanced transfer scenarios.
+    /// 
+    /// # Arguments
+    /// * `transfer_target` - URI to transfer the call to
+    /// * `refer_body` - Custom REFER body with additional headers
+    /// 
+    /// # Returns
+    /// Transaction key for the REFER request
+    pub async fn transfer_with_body(&self, transfer_target: String, refer_body: String) -> ApiResult<TransactionKey> {
+        info!("Transferring call {} to {} with custom body", self.call_id(), transfer_target);
+        
+        self.dialog_handle.send_refer(transfer_target, Some(refer_body)).await
+    }
+    
+    /// **NEW**: Send call-related notifications
+    /// 
+    /// Send NOTIFY requests for call-related events.
+    /// 
+    /// # Arguments
+    /// * `event` - Event type being notified
+    /// * `body` - Optional notification body
+    /// 
+    /// # Returns
+    /// Transaction key for the NOTIFY request
+    pub async fn notify(&self, event: String, body: Option<String>) -> ApiResult<TransactionKey> {
+        info!("Sending call notification for {} event {}", self.call_id(), event);
+        
+        self.dialog_handle.send_notify(event, body).await
+    }
+    
+    /// **NEW**: Update call media parameters
+    /// 
+    /// Send UPDATE request to modify media parameters without re-INVITE.
+    /// 
+    /// # Arguments
+    /// * `sdp` - Optional SDP body with new media parameters
+    /// 
+    /// # Returns
+    /// Transaction key for the UPDATE request
+    pub async fn update_media(&self, sdp: Option<String>) -> ApiResult<TransactionKey> {
+        info!("Updating media for call {}", self.call_id());
+        
+        self.dialog_handle.send_update(sdp).await
+    }
+    
+    /// **NEW**: Send call information
+    /// 
+    /// Send INFO request with call-related information.
+    /// 
+    /// # Arguments
+    /// * `info_body` - Information to send
+    /// 
+    /// # Returns
+    /// Transaction key for the INFO request
+    pub async fn send_info(&self, info_body: String) -> ApiResult<TransactionKey> {
+        info!("Sending call info for {}", self.call_id());
+        
+        self.dialog_handle.send_info(info_body).await
+    }
+    
+    /// **NEW**: Direct dialog operations for advanced use cases
+    
+    /// Get dialog state
+    pub async fn dialog_state(&self) -> ApiResult<DialogState> {
+        self.dialog_handle.state().await
+    }
+    
+    /// Send custom request in dialog
+    pub async fn send_request(&self, method: Method, body: Option<String>) -> ApiResult<TransactionKey> {
+        self.dialog_handle.send_request_with_key(method, body.map(|s| bytes::Bytes::from(s))).await
+    }
+    
+    /// Send response for transaction
+    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> ApiResult<()> {
+        self.dialog_handle.send_response(transaction_id, response).await
     }
     
     /// Check if the call is still active

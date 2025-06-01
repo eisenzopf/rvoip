@@ -86,8 +86,12 @@ impl SessionManager {
         info!("Sending REFER request for transfer {}: {} -> {}", transfer_id, session_id, target_uri);
         debug!("REFER body: {}", full_body);
         
-        // **ARCHITECTURE FIX**: Use dialog-core to send the REFER request
-        match self.dialog_manager.send_request(&dialog_id, Method::Refer, Some(full_body.into())).await {
+        // **ARCHITECTURE COMPLIANCE**: Use dialog-core to send REFER
+        // This replaces manual SimpleRequestBuilder usage with proper delegation
+        let full_body_bytes = bytes::Bytes::from(full_body);
+        
+        // Send REFER request via dialog-core delegation
+        match self.dialog_manager.send_request_in_dialog(&dialog_id, Method::Refer, Some(full_body_bytes)).await {
             Ok(_transaction_id) => {
                 info!("REFER request sent successfully for transfer {}", transfer_id);
             },
@@ -404,7 +408,7 @@ impl SessionManager {
         let notify_body = bytes::Bytes::from(sipfrag_body);
         
         // Send NOTIFY request via dialog-core delegation
-        match self.dialog_manager.send_request(&dialog_id, Method::Notify, Some(notify_body)).await {
+        match self.dialog_manager.send_request_in_dialog(&dialog_id, Method::Notify, Some(notify_body)).await {
             Ok(transaction_id) => {
                 info!("Created NOTIFY transaction: {}", transaction_id);
                 info!("NOTIFY request sent successfully for transfer {}", transfer_id);

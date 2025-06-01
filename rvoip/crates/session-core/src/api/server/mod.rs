@@ -15,24 +15,25 @@ pub use manager::ServerManager;
 use crate::{
     session::{SessionManager, SessionConfig, SessionDirection},
     events::{EventBus, SessionEvent},
-    Error, SessionId, Session
+    media::{MediaManager, MediaConfig},
+    Error, SessionId, Session,
+    
+    // **NEW**: Import bridge types for multi-session bridging
+    session::bridge::{
+        SessionBridge, BridgeId, BridgeState, BridgeInfo, BridgeConfig,
+        BridgeEvent, BridgeEventType, BridgeStats, BridgeError
+    },
 };
+use rvoip_dialog_core::api::DialogServer;
 use std::sync::Arc;
 use std::collections::HashMap;
-use rvoip_sip_core::{Request, Response, Uri, StatusCode};
 use tokio::sync::{RwLock, mpsc};
+use rvoip_sip_core::{Request, Response, StatusCode, Uri};
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use anyhow::{Result, Context};
 use tracing::warn;
-use rvoip_dialog_core::DialogManager;
 
-// **NEW**: Import bridge types for call-engine API
-use crate::session::bridge::{
-    BridgeId, BridgeConfig, BridgeInfo, BridgeEvent, BridgeStats, BridgeError
-};
-
-use crate::media::MediaManager;
 use crate::session::SessionState;
 
 /// Legacy server configuration for backward compatibility
@@ -139,10 +140,10 @@ pub struct ServerSessionManager {
 impl ServerSessionManager {
     /// Create a new server session manager
     /// 
-    /// **ARCHITECTURE**: Server receives DialogManager via dependency injection
+    /// **ARCHITECTURE**: Server receives DialogServer via dependency injection
     /// and coordinates with dialog-core for SIP protocol handling.
     pub async fn new(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: ServerConfig
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let event_bus = EventBus::new(1000).await?;
@@ -170,10 +171,10 @@ impl ServerSessionManager {
     
     /// Create a new server session manager (synchronous)
     /// 
-    /// **ARCHITECTURE**: Server receives DialogManager via dependency injection
+    /// **ARCHITECTURE**: Server receives DialogServer via dependency injection
     /// and coordinates with dialog-core for SIP protocol handling.
     pub fn new_sync(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: ServerConfig
     ) -> Self {
         let event_bus = EventBus::new_simple(1000);
@@ -410,7 +411,7 @@ pub struct ServerStats {
 
 /// Create a session manager configured for server use
 pub async fn create_server_session_manager(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ServerConfig
 ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
     let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
@@ -419,7 +420,7 @@ pub async fn create_server_session_manager(
 
 /// Create a session manager configured for server use (synchronous)
 pub fn create_server_session_manager_sync(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ServerConfig
 ) -> Arc<SessionManager> {
     let server_manager = ServerSessionManager::new_sync(dialog_manager, config);
@@ -428,7 +429,7 @@ pub fn create_server_session_manager_sync(
 
 /// Create a full-featured server session manager
 pub async fn create_full_server_manager(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ServerConfig
 ) -> Result<Arc<ServerSessionManager>, Box<dyn std::error::Error>> {
     let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
@@ -437,7 +438,7 @@ pub async fn create_full_server_manager(
 
 /// Create a full-featured server session manager (synchronous)
 pub fn create_full_server_manager_sync(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ServerConfig
 ) -> Arc<ServerSessionManager> {
     let server_manager = ServerSessionManager::new_sync(dialog_manager, config);

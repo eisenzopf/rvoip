@@ -59,7 +59,7 @@ pub enum ApiError {
 impl From<DialogError> for ApiError {
     fn from(error: DialogError) -> Self {
         match error {
-            DialogError::InternalError { message } => ApiError::Internal { message },
+            DialogError::InternalError { message, .. } => ApiError::Internal { message },
             DialogError::NetworkError { message, .. } => ApiError::Network { message },
             DialogError::ProtocolError { message, .. } => ApiError::Protocol { message },
             DialogError::DialogNotFound { id, .. } => ApiError::Dialog { message: format!("Dialog not found: {}", id) },

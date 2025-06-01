@@ -12,8 +12,9 @@ use crate::{
     session::{SessionManager, SessionConfig, SessionDirection},
     events::{EventBus, SessionEvent},
     media::{MediaManager, MediaConfig},
-    Error, SessionId, Session, DialogManager
+    Error, SessionId, Session
 };
+use rvoip_dialog_core::api::DialogServer;
 use std::sync::Arc;
 use rvoip_sip_core::Uri;
 
@@ -86,7 +87,7 @@ pub struct ClientSessionManager {
 impl ClientSessionManager {
     /// Create a new client session manager
     pub async fn new(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: ClientConfig
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let event_bus = EventBus::new(100).await?;
@@ -116,7 +117,7 @@ impl ClientSessionManager {
     
     /// Create a new client session manager (synchronous)
     pub fn new_sync(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: ClientConfig
     ) -> Self {
         let event_bus = EventBus::new_simple(100);
@@ -325,7 +326,7 @@ impl ClientSessionManager {
 
 /// Create a session manager configured for client use
 pub async fn create_client_session_manager(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ClientConfig
 ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
     let client_manager = ClientSessionManager::new(dialog_manager, config).await?;
@@ -334,7 +335,7 @@ pub async fn create_client_session_manager(
 
 /// Create a session manager configured for client use (synchronous)
 pub fn create_client_session_manager_sync(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ClientConfig
 ) -> Arc<SessionManager> {
     let client_manager = ClientSessionManager::new_sync(dialog_manager, config);
@@ -343,7 +344,7 @@ pub fn create_client_session_manager_sync(
 
 /// Create a full-featured client session manager
 pub async fn create_full_client_manager(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ClientConfig
 ) -> Result<Arc<ClientSessionManager>, Box<dyn std::error::Error>> {
     let client_manager = ClientSessionManager::new(dialog_manager, config).await?;
@@ -352,7 +353,7 @@ pub async fn create_full_client_manager(
 
 /// Create a full-featured client session manager (synchronous)
 pub fn create_full_client_manager_sync(
-    dialog_manager: Arc<DialogManager>,
+    dialog_manager: Arc<DialogServer>,
     config: ClientConfig
 ) -> Arc<ClientSessionManager> {
     let client_manager = ClientSessionManager::new_sync(dialog_manager, config);

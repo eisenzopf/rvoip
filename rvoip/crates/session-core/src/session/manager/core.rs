@@ -10,7 +10,7 @@ use anyhow::{Result, Context};
 use tokio::sync::RwLock;
 
 // ARCHITECTURE: session-core ONLY delegates to dialog-core API, NO direct manager access
-use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogConfig, CallHandle, DialogHandle};
+use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogConfig, CallHandle, DialogHandle, DialogApi};
 use rvoip_dialog_core::{DialogId, SessionCoordinationEvent};
 use rvoip_sip_core::{Request, Response, StatusCode, Method};
 use rvoip_sip_core::json::ext::SipMessageJson;
@@ -532,7 +532,7 @@ impl SessionManager {
         // Get dialog ID and send BYE through dialog-core
         if let Some(dialog_id) = self.default_dialogs.get(session_id) {
             let dialog_id = dialog_id.clone();
-            if let Err(e) = self.dialog_manager.send_request(&dialog_id, rvoip_sip_core::Method::Bye, None).await {
+            if let Err(e) = self.dialog_manager.send_request_in_dialog(&dialog_id, rvoip_sip_core::Method::Bye, None).await {
                 warn!("Failed to send BYE for session {}: {}", session_id, e);
             } else {
                 info!("✅ BYE sent for session {} via dialog-core", session_id);
@@ -622,7 +622,7 @@ impl SessionManager {
         // **ARCHITECTURE COMPLIANCE**: Use dialog-core to send INVITE with SDP body
         // This replaces manual RequestBuilder usage with proper delegation
         let sdp_body = bytes::Bytes::from(sdp_offer_body);
-        let _transaction_id = self.dialog_manager.send_request(
+        let _transaction_id = self.dialog_manager.send_request_in_dialog(
             &dialog_id, 
             Method::Invite, 
             Some(sdp_body)
