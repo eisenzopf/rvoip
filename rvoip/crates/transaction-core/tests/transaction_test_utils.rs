@@ -216,6 +216,8 @@ impl TestEnvironment {
         let timer_settings = TimerSettings {
             t1: Duration::from_millis(100),        // Slightly longer T1 (normally 500ms)
             t2: Duration::from_millis(400),        // Longer T2 (normally 4s)
+            t4: Duration::from_secs(5),            // Default T4 value
+            timer_100_interval: Duration::from_millis(200), // Default Timer 100 interval
             transaction_timeout: Duration::from_millis(20000), // Much longer timeout (20 seconds)
             wait_time_j: Duration::from_millis(120),  // Longer Timer J
             wait_time_k: Duration::from_millis(120),  // Longer Timer K

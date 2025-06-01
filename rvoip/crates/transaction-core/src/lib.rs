@@ -958,6 +958,8 @@ mod tests {
         let custom_settings = TimerSettings {
             t1: Duration::from_millis(200),
             t2: Duration::from_secs(2),
+            t4: Duration::from_secs(5),
+            timer_100_interval: Duration::from_millis(200),
             transaction_timeout: Duration::from_secs(16),
             wait_time_d: Duration::from_secs(16),
             wait_time_h: Duration::from_secs(16),
