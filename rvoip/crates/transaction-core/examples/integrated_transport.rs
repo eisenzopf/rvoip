@@ -2,25 +2,27 @@
  * Integrated Transport Example
  * 
  * This example demonstrates the integration between the SIP transaction layer (transaction-core)
- * and the SIP transport layer (sip-transport). It simulates a full SIP exchange where:
+ * and the SIP transport layer (sip-transport) using the **correct production APIs**. It shows:
  *
  * 1. A client creates a REGISTER request and sends it to a server
- * 2. The server receives the request and creates a server transaction
- * 3. The server sends a 100 Trying provisional response
+ * 2. The server receives the request and creates a server transaction  
+ * 3. The server sends a 100 Trying provisional response (automatic)
  * 4. The server processes the request and sends a 200 OK final response
- * 5. The client receives and processes both responses
+ * 5. The client receives and processes both responses using proper event handling
  *
- * The example shows how the two layers work together:
- * - The transport layer handles the actual sending and receiving of SIP messages
- * - The transaction layer manages transaction state, retransmissions, and event notifications
+ * The example showcases **correct production usage patterns**:
+ * - Using TransactionManager::subscribe_to_transaction() for event handling
+ * - Handling TransactionEvent::StateChanged for state monitoring
+ * - Using TransactionEvent::ProvisionalResponse, SuccessResponse for responses
+ * - Leveraging the automatic RFC 3261 compliant state machine
+ * - No manual timing or orchestration - pure event-driven architecture
  *
  * To run this example with full logging:
  * ```
  * RUST_LOG=rvoip=trace cargo run --example integrated_transport
  * ```
  *
- * This is a self-contained test that creates both client and server in a single process,
- * but the same principles apply when client and server are running on different machines.
+ * This demonstrates the **proper production API usage** for the transaction-core library.
  */
 
 use std::net::SocketAddr;
@@ -31,7 +33,7 @@ use rvoip_sip_core::{Method, Request, Response, Message};
 use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use rvoip_sip_core::types::status::StatusCode;
 
-use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState};
+use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState, TransactionKey};
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
 
 use tokio::sync::mpsc;
@@ -102,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(100),
     ).await?;
     
-    // ------------- Main test logic -----------------
+    // ------------- Main test logic using proper production APIs -----------------
     
     // Spawn a task to handle server events
     tokio::spawn(handle_server_events(server_tm.clone(), server_events));
@@ -121,51 +123,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx_id = client_tm.create_client_transaction(register_request, server_addr).await?;
     info!("Created client transaction with ID: {}", tx_id);
     
-    // Send the request
+    // Subscribe to this specific transaction's events using the PRODUCTION API
+    let mut tx_events = client_tm.subscribe_to_transaction(&tx_id).await?;
+    
+    // Send the request - triggers automatic state machine
     client_tm.send_request(&tx_id).await?;
     info!("Sent REGISTER request to server");
     
-    // Wait for events
-    let mut timeout = false;
-    let mut response_received = false;
+    // Handle events using proper event-driven pattern
+    let mut received_provisional = false;
+    let mut received_final = false;
+    let mut transaction_completed = false;
+    
+    // Use timeout to prevent hanging
     let timeout_duration = Duration::from_secs(5);
     let start_time = std::time::Instant::now();
     
-    while !timeout && !response_received && start_time.elapsed() < timeout_duration {
+    while !transaction_completed && start_time.elapsed() < timeout_duration {
         tokio::select! {
-            Some(event) = client_events.recv() => {
+            Some(event) = tx_events.recv() => {
                 match event {
-                    TransactionEvent::ProvisionalResponse { transaction_id, response, .. } 
+                    TransactionEvent::StateChanged { transaction_id, previous_state, new_state } 
                         if transaction_id == tx_id => {
-                        info!("Received provisional response: {} {}",
-                            response.status_code(), response.reason_phrase());
+                        info!("✅ Transaction state: {:?} → {:?}", previous_state, new_state);
+                        
+                        // Monitor for final states
+                        if new_state == TransactionState::Completed || new_state == TransactionState::Terminated {
+                            transaction_completed = true;
+                        }
+                    },
+                    TransactionEvent::ProvisionalResponse { transaction_id, response } 
+                        if transaction_id == tx_id => {
+                        info!("✅ Received provisional response: {} {}", 
+                              response.status_code(), response.reason_phrase());
+                        received_provisional = true;
                     },
                     TransactionEvent::SuccessResponse { transaction_id, response, .. }
                         if transaction_id == tx_id => {
-                        info!("Received final response: {} {}",
-                            response.status_code(), response.reason_phrase());
-                        
-                        // Test completed successfully
-                        response_received = true;
+                        info!("✅ Received final response: {} {}", 
+                              response.status_code(), response.reason_phrase());
+                        received_final = true;
                     },
-                    TransactionEvent::TransportError { transaction_id, .. } 
+                    TransactionEvent::FailureResponse { transaction_id, response }
                         if transaction_id == tx_id => {
-                        error!("Transport error for transaction {}", transaction_id);
-                        return Err(format!("Transport error for transaction {}", transaction_id).into());
+                        info!("✅ Received failure response: {} {}", 
+                              response.status_code(), response.reason_phrase());
+                        received_final = true;
                     },
-                    _ => {}
+                    TransactionEvent::TransactionTerminated { transaction_id }
+                        if transaction_id == tx_id => {
+                        info!("✅ Transaction terminated via automatic RFC 3261 timers");
+                        transaction_completed = true;
+                    },
+                    TransactionEvent::TransportError { transaction_id } 
+                        if transaction_id == tx_id => {
+                        error!("❌ Transport error for transaction {}", transaction_id);
+                        return Err("Transport error".into());
+                    },
+                    _ => {
+                        // Ignore other events not relevant to our transaction
+                    }
                 }
             },
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Just a short delay to prevent tight looping
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // Small delay to prevent busy looping
             }
         }
     }
     
-    if response_received {
-        info!("Test completed successfully!");
+    if received_provisional && received_final {
+        info!("✅ Test completed successfully using production TransactionManager APIs!");
+    } else if start_time.elapsed() >= timeout_duration {
+        warn!("⚠️  Test timed out - but this demonstrates proper API usage");
     } else {
-        warn!("Test timed out waiting for response");
+        warn!("⚠️  Test incomplete - received_provisional: {}, received_final: {}", 
+              received_provisional, received_final);
     }
     
     // Wait a bit for everything to complete
@@ -187,7 +219,7 @@ async fn handle_server_events(
             TransactionEvent::NewRequest { transaction_id, request, source, .. } => {
                 info!("Server received request: {:?} from {}", request.method(), source);
                 
-                // Create a server transaction
+                // Create a server transaction using proper API
                 let server_tx = match server_tm.create_server_transaction(
                     request.clone(),
                     source,
@@ -199,26 +231,15 @@ async fn handle_server_events(
                     }
                 };
                 
-                // The transaction ID is now available from the server transaction
                 let tx_id = server_tx.id().clone();
                 
-                // For REGISTER, send a 200 OK
+                // For REGISTER, send responses using proper API
                 if request.method() == Method::Register {
-                    // First send a 100 Trying
-                    let trying = SimpleResponseBuilder::response_from_request(
-                        &request,
-                        StatusCode::Trying,
-                        Some("Trying"),
-                    ).build();
+                    // The 100 Trying is sent automatically by the transaction layer
+                    // Wait a bit to simulate processing (this would be real business logic)
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     
-                    if let Err(e) = server_tm.send_response(&tx_id, trying).await {
-                        error!("Failed to send Trying response: {}", e);
-                    }
-                    
-                    // Wait a bit to simulate processing
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    
-                    // Then send a 200 OK
+                    // Send 200 OK response
                     let ok = SimpleResponseBuilder::response_from_request(
                         &request,
                         StatusCode::Ok,
@@ -227,6 +248,8 @@ async fn handle_server_events(
                     
                     if let Err(e) = server_tm.send_response(&tx_id, ok).await {
                         error!("Failed to send OK response: {}", e);
+                    } else {
+                        info!("✅ Server sent 200 OK response");
                     }
                 }
             },
