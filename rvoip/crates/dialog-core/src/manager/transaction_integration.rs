@@ -67,32 +67,30 @@ impl TransactionIntegration for DialogManager {
         let request = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
             
-            // First create a basic template request using the current dialog method
-            // This gives us the dialog-specific headers (Call-ID, From, To, CSeq)
-            let template_request = dialog.create_request(method.clone());
+            // Create a dialog template with all required information
+            let template = dialog.create_request_template(method.clone());
             
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
             
             // Determine content type for common methods
             let content_type = if method == Method::Invite && body_string.is_some() {
-                Some("application/sdp")
-            } else if body_string.is_some() {
-                Some("text/plain") // Default for other methods with body
+                Some("application/sdp".to_string())
+            } else if method == Method::Info && body_string.is_some() {
+                Some("application/info".to_string())
+            } else if method == Method::Message && body_string.is_some() {
+                Some("text/plain".to_string())
             } else {
                 None
             };
             
             // Use transaction-core helper to create a proper RFC 3261 compliant request
-            rvoip_transaction_core::utils::create_in_dialog_request(
-                &template_request,
-                method.clone(),
-                &self.local_address, // Use configured local address from DialogManager
-                body_string,
-                content_type,
-            ).map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create {} request using transaction-core helper: {}", method, e),
-            })?
+            rvoip_transaction_core::utils::create_request_from_dialog_template(
+                &template, 
+                self.local_address, 
+                body_string, 
+                content_type
+            )
         };
         
         // Use transaction-core helpers to create appropriate transaction

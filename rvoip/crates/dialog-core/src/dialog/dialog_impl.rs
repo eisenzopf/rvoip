@@ -16,6 +16,7 @@ use rvoip_sip_core::{
 use rvoip_sip_core::types::address::Address;
 use rvoip_sip_core::types::from::From as FromHeader;
 use rvoip_sip_core::types::to::To as ToHeader;
+use rvoip_transaction_core::utils::DialogRequestTemplate;
 
 use super::dialog_state::DialogState;
 use super::dialog_id::DialogId;
@@ -365,7 +366,38 @@ impl Dialog {
     }
     
     /// Create a new request within this dialog
+    /// 
+    /// **ARCHITECTURAL NOTE**: This method now creates a basic dialog-aware request template
+    /// that should be further processed by transaction-core helpers for proper RFC 3261 compliance.
+    /// The DialogManager's transaction integration layer handles the complete request creation.
+    pub fn create_request_template(&mut self, method: Method) -> DialogRequestTemplate {
+        // Increment local sequence number for new request (except ACK)
+        if method != Method::Ack {
+            self.local_seq += 1;
+        }
+        
+        DialogRequestTemplate {
+            method: method.clone(),
+            target_uri: self.remote_target.clone(),
+            call_id: self.call_id.clone(),
+            local_uri: self.local_uri.clone(),
+            remote_uri: self.remote_uri.clone(),
+            local_tag: self.local_tag.clone(),
+            remote_tag: self.remote_tag.clone(),
+            cseq_number: self.local_seq,
+            route_set: self.route_set.clone(),
+        }
+    }
+    
+    /// **DEPRECATED**: Use DialogManager::send_request_in_dialog instead
+    /// 
+    /// This method violates architectural separation by creating SIP messages directly.
+    /// It's kept for backward compatibility but should not be used in new code.
+    #[deprecated(since = "0.1.0", note = "Use DialogManager::send_request_in_dialog for proper transaction-core integration")]
     pub fn create_request(&mut self, method: Method) -> Request {
+        // This is the old implementation that violates architecture
+        // Keep for backward compatibility but discourage use
+        
         // Increment local sequence number for new request (except ACK)
         if method != Method::Ack {
             self.local_seq += 1;
