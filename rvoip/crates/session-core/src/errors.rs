@@ -425,10 +425,10 @@ pub enum Error {
     // External dependency errors
     //
     
-    /// Transaction layer error
-    #[error("Transaction layer error: {0}")]
-    TransactionError(
-        rvoip_transaction_core::Error, 
+    /// Dialog layer error (for dialog-core integration)
+    #[error("Dialog layer error: {0}")]
+    DialogError(
+        String, 
         ErrorContext
     ),
 
@@ -452,6 +452,10 @@ pub enum Error {
         rvoip_media_core::Error, 
         ErrorContext
     ),
+
+    /// Network error (replaces transport error for architectural compliance)
+    #[error("Network error: {0}")]
+    NetworkError(String, ErrorContext),
 
     /// I/O error
     #[error("I/O error: {0}")]
@@ -486,10 +490,6 @@ pub enum Error {
         /// Error context
         context: ErrorContext,
     },
-
-    /// Transport error
-    #[error("Transport error: {0}")]
-    TransportError(rvoip_sip_transport::error::Error, ErrorContext),
 
     /// Feature not supported
     #[error("Feature not supported: {feature}")]
@@ -553,7 +553,7 @@ impl Error {
             Error::ResourceAllocationFailed(_, ctx) => ctx,
             Error::ResourceLimitExceeded(_, ctx) => ctx,
             Error::MemoryAllocationFailed(_, ctx) => ctx,
-            Error::TransactionError(_, ctx) => ctx,
+            Error::DialogError(_, ctx) => ctx,
             Error::SipError(_, ctx) => ctx,
             Error::RtpError(_, ctx) => ctx,
             Error::MediaError(_, ctx) => ctx,
@@ -563,7 +563,7 @@ impl Error {
             Error::UnexpectedError(_, _, ctx) => ctx,
             Error::SerializationError(_, ctx) => ctx,
             Error::InvalidMediaState { context, .. } => context,
-            Error::TransportError(error, ctx) => ctx,
+            Error::NetworkError(_, ctx) => ctx,
             Error::Unsupported { feature, context, .. } => context,
             Error::MissingDialogData { context, .. } => context,
         }
@@ -662,17 +662,15 @@ impl Error {
         )
     }
 
-    /// Create a transport error with context
-    pub fn transport_error(error: rvoip_sip_transport::error::Error, details: &str) -> Self {
-        Self::TransportError(
-            error,
+    /// Create a network error with context
+    pub fn network_error(details: &str) -> Self {
+        Error::NetworkError(
+            details.to_string(),
             ErrorContext {
                 category: ErrorCategory::Network,
                 severity: ErrorSeverity::Error,
                 recovery: RecoveryAction::Retry,
                 retryable: true,
-                timestamp: std::time::SystemTime::now(),
-                details: Some(details.to_string()),
                 ..Default::default()
             }
         )

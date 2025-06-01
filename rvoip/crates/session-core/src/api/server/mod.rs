@@ -19,18 +19,21 @@ use crate::{
 };
 use std::sync::Arc;
 use std::collections::HashMap;
-use rvoip_transaction_core::TransactionManager;
 use rvoip_sip_core::{Request, Response, Uri, StatusCode};
 use tokio::sync::{RwLock, mpsc};
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use anyhow::{Result, Context};
 use tracing::warn;
+use rvoip_dialog_core::DialogManager;
 
 // **NEW**: Import bridge types for call-engine API
 use crate::session::bridge::{
     BridgeId, BridgeConfig, BridgeInfo, BridgeEvent, BridgeStats, BridgeError
 };
+
+use crate::media::MediaManager;
+use crate::session::SessionState;
 
 /// Legacy server configuration for backward compatibility
 #[derive(Debug, Clone)]
@@ -482,6 +485,9 @@ pub struct CallerInfo {
 impl CallerInfo {
     /// Extract caller information from a SIP request
     pub fn from_request(request: &Request, source: SocketAddr) -> Self {
+        // **CLEAN API**: Delegate SIP parsing to underlying layers
+        // API layer should provide clean abstractions, not parse SIP directly
+        
         let from = request.from()
             .map(|h| h.to_string())
             .unwrap_or_else(|| "unknown".to_string());
@@ -494,12 +500,22 @@ impl CallerInfo {
             .map(|h| h.to_string())
             .unwrap_or_else(|| "unknown".to_string());
             
-        let contact = request.typed_header::<rvoip_sip_core::types::contact::Contact>()
-            .and_then(|h| h.0.first())
-            .map(|_| format!("sip:{}@{}", "user", source.ip()));
-            
-        let user_agent = request.typed_header::<rvoip_sip_core::types::user_agent::UserAgent>()
-            .map(|h| h.0.clone());
+        // **SIMPLIFIED**: Basic contact info without complex SIP parsing
+        let contact = Some(format!("sip:user@{}", source.ip()));
+        
+        // **CLEAN DELEGATION**: Get user agent through simple method
+        let user_agent = request.header(&rvoip_sip_core::HeaderName::UserAgent)
+            .and_then(|h| match h {
+                rvoip_sip_core::TypedHeader::UserAgent(ua) => {
+                    // UserAgent contains Vec<String>, join them with space
+                    if ua.is_empty() {
+                        None
+                    } else {
+                        Some(ua.join(" "))
+                    }
+                },
+                _ => None,
+            });
         
         Self {
             from,

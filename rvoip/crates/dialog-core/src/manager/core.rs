@@ -25,23 +25,7 @@ use super::{
     utils::MessageExtensions,
 };
 
-/// Main dialog manager for handling SIP dialogs according to RFC 3261
-/// 
-/// The DialogManager coordinates all dialog-related activities and maintains
-/// proper separation of concerns with the transaction layer. It implements
-/// the dialog state machines defined in RFC 3261 Section 12.
-/// 
-/// ## Architecture
-/// 
-/// The DialogManager is structured as a composition of focused components:
-/// - DialogStore: Manages dialog storage and lookup
-/// - ProtocolHandlers: Handles SIP method-specific processing
-/// - MessageRouter: Routes messages to appropriate dialogs
-/// - TransactionIntegration: Interfaces with transaction-core
-/// - SessionCoordinator: Coordinates with session-core
-/// 
-/// This design maintains clear separation of concerns and makes the codebase
-/// more maintainable and testable.
+#[derive(Debug)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,

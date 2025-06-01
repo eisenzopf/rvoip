@@ -128,8 +128,21 @@ impl ServerManager {
             SessionEvent::Terminated { session_id, reason } => {
                 info!("📞 Session terminated: {} (reason: {})", session_id, reason);
             },
-            SessionEvent::StateChanged { session_id, from, to } => {
-                info!("📞 Session {} state changed: {} → {}", session_id, from, to);
+            SessionEvent::StateChanged { session_id, old_state, new_state } => {
+                info!("Session {} state changed from {:?} to {:?}", session_id, old_state, new_state);
+                
+                // Handle state transitions
+                match new_state {
+                    crate::session::SessionState::Connected => {
+                        info!("Session {} connected", session_id);
+                        // Could trigger billing start, etc.
+                    },
+                    crate::session::SessionState::Terminated => {
+                        info!("Session {} terminated", session_id);
+                        // Could trigger billing stop, cleanup, etc.
+                    },
+                    _ => {}
+                }
             },
             _ => {
                 debug!("Session event processed: {:?}", event);

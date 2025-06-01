@@ -5,10 +5,6 @@ use tracing::{debug, error, warn};
 use futures::stream::{StreamExt, FuturesUnordered};
 use serde_json;
 
-use rvoip_transaction_core::{
-    TransactionManager, 
-    TransactionEvent,
-};
 use rvoip_sip_core::Request;
 
 use crate::dialog::{DialogState, DialogId};
@@ -32,7 +28,10 @@ impl SessionManager {
         // Start the dialog manager (it now handles its own cleanup)
         if let Err(e) = self.dialog_manager.start().await {
             error!("Failed to start dialog manager: {}", e);
-            return Err(e);
+            return Err(Error::InternalError(
+                format!("Failed to start dialog manager: {}", e),
+                ErrorContext::default().with_message("Dialog manager startup failed")
+            ));
         }
         
         // Create a task for cleanup
@@ -417,62 +416,6 @@ impl SessionManager {
         }
         
         count
-    }
-    
-    /// Process events from the dialog manager
-    async fn process_dialog_events(&self, mut events_rx: mpsc::Receiver<TransactionEvent>) {
-        while let Some(event) = events_rx.recv().await {
-            if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            
-            // Handle events that might affect sessions
-            match &event {
-                TransactionEvent::Response { transaction_id, response, .. } => {
-                    // Forward to any session associated with this transaction
-                    if let Ok(dialog_id) = self.dialog_manager.find_dialog_for_transaction(transaction_id) {
-                        if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                            let session_id_clone = session_id.clone();
-                            if let Ok(session) = self.get_session(&session_id_clone) {
-                                // Process response based on type
-                                if response.status().is_success() {
-                                    debug!("Session {} received successful response for transaction {}", 
-                                          session_id_clone, transaction_id);
-                                } else if response.status().as_u16() >= 400 {
-                                    debug!("Session {} received failure response for transaction {}: {}", 
-                                          session_id_clone, transaction_id, response.status());
-                                }
-                            }
-                        }
-                    }
-                },
-                TransactionEvent::Error { transaction_id, error } => {
-                    // Handle transaction errors that affect sessions
-                    if let Some(tx_id) = transaction_id {
-                        if let Ok(dialog_id) = self.dialog_manager.find_dialog_for_transaction(tx_id) {
-                            if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                                let session_id_clone = session_id.clone();
-                                error!("Session {} transaction error: {}", session_id_clone, error);
-                                
-                                // Publish an error event
-                                self.event_bus.publish(SessionEvent::Custom {
-                                    session_id: session_id_clone.clone(),
-                                    event_type: "transaction_error".to_string(),
-                                    data: serde_json::json!({
-                                        "transaction_id": tx_id.to_string(),
-                                        "error": error.to_string()
-                                    }),
-                                });
-                            }
-                        }
-                    }
-                },
-                _ => {
-                    // Process other transaction events
-                    debug!("Session manager received transaction event: {:?}", event);
-                }
-            }
-        }
     }
     
     /// Find a session by dialog identifiers

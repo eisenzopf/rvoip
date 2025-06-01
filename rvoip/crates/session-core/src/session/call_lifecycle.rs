@@ -16,7 +16,6 @@ use chrono;
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{HeaderName, TypedHeader};
-use rvoip_transaction_core::TransactionKey;
 use crate::media::MediaManager;
 use crate::session::SessionId;
 use uuid;

@@ -18,7 +18,6 @@ use infra_common::events::bus::EventBusConfig;
 use infra_common::events::api::EventSystem as EventSystemTrait;
 
 use rvoip_sip_core::{Response, StatusCode};
-use rvoip_transaction_core::TransactionKey;
 
 use crate::session::{SessionId, SessionState};
 use crate::dialog::{DialogId, DialogState};

@@ -9,10 +9,9 @@ use std::net::SocketAddr;
 use anyhow::{Result, Context};
 use tokio::sync::RwLock;
 
-// ARCHITECTURE: session-core ONLY delegates to dialog-core, NO direct transaction access
-// Exception: convenience methods may create the dependency chain internally
-use rvoip_transaction_core::TransactionManager; // Only for convenience methods
-use rvoip_dialog_core::{DialogManager, DialogId, SessionCoordinationEvent};
+// ARCHITECTURE: session-core ONLY delegates to dialog-core API, NO direct manager access
+use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogConfig, CallHandle, DialogHandle};
+use rvoip_dialog_core::{DialogId, SessionCoordinationEvent};
 use rvoip_sip_core::{Request, Response, StatusCode, Method};
 use rvoip_sip_core::json::ext::SipMessageJson;
 use rvoip_sip_core::RequestBuilder;
@@ -72,7 +71,7 @@ pub struct SessionManager {
     pub(crate) dialog_to_session: DashMap<DialogId, SessionId>,
     
     /// Dialog manager reference (from dialog-core) - ONLY SIP interface
-    pub(crate) dialog_manager: Arc<DialogManager>,
+    pub(crate) dialog_manager: Arc<DialogServer>,
     
     /// Media manager for RTP stream coordination
     pub(crate) media_manager: Arc<MediaManager>,
@@ -114,7 +113,7 @@ impl SessionManager {
     /// **ARCHITECTURE**: Session-core receives DialogManager via dependency injection.
     /// Application level creates: TransactionManager -> DialogManager -> SessionManager
     pub async fn new(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: SessionConfig,
         event_bus: EventBus
     ) -> Result<Self, Error> {
@@ -343,7 +342,7 @@ impl SessionManager {
     }
     
     /// Get a reference to the dialog manager
-    pub fn dialog_manager(&self) -> &Arc<DialogManager> {
+    pub fn dialog_manager(&self) -> &Arc<DialogServer> {
         &self.dialog_manager
     }
     
@@ -572,18 +571,17 @@ impl SessionManager {
             ));
         }
         
-        // Parse target URI
-        let target_uri_parsed: rvoip_sip_core::Uri = target_uri.parse()
+        // Parse target URI for validation
+        let _target_uri_parsed: rvoip_sip_core::Uri = target_uri.parse()
             .map_err(|e| Error::InternalError(
                 format!("Invalid target URI '{}': {}", target_uri, e),
                 ErrorContext::default().with_message("URI parsing failed")
             ))?;
         
-        // Generate SDP offer if not provided
+        // Generate SDP offer if not provided using media coordination
         let sdp_offer_body = if let Some(offer) = sdp_offer {
             offer
         } else {
-            // Generate SDP offer using media coordination
             info!("🎵 Generating SDP offer for outgoing call...");
             self.call_lifecycle_coordinator
                 .coordinate_session_establishment(session_id, "")
@@ -594,29 +592,44 @@ impl SessionManager {
                 ))?
         };
         
-        // Create an INVITE request manually
-        let invite_request = rvoip_sip_core::RequestBuilder::new(
-            rvoip_sip_core::Method::Invite,
-            &target_uri_parsed.to_string()
-        )?
-        .body(bytes::Bytes::from(sdp_offer_body))
-        .build()
-        .map_err(|e| Error::InternalError(
-            format!("Failed to build INVITE request: {}", e),
-            ErrorContext::default().with_message("Request building failed")
+        // **ARCHITECTURE FIX**: Use dialog-core to create outgoing dialog and send INVITE
+        // This replaces direct SIP message building with proper delegation
+        let local_uri: rvoip_sip_core::Uri = from_uri.parse()
+            .map_err(|e| Error::InternalError(
+                format!("Invalid from URI '{}': {}", from_uri, e),
+                ErrorContext::default().with_message("From URI parsing failed")
+            ))?;
+        
+        let remote_uri: rvoip_sip_core::Uri = target_uri.parse()
+            .map_err(|e| Error::InternalError(
+                format!("Invalid target URI '{}': {}", target_uri, e),
+                ErrorContext::default().with_message("Target URI parsing failed")
+            ))?;
+        
+        // Create outgoing dialog using dialog-core
+        let dialog_id = self.dialog_manager.create_outgoing_dialog(
+            local_uri,
+            remote_uri,
+            None // Let dialog-core generate call-id
+        ).await.map_err(|e| Error::InternalError(
+            format!("Failed to create outgoing dialog: {}", e),
+            ErrorContext::default().with_message("Dialog creation failed")
         ))?;
         
-        // Use dialog-core to handle the INVITE
-        // This will create the dialog and send the request
-        let destination = std::net::SocketAddr::from(([127, 0, 0, 1], 5060)); // TODO: resolve from URI
+        // Associate dialog with session
+        self.set_default_dialog(session_id, &dialog_id)?;
         
-        if let Err(e) = self.dialog_manager.handle_invite(invite_request, destination).await {
-            error!("Failed to send INVITE via dialog-core: {}", e);
-            return Err(Error::InternalError(
-                format!("Failed to send INVITE: {}", e),
-                ErrorContext::default().with_message("INVITE transmission failed")
-            ));
-        }
+        // **ARCHITECTURE COMPLIANCE**: Use dialog-core to send INVITE with SDP body
+        // This replaces manual RequestBuilder usage with proper delegation
+        let sdp_body = bytes::Bytes::from(sdp_offer_body);
+        let _transaction_id = self.dialog_manager.send_request(
+            &dialog_id, 
+            Method::Invite, 
+            Some(sdp_body)
+        ).await.map_err(|e| Error::InternalError(
+            format!("Failed to send INVITE via dialog-core: {}", e),
+            ErrorContext::default().with_message("INVITE transmission failed")
+        ))?;
         
         // Update session state to Dialing
         session.set_state(SessionState::Dialing).await
@@ -636,7 +649,7 @@ impl SessionManager {
     /// **CONVENIENCE METHOD**: Creates the full dependency chain internally.
     /// For production, prefer creating dependencies explicitly at application level.
     pub async fn new_with_default_events(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: SessionConfig,
     ) -> Result<Self, Error> {
         // Create default zero-copy event bus
@@ -654,7 +667,7 @@ impl SessionManager {
     /// **CONVENIENCE METHOD**: Uses provided dialog manager.
     /// For production, prefer creating dependencies explicitly at application level.
     pub fn new_sync(
-        dialog_manager: Arc<DialogManager>,
+        dialog_manager: Arc<DialogServer>,
         config: SessionConfig,
         event_bus: EventBus
     ) -> Self {
