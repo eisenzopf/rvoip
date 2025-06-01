@@ -270,47 +270,24 @@ impl SessionManager {
             }
         };
         
-        match self.transaction_manager.create_non_invite_client_transaction(refer_request, destination).await {
+        match self.dialog_manager.send_request(&dialog_id, Method::Refer, Some(refer_request.to_string())).await {
             Ok(transaction_id) => {
                 info!("Created REFER transaction: {}", transaction_id);
-                
-                // Send the request
-                match self.transaction_manager.send_request(&transaction_id).await {
-                    Ok(()) => {
-                        info!("REFER request sent successfully for transfer {}", transfer_id);
-                    },
-                    Err(e) => {
-                        error!("Failed to send REFER request: {}", e);
-                        return Err(Error::TransactionFailed(
-                            format!("Failed to send REFER request: {}", e),
-                            Some(Box::new(e)),
-                            ErrorContext {
-                                category: ErrorCategory::Network,
-                                severity: ErrorSeverity::Error,
-                                recovery: RecoveryAction::Retry,
-                                retryable: true,
-                                session_id: Some(session_id.to_string()),
-                                timestamp: SystemTime::now(),
-                                details: Some("REFER request sending failed".to_string()),
-                                ..Default::default()
-                            }
-                        ));
-                    }
-                }
+                info!("REFER request sent successfully for transfer {}", transfer_id);
             },
             Err(e) => {
-                error!("Failed to create REFER transaction: {}", e);
-                return Err(Error::TransactionCreationFailed(
-                    format!("Failed to create REFER transaction: {}", e),
+                error!("Failed to send REFER request: {}", e);
+                return Err(Error::TransactionFailed(
+                    format!("Failed to send REFER request: {}", e),
                     Some(Box::new(e)),
                     ErrorContext {
-                        category: ErrorCategory::Internal,
+                        category: ErrorCategory::Network,
                         severity: ErrorSeverity::Error,
                         recovery: RecoveryAction::Retry,
                         retryable: true,
                         session_id: Some(session_id.to_string()),
                         timestamp: SystemTime::now(),
-                        details: Some("REFER transaction creation failed".to_string()),
+                        details: Some("REFER request sending failed".to_string()),
                         ..Default::default()
                     }
                 ));
@@ -454,7 +431,7 @@ impl SessionManager {
             }
         };
         
-        match self.transaction_manager.send_response(&transaction_key, response).await {
+        match self.dialog_manager.send_response(&transaction_key, response).await {
             Ok(()) => {
                 info!("202 Accepted response sent successfully");
             },
@@ -713,47 +690,24 @@ impl SessionManager {
             }
         };
         
-        match self.transaction_manager.create_non_invite_client_transaction(notify_request, destination).await {
+        match self.dialog_manager.send_request(&dialog_id, Method::Notify, Some(notify_request.to_string())).await {
             Ok(transaction_id) => {
                 info!("Created NOTIFY transaction: {}", transaction_id);
-                
-                // Send the request
-                match self.transaction_manager.send_request(&transaction_id).await {
-                    Ok(()) => {
-                        info!("NOTIFY request sent successfully for transfer {}", transfer_id);
-                    },
-                    Err(e) => {
-                        error!("Failed to send NOTIFY request: {}", e);
-                        return Err(Error::TransactionFailed(
-                            format!("Failed to send NOTIFY request: {}", e),
-                            Some(Box::new(e)),
-                            ErrorContext {
-                                category: ErrorCategory::Network,
-                                severity: ErrorSeverity::Error,
-                                recovery: RecoveryAction::Retry,
-                                retryable: true,
-                                session_id: Some(session_id.to_string()),
-                                timestamp: SystemTime::now(),
-                                details: Some("NOTIFY request sending failed".to_string()),
-                                ..Default::default()
-                            }
-                        ));
-                    }
-                }
+                info!("NOTIFY request sent successfully for transfer {}", transfer_id);
             },
             Err(e) => {
-                error!("Failed to create NOTIFY transaction: {}", e);
-                return Err(Error::TransactionCreationFailed(
-                    format!("Failed to create NOTIFY transaction: {}", e),
+                error!("Failed to send NOTIFY request: {}", e);
+                return Err(Error::TransactionFailed(
+                    format!("Failed to send NOTIFY request: {}", e),
                     Some(Box::new(e)),
                     ErrorContext {
-                        category: ErrorCategory::Internal,
+                        category: ErrorCategory::Network,
                         severity: ErrorSeverity::Error,
                         recovery: RecoveryAction::Retry,
                         retryable: true,
                         session_id: Some(session_id.to_string()),
                         timestamp: SystemTime::now(),
-                        details: Some("NOTIFY transaction creation failed".to_string()),
+                        details: Some("NOTIFY request sending failed".to_string()),
                         ..Default::default()
                     }
                 ));

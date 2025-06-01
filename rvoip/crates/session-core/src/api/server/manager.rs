@@ -1,12 +1,12 @@
 //! Server Manager
 //!
 //! This module provides high-level server operations for handling incoming calls,
-//! managing sessions, and coordinating with the transport layer via transaction-core.
+//! managing sessions, and coordinating with dialog-core via SessionManager.
 //!
 //! **ARCHITECTURAL PRINCIPLE**: session-core is a COORDINATOR, not a SIP protocol handler.
-//! - session-core REACTS to transaction events from transaction-core
+//! - session-core REACTS to session coordination events from dialog-core
 //! - session-core COORDINATES between SIP signaling and media processing
-//! - session-core NEVER sends SIP responses directly (that's transaction-core's job)
+//! - session-core NEVER sends SIP responses directly (that's dialog-core's job)
 
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -17,13 +17,12 @@ use uuid::Uuid;
 use std::net::SocketAddr;
 use async_trait::async_trait;
 
-use rvoip_sip_core::{Request, Response, StatusCode, Method, Message};
-use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
+use rvoip_sip_core::{Request, Response, StatusCode, Method, Message, Uri};
 use crate::api::server::config::ServerConfig;
-use crate::api::server::{IncomingCallEvent, CallerInfo, CallDecision, IncomingCallNotification};
+use crate::api::server::{IncomingCallEvent, CallerInfo, CallDecision, IncomingCallNotification, RegistrationDecision, UserRegistration};
 use crate::session::{SessionManager, Session};
-use crate::transport::{SessionTransportEvent, TransportIntegration};
 use crate::{SessionId, Error};
+use crate::events::SessionEvent;
 
 /// High-level server manager for policy decisions and call coordination
 /// 
@@ -35,9 +34,6 @@ use crate::{SessionId, Error};
 pub struct ServerManager {
     /// Core session manager for SIP implementation
     session_manager: Arc<SessionManager>,
-    
-    /// Transaction manager reference (for coordination only)
-    transaction_manager: Arc<TransactionManager>,
     
     /// Server configuration and policies
     config: ServerConfig,
@@ -73,18 +69,39 @@ impl IncomingCallNotification for ServerManager {
         info!("📞 ServerManager notified: Call {} (session {}) ended by server", call_id, session_id);
         // Add any cleanup logic, logging, or monitoring here
     }
+    
+    /// **NEW**: Handle user registration requests
+    async fn on_user_registration_request(&self, registration: UserRegistration) -> RegistrationDecision {
+        info!("📝 ServerManager policy decision for registration: {}", registration.user_uri);
+        
+        // Example registration policy - customize based on needs
+        if self.should_accept_registration(&registration).await {
+            info!("✅ ServerManager policy: ACCEPT registration for {}", registration.user_uri);
+            RegistrationDecision::Accept
+        } else {
+            info!("❌ ServerManager policy: REJECT registration for {}", registration.user_uri);
+            RegistrationDecision::Reject { 
+                status_code: StatusCode::Forbidden, 
+                reason: Some("Registration not allowed".to_string()) 
+            }
+        }
+    }
+    
+    /// **NEW**: Handle user unregistration
+    async fn on_user_unregistered(&self, user_uri: Uri) {
+        info!("📝 ServerManager notified: User {} unregistered", user_uri);
+        // Add any cleanup logic, logging, or monitoring here
+    }
 }
 
 impl ServerManager {
     /// Create a new server manager
     pub fn new(
         session_manager: Arc<SessionManager>, 
-        transaction_manager: Arc<TransactionManager>,
         config: ServerConfig
     ) -> Self {
         Self {
             session_manager,
-            transaction_manager,
             config,
         }
     }
@@ -98,36 +115,39 @@ impl ServerManager {
         Ok(())
     }
     
-    /// Handle transaction events - simplified to only delegate
-    pub async fn handle_transaction_event(&self, event: TransactionEvent) -> Result<()> {
-        debug!("ServerManager delegating transaction event to SessionManager: {:?}", event);
+    /// Handle session events - simplified to only delegate
+    pub async fn handle_session_event(&self, event: SessionEvent) -> Result<()> {
+        debug!("ServerManager processing session event: {:?}", event);
         
-        // **ARCHITECTURAL FIX**: Delegate everything to SessionManager
-        self.session_manager.handle_transaction_event(event).await
-            .map_err(|e| anyhow::anyhow!("SessionManager failed to handle transaction event: {}", e))?;
-        
-        Ok(())
-    }
-    
-    /// Handle incoming transport events (legacy compatibility)
-    pub async fn handle_transport_event(&self, event: SessionTransportEvent) -> Result<()> {
+        // **ARCHITECTURAL FIX**: Process session-level events (not transaction events)
+        // SessionManager already processes dialog coordination internally
         match event {
-            SessionTransportEvent::TransportError { error, source } => {
-                warn!("Transport error from {:?}: {}", source, error);
+            SessionEvent::Created { session_id } => {
+                info!("📞 New session created: {}", session_id);
             },
-            SessionTransportEvent::ConnectionEstablished { local_addr, remote_addr, transport } => {
-                info!("Connection established: {} -> {:?} ({})", local_addr, remote_addr, transport);
+            SessionEvent::Terminated { session_id, reason } => {
+                info!("📞 Session terminated: {} (reason: {})", session_id, reason);
             },
-            SessionTransportEvent::ConnectionClosed { local_addr, remote_addr, transport } => {
-                info!("Connection closed: {} -> {:?} ({})", local_addr, remote_addr, transport);
+            SessionEvent::StateChanged { session_id, from, to } => {
+                info!("📞 Session {} state changed: {} → {}", session_id, from, to);
             },
             _ => {
-                debug!("Transport event handled by transaction-core");
+                debug!("Session event processed: {:?}", event);
             }
         }
+        
         Ok(())
     }
-    
+
+    /// **NEW**: Server policy method - determine if registration should be accepted
+    async fn should_accept_registration(&self, registration: &UserRegistration) -> bool {
+        // Example registration policy logic - customize based on server requirements
+        
+        // For now, accept all registrations
+        info!("Accepting registration for {} - passed all policy checks", registration.user_uri);
+        true
+    }
+
     /// **NEW**: Server policy method - determine if call should be accepted
     async fn should_accept_call(&self, event: &IncomingCallEvent) -> bool {
         // Example policy logic - customize based on server requirements

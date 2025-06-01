@@ -147,7 +147,6 @@ impl SessionManager {
         let session = Arc::new(Session::new(
             SessionDirection::Outgoing,
             self.config.clone(),
-            self.transaction_manager.clone(),
             self.event_bus.clone()
         ));
         
@@ -186,7 +185,6 @@ impl SessionManager {
         let session = Arc::new(Session::new(
             SessionDirection::Incoming,
             self.config.clone(),
-            self.transaction_manager.clone(),
             self.event_bus.clone()
         ));
         
@@ -224,7 +222,6 @@ impl SessionManager {
         let session = Arc::new(Session::new(
             direction,
             self.config.clone(),
-            self.transaction_manager.clone(),
             self.event_bus.clone()
         ));
         
@@ -433,7 +430,7 @@ impl SessionManager {
             match &event {
                 TransactionEvent::Response { transaction_id, response, .. } => {
                     // Forward to any session associated with this transaction
-                    if let Some(dialog_id) = self.dialog_manager.find_dialog_for_transaction(transaction_id) {
+                    if let Ok(dialog_id) = self.dialog_manager.find_dialog_for_transaction(transaction_id) {
                         if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
                             let session_id_clone = session_id.clone();
                             if let Ok(session) = self.get_session(&session_id_clone) {
@@ -452,7 +449,7 @@ impl SessionManager {
                 TransactionEvent::Error { transaction_id, error } => {
                     // Handle transaction errors that affect sessions
                     if let Some(tx_id) = transaction_id {
-                        if let Some(dialog_id) = self.dialog_manager.find_dialog_for_transaction(tx_id) {
+                        if let Ok(dialog_id) = self.dialog_manager.find_dialog_for_transaction(tx_id) {
                             if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
                                 let session_id_clone = session_id.clone();
                                 error!("Session {} transaction error: {}", session_id_clone, error);

@@ -136,10 +136,10 @@ pub struct ServerSessionManager {
 impl ServerSessionManager {
     /// Create a new server session manager
     /// 
-    /// **ARCHITECTURE**: Server receives TransactionManager via dependency injection
-    /// and passes it down through the session layer to dialog layer.
+    /// **ARCHITECTURE**: Server receives DialogManager via dependency injection
+    /// and coordinates with dialog-core for SIP protocol handling.
     pub async fn new(
-        transaction_manager: Arc<TransactionManager>,
+        dialog_manager: Arc<DialogManager>,
         config: ServerConfig
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let event_bus = EventBus::new(1000).await?;
@@ -151,7 +151,7 @@ impl ServerSessionManager {
         };
         
         let session_manager = SessionManager::new(
-            transaction_manager,
+            dialog_manager,
             session_config,
             event_bus
         ).await?;
@@ -167,10 +167,10 @@ impl ServerSessionManager {
     
     /// Create a new server session manager (synchronous)
     /// 
-    /// **ARCHITECTURE**: Server receives TransactionManager via dependency injection
-    /// and passes it down through the session layer to dialog layer.
+    /// **ARCHITECTURE**: Server receives DialogManager via dependency injection
+    /// and coordinates with dialog-core for SIP protocol handling.
     pub fn new_sync(
-        transaction_manager: Arc<TransactionManager>,
+        dialog_manager: Arc<DialogManager>,
         config: ServerConfig
     ) -> Self {
         let event_bus = EventBus::new_simple(1000);
@@ -182,7 +182,7 @@ impl ServerSessionManager {
         };
         
         let session_manager = SessionManager::new_sync(
-            transaction_manager,
+            dialog_manager,
             session_config,
             event_bus
         );
@@ -407,37 +407,37 @@ pub struct ServerStats {
 
 /// Create a session manager configured for server use
 pub async fn create_server_session_manager(
-    transaction_manager: Arc<TransactionManager>,
+    dialog_manager: Arc<DialogManager>,
     config: ServerConfig
 ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
-    let server_manager = ServerSessionManager::new(transaction_manager, config).await?;
+    let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
     Ok(server_manager.session_manager().clone())
 }
 
 /// Create a session manager configured for server use (synchronous)
 pub fn create_server_session_manager_sync(
-    transaction_manager: Arc<TransactionManager>,
+    dialog_manager: Arc<DialogManager>,
     config: ServerConfig
 ) -> Arc<SessionManager> {
-    let server_manager = ServerSessionManager::new_sync(transaction_manager, config);
+    let server_manager = ServerSessionManager::new_sync(dialog_manager, config);
     server_manager.session_manager().clone()
 }
 
 /// Create a full-featured server session manager
 pub async fn create_full_server_manager(
-    transaction_manager: Arc<TransactionManager>,
+    dialog_manager: Arc<DialogManager>,
     config: ServerConfig
 ) -> Result<Arc<ServerSessionManager>, Box<dyn std::error::Error>> {
-    let server_manager = ServerSessionManager::new(transaction_manager, config).await?;
+    let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
     Ok(Arc::new(server_manager))
 }
 
 /// Create a full-featured server session manager (synchronous)
 pub fn create_full_server_manager_sync(
-    transaction_manager: Arc<TransactionManager>,
+    dialog_manager: Arc<DialogManager>,
     config: ServerConfig
 ) -> Arc<ServerSessionManager> {
-    let server_manager = ServerSessionManager::new_sync(transaction_manager, config);
+    let server_manager = ServerSessionManager::new_sync(dialog_manager, config);
     Arc::new(server_manager)
 }
 

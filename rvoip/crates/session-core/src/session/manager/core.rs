@@ -636,7 +636,7 @@ impl SessionManager {
     /// **CONVENIENCE METHOD**: Creates the full dependency chain internally.
     /// For production, prefer creating dependencies explicitly at application level.
     pub async fn new_with_default_events(
-        transaction_manager: Arc<TransactionManager>,
+        dialog_manager: Arc<DialogManager>,
         config: SessionConfig,
     ) -> Result<Self, Error> {
         // Create default zero-copy event bus
@@ -646,22 +646,15 @@ impl SessionManager {
                 ErrorContext::default().with_message("Event bus initialization failed")
             ))?;
         
-        // Create dialog manager with the transaction manager
-        let dialog_manager = DialogManager::new(transaction_manager).await
-            .map_err(|e| Error::InternalError(
-                format!("Failed to create dialog manager: {}", e),
-                ErrorContext::default().with_message("Dialog manager initialization failed")
-            ))?;
-        
-        Self::new(Arc::new(dialog_manager), config, event_bus).await
+        Self::new(dialog_manager, config, event_bus).await
     }
     
     /// Create a new session manager (legacy method for backward compatibility)
     /// 
-    /// **CONVENIENCE METHOD**: Creates the full dependency chain internally.
+    /// **CONVENIENCE METHOD**: Uses provided dialog manager.
     /// For production, prefer creating dependencies explicitly at application level.
     pub fn new_sync(
-        transaction_manager: Arc<TransactionManager>,
+        dialog_manager: Arc<DialogManager>,
         config: SessionConfig,
         event_bus: EventBus
     ) -> Self {
@@ -673,11 +666,7 @@ impl SessionManager {
             .expect("No tokio runtime available");
         
         rt.block_on(async {
-            // Create dialog manager with the transaction manager
-            let dialog_manager = DialogManager::new(transaction_manager).await
-                .expect("Failed to create dialog manager");
-            
-            Self::new(Arc::new(dialog_manager), config, event_bus).await
+            Self::new(dialog_manager, config, event_bus).await
                 .expect("Failed to create session manager")
         })
     }

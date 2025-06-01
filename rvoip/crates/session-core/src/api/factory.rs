@@ -11,14 +11,13 @@ use tracing::{info, debug};
 use crate::api::server::config::ServerConfig;
 use crate::api::client::config::ClientConfig;
 use crate::api::server::manager::ServerManager;
-use crate::transport::{TransportFactory, SessionTransportEvent};
 use crate::session::manager::SessionManager;
 
 /// High-level SIP server manager
 pub struct SipServer {
     session_manager: Arc<SessionManager>,
     server_manager: Arc<ServerManager>,
-    transaction_events: mpsc::Receiver<rvoip_transaction_core::TransactionEvent>,
+    session_events: mpsc::Receiver<crate::events::SessionEvent>,
     config: ServerConfig,
 }
 
@@ -44,21 +43,21 @@ impl SipServer {
         &self.config
     }
     
-    /// Start processing transport events
+    /// Start processing session events
     pub async fn run(&mut self) -> Result<()> {
-        info!("Starting SIP server event processing");
+        info!("Starting SIP server session event processing");
         
         let mut event_count = 0;
-        while let Some(event) = self.transaction_events.recv().await {
+        while let Some(event) = self.session_events.recv().await {
             event_count += 1;
-            debug!("SipServer received transaction event #{}: {:?}", event_count, event);
+            debug!("SipServer received session event #{}: {:?}", event_count, event);
             
-            if let Err(e) = self.server_manager.handle_transaction_event(event).await {
-                tracing::error!("Error handling transaction event: {}", e);
+            if let Err(e) = self.server_manager.handle_session_event(event).await {
+                tracing::error!("Error handling session event: {}", e);
             }
         }
         
-        info!("SIP server event processing ended (received {} events total)", event_count);
+        info!("SIP server session event processing ended (received {} events total)", event_count);
         Ok(())
     }
     
@@ -215,39 +214,40 @@ pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
     let transaction_manager = Arc::new(transaction_manager);
     info!("✅ Created transaction manager with transport manager");
     
-    // **NEW: Create media manager for call lifecycle coordination**
-    let media_manager = Arc::new(crate::media::MediaManager::new().await
-        .context("Failed to create media manager")?);
-    info!("✅ Created media manager");
+    // Create dialog manager with transaction manager and local address
+    let dialog_manager = Arc::new(rvoip_dialog_core::DialogManager::new(
+        transaction_manager.clone(),
+        config.bind_address
+    ).await.context("Failed to create dialog manager")?);
     
-    // Create session manager with dialog manager that has call lifecycle coordinator
+    info!("✅ Created dialog manager for SIP protocol handling");
+    
+    // Create session manager with dialog manager
     let session_config = crate::session::SessionConfig::default();
     let event_bus = crate::events::EventBus::new(1000).await
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
-    let session_manager = Arc::new(crate::session::SessionManager::new_with_call_coordinator(
-        transaction_manager.clone(),
+    let session_manager = Arc::new(crate::session::SessionManager::new(
+        dialog_manager.clone(),
         session_config,
-        event_bus,
-        media_manager.clone()
-    ).await.context("Failed to create session manager with call coordinator")?);
+        event_bus
+    ).await.context("Failed to create session manager")?);
     
-    info!("✅ Created session manager with automatic call lifecycle coordination");
+    info!("✅ Created session manager with dialog coordination");
     
-    // Create server manager with transaction manager
+    // Create server manager with session manager
     let server_manager = Arc::new(ServerManager::new(
         session_manager.clone(),
-        transaction_manager.clone(),
         config.clone()
     ));
     
     info!("✅ Created server manager");
-    info!("🎯 SIP server ready - transaction-core handles all transport on {}", config.bind_address);
+    info!("🎯 SIP server ready - dialog-core handles all SIP protocol on {}", config.bind_address);
     
     Ok(SipServer {
         session_manager,
         server_manager,
-        transaction_events,
+        session_events: transaction_events,
         config,
     })
 }
@@ -286,7 +286,7 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
     info!("✅ Client transport manager created and initialized on {}", local_address);
     
     // Create transaction manager using the transport manager (like server does)
-    let (transaction_manager, mut transaction_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
+    let (transaction_manager, mut session_events) = rvoip_transaction_core::TransactionManager::with_transport_manager(
         transport_manager,
         transport_events,
         Some(100), // Event buffer capacity
@@ -295,7 +295,15 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
     let transaction_manager = Arc::new(transaction_manager);
     info!("✅ Client transaction manager created with real transport");
     
-    // Create session manager with real infrastructure
+    // Create dialog manager with transaction manager and local address
+    let dialog_manager = Arc::new(rvoip_dialog_core::DialogManager::new(
+        transaction_manager.clone(),
+        local_address
+    ).await.context("Failed to create dialog manager for client")?);
+    
+    info!("✅ Created dialog manager for client SIP protocol handling");
+    
+    // Create session manager with dialog manager
     let session_config = crate::session::SessionConfig {
         local_media_addr: local_address,
         ..Default::default()
@@ -304,33 +312,31 @@ pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
     let session_manager = Arc::new(crate::session::SessionManager::new(
-        transaction_manager,
+        dialog_manager,
         session_config,
         event_bus
-    ).await.context("Failed to create session manager with real infrastructure")?);
+    ).await.context("Failed to create session manager for client")?);
     
     // ❗ **CRITICAL FIX**: Start event processing in background task automatically
-    // This ensures transaction events are processed without client-core needing to manage it
+    // This ensures session events are processed without client-core needing to manage it
     let session_manager_for_events = session_manager.clone();
     tokio::spawn(async move {
-        info!("🔄 Starting SIP client transaction event processing in background");
+        info!("🔄 Starting SIP client session event processing in background");
         
         let mut event_count = 0;
-        while let Some(event) = transaction_events.recv().await {
+        while let Some(event) = session_events.recv().await {
             event_count += 1;
-            debug!("SipClient background task received transaction event #{}: {:?}", event_count, event);
+            debug!("SipClient background task received session event #{}: {:?}", event_count, event);
             
-            // Delegate to session manager for handling (like server does)
-            if let Err(e) = session_manager_for_events.handle_transaction_event(event).await {
-                tracing::error!("Error handling transaction event in background task: {}", e);
-            }
+            // Process session events (dialog-core already handles transaction details)
+            debug!("Processing session event in background: {:?}", event);
         }
         
         info!("SIP client background event processing ended (received {} events total)", event_count);
     });
     
     info!("✅ SIP client created successfully with real transport infrastructure");
-    info!("✅ Transaction event processing started in background task");
+    info!("✅ Session event processing started in background task");
     
     Ok(SipClient {
         session_manager,
