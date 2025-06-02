@@ -1,19 +1,23 @@
+//! Dialog state management
+//!
+//! Represents the various states a SIP dialog can be in during its lifecycle.
+
 use std::fmt;
 use serde::{Serialize, Deserialize};
 
 /// Represents the state of a dialog
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DialogState {
-    /// Initial state (before any response has been sent/received)
+    /// Dialog is in initial state, before establishment
     Initial,
     
-    /// Early dialog (1xx responses with tag)
+    /// Dialog is in early state (provisional response received)
     Early,
     
-    /// Confirmed dialog (2xx response)
+    /// Dialog is confirmed and established
     Confirmed,
     
-    /// Dialog is in the process of recovering from a network failure
+    /// Dialog is in recovery mode due to some failure
     Recovering,
     
     /// Dialog has been terminated
@@ -29,6 +33,23 @@ impl fmt::Display for DialogState {
             DialogState::Recovering => write!(f, "Recovering"),
             DialogState::Terminated => write!(f, "Terminated"),
         }
+    }
+}
+
+impl DialogState {
+    /// Check if the dialog is active (can process requests)
+    pub fn is_active(&self) -> bool {
+        matches!(self, DialogState::Confirmed | DialogState::Early)
+    }
+    
+    /// Check if the dialog is terminated
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, DialogState::Terminated)
+    }
+    
+    /// Check if the dialog is in recovery mode
+    pub fn is_recovering(&self) -> bool {
+        matches!(self, DialogState::Recovering)
     }
 }
 

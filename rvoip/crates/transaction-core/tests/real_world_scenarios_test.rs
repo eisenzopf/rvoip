@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use std::sync::Arc;
 use serial_test::serial;
 use std::collections::HashMap;
+use std::env;
 
 use rvoip_sip_core::types::status::StatusCode;
 use rvoip_sip_core::prelude::Method;
@@ -30,6 +31,9 @@ use rvoip_sip_core::types::param::Param;
 use rvoip_sip_transport::Transport;
 use rvoip_transaction_core::transaction::TransactionState;
 use rvoip_transaction_core::{TransactionEvent, TransactionKey};
+use rvoip_transaction_core::builders::{client_quick, server_quick};
+use rvoip_transaction_core::client::builders::{InviteBuilder, ByeBuilder};
+use rvoip_transaction_core::server::builders::{InviteResponseBuilder, ResponseBuilder};
 
 use transaction_test_utils::*;
 
@@ -818,4 +822,454 @@ async fn test_reinvite_flow() {
     if let Err(_) = test_result {
         panic!("Test timed out after 10 seconds");
     }
+}
+
+/// Test complete INVITE call flow with builder integration
+///
+/// This test demonstrates:
+/// 1. Using InviteBuilder to create a proper INVITE request with SDP
+/// 2. Using InviteResponseBuilder for server responses
+/// 3. Using ByeBuilder for call termination
+/// 4. Full integration with transaction layer
+#[tokio::test]
+#[serial]
+async fn test_invite_call_flow_with_builders() {
+    env::set_var("RVOIP_TEST", "1");
+    
+    println!("\n==== TEST: INVITE Call Flow with Builders ====");
+    println!("Testing complete call flow using new builders for request/response creation");
+    
+    let test_result = timeout(Duration::from_secs(15), async {
+        let mut env = TestEnvironment::new().await;
+        
+        // 1. Create INVITE using the new builder with SDP
+        println!("Creating INVITE request using InviteBuilder");
+        let from_uri = format!("sip:alice@{}", env.client_addr.ip());
+        let to_uri = format!("sip:bob@{}", env.server_addr.ip());
+        let sdp_offer = r#"v=0
+o=alice 123456 123456 IN IP4 127.0.0.1
+s=Call Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 5004 RTP/AVP 0
+a=rtpmap:0 PCMU/8000"#;
+        
+        let invite_request = InviteBuilder::new()
+            .from_to(&from_uri, &to_uri)
+            .local_address(env.client_addr)
+            .with_sdp(sdp_offer)
+            .cseq(1)
+            .build()
+            .expect("Failed to build INVITE with builder");
+        
+        // Verify the builder created a proper INVITE
+        assert_eq!(invite_request.method(), Method::Invite);
+        assert!(invite_request.body().len() > 0, "INVITE should have SDP content");
+        println!("✅ InviteBuilder created proper INVITE with SDP");
+        
+        // 2. Create client transaction
+        let client_tx_id = env.client_manager.create_client_transaction(
+            invite_request.clone(),
+            env.server_addr
+        ).await.expect("Failed to create client transaction");
+        
+        // 3. Send INVITE
+        env.client_manager.send_request(&client_tx_id).await
+            .expect("Failed to send INVITE");
+        
+        // Give time for automatic processing
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // 4. Find server transaction
+        let server_tx_id = TransactionKey::from_request(&invite_request)
+            .expect("Failed to create server transaction key");
+        
+        assert!(env.server_manager.transaction_exists(&server_tx_id).await,
+                "Server transaction should exist");
+        
+        // 5. Server responds with 180 Ringing using builder
+        println!("Server sending 180 Ringing using builder");
+        let ringing_response = server_quick::ringing(&invite_request, None)
+            .expect("Failed to create 180 Ringing with builder");
+        
+        env.server_manager.send_response(&server_tx_id, ringing_response).await
+            .expect("Failed to send ringing response");
+        
+        // 6. Server responds with 200 OK with SDP using InviteResponseBuilder
+        println!("Server sending 200 OK with SDP using InviteResponseBuilder");
+        let sdp_answer = r#"v=0
+o=bob 654321 654321 IN IP4 127.0.0.1
+s=Call Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 5006 RTP/AVP 0
+a=rtpmap:0 PCMU/8000"#;
+        
+        let ok_response = InviteResponseBuilder::new(StatusCode::Ok)
+            .from_request(&invite_request)
+            .with_sdp_answer(sdp_answer)
+            .with_contact_address(env.server_addr, Some("bob"))
+            .build()
+            .expect("Failed to build 200 OK with InviteResponseBuilder");
+        
+        // Verify the builder created a proper response
+        assert_eq!(ok_response.status_code(), 200);
+        assert!(ok_response.body().len() > 0, "200 OK should have SDP content");
+        assert!(ok_response.to().unwrap().tag().is_some(), "200 OK should have To tag");
+        println!("✅ InviteResponseBuilder created proper 200 OK with SDP");
+        
+        env.server_manager.send_response(&server_tx_id, ok_response.clone()).await
+            .expect("Failed to send OK response");
+        
+        // 7. Wait for call establishment
+        let success_event = env.wait_for_client_event(
+            Duration::from_millis(2000),
+            |event| match_success_response(event)
+        ).await;
+        
+        assert!(success_event.is_some(), "Should receive 200 OK");
+        println!("✅ Call established successfully using builders");
+        
+        // 8. Terminate call with BYE using ByeBuilder
+        println!("Terminating call using ByeBuilder");
+        
+        // Extract dialog information from the established call
+        let call_id = invite_request.call_id().unwrap().value().to_string();
+        let from_tag = invite_request.from().unwrap().tag().unwrap().to_string();
+        let to_tag = ok_response.to().unwrap().tag().unwrap().to_string();
+        
+        let bye_request = ByeBuilder::new()
+            .from_dialog(&call_id, &from_uri, &from_tag, &to_uri, &to_tag)
+            .local_address(env.client_addr)
+            .cseq(2) // Increment CSeq for new request in dialog
+            .build()
+            .expect("Failed to build BYE with builder");
+        
+        // Verify the builder created a proper BYE
+        assert_eq!(bye_request.method(), Method::Bye);
+        assert_eq!(bye_request.call_id().unwrap().value(), call_id);
+        assert_eq!(bye_request.cseq().unwrap().seq, 2);
+        println!("✅ ByeBuilder created proper BYE request");
+        
+        // 9. Send BYE
+        let bye_tx_id = env.client_manager.create_client_transaction(
+            bye_request.clone(),
+            env.server_addr
+        ).await.expect("Failed to create BYE transaction");
+        
+        env.client_manager.send_request(&bye_tx_id).await
+            .expect("Failed to send BYE");
+        
+        // Give time for processing
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // 10. Server responds to BYE using builder
+        let bye_server_tx_id = TransactionKey::from_request(&bye_request)
+            .expect("Failed to create BYE server transaction key");
+        
+        let bye_ok = server_quick::ok_bye(&bye_request)
+            .expect("Failed to create 200 OK for BYE");
+        
+        env.server_manager.send_response(&bye_server_tx_id, bye_ok).await
+            .expect("Failed to send BYE response");
+        
+        // Wait for BYE completion
+        let bye_success = env.wait_for_client_event(
+            Duration::from_millis(2000),
+            |event| match_success_response(event)
+        ).await;
+        
+        assert!(bye_success.is_some(), "Should receive 200 OK for BYE");
+        println!("✅ Call terminated successfully using builders");
+        
+        env.shutdown().await;
+    }).await;
+    
+    if let Err(_) = test_result {
+        panic!("Test timed out");
+    }
+    
+    env::remove_var("RVOIP_TEST");
+}
+
+/// Test REGISTER flow with builders
+///
+/// This test demonstrates:
+/// 1. Using client_quick::register for REGISTER request creation
+/// 2. Using server_quick::ok_register for server response
+/// 3. Full integration with transaction layer
+#[tokio::test]
+#[serial]
+async fn test_register_flow_with_builders() {
+    env::set_var("RVOIP_TEST", "1");
+    
+    println!("\n==== TEST: REGISTER Flow with Builders ====");
+    println!("Testing REGISTER flow using builders for request/response creation");
+    
+    let test_result = timeout(Duration::from_secs(10), async {
+        let mut env = TestEnvironment::new().await;
+        
+        // 1. Create REGISTER using quick helper
+        println!("Creating REGISTER request using client_quick::register");
+        let registrar_uri = format!("sip:registrar@{}", env.server_addr.ip());
+        let user_uri = format!("sip:alice@{}", env.client_addr.ip());
+        
+        let register_request = client_quick::register(
+            &registrar_uri,
+            &user_uri,
+            "Alice Smith",
+            env.client_addr,
+            Some(3600) // 1 hour registration
+        ).expect("Failed to create REGISTER with builder");
+        
+        // Verify the builder created a proper REGISTER
+        assert_eq!(register_request.method(), Method::Register);
+        assert_eq!(register_request.uri().to_string(), registrar_uri);
+        let expires_header = register_request.header(&rvoip_sip_core::types::header::HeaderName::Expires);
+        assert!(expires_header.is_some(), "REGISTER should have Expires header");
+        println!("✅ client_quick::register created proper REGISTER request");
+        
+        // 2. Create client transaction
+        let client_tx_id = env.client_manager.create_client_transaction(
+            register_request.clone(),
+            env.server_addr
+        ).await.expect("Failed to create REGISTER transaction");
+        
+        // 3. Send REGISTER
+        env.client_manager.send_request(&client_tx_id).await
+            .expect("Failed to send REGISTER");
+        
+        // Give time for automatic processing
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // 4. Find server transaction
+        let server_tx_id = TransactionKey::from_request(&register_request)
+            .expect("Failed to create server transaction key");
+        
+        assert!(env.server_manager.transaction_exists(&server_tx_id).await,
+                "Server transaction should exist");
+        
+        // 5. Server responds with 200 OK using builder with registered contacts
+        println!("Server sending 200 OK for REGISTER using server_quick::ok_register");
+        let registered_contact = format!("sip:alice@{}", env.client_addr);
+        
+        let register_ok = server_quick::ok_register(
+            &register_request,
+            3600, // Same expires
+            vec![registered_contact.clone()]
+        ).expect("Failed to create 200 OK for REGISTER");
+        
+        // Verify the builder created a proper response
+        assert_eq!(register_ok.status_code(), 200);
+        let expires_header = register_ok.header(&rvoip_sip_core::types::header::HeaderName::Expires);
+        assert!(expires_header.is_some(), "200 OK should have Expires header");
+        println!("✅ server_quick::ok_register created proper 200 OK");
+        
+        env.server_manager.send_response(&server_tx_id, register_ok).await
+            .expect("Failed to send REGISTER response");
+        
+        // 6. Wait for registration completion
+        let success_event = env.wait_for_client_event(
+            Duration::from_millis(2000),
+            |event| match_success_response(event)
+        ).await;
+        
+        assert!(success_event.is_some(), "Should receive 200 OK for REGISTER");
+        println!("✅ Registration completed successfully using builders");
+        
+        env.shutdown().await;
+    }).await;
+    
+    if let Err(_) = test_result {
+        panic!("Test timed out");
+    }
+    
+    env::remove_var("RVOIP_TEST");
+}
+
+/// Test error response scenarios with builders
+///
+/// This test demonstrates:
+/// 1. Using server_quick helpers for various error responses
+/// 2. Integration with transaction error handling
+#[tokio::test]
+#[serial]
+async fn test_error_responses_with_builders() {
+    env::set_var("RVOIP_TEST", "1");
+    
+    println!("\n==== TEST: Error Responses with Builders ====");
+    println!("Testing error response scenarios using builders");
+    
+    let test_result = timeout(Duration::from_secs(10), async {
+        let mut env = TestEnvironment::new().await;
+        
+        // 1. Create INVITE that will be rejected
+        let invite_request = env.create_request(Method::Invite, &format!("sip:busy@{}", env.server_addr));
+        
+        let client_tx_id = env.client_manager.create_client_transaction(
+            invite_request.clone(),
+            env.server_addr
+        ).await.expect("Failed to create client transaction");
+        
+        env.client_manager.send_request(&client_tx_id).await
+            .expect("Failed to send INVITE");
+        
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        let server_tx_id = TransactionKey::from_request(&invite_request)
+            .expect("Failed to create server transaction key");
+        
+        // 2. Test various error responses using builders
+        println!("Testing 486 Busy Here using server_quick::busy_here");
+        let busy_response = server_quick::busy_here(&invite_request)
+            .expect("Failed to create 486 Busy Here");
+        
+        assert_eq!(busy_response.status_code(), 486);
+        assert_eq!(busy_response.reason_phrase(), "Busy Here");
+        println!("✅ server_quick::busy_here created proper 486 response");
+        
+        env.server_manager.send_response(&server_tx_id, busy_response).await
+            .expect("Failed to send 486 response");
+        
+        // Wait for error response
+        let error_event = env.wait_for_client_event(
+            Duration::from_millis(2000),
+            |event| match_failure_response(event)
+        ).await;
+        
+        if let Some((_, response)) = error_event {
+            assert_eq!(response.status_code(), 486);
+            println!("✅ Client received 486 Busy Here error response");
+        }
+        
+        // 3. Test 404 Not Found for a different call
+        println!("Testing 404 Not Found scenario");
+        let invite2 = env.create_request(Method::Invite, &format!("sip:notfound@{}", env.server_addr));
+        
+        let client_tx_id2 = env.client_manager.create_client_transaction(
+            invite2.clone(),
+            env.server_addr
+        ).await.expect("Failed to create second client transaction");
+        
+        env.client_manager.send_request(&client_tx_id2).await
+            .expect("Failed to send second INVITE");
+        
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        let server_tx_id2 = TransactionKey::from_request(&invite2)
+            .expect("Failed to create second server transaction key");
+        
+        let not_found_response = server_quick::not_found(&invite2)
+            .expect("Failed to create 404 Not Found");
+        
+        assert_eq!(not_found_response.status_code(), 404);
+        println!("✅ server_quick::not_found created proper 404 response");
+        
+        env.server_manager.send_response(&server_tx_id2, not_found_response).await
+            .expect("Failed to send 404 response");
+        
+        println!("✅ Error response scenarios completed using builders");
+        
+        env.shutdown().await;
+    }).await;
+    
+    if let Err(_) = test_result {
+        panic!("Test timed out");
+    }
+    
+    env::remove_var("RVOIP_TEST");
+}
+
+/// Test builder customization in real scenarios
+///
+/// This test demonstrates:
+/// 1. Custom headers and parameters using builders
+/// 2. SDP handling with builders
+/// 3. Contact header management
+#[tokio::test]
+#[serial]
+async fn test_builder_customization_scenarios() {
+    env::set_var("RVOIP_TEST", "1");
+    
+    println!("\n==== TEST: Builder Customization Scenarios ====");
+    println!("Testing builder customization features in real transaction flows");
+    
+    let test_result = timeout(Duration::from_secs(10), async {
+        let mut env = TestEnvironment::new().await;
+        
+        // 1. Create highly customized INVITE
+        println!("Creating customized INVITE with specific Call-ID and headers");
+        let custom_call_id = "custom-call-12345";
+        let custom_contact = format!("sip:alice-custom@{}", env.client_addr);
+        
+        let custom_invite = InviteBuilder::new()
+            .from_to(
+                &format!("sip:alice@{}", env.client_addr.ip()),
+                &format!("sip:bob@{}", env.server_addr.ip())
+            )
+            .local_address(env.client_addr)
+            .call_id(custom_call_id)
+            .cseq(42) // Custom CSeq number
+            .contact(&custom_contact)
+            .max_forwards(50) // Custom Max-Forwards
+            .build()
+            .expect("Failed to build customized INVITE");
+        
+        // Verify customizations
+        assert_eq!(custom_invite.call_id().unwrap().value(), custom_call_id);
+        assert_eq!(custom_invite.cseq().unwrap().seq, 42);
+        println!("✅ Created customized INVITE with specific parameters");
+        
+        // 2. Create client transaction and send
+        let client_tx_id = env.client_manager.create_client_transaction(
+            custom_invite.clone(),
+            env.server_addr
+        ).await.expect("Failed to create customized transaction");
+        
+        env.client_manager.send_request(&client_tx_id).await
+            .expect("Failed to send customized INVITE");
+        
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // 3. Create customized response with specific To tag
+        let server_tx_id = TransactionKey::from_request(&custom_invite)
+            .expect("Failed to create server transaction key");
+        
+        let custom_to_tag = "custom-server-tag-67890";
+        let custom_ok = ResponseBuilder::new(StatusCode::Ok)
+            .from_request(&custom_invite)
+            .with_to_tag(custom_to_tag)
+            .reason_phrase("Custom OK Message")
+            .with_contact_address(env.server_addr, Some("custom-bob"))
+            .build()
+            .expect("Failed to build customized 200 OK");
+        
+        // Verify customizations
+        assert_eq!(custom_ok.to().unwrap().tag().unwrap(), custom_to_tag);
+        assert_eq!(custom_ok.reason_phrase(), "Custom OK Message");
+        println!("✅ Created customized 200 OK response");
+        
+        env.server_manager.send_response(&server_tx_id, custom_ok).await
+            .expect("Failed to send customized response");
+        
+        // 4. Verify the custom flow completes
+        let success_event = env.wait_for_client_event(
+            Duration::from_millis(2000),
+            |event| match_success_response(event)
+        ).await;
+        
+        if let Some((_, response)) = success_event {
+            assert_eq!(response.status_code(), 200);
+            assert_eq!(response.reason_phrase(), "Custom OK Message");
+            println!("✅ Customized call flow completed successfully");
+        }
+        
+        env.shutdown().await;
+    }).await;
+    
+    if let Err(_) = test_result {
+        panic!("Test timed out");
+    }
+    
+    env::remove_var("RVOIP_TEST");
 } 

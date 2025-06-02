@@ -1,13 +1,15 @@
 //! Unit tests for request routing functionality
 //!
-//! Tests request routing logic and dialog matching in isolation.
+//! Tests request routing logic and dialog matching using **REAL IMPLEMENTATIONS**.
 
 use rvoip_dialog_core::{Dialog, DialogState};
 use rvoip_sip_core::{Request, Method, HeaderName, TypedHeader, Uri};
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use uuid::Uuid;
 
-/// Test dialog tuple extraction for routing
+/// Test dialog tuple extraction for routing with real Dialog
 #[test]
-fn test_dialog_tuple_extraction() {
+fn test_dialog_tuple_extraction_real() {
     let dialog = Dialog::new(
         "routing-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -22,11 +24,13 @@ fn test_dialog_tuple_extraction() {
     assert_eq!(tuple.0, "routing-test-call-id");
     assert_eq!(tuple.1, "alice-tag");
     assert_eq!(tuple.2, "bob-tag");
+    
+    println!("✅ Real dialog tuple extraction working: ({}, {}, {})", tuple.0, tuple.1, tuple.2);
 }
 
-/// Test dialog tuple extraction with missing tags
+/// Test dialog tuple extraction with missing tags (real validation)
 #[test]
-fn test_dialog_tuple_extraction_missing_tags() {
+fn test_dialog_tuple_extraction_missing_tags_real() {
     // Dialog with missing remote tag
     let dialog_no_remote_tag = Dialog::new(
         "test-call-id".to_string(),
@@ -38,6 +42,7 @@ fn test_dialog_tuple_extraction_missing_tags() {
     );
     
     assert!(dialog_no_remote_tag.dialog_id_tuple().is_none());
+    println!("✅ Real dialog correctly rejects incomplete tuple (no remote tag)");
     
     // Dialog with missing local tag
     let dialog_no_local_tag = Dialog::new(
@@ -50,6 +55,7 @@ fn test_dialog_tuple_extraction_missing_tags() {
     );
     
     assert!(dialog_no_local_tag.dialog_id_tuple().is_none());
+    println!("✅ Real dialog correctly rejects incomplete tuple (no local tag)");
     
     // Dialog with both tags missing
     let dialog_no_tags = Dialog::new(
@@ -62,12 +68,13 @@ fn test_dialog_tuple_extraction_missing_tags() {
     );
     
     assert!(dialog_no_tags.dialog_id_tuple().is_none());
+    println!("✅ Real dialog correctly rejects incomplete tuple (no tags)");
 }
 
-/// Test request matching based on Call-ID and tags
+/// Test request matching with real SIP requests
 #[test]
-fn test_request_dialog_matching() {
-    // Create a dialog
+fn test_request_dialog_matching_real() {
+    // Create a real dialog
     let dialog = Dialog::new(
         "match-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -77,8 +84,8 @@ fn test_request_dialog_matching() {
         true,
     );
     
-    // Create a request that should match this dialog
-    let matching_request = create_request_with_headers(
+    // Create a real SIP request using proper builder
+    let matching_request = create_real_sip_request(
         Method::Bye,
         "sip:alice@example.com",
         "match-test-call-id",
@@ -90,15 +97,18 @@ fn test_request_dialog_matching() {
     let request_tuple = extract_dialog_tuple_from_request(&matching_request);
     let dialog_tuple = dialog.dialog_id_tuple().unwrap();
     
-    // For initiator, the tags are swapped in the request perspective
-    assert_eq!(request_tuple.0, dialog_tuple.0); // Same Call-ID
-    // Note: Tag matching would need proper From/To header analysis
+    // Verify Call-ID matches
+    assert_eq!(request_tuple.0, dialog_tuple.0);
+    println!("✅ Real SIP request Call-ID matches dialog: {}", request_tuple.0);
+    
+    // Note: Tag matching depends on dialog perspective (initiator vs recipient)
+    println!("✅ Real request/dialog matching validation complete");
 }
 
-/// Test in-dialog vs new dialog request classification
+/// Test in-dialog vs new dialog request classification with real methods
 #[test]
-fn test_request_classification() {
-    // Create established dialog
+fn test_request_classification_real() {
+    // Create real established dialog
     let mut dialog = Dialog::new(
         "established-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -108,8 +118,10 @@ fn test_request_classification() {
         true,
     );
     
-    // Set dialog to confirmed state
+    // Set dialog to confirmed state (realistic scenario)
     dialog.state = DialogState::Confirmed;
+    assert_eq!(dialog.state, DialogState::Confirmed);
+    println!("✅ Real dialog established in Confirmed state");
     
     // Test methods that are typically in-dialog
     let in_dialog_methods = vec![
@@ -121,6 +133,7 @@ fn test_request_classification() {
     
     for method in in_dialog_methods {
         assert!(is_in_dialog_method(&method), "Method {:?} should be in-dialog", method);
+        println!("✅ Method {:?} correctly classified as in-dialog", method);
     }
     
     // Test methods that typically create new dialogs
@@ -133,12 +146,13 @@ fn test_request_classification() {
     
     for method in new_dialog_methods {
         assert!(!is_in_dialog_method(&method), "Method {:?} should create new dialog", method);
+        println!("✅ Method {:?} correctly classified as new-dialog", method);
     }
 }
 
-/// Test route set handling for requests
+/// Test route set handling with real Dialog functionality
 #[test]
-fn test_route_set_handling() {
+fn test_route_set_handling_real() {
     let mut dialog = Dialog::new(
         "route-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -148,28 +162,30 @@ fn test_route_set_handling() {
         true,
     );
     
-    // Add some routes to the dialog
+    // Add real routes to the dialog
     let route1: Uri = "sip:proxy1.example.com".parse().unwrap();
     let route2: Uri = "sip:proxy2.example.com".parse().unwrap();
     dialog.route_set = vec![route1.clone(), route2.clone()];
     
-    // Create a request
+    // Create a real request using deprecated but functional method
+    #[allow(deprecated)]
     let request = dialog.create_request(Method::Bye);
     
     // The request should be created with the remote target
     assert_eq!(request.uri, dialog.remote_target);
+    println!("✅ Real request created with correct remote target: {}", request.uri);
     
-    // In a full implementation, Route headers would be added based on route_set
-    // For now, just verify the route set is available
+    // Verify the route set is available for request building
     assert_eq!(dialog.route_set.len(), 2);
     assert_eq!(dialog.route_set[0], route1);
     assert_eq!(dialog.route_set[1], route2);
+    println!("✅ Real route set properly maintained: {} routes", dialog.route_set.len());
 }
 
-/// Test dialog matching with different perspective (initiator vs recipient)
+/// Test dialog perspective matching with real Dialog instances
 #[test]
-fn test_dialog_perspective_matching() {
-    // Create initiator dialog
+fn test_dialog_perspective_matching_real() {
+    // Create real initiator dialog
     let initiator_dialog = Dialog::new(
         "perspective-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -179,7 +195,7 @@ fn test_dialog_perspective_matching() {
         true, // initiator
     );
     
-    // Create recipient dialog (same call, different perspective)
+    // Create real recipient dialog (same call, different perspective)
     let recipient_dialog = Dialog::new(
         "perspective-test-call-id".to_string(),
         "sip:bob@example.com".parse().unwrap(),
@@ -191,6 +207,7 @@ fn test_dialog_perspective_matching() {
     
     // Both should have the same Call-ID
     assert_eq!(initiator_dialog.call_id, recipient_dialog.call_id);
+    println!("✅ Real dialogs share same Call-ID: {}", initiator_dialog.call_id);
     
     // But different perspectives on local/remote
     assert_ne!(initiator_dialog.local_uri, recipient_dialog.local_uri);
@@ -201,11 +218,15 @@ fn test_dialog_perspective_matching() {
     // Verify perspective flags
     assert!(initiator_dialog.is_initiator);
     assert!(!recipient_dialog.is_initiator);
+    
+    println!("✅ Real dialog perspective handling working correctly");
+    println!("   Initiator: {} -> {}", initiator_dialog.local_uri, initiator_dialog.remote_uri);
+    println!("   Recipient: {} -> {}", recipient_dialog.local_uri, recipient_dialog.remote_uri);
 }
 
-/// Test sequence number validation for in-dialog requests
+/// Test sequence number validation with real Dialog functionality
 #[test]
-fn test_sequence_number_validation() {
+fn test_sequence_number_validation_real() {
     let mut dialog = Dialog::new(
         "seq-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -219,52 +240,82 @@ fn test_sequence_number_validation() {
     dialog.local_seq = 5;
     dialog.remote_seq = 3;
     
-    // Create requests and verify sequence number increments
-    let request1 = dialog.create_request(Method::Info);
+    println!("✅ Initial sequence numbers: local={}, remote={}", dialog.local_seq, dialog.remote_seq);
+    
+    // Create real requests and verify sequence number increments
+    #[allow(deprecated)]
+    let _request1 = dialog.create_request(Method::Info);
     assert_eq!(dialog.local_seq, 6);
+    println!("✅ INFO request incremented sequence to: {}", dialog.local_seq);
     
-    let request2 = dialog.create_request(Method::Bye);
+    #[allow(deprecated)]
+    let _request2 = dialog.create_request(Method::Bye);
     assert_eq!(dialog.local_seq, 7);
+    println!("✅ BYE request incremented sequence to: {}", dialog.local_seq);
     
-    // ACK should not increment
-    let ack_request = dialog.create_request(Method::Ack);
+    // ACK should not increment (RFC 3261 requirement)
+    #[allow(deprecated)]
+    let _ack_request = dialog.create_request(Method::Ack);
     assert_eq!(dialog.local_seq, 7); // Should remain the same
+    println!("✅ ACK request correctly did NOT increment sequence: {}", dialog.local_seq);
 }
 
-// Helper functions for testing
+/// Test dialog state transitions with real state management
+#[test]
+fn test_dialog_state_transitions_real() {
+    let mut dialog = Dialog::new(
+        "state-transition-test".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        Some("bob-tag".to_string()),
+        true,
+    );
+    
+    // Start in Initial state
+    assert_eq!(dialog.state, DialogState::Initial);
+    println!("✅ Real dialog starts in Initial state");
+    
+    // Test recovery mode transitions
+    dialog.enter_recovery_mode("Network issue");
+    assert_eq!(dialog.state, DialogState::Recovering);
+    assert!(dialog.is_recovering());
+    println!("✅ Real dialog entered recovery mode");
+    
+    // Test recovery completion
+    let recovered = dialog.complete_recovery();
+    assert!(recovered);
+    assert_eq!(dialog.state, DialogState::Confirmed);
+    assert!(!dialog.is_recovering());
+    println!("✅ Real dialog completed recovery to Confirmed state");
+    
+    // Test termination
+    dialog.terminate();
+    assert_eq!(dialog.state, DialogState::Terminated);
+    assert!(dialog.is_terminated());
+    println!("✅ Real dialog terminated successfully");
+}
 
-fn create_request_with_headers(
+// Helper functions for real SIP request creation and processing
+
+fn create_real_sip_request(
     method: Method,
     uri: &str,
     call_id: &str,
     from_tag: &str,
     to_tag: &str,
 ) -> Request {
-    let request_uri: Uri = uri.parse().unwrap();
-    let mut request = Request::new(method, request_uri);
+    let branch = format!("z9hG4bK-{}", Uuid::new_v4().to_string().replace("-", ""));
     
-    // Add Call-ID
-    request.headers.push(TypedHeader::CallId(
-        rvoip_sip_core::types::call_id::CallId(call_id.to_string())
-    ));
-    
-    // Add From header with tag
-    let from_uri: Uri = "sip:caller@example.com".parse().unwrap();
-    let mut from_addr = rvoip_sip_core::types::address::Address::new(from_uri);
-    from_addr.set_tag(from_tag);
-    request.headers.push(TypedHeader::From(
-        rvoip_sip_core::types::from::From(from_addr)
-    ));
-    
-    // Add To header with tag
-    let to_uri: Uri = "sip:callee@example.com".parse().unwrap();
-    let mut to_addr = rvoip_sip_core::types::address::Address::new(to_uri);
-    to_addr.set_tag(to_tag);
-    request.headers.push(TypedHeader::To(
-        rvoip_sip_core::types::to::To(to_addr)
-    ));
-    
-    request
+    SimpleRequestBuilder::new(method, uri)
+        .expect("Failed to create request builder")
+        .from("Caller", "sip:caller@example.com", Some(from_tag))
+        .to("Callee", "sip:callee@example.com", Some(to_tag))
+        .call_id(call_id)
+        .cseq(1)
+        .via("127.0.0.1:5060", "UDP", Some(&branch))
+        .max_forwards(70)
+        .build()
 }
 
 fn extract_dialog_tuple_from_request(request: &Request) -> (String, String, String) {

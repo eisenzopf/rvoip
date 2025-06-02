@@ -1392,11 +1392,15 @@ impl TransactionManager {
             TransactionEvent::TimerTriggered { transaction_id, .. } => Some(transaction_id),
             TransactionEvent::AckReceived { transaction_id, .. } => Some(transaction_id),
             TransactionEvent::CancelReceived { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::InviteRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::NonInviteRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::AckRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::CancelRequest { transaction_id, .. } => Some(transaction_id),
             // These events don't have a specific transaction ID
-            TransactionEvent::NewRequest { .. } => None,
             TransactionEvent::StrayResponse { .. } => None,
             TransactionEvent::StrayAck { .. } => None,
             TransactionEvent::StrayCancel { .. } => None,
+            TransactionEvent::StrayAckRequest { .. } => None,
             // Add other event types for completeness
             _ => None,
         };

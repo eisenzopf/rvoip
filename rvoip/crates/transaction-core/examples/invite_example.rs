@@ -12,7 +12,8 @@
  * 6. Session termination with BYE request/response exchange
  *
  * Unlike non-INVITE transactions, INVITE transactions:
- * - Require ACK for 2xx final responses (handled automatically)
+ * - Require ACK for 2xx final responses (sent by dialog layer/application)
+ * - ACK for non-2xx responses is handled automatically by transaction layer
  * - Use a more complex state machine (Initial → Calling → Proceeding → Completed → Terminated)
  * - Can receive multiple provisional responses
  * - Use different timers (Timer A/B for retransmissions, Timer D for cleanup)
@@ -31,31 +32,21 @@
  */
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip_core::{Method, Message, Request, Response, Uri};
-use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use rvoip_sip_core::types::status::StatusCode;
-use rvoip_sip_core::types::header::{HeaderName, TypedHeader};
-use rvoip_sip_core::types::content_type::ContentType;
-use rvoip_sip_core::types::content_length::ContentLength;
-use rvoip_sip_core::types::max_forwards::MaxForwards;
-
+use rvoip_sip_core::Method;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState, TransactionKey};
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+use rvoip_transaction_core::builders::{client_quick, server_quick};
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::fmt::format::FmtSpan;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup logging
     tracing_subscriber::fmt()
         .with_env_filter("rvoip=debug")
-        .with_span_events(FmtSpan::CLOSE)
         .init();
     
     // ------------- Server setup -----------------
@@ -122,9 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ------------- EXAMPLE: INVITE Call Flow -----------------
     info!("INVITE Call Flow using production APIs");
     
-    // Create an INVITE request with SDP content
-    let call_id = format!("invite-{}", Uuid::new_v4());
-    let from_tag = format!("tag-{}", Uuid::new_v4().simple());
+    // Create an INVITE request with SDP content using the convenience builder
+    let from_uri = format!("sip:client@{}", client_addr.ip());
+    let to_uri = format!("sip:server@{}", server_addr.ip());
     let sdp_content = r#"v=0
 o=client 123456 123456 IN IP4 127.0.0.1
 s=Session
@@ -133,16 +124,12 @@ t=0 0
 m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
     
-    let invite_request = SimpleRequestBuilder::new(Method::Invite, &format!("sip:server@{}", server_addr.ip()))?
-        .from("Client", &format!("sip:client@{}", client_addr.ip()), Some(&from_tag))
-        .to("Server", &format!("sip:server@{}", server_addr.ip()), None)
-        .call_id(&call_id)
-        .cseq(1)
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::ContentType(ContentType::from_str("application/sdp").unwrap()))
-        .header(TypedHeader::ContentLength(ContentLength::new(sdp_content.len() as u32)))
-        .body(sdp_content.as_bytes().to_vec())
-        .build();
+    let invite_request = client_quick::invite(&from_uri, &to_uri, client_addr, Some(sdp_content))
+        .expect("Failed to create INVITE request");
+    
+    // Extract dialog information before moving the request
+    let call_id = invite_request.call_id().unwrap().value().to_string();
+    let from_tag = invite_request.from().and_then(|f| f.tag()).unwrap_or("default-from-tag").to_string();
     
     // Create a client transaction for the INVITE request
     let invite_tx_id = client_tm.create_client_transaction(invite_request, server_addr).await?;
@@ -192,7 +179,14 @@ a=rtpmap:0 PCMU/8000"#;
                         info!("✅ INVITE received final response: {} {}", 
                               response.status_code(), response.reason_phrase());
                         received_200_ok = true;
-                        // Note: ACK is handled automatically by the transaction layer
+                        
+                        // According to RFC 3261: ACK for 2xx responses must be sent by the dialog layer
+                        // The transaction layer only handles ACK automatically for non-2xx responses
+                        if let Err(e) = client_tm.send_ack_for_2xx(&invite_tx_id, &response).await {
+                            error!("❌ Failed to send ACK for 2xx: {}", e);
+                        } else {
+                            info!("📤 Sent ACK for 2xx response (RFC 3261 compliance)");
+                        }
                     },
                     TransactionEvent::FailureResponse { transaction_id, response }
                         if transaction_id == invite_tx_id => {
@@ -217,15 +211,19 @@ a=rtpmap:0 PCMU/8000"#;
     // ------------- Session Termination with BYE -----------------
     info!("Session termination with BYE using production APIs");
     
-    // Create a BYE request to terminate the session
-    let bye_request = SimpleRequestBuilder::new(Method::Bye, &format!("sip:server@{}", server_addr.ip()))?
-        .from("Client", &format!("sip:client@{}", client_addr.ip()), Some(&from_tag))
-        .to("Server", &format!("sip:server@{}", server_addr.ip()), None)
-        .call_id(&call_id)
-        .cseq(2) // Increment CSeq for new request in same dialog
-        .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-        .header(TypedHeader::ContentLength(ContentLength::new(0)))
-        .build();
+    // Extract dialog information from the INVITE request for the BYE
+    let to_tag = "default-to-tag".to_string(); // In real usage, this would come from the 200 OK response
+    
+    // Create a BYE request to terminate the session using the new builder
+    let bye_request = client_quick::bye(
+        &call_id,
+        &from_uri,
+        &from_tag,
+        &to_uri,
+        &to_tag,
+        client_addr,
+        2, // Increment CSeq for new request in same dialog
+    ).expect("Failed to create BYE request");
     
     // Create a client transaction for the BYE request
     let bye_tx_id = client_tm.create_client_transaction(bye_request, server_addr).await?;
@@ -297,130 +295,72 @@ async fn handle_server_events(
     server_tm: TransactionManager,
     mut events: mpsc::Receiver<TransactionEvent>,
 ) {
+    info!("🟡 Server event handler started - waiting for events...");
+    
     while let Some(event) = events.recv().await {
+        info!("🟡 Server received event: {:?}", event);
+        
         match event {
-            TransactionEvent::NewRequest { transaction_id, request, source, .. } => {
-                info!("Server received request: {:?} from {}", request.method(), source);
+            TransactionEvent::InviteRequest { transaction_id, request, source, .. } => {
+                info!("🔹 Server received INVITE request from {}", source);
                 
-                // Create a server transaction using proper API
-                let server_tx = match server_tm.create_server_transaction(
-                    request.clone(),
-                    source,
-                ).await {
-                    Ok(tx) => tx.id().clone(),
-                    Err(e) => {
-                        error!("Failed to create server transaction: {}", e);
-                        continue;
-                    }
-                };
+                // Send 180 Ringing
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let ringing = server_quick::ringing(&request, None)
+                    .expect("Failed to create 180 Ringing response");
                 
-                // Process based on request method using automatic state machine
+                if let Err(e) = server_tm.send_response(&transaction_id, ringing).await {
+                    error!("Failed to send 180 Ringing: {}", e);
+                    continue;
+                }
+                info!("📞 Server sent 180 Ringing");
+                
+                // Send 200 OK after a delay
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let sdp_answer = "v=0\r\no=server 456 789 IN IP4 127.0.0.1\r\n...";
+                let contact = format!("sip:server@{}", source.ip());
+                let ok = server_quick::ok_invite(&request, Some(sdp_answer.to_string()), contact)
+                    .expect("Failed to create 200 OK response");
+                
+                if let Err(e) = server_tm.send_response(&transaction_id, ok).await {
+                    error!("Failed to send 200 OK: {}", e);
+                    continue;
+                }
+                info!("✅ Server sent 200 OK");
+            },
+            TransactionEvent::AckRequest { transaction_id, request, source, .. } => {
+                info!("📨 Server received ACK for transaction {} from {}", transaction_id, source);
+                info!("🎉 INVITE call flow completed successfully!");
+            },
+            TransactionEvent::NonInviteRequest { transaction_id, request, source, .. } => {
+                info!("🔹 Server received {} request from {}", request.method(), source);
+                
                 match request.method() {
-                    Method::Invite => {
-                        process_invite_request(server_tm.clone(), server_tx, request).await;
-                    },
                     Method::Bye => {
-                        process_bye_request(server_tm.clone(), server_tx, request).await;
+                        let ok = server_quick::ok_bye(&request)
+                            .expect("Failed to create BYE response");
+                        
+                        if let Err(e) = server_tm.send_response(&transaction_id, ok).await {
+                            error!("Failed to send BYE response: {}", e);
+                        } else {
+                            info!("📞 Server sent 200 OK to BYE - call terminated");
+                        }
                     },
                     _ => {
-                        // For other methods, just send a 200 OK
-                        let ok = SimpleResponseBuilder::response_from_request(
-                            &request,
-                            StatusCode::Ok,
-                            Some("OK"),
-                        ).build();
-                        
-                        if let Err(e) = server_tm.send_response(&server_tx, ok).await {
-                            error!("Failed to send OK response: {}", e);
-                        } else {
-                            info!("✅ Server sent 200 OK response");
-                        }
+                        warn!("🤷 Server received unexpected {} request", request.method());
                     }
                 }
             },
-            TransactionEvent::StateChanged { transaction_id, previous_state, new_state } => {
-                debug!("Server transaction {} changed state: {:?} -> {:?}",
-                    transaction_id, previous_state, new_state);
+            TransactionEvent::CancelReceived { transaction_id, cancel_request, .. } => {
+                info!("🚫 Server received CANCEL for transaction {}", transaction_id);
+                // The transaction layer automatically handles CANCEL responses
+                info!("📞 Call cancelled by client");
             },
-            TransactionEvent::TransportError { transaction_id, .. } => {
-                error!("Server transport error for transaction {}", transaction_id);
-            },
-            _ => {}
+            other_event => {
+                debug!("🔄 Server received other event: {:?}", other_event);
+            }
         }
     }
-}
-
-async fn process_invite_request(
-    server_tm: TransactionManager,
-    transaction_id: TransactionKey,
-    request: Request,
-) {
-    // For INVITE, we send provisional responses and then a final response
     
-    // The 100 Trying is sent automatically by the transaction layer
-    
-    // Wait a bit to simulate processing, then send 180 Ringing
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    let ringing = SimpleResponseBuilder::response_from_request(
-        &request,
-        StatusCode::Ringing,
-        Some("Ringing"),
-    ).build();
-    
-    if let Err(e) = server_tm.send_response(&transaction_id, ringing).await {
-        error!("Failed to send Ringing response: {}", e);
-    } else {
-        info!("✅ Server sent 180 Ringing response");
-    }
-    
-    // Wait a bit more to simulate user answering, then send 200 OK
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    
-    // Create a 200 OK response with SDP answer
-    let sdp_answer = r#"v=0
-o=server 654321 654321 IN IP4 127.0.0.1
-s=Session
-c=IN IP4 127.0.0.1
-t=0 0
-m=audio 5006 RTP/AVP 0
-a=rtpmap:0 PCMU/8000"#;
-    
-    let ok = SimpleResponseBuilder::response_from_request(
-        &request,
-        StatusCode::Ok,
-        Some("OK"),
-    )
-    .header(TypedHeader::ContentType(ContentType::from_str("application/sdp").unwrap()))
-    .header(TypedHeader::ContentLength(ContentLength::new(sdp_answer.len() as u32)))
-    .body(sdp_answer.as_bytes().to_vec())
-    .build();
-    
-    if let Err(e) = server_tm.send_response(&transaction_id, ok).await {
-        error!("Failed to send OK response: {}", e);
-    } else {
-        info!("✅ Server sent 200 OK response with SDP answer");
-    }
-}
-
-async fn process_bye_request(
-    server_tm: TransactionManager,
-    transaction_id: TransactionKey,
-    request: Request,
-) {
-    // For BYE, just send 200 OK immediately
-    let ok = SimpleResponseBuilder::response_from_request(
-        &request,
-        StatusCode::Ok,
-        Some("OK"),
-    ).build();
-    
-    if let Err(e) = server_tm.send_response(&transaction_id, ok).await {
-        error!("Failed to send BYE response: {}", e);
-    } else {
-        info!("✅ Server sent 200 OK response to BYE");
-    }
-}
-
-// Import for parsing content type
-use std::str::FromStr; 
+    info!("🛑 Server event handler shutting down");
+} 

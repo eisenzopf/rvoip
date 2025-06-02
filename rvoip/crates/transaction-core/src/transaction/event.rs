@@ -69,18 +69,6 @@ use crate::transaction::{TransactionKey, TransactionState};
 #[derive(Debug, Clone)]
 pub enum TransactionEvent {
     // --- Request Processing (Events primarily for Server Transactions) ---
-    /// A new SIP request has been received that has successfully initiated a new server transaction.
-    ///
-    /// The TU is responsible for processing this request and subsequently using the
-    /// `TransactionManager` to send one or more responses.
-    NewRequest {
-        /// The unique identifier for the newly created server transaction.
-        transaction_id: TransactionKey,
-        /// The full SIP request message that initiated the transaction.
-        request: Request,
-        /// The network address from which the request was received.
-        source: SocketAddr,
-    },
     /// An ACK request was received, matching an Invite Server Transaction that had previously
     /// sent a non-2xx final response.
     ///
@@ -387,17 +375,6 @@ mod tests {
             response,
         };
         assert!(matches!(event, TransactionEvent::FailureResponse { .. }));
-    }
-
-    #[test]
-    fn it_builds_request_received_event() {
-        let request = Request::new(Method::Register, Uri::sip("test.com"));
-        let event = TransactionEvent::NewRequest {
-            transaction_id: TransactionKey::new("branch101".to_string(), Method::Register, true),
-            request,
-            source: "127.0.0.1:5060".parse().unwrap(),
-        };
-        assert!(matches!(event, TransactionEvent::NewRequest { .. }));
     }
 
     #[test]

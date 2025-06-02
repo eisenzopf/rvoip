@@ -79,15 +79,18 @@ async fn test_rfc3261_sequence_number_handling() {
     // Initial sequence number should be 0
     assert_eq!(dialog.local_seq, 0);
     
-    // Creating a request should increment sequence number
+    // Creating a request should increment sequence number (deprecated but still functional)
+    #[allow(deprecated)]
     let _request1 = dialog.create_request(Method::Bye);
     assert_eq!(dialog.local_seq, 1);
     
     // Another request should increment further
+    #[allow(deprecated)]
     let _request2 = dialog.create_request(Method::Info);
     assert_eq!(dialog.local_seq, 2);
     
     // ACK requests should NOT increment sequence number (RFC 3261)
+    #[allow(deprecated)]
     let _ack_request = dialog.create_request(Method::Ack);
     assert_eq!(dialog.local_seq, 2); // Should remain the same
 }
@@ -171,6 +174,7 @@ async fn test_rfc3261_request_creation_within_dialog() {
         true,
     );
     
+    #[allow(deprecated)]
     let request = dialog.create_request(Method::Bye);
     
     // Verify required headers are present
@@ -248,12 +252,11 @@ fn create_mock_200_ok_response() -> Response {
         rvoip_sip_core::types::to::To(to_addr)
     ));
     
-    // Add Contact header
+    // Add Contact header (simplified)
     let contact_uri: Uri = "sip:bob@192.168.1.100:5060".parse().unwrap();
     let contact_addr = rvoip_sip_core::types::address::Address::new(contact_uri);
     let contact_param = rvoip_sip_core::types::contact::ContactParamInfo {
         address: contact_addr,
-        params: Vec::new(),
     };
     response.headers.push(TypedHeader::Contact(
         rvoip_sip_core::types::contact::Contact(vec![
@@ -288,12 +291,11 @@ fn create_mock_180_ringing_response() -> Response {
         rvoip_sip_core::types::to::To(to_addr)
     ));
     
-    // Add Contact header
+    // Add Contact header (simplified)
     let contact_uri: Uri = "sip:bob@192.168.1.100:5060".parse().unwrap();
     let contact_addr = rvoip_sip_core::types::address::Address::new(contact_uri);
     let contact_param = rvoip_sip_core::types::contact::ContactParamInfo {
         address: contact_addr,
-        params: Vec::new(),
     };
     response.headers.push(TypedHeader::Contact(
         rvoip_sip_core::types::contact::Contact(vec![

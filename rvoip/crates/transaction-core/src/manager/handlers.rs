@@ -416,20 +416,13 @@ pub async fn handle_transport_message(
                     drop(server_txs);
                     
                     // If we get here, this is a new request
-                    debug!(%tx_id, method = ?request.method(), "Received new request, notify TU");
+                    debug!(%tx_id, method = ?request.method(), "Received new request, delegate to proper handler");
                     
-                    // Notify TU about new request
-                    TransactionManager::broadcast_event(
-                        TransactionEvent::NewRequest {
-                            transaction_id: tx_id,
-                            request,
-                            source,
-                        },
-                        events_tx,
-                        event_subscribers,
-                        None,
-                        None,
-                    ).await;
+                    // Delegate to the actual request handler which will create appropriate transactions
+                    // and generate the correct InviteRequest or NonInviteRequest events
+                    if let Err(e) = manager.handle_request(request, source).await {
+                        warn!(error=%e, "Failed to handle new request");
+                    }
                     
                     return Ok(());
                 },

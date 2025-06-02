@@ -21,7 +21,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use rvoip_dialog_core::api::{DialogClient, DialogServer};
+//! use rvoip_dialog_core::api::{DialogClient, DialogServer, DialogApi};
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]

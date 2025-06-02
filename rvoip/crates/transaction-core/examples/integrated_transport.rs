@@ -26,15 +26,12 @@
  */
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip_core::{Method, Request, Response, Message};
-use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use rvoip_sip_core::types::status::StatusCode;
-
+use rvoip_sip_core::Method;
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionState, TransactionKey};
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+use rvoip_transaction_core::builders::{client_quick, server_quick};
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -109,15 +106,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn a task to handle server events
     tokio::spawn(handle_server_events(server_tm.clone(), server_events));
     
-    // Create a REGISTER request
-    let register_request = SimpleRequestBuilder::new(Method::Register, &format!("sip:server@{}", server_addr.ip()))
-        .unwrap()
-        .from("client", &format!("sip:client@{}", client_addr.ip()), Some("tag1"))
-        .to("server", &format!("sip:server@{}", server_addr.ip()), None)
-        .call_id(&format!("call-{}", uuid::Uuid::new_v4()))
-        .cseq(1)
-        .contact(&format!("sip:client@{}", client_addr.ip()), None)
-        .build();
+    // Create a REGISTER request using the new builder
+    let registrar_uri = format!("sip:server@{}", server_addr.ip());
+    let user_uri = format!("sip:client@{}", client_addr.ip());
+    
+    let register_request = client_quick::register(
+        &registrar_uri,
+        &user_uri,
+        "Client UA",
+        client_addr,
+        Some(3600), // 1 hour registration
+    ).expect("Failed to create REGISTER request");
     
     // Create a client transaction for the REGISTER request
     let tx_id = client_tm.create_client_transaction(register_request, server_addr).await?;
@@ -216,37 +215,21 @@ async fn handle_server_events(
 ) {
     while let Some(event) = events.recv().await {
         match event {
-            TransactionEvent::NewRequest { transaction_id, request, source, .. } => {
+            TransactionEvent::NonInviteRequest { transaction_id, request, source, .. } => {
                 info!("Server received request: {:?} from {}", request.method(), source);
                 
-                // Create a server transaction using proper API
-                let server_tx = match server_tm.create_server_transaction(
-                    request.clone(),
-                    source,
-                ).await {
-                    Ok(tx) => tx,
-                    Err(e) => {
-                        error!("Failed to create server transaction: {}", e);
-                        continue;
-                    }
-                };
-                
-                let tx_id = server_tx.id().clone();
-                
-                // For REGISTER, send responses using proper API
+                // For REGISTER, send responses using proper API and new builders
                 if request.method() == Method::Register {
                     // The 100 Trying is sent automatically by the transaction layer
                     // Wait a bit to simulate processing (this would be real business logic)
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     
-                    // Send 200 OK response
-                    let ok = SimpleResponseBuilder::response_from_request(
-                        &request,
-                        StatusCode::Ok,
-                        Some("OK"),
-                    ).build();
+                    // Send 200 OK response with registered contacts using the new builder
+                    let contact = format!("sip:client@{}", source.ip());
+                    let ok = server_quick::ok_register(&request, 3600, vec![contact])
+                        .expect("Failed to create 200 OK REGISTER response");
                     
-                    if let Err(e) = server_tm.send_response(&tx_id, ok).await {
+                    if let Err(e) = server_tm.send_response(&transaction_id, ok).await {
                         error!("Failed to send OK response: {}", e);
                     } else {
                         info!("✅ Server sent 200 OK response");

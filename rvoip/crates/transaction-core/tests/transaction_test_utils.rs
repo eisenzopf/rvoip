@@ -15,6 +15,7 @@ use rvoip_sip_transport::{Transport, Error as TransportError, TransportEvent};
 use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
 use rvoip_transaction_core::transaction::TransactionState;
 use rvoip_transaction_core::timer::TimerSettings;
+use rvoip_transaction_core::builders::{client_quick, server_quick};
 
 /// Enhanced mock transport for integration testing that tracks sent messages and allows
 /// injecting transport events.
@@ -262,32 +263,135 @@ impl TestEnvironment {
     
     /// Create a SIP request of the specified method
     pub fn create_request(&self, method: Method, to_uri: &str) -> Request {
-        let mut builder = SimpleRequestBuilder::new(method, to_uri)
-            .expect("Failed to create request builder");
-            
-        let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
-        let call_id = format!("test-call-{}", Uuid::new_v4().to_string().replace("-", ""));
-        let from_tag = format!("from-tag-{}", Uuid::new_v4().to_string().replace("-", "").chars().take(8).collect::<String>());
-        
-        let from_uri = format!("sip:client@{}", self.client_addr);
-        
-        builder = builder
-            .from("Client UA", &from_uri, Some(&from_tag))
-            .to("Server UA", to_uri, None)
-            .call_id(&call_id)
-            .cseq(1)
-            .via(&self.client_addr.to_string(), "UDP", Some(&branch))
-            .max_forwards(70)
-            .header(TypedHeader::ContentLength(ContentLength::new(0)));
-            
-        builder.build()
+        match method {
+            Method::Invite => {
+                // Use the new INVITE builder
+                let from_uri = format!("sip:client@{}", self.client_addr);
+                client_quick::invite(&from_uri, to_uri, self.client_addr, None)
+                    .expect("Failed to create INVITE request")
+            },
+            Method::Bye => {
+                // For BYE, we need dialog information - fallback to manual construction for now
+                // In real usage, dialog-core would provide this information
+                let mut builder = SimpleRequestBuilder::new(method, to_uri)
+                    .expect("Failed to create request builder");
+                    
+                let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
+                let call_id = format!("test-call-{}", Uuid::new_v4().to_string().replace("-", ""));
+                let from_tag = format!("from-tag-{}", Uuid::new_v4().to_string().replace("-", "").chars().take(8).collect::<String>());
+                let to_tag = format!("to-tag-{}", Uuid::new_v4().to_string().replace("-", "").chars().take(8).collect::<String>());
+                
+                let from_uri = format!("sip:client@{}", self.client_addr);
+                
+                builder = builder
+                    .from("Client UA", &from_uri, Some(&from_tag))
+                    .to("Server UA", to_uri, Some(&to_tag))
+                    .call_id(&call_id)
+                    .cseq(2) // BYE typically has a higher CSeq
+                    .via(&self.client_addr.to_string(), "UDP", Some(&branch))
+                    .max_forwards(70)
+                    .header(TypedHeader::ContentLength(ContentLength::new(0)));
+                    
+                builder.build()
+            },
+            Method::Register => {
+                // Use the new REGISTER builder
+                let user_uri = format!("sip:client@{}", self.client_addr.ip());
+                client_quick::register(to_uri, &user_uri, "Client UA", self.client_addr, Some(3600))
+                    .expect("Failed to create REGISTER request")
+            },
+            _ => {
+                // For other methods, use manual construction
+                let mut builder = SimpleRequestBuilder::new(method, to_uri)
+                    .expect("Failed to create request builder");
+                    
+                let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
+                let call_id = format!("test-call-{}", Uuid::new_v4().to_string().replace("-", ""));
+                let from_tag = format!("from-tag-{}", Uuid::new_v4().to_string().replace("-", "").chars().take(8).collect::<String>());
+                
+                let from_uri = format!("sip:client@{}", self.client_addr);
+                
+                builder = builder
+                    .from("Client UA", &from_uri, Some(&from_tag))
+                    .to("Server UA", to_uri, None)
+                    .call_id(&call_id)
+                    .cseq(1)
+                    .via(&self.client_addr.to_string(), "UDP", Some(&branch))
+                    .max_forwards(70)
+                    .header(TypedHeader::ContentLength(ContentLength::new(0)));
+                    
+                builder.build()
+            }
+        }
     }
     
     /// Create a response for the given request
     pub fn create_response(&self, request: &Request, status_code: StatusCode, reason: Option<&str>) -> Response {
-        SimpleResponseBuilder::response_from_request(request, status_code, reason)
-            .header(TypedHeader::ContentLength(ContentLength::new(0)))
-            .build()
+        match status_code {
+            StatusCode::Trying => {
+                // Use the new server quick builders
+                server_quick::trying(request)
+                    .expect("Failed to create 100 Trying response")
+            },
+            StatusCode::Ringing => {
+                // Use the new server quick builders
+                let contact = format!("sip:server@{}", self.server_addr);
+                server_quick::ringing(request, Some(contact))
+                    .expect("Failed to create 180 Ringing response")
+            },
+            StatusCode::Ok => {
+                // Use the new server quick builders for different request types
+                match request.method() {
+                    Method::Invite => {
+                        let contact = format!("sip:server@{}", self.server_addr);
+                        server_quick::ok_invite(request, None, contact)
+                            .expect("Failed to create 200 OK for INVITE")
+                    },
+                    Method::Bye => {
+                        server_quick::ok_bye(request)
+                            .expect("Failed to create 200 OK for BYE")
+                    },
+                    Method::Register => {
+                        let contact = format!("sip:client@{}", self.client_addr);
+                        server_quick::ok_register(request, 3600, vec![contact])
+                            .expect("Failed to create 200 OK for REGISTER")
+                    },
+                    Method::Options => {
+                        let allow_methods = vec![Method::Invite, Method::Ack, Method::Bye, Method::Cancel, Method::Options];
+                        server_quick::ok_options(request, allow_methods)
+                            .expect("Failed to create 200 OK for OPTIONS")
+                    },
+                    _ => {
+                        // Fallback to manual construction for other methods
+                        SimpleResponseBuilder::response_from_request(request, status_code, reason)
+                            .header(TypedHeader::ContentLength(ContentLength::new(0)))
+                            .build()
+                    }
+                }
+            },
+            StatusCode::BusyHere => {
+                server_quick::busy_here(request)
+                    .expect("Failed to create 486 Busy Here response")
+            },
+            StatusCode::RequestTerminated => {
+                server_quick::request_terminated(request)
+                    .expect("Failed to create 487 Request Terminated response")
+            },
+            StatusCode::NotFound => {
+                server_quick::not_found(request)
+                    .expect("Failed to create 404 Not Found response")
+            },
+            StatusCode::ServerInternalError => {
+                server_quick::server_error(request, reason.map(|s| s.to_string()))
+                    .expect("Failed to create 500 Server Internal Error response")
+            },
+            _ => {
+                // Fallback to manual construction for other status codes
+                SimpleResponseBuilder::response_from_request(request, status_code, reason)
+                    .header(TypedHeader::ContentLength(ContentLength::new(0)))
+                    .build()
+            }
+        }
     }
     
     /// Create a CANCEL request for an INVITE request
@@ -415,9 +519,18 @@ impl TestEnvironment {
     }
 }
 
-/// Match a NewRequest event
-pub fn match_new_request(event: &TransactionEvent) -> Option<(TransactionKey, Request, SocketAddr)> {
-    if let TransactionEvent::NewRequest { transaction_id, request, source, .. } = event {
+/// Match an InviteRequest event
+pub fn match_invite_request(event: &TransactionEvent) -> Option<(TransactionKey, Request, SocketAddr)> {
+    if let TransactionEvent::InviteRequest { transaction_id, request, source, .. } = event {
+        Some((transaction_id.clone(), request.clone(), *source))
+    } else {
+        None
+    }
+}
+
+/// Match a NonInviteRequest event
+pub fn match_non_invite_request(event: &TransactionEvent) -> Option<(TransactionKey, Request, SocketAddr)> {
+    if let TransactionEvent::NonInviteRequest { transaction_id, request, source, .. } = event {
         Some((transaction_id.clone(), request.clone(), *source))
     } else {
         None

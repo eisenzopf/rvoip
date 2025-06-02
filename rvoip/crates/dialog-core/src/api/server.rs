@@ -32,7 +32,7 @@ use super::{
 /// ## Example Usage
 /// 
 /// ```rust,no_run
-/// use rvoip_dialog_core::api::DialogServer;
+/// use rvoip_dialog_core::api::{DialogServer, DialogApi};
 /// use tokio::sync::mpsc;
 /// 
 /// #[tokio::main]
