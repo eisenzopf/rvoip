@@ -9,6 +9,9 @@ use tokio::sync::mpsc;
 use tracing::{info, debug};
 
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
+use rvoip_transaction_core::server::builders::ResponseBuilder;
+use rvoip_transaction_core::client::builders::{InviteBuilder, ByeBuilder};
+use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
 use rvoip_sip_core::{Uri, Method, Response, StatusCode};
 
 use crate::manager::DialogManager;
@@ -376,7 +379,7 @@ impl DialogClient {
     /// Build a SIP response with automatic header generation
     /// 
     /// Convenience method for creating properly formatted SIP responses
-    /// with correct headers and routing information.
+    /// with correct headers and routing information using Phase 3 dialog functions.
     /// 
     /// # Arguments
     /// * `transaction_id` - Transaction to respond to
@@ -391,13 +394,88 @@ impl DialogClient {
         status_code: StatusCode,
         body: Option<String>
     ) -> ApiResult<Response> {
-        debug!("Building response with status {} for transaction {}", status_code, transaction_id);
+        debug!("Building response with status {} for transaction {} using Phase 3 functions", status_code, transaction_id);
         
-        // TODO: Implement response building when available in DialogManager
-        // For now, return an error indicating this needs implementation
-        Err(ApiError::Internal {
-            message: "Response building not yet implemented - use send_response() with pre-built Response".to_string()
-        })
+        // Get original request from transaction manager
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use Phase 3 dialog quick function for instant response creation - ONE LINER!
+        let response = dialog_quick::response_for_dialog_transaction(
+            transaction_id.to_string(),
+            original_request,
+            None, // No specific dialog ID
+            status_code,
+            self.dialog_manager.local_address,
+            body,
+            None // No custom reason
+        ).map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build response using Phase 3 functions: {}", e) 
+        })?;
+        
+        debug!("Successfully built response with status {} for transaction {} using Phase 3 functions", status_code, transaction_id);
+        Ok(response)
+    }
+    
+    /// Build a dialog-aware response with enhanced context
+    /// 
+    /// This method provides dialog-aware response building using Phase 3 dialog utilities
+    /// to ensure proper response construction for dialog transactions.
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `dialog_id` - Dialog ID for context
+    /// * `status_code` - SIP status code
+    /// * `body` - Optional response body
+    /// 
+    /// # Returns
+    /// Built SIP response with dialog awareness
+    pub async fn build_dialog_response(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+        status_code: StatusCode,
+        body: Option<String>
+    ) -> ApiResult<Response> {
+        debug!("Building dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+               status_code, transaction_id, dialog_id);
+        
+        // Get original request from transaction manager
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use Phase 3 dialog quick function with dialog context - ONE LINER!
+        let response = dialog_quick::response_for_dialog_transaction(
+            transaction_id.to_string(),
+            original_request,
+            Some(dialog_id.to_string()),
+            status_code,
+            self.dialog_manager.local_address,
+            body,
+            None // No custom reason
+        ).map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build dialog response using Phase 3 functions: {}", e) 
+        })?;
+        
+        debug!("Successfully built dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+               status_code, transaction_id, dialog_id);
+        Ok(response)
     }
     
     /// Send a status response with automatic response building
@@ -420,10 +498,14 @@ impl DialogClient {
     ) -> ApiResult<()> {
         debug!("Sending status response {} for transaction {}", status_code, transaction_id);
         
-        // TODO: Implement when response building is available
-        Err(ApiError::Internal {
-            message: "Status response sending not yet implemented - use send_response() with pre-built Response".to_string()
-        })
+        // Build the response using our build_response method
+        let response = self.build_response(transaction_id, status_code, reason).await?;
+        
+        // Send the response using the dialog manager
+        self.send_response(transaction_id, response).await?;
+        
+        debug!("Successfully sent status response {} for transaction {}", status_code, transaction_id);
+        Ok(())
     }
     
     // **NEW**: SIP method-specific convenience methods
@@ -598,4 +680,4 @@ impl DialogApi for DialogClient {
             },
         }
     }
-} 
+}

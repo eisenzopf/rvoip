@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{info, debug, warn};
 
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
+use rvoip_transaction_core::server::builders::{ResponseBuilder, InviteResponseBuilder};
+use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
 use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
 
 use crate::manager::DialogManager;
@@ -399,7 +401,7 @@ impl DialogServer {
     /// Build a SIP response with automatic header generation
     /// 
     /// Convenience method for creating properly formatted SIP responses
-    /// with correct headers and routing information.
+    /// with correct headers and routing information using Phase 3 dialog functions.
     /// 
     /// # Arguments
     /// * `transaction_id` - Transaction to respond to
@@ -414,13 +416,88 @@ impl DialogServer {
         status_code: StatusCode,
         body: Option<String>
     ) -> ApiResult<Response> {
-        debug!("Building response with status {} for transaction {}", status_code, transaction_id);
+        debug!("Building response with status {} for transaction {} using Phase 3 functions", status_code, transaction_id);
         
-        // TODO: Implement response building when available in DialogManager
-        // For now, return an error indicating this needs implementation
-        Err(ApiError::Internal {
-            message: "Response building not yet implemented - use send_response() with pre-built Response".to_string()
-        })
+        // Get original request from transaction manager
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use Phase 3 dialog quick function for instant response creation - ONE LINER!
+        let response = dialog_quick::response_for_dialog_transaction(
+            transaction_id.to_string(),
+            original_request,
+            None, // No specific dialog ID
+            status_code,
+            self.dialog_manager.local_address,
+            body,
+            None // No custom reason
+        ).map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build response using Phase 3 functions: {}", e) 
+        })?;
+        
+        debug!("Successfully built response with status {} for transaction {} using Phase 3 functions", status_code, transaction_id);
+        Ok(response)
+    }
+    
+    /// Build a dialog-aware response with enhanced context
+    /// 
+    /// This method provides dialog-aware response building using Phase 3 dialog utilities
+    /// to ensure proper response construction for dialog transactions.
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `dialog_id` - Dialog ID for context
+    /// * `status_code` - SIP status code
+    /// * `body` - Optional response body
+    /// 
+    /// # Returns
+    /// Built SIP response with dialog awareness
+    pub async fn build_dialog_response(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+        status_code: StatusCode,
+        body: Option<String>
+    ) -> ApiResult<Response> {
+        debug!("Building dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+               status_code, transaction_id, dialog_id);
+        
+        // Get original request from transaction manager
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use Phase 3 dialog quick function with dialog context - ONE LINER!
+        let response = dialog_quick::response_for_dialog_transaction(
+            transaction_id.to_string(),
+            original_request,
+            Some(dialog_id.to_string()),
+            status_code,
+            self.dialog_manager.local_address,
+            body,
+            None // No custom reason
+        ).map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build dialog response using Phase 3 functions: {}", e) 
+        })?;
+        
+        debug!("Successfully built dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+               status_code, transaction_id, dialog_id);
+        Ok(response)
     }
     
     /// Send a status response with automatic response building
@@ -443,10 +520,201 @@ impl DialogServer {
     ) -> ApiResult<()> {
         debug!("Sending status response {} for transaction {}", status_code, transaction_id);
         
-        // TODO: Implement when response building is available
-        Err(ApiError::Internal {
-            message: "Status response sending not yet implemented - use send_response() with pre-built Response".to_string()
-        })
+        // Build the response using our build_response method
+        let response = self.build_response(transaction_id, status_code, reason).await?;
+        
+        // Send the response using the dialog manager
+        self.send_response(transaction_id, response).await?;
+        
+        debug!("Successfully sent status response {} for transaction {}", status_code, transaction_id);
+        Ok(())
+    }
+    
+    // **NEW**: Dialog-aware response convenience methods
+    
+    /// Send a 100 Trying response for an INVITE with dialog awareness
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// 
+    /// # Returns
+    /// Success or error
+    pub async fn send_trying_response(&self, transaction_id: &TransactionKey) -> ApiResult<()> {
+        debug!("Sending 100 Trying response for transaction {}", transaction_id);
+        
+        // Get original request to use dialog-aware builder
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use dialog-aware InviteResponseBuilder
+        let response = InviteResponseBuilder::trying_for_dialog(&original_request)
+            .build()
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to build trying response: {}", e) 
+            })?;
+        
+        self.send_response(transaction_id, response).await
+    }
+    
+    /// Send a 180 Ringing response for an INVITE with dialog awareness
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `dialog_id` - Optional dialog ID for context
+    /// * `early_media_sdp` - Optional SDP for early media
+    /// * `contact_uri` - Contact URI for the response
+    /// 
+    /// # Returns
+    /// Success or error
+    pub async fn send_ringing_response(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: Option<&DialogId>,
+        early_media_sdp: Option<String>,
+        contact_uri: Option<String>
+    ) -> ApiResult<()> {
+        debug!("Sending 180 Ringing response for transaction {}", transaction_id);
+        
+        // Get original request to use dialog-aware builder
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use dialog-aware InviteResponseBuilder
+        let dialog_id_str = dialog_id.map(|d| d.to_string());
+        let mut response_builder = InviteResponseBuilder::ringing_for_dialog(
+            &original_request,
+            dialog_id_str.as_deref(),
+            early_media_sdp
+        );
+        
+        // Add contact if provided
+        if let Some(contact) = contact_uri {
+            response_builder = response_builder.with_contact(contact);
+        }
+        
+        let response = response_builder.build()
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to build ringing response: {}", e) 
+            })?;
+        
+        self.send_response(transaction_id, response).await
+    }
+    
+    /// Send a 200 OK response for an INVITE with dialog awareness
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `dialog_id` - Optional dialog ID for context
+    /// * `sdp_answer` - SDP answer for the call
+    /// * `contact_uri` - Contact URI for the response
+    /// 
+    /// # Returns
+    /// Success or error
+    pub async fn send_ok_invite_response(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: Option<&DialogId>,
+        sdp_answer: String,
+        contact_uri: String
+    ) -> ApiResult<()> {
+        debug!("Sending 200 OK INVITE response for transaction {}", transaction_id);
+        
+        // Get original request to use dialog-aware builder
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use dialog-aware InviteResponseBuilder
+        let dialog_id_str = dialog_id.map(|d| d.to_string());
+        let response = InviteResponseBuilder::ok_for_dialog(
+            &original_request,
+            dialog_id_str.as_deref(),
+            sdp_answer,
+            contact_uri
+        ).build()
+        .map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build OK INVITE response: {}", e) 
+        })?;
+        
+        self.send_response(transaction_id, response).await
+    }
+    
+    /// Send an error response for an INVITE with dialog awareness
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - Transaction to respond to
+    /// * `status_code` - Error status code (4xx, 5xx, 6xx)
+    /// * `reason` - Optional reason phrase
+    /// 
+    /// # Returns
+    /// Success or error
+    pub async fn send_invite_error_response(
+        &self,
+        transaction_id: &TransactionKey,
+        status_code: StatusCode,
+        reason: Option<String>
+    ) -> ApiResult<()> {
+        debug!("Sending {} INVITE error response for transaction {}", status_code, transaction_id);
+        
+        // Get original request to use dialog-aware builder
+        let original_request = self.dialog_manager()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use dialog-aware InviteResponseBuilder
+        let response = InviteResponseBuilder::error_for_dialog(
+            &original_request,
+            status_code,
+            reason
+        ).build()
+        .map_err(|e| ApiError::Internal { 
+            message: format!("Failed to build INVITE error response: {}", e) 
+        })?;
+        
+        self.send_response(transaction_id, response).await
+    }
+    
+    /// Get server configuration
+    pub fn config(&self) -> &ServerConfig {
+        &self.config
+    }
+    
+    /// Get a list of all active dialog handles
+    pub async fn active_calls(&self) -> Vec<DialogHandle> {
+        let dialog_ids = self.dialog_manager.list_dialogs();
+        dialog_ids.into_iter()
+            .map(|id| DialogHandle::new(id, self.dialog_manager.clone()))
+            .collect()
     }
     
     // **NEW**: SIP method-specific convenience methods
@@ -465,7 +733,7 @@ impl DialogServer {
         info!("Sending BYE for dialog {}", dialog_id);
         self.send_request_in_dialog(dialog_id, Method::Bye, None).await
     }
-    
+
     /// Send a REFER request for call transfer
     /// 
     /// Convenience method for initiating call transfers using the
@@ -494,7 +762,7 @@ impl DialogServer {
         
         self.send_request_in_dialog(dialog_id, Method::Refer, Some(bytes::Bytes::from(body))).await
     }
-    
+
     /// Send a NOTIFY request for event notifications
     /// 
     /// Convenience method for sending event notifications using the
@@ -518,7 +786,7 @@ impl DialogServer {
         let notify_body = body.map(|b| bytes::Bytes::from(b));
         self.send_request_in_dialog(dialog_id, Method::Notify, notify_body).await
     }
-    
+
     /// Send an UPDATE request for media modifications
     /// 
     /// Convenience method for updating media parameters using the
@@ -540,7 +808,7 @@ impl DialogServer {
         let update_body = sdp.map(|s| bytes::Bytes::from(s));
         self.send_request_in_dialog(dialog_id, Method::Update, update_body).await
     }
-    
+
     /// Send an INFO request for application-specific information
     /// 
     /// Convenience method for sending application-specific information
@@ -560,19 +828,6 @@ impl DialogServer {
         info!("Sending INFO for dialog {}", dialog_id);
         
         self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body))).await
-    }
-    
-    /// Get server configuration
-    pub fn config(&self) -> &ServerConfig {
-        &self.config
-    }
-    
-    /// Get a list of all active dialog handles
-    pub async fn active_calls(&self) -> Vec<DialogHandle> {
-        let dialog_ids = self.dialog_manager.list_dialogs();
-        dialog_ids.into_iter()
-            .map(|id| DialogHandle::new(id, self.dialog_manager.clone()))
-            .collect()
     }
 }
 

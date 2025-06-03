@@ -16,6 +16,7 @@ use rvoip_sip_core::types::{
     allow::Allow,
     via::Via,
 };
+use tracing::debug;
 use crate::error::{Error, Result};
 
 /// Builder for SIP responses
@@ -82,6 +83,122 @@ impl ResponseBuilder {
             sdp_content: None,
             custom_headers: Vec::new(),
         }
+    }
+    
+    /// Create response builder from dialog transaction context
+    /// 
+    /// This method provides dialog-aware response building by automatically
+    /// extracting dialog context when available. For dialog-creating responses
+    /// (like 2xx responses to INVITE), it will auto-generate necessary headers
+    /// like To tags.
+    /// 
+    /// # Arguments
+    /// * `status_code` - The SIP status code for the response
+    /// * `request` - The original request to respond to
+    /// * `dialog_id` - Optional dialog ID for context
+    /// 
+    /// # Returns
+    /// A ResponseBuilder configured with dialog context
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// use rvoip_transaction_core::server::builders::ResponseBuilder;
+    /// use rvoip_transaction_core::builders::client_quick;
+    /// use rvoip_sip_core::StatusCode;
+    /// use std::net::SocketAddr;
+    /// 
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+    /// let original_request = client_quick::invite(
+    ///     "sip:alice@example.com",
+    ///     "sip:bob@example.com",
+    ///     local_addr,
+    ///     None
+    /// )?;
+    /// let dialog_id = "dialog-123";
+    /// 
+    /// let response = ResponseBuilder::from_dialog_transaction(
+    ///     StatusCode::Ok,
+    ///     &original_request,
+    ///     Some(&dialog_id)
+    /// )
+    /// .with_contact_address(local_addr, Some("server"))
+    /// .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_dialog_transaction(
+        status_code: StatusCode, 
+        request: &Request,
+        dialog_id: Option<&str>
+    ) -> Self {
+        let mut builder = Self::new(status_code).from_request(request);
+        
+        // For dialog-creating responses (2xx to INVITE), auto-generate To tag if not present
+        if status_code.is_success() && request.method() == Method::Invite {
+            // Check if To header already has a tag
+            let needs_to_tag = request.header(&HeaderName::To)
+                .and_then(|header| {
+                    if let TypedHeader::To(to_header) = header {
+                        Some(to_header.tag().is_none())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+            
+            if needs_to_tag {
+                builder = builder.with_generated_to_tag();
+            }
+        }
+        
+        // Add dialog-specific context if dialog_id is provided
+        if let Some(id) = dialog_id {
+            debug!("Building response for dialog: {}", id);
+            // Future enhancement: Could add dialog-specific headers or processing here
+        }
+        
+        builder
+    }
+    
+    /// Create response builder with automatic dialog context detection
+    /// 
+    /// This method analyzes the request to determine if it's part of an established
+    /// dialog and applies appropriate response building logic.
+    /// 
+    /// # Arguments
+    /// * `status_code` - The SIP status code for the response
+    /// * `request` - The original request to respond to
+    /// 
+    /// # Returns
+    /// A ResponseBuilder configured with detected dialog context
+    pub fn from_request_with_dialog_detection(status_code: StatusCode, request: &Request) -> Self {
+        // Detect if this is an in-dialog request by checking for To tag
+        let is_in_dialog = request.header(&HeaderName::To)
+            .and_then(|header| {
+                if let TypedHeader::To(to_header) = header {
+                    Some(to_header.tag().is_some())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
+        
+        let mut builder = Self::new(status_code).from_request(request);
+        
+        if is_in_dialog {
+            debug!("Detected in-dialog request, applying dialog response logic");
+            // For in-dialog requests, ensure we maintain dialog context properly
+            // Additional dialog-specific response logic can be added here
+        } else {
+            debug!("Detected dialog-creating or standalone request");
+            // For dialog-creating responses, apply appropriate logic
+            if status_code.is_success() && request.method() == Method::Invite {
+                builder = builder.with_generated_to_tag();
+            }
+        }
+        
+        builder
     }
     
     /// Initialize from a SIP request (copies required headers)
@@ -281,6 +398,108 @@ impl InviteResponseBuilder {
             sdp_answer: None,
             early_media: false,
         }
+    }
+    
+    /// Create INVITE response builder with dialog awareness
+    /// 
+    /// This method provides enhanced dialog-aware response building for INVITE
+    /// transactions, automatically handling dialog creation and maintenance.
+    /// 
+    /// # Arguments
+    /// * `status_code` - The SIP status code for the response
+    /// * `request` - The original INVITE request
+    /// * `dialog_id` - Optional dialog ID for context
+    /// 
+    /// # Returns
+    /// An InviteResponseBuilder configured for dialog handling
+    pub fn from_dialog_context(
+        status_code: StatusCode, 
+        request: &Request,
+        dialog_id: Option<&str>
+    ) -> Self {
+        Self {
+            inner: ResponseBuilder::from_dialog_transaction(status_code, request, dialog_id),
+            sdp_answer: None,
+            early_media: false,
+        }
+    }
+    
+    /// Create a 100 Trying response for INVITE with dialog context
+    /// 
+    /// # Arguments
+    /// * `request` - The original INVITE request
+    /// 
+    /// # Returns
+    /// Pre-configured InviteResponseBuilder for 100 Trying
+    pub fn trying_for_dialog(request: &Request) -> Self {
+        Self::from_dialog_context(StatusCode::Trying, request, None)
+    }
+    
+    /// Create a 180 Ringing response for INVITE with dialog context
+    /// 
+    /// # Arguments
+    /// * `request` - The original INVITE request
+    /// * `dialog_id` - Optional dialog ID
+    /// * `early_media_sdp` - Optional SDP for early media
+    /// 
+    /// # Returns
+    /// Pre-configured InviteResponseBuilder for 180 Ringing
+    pub fn ringing_for_dialog(
+        request: &Request, 
+        dialog_id: Option<&str>,
+        early_media_sdp: Option<String>
+    ) -> Self {
+        let mut builder = Self::from_dialog_context(StatusCode::Ringing, request, dialog_id);
+        
+        if let Some(sdp) = early_media_sdp {
+            builder = builder.with_early_media(sdp);
+        }
+        
+        builder
+    }
+    
+    /// Create a 200 OK response for INVITE with dialog context
+    /// 
+    /// # Arguments
+    /// * `request` - The original INVITE request
+    /// * `dialog_id` - Optional dialog ID
+    /// * `sdp_answer` - SDP answer for the call
+    /// * `contact_uri` - Contact URI for the response
+    /// 
+    /// # Returns
+    /// Pre-configured InviteResponseBuilder for 200 OK
+    pub fn ok_for_dialog(
+        request: &Request,
+        dialog_id: Option<&str>,
+        sdp_answer: String,
+        contact_uri: String
+    ) -> Self {
+        Self::from_dialog_context(StatusCode::Ok, request, dialog_id)
+            .with_sdp_answer(sdp_answer)
+            .with_contact(contact_uri)
+    }
+    
+    /// Create an error response for INVITE with dialog context
+    /// 
+    /// # Arguments
+    /// * `request` - The original INVITE request
+    /// * `status_code` - Error status code (4xx, 5xx, 6xx)
+    /// * `reason` - Optional reason phrase
+    /// 
+    /// # Returns
+    /// Pre-configured InviteResponseBuilder for error response
+    pub fn error_for_dialog(
+        request: &Request,
+        status_code: StatusCode,
+        reason: Option<String>
+    ) -> Self {
+        let mut builder = Self::from_dialog_context(status_code, request, None);
+        
+        if let Some(reason_phrase) = reason {
+            builder.inner = builder.inner.reason_phrase(reason_phrase);
+        }
+        
+        builder
     }
     
     /// Initialize from INVITE request

@@ -281,6 +281,157 @@ a=rtpmap:0 PCMU/8000"#;
               received_200_ok, bye_completed);
     }
     
+    // ------------- BONUS: Demonstrate Phase 3 Dialog Functions -----------------
+    info!("🎯 BONUS: Demonstrating Phase 3 Dialog Integration Functions");
+
+    // The above example used the traditional client_quick::bye() function.
+    // Now let's demonstrate the new Phase 3 dialog functions for comparison:
+
+    // Extract dialog context from the completed call
+    if received_200_ok {
+        use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
+        
+        // Demonstrate dialog utility functions
+        info!("🔧 Using Dialog Utility Functions:");
+        
+        // 1. Create a DialogRequestTemplate from dialog context
+        let dialog_template = rvoip_transaction_core::dialog::DialogRequestTemplate {
+            call_id: call_id.clone(),
+            from_uri: from_uri.clone(),
+            from_tag: from_tag.clone(),
+            to_uri: to_uri.clone(),
+            to_tag: "demo-to-tag".to_string(), // In real usage, from 200 OK response
+            request_uri: to_uri.clone(),
+            cseq: 10, // Next CSeq in dialog
+            local_address: client_addr,
+            route_set: vec![],
+            contact: None,
+        };
+        
+        // 2. Use dialog template to create an INFO request
+        let info_request = dialog_utils::request_builder_from_dialog_template(
+            &dialog_template,
+            rvoip_sip_core::Method::Info,
+            Some("Demonstration of dialog utility functions".to_string()),
+            Some("text/plain".to_string())
+        );
+        
+        match info_request {
+            Ok(request) => {
+                info!("✅ Created INFO request using dialog_utils::request_builder_from_dialog_template()");
+                info!("   Call-ID: {}", request.call_id().unwrap().value());
+                info!("   CSeq: {}", request.cseq().unwrap().seq);
+                info!("   Method: {:?}", request.method());
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to create INFO with dialog template: {}", e);
+            }
+        }
+        
+        // Demonstrate quick dialog functions
+        info!("⚡ Using Quick Dialog Functions (One-Liners):");
+        
+        // 1. Quick REFER for call transfer
+        let refer_request = dialog_quick::refer_for_dialog(
+            &call_id,
+            &from_uri,
+            &from_tag,
+            &to_uri,
+            "demo-to-tag",
+            "sip:transfer-target@example.com", // Transfer target
+            11,
+            client_addr,
+            None
+        );
+        
+        match refer_request {
+            Ok(request) => {
+                info!("✅ Created REFER request using dialog_quick::refer_for_dialog()");
+                info!("   Transfer target in body: {}", String::from_utf8_lossy(request.body()).contains("transfer-target"));
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to create REFER with quick function: {}", e);
+            }
+        }
+        
+        // 2. Quick UPDATE for session modification
+        let update_request = dialog_quick::update_for_dialog(
+            &call_id,
+            &from_uri,
+            &from_tag,
+            &to_uri,
+            "demo-to-tag",
+            Some("v=0\r\no=alice-updated 456 789 IN IP4 127.0.0.1\r\nc=IN IP4 127.0.0.1\r\nm=audio 5008 RTP/AVP 0\r\n".to_string()),
+            12,
+            client_addr,
+            None
+        );
+        
+        match update_request {
+            Ok(request) => {
+                info!("✅ Created UPDATE request using dialog_quick::update_for_dialog()");
+                info!("   Has SDP content: {}", request.body().len() > 0);
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to create UPDATE with quick function: {}", e);
+            }
+        }
+        
+        // 3. Quick MESSAGE for instant messaging
+        let message_request = dialog_quick::message_for_dialog(
+            &call_id,
+            &from_uri,
+            &from_tag,
+            &to_uri,
+            "demo-to-tag",
+            "Hello! This message was created using the new dialog quick functions from Phase 3.",
+            Some("text/plain".to_string()),
+            13,
+            client_addr,
+            None
+        );
+        
+        match message_request {
+            Ok(request) => {
+                info!("✅ Created MESSAGE request using dialog_quick::message_for_dialog()");
+                info!("   Message content: {}", String::from_utf8_lossy(request.body()));
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to create MESSAGE with quick function: {}", e);
+            }
+        }
+        
+        // 4. Quick BYE (alternative to the one used above)
+        let quick_bye_request = dialog_quick::bye_for_dialog(
+            &call_id,
+            &from_uri,
+            &from_tag,
+            &to_uri,
+            "demo-to-tag",
+            14,
+            client_addr,
+            None
+        );
+        
+        match quick_bye_request {
+            Ok(request) => {
+                info!("✅ Created BYE request using dialog_quick::bye_for_dialog()");
+                info!("   Compare with client_quick::bye() used earlier - both work!");
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to create BYE with quick function: {}", e);
+            }
+        }
+        
+        info!("🎉 Phase 3 Dialog Integration Functions demonstration completed!");
+        info!("   Traditional builders: client_quick::invite(), client_quick::bye(), etc.");
+        info!("   Dialog utility functions: request_builder_from_dialog_template(), response_builder_for_dialog_transaction()");
+        info!("   Quick dialog functions: bye_for_dialog(), refer_for_dialog(), update_for_dialog(), etc.");
+        info!("   ✨ All approaches work seamlessly together!");
+    } else {
+        info!("⚠️  Skipping dialog function demonstration - dialog not fully established");
+    }
+    
     // Wait a bit for everything to complete
     tokio::time::sleep(Duration::from_millis(500)).await;
     

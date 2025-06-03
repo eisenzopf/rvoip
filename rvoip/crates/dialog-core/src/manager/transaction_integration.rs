@@ -7,6 +7,8 @@ use std::net::SocketAddr;
 use tracing::{debug, warn};
 use rvoip_sip_core::{Request, Response, Method};
 use rvoip_transaction_core::TransactionKey;
+use rvoip_transaction_core::client::builders::{InviteBuilder, ByeBuilder, InDialogRequestBuilder};
+use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
 use crate::errors::DialogResult;
 use crate::dialog::DialogId;
 use super::core::DialogManager;
@@ -47,50 +49,191 @@ pub trait TransactionHelpers {
 impl TransactionIntegration for DialogManager {
     /// Send a request within a dialog using transaction-core
     /// 
-    /// Implements proper request creation within dialogs and transaction handling.
+    /// Implements proper request creation within dialogs using Phase 3 dialog functions
+    /// for significantly simplified and more maintainable code.
     async fn send_request_in_dialog(
         &self,
         dialog_id: &DialogId,
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> DialogResult<TransactionKey> {
-        debug!("Sending {} request for dialog {}", method, dialog_id);
+        debug!("Sending {} request for dialog {} using Phase 3 dialog functions", method, dialog_id);
         
-        // Get destination from dialog first
-        let destination = {
-            let dialog = self.get_dialog(dialog_id)?;
-            dialog.get_remote_target_address().await
-                .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?
-        };
-        
-        // Create the request using **transaction-core helper** instead of dialog.create_request()
-        let request = {
+        // Get destination and dialog context
+        let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
             
-            // Create a dialog template with all required information
-            let template = dialog.create_request_template(method.clone());
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
             
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
             
-            // Determine content type for common methods
-            let content_type = if method == Method::Invite && body_string.is_some() {
-                Some("application/sdp".to_string())
-            } else if method == Method::Info && body_string.is_some() {
-                Some("application/info".to_string())
-            } else if method == Method::Message && body_string.is_some() {
-                Some("text/plain".to_string())
-            } else {
-                None
-            };
+            // Create dialog template using the proper dialog method
+            let template = dialog.create_request_template(method.clone());
             
-            // Use transaction-core helper to create a proper RFC 3261 compliant request
-            rvoip_transaction_core::utils::create_request_from_dialog_template(
-                &template, 
-                self.local_address, 
-                body_string, 
-                content_type
-            )
+            // Build request using Phase 3 dialog quick functions (MUCH simpler!)
+            let request = match method {
+                Method::Invite => {
+                    // Use enhanced InviteBuilder with dialog context
+                    let mut builder = if template.route_set.is_empty() {
+                        InviteBuilder::from_dialog(
+                            template.call_id, 
+                            template.local_uri.to_string(), 
+                            template.local_tag.clone().unwrap_or_default(), 
+                            template.remote_uri.to_string(), 
+                            template.remote_tag.clone().unwrap_or_default(), 
+                            template.cseq_number, 
+                            self.local_address
+                        )
+                    } else {
+                        InviteBuilder::from_dialog_enhanced(
+                            template.call_id, 
+                            template.local_uri.to_string(), 
+                            template.local_tag.clone().unwrap_or_default(), 
+                            None, 
+                            template.remote_uri.to_string(), 
+                            template.remote_tag.clone().unwrap_or_default(), 
+                            None,
+                            template.target_uri.to_string(), 
+                            template.cseq_number, 
+                            self.local_address, 
+                            template.route_set.clone(), 
+                            None
+                        )
+                    };
+                    
+                    if let Some(sdp) = body_string {
+                        builder = builder.with_sdp(sdp);
+                    }
+                    
+                    builder.build()
+                },
+                
+                Method::Bye => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    dialog_quick::bye_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                Method::Refer => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    let target_uri = body_string.clone().unwrap_or_else(|| "sip:unknown".to_string());
+                    dialog_quick::refer_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        &target_uri,
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                Method::Update => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    dialog_quick::update_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        body_string, // SDP content
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                Method::Info => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    let content = body_string.unwrap_or_else(|| "Application info".to_string());
+                    dialog_quick::info_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        &content,
+                        Some("application/info".to_string()),
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                Method::Notify => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    let event_type = "dialog"; // This should come from dialog context
+                    dialog_quick::notify_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        event_type,
+                        body_string,
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                Method::Message => {
+                    // Use Phase 3 quick function - ONE LINER!
+                    let content = body_string.unwrap_or_else(|| "".to_string());
+                    dialog_quick::message_for_dialog(
+                        &template.call_id,
+                        &template.local_uri.to_string(),
+                        &template.local_tag.clone().unwrap_or_default(),
+                        &template.remote_uri.to_string(),
+                        &template.remote_tag.clone().unwrap_or_default(),
+                        &content,
+                        Some("text/plain".to_string()),
+                        template.cseq_number,
+                        self.local_address,
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    )
+                },
+                
+                _ => {
+                    // For any other method, use dialog template + utility function
+                    let template_struct = dialog_utils::DialogRequestTemplate {
+                        call_id: template.call_id,
+                        from_uri: template.local_uri.to_string(),
+                        from_tag: template.local_tag.clone().unwrap_or_default(),
+                        to_uri: template.remote_uri.to_string(),
+                        to_tag: template.remote_tag.clone().unwrap_or_default(),
+                        request_uri: template.target_uri.to_string(),
+                        cseq: template.cseq_number,
+                        local_address: self.local_address,
+                        route_set: template.route_set.clone(),
+                        contact: None,
+                    };
+                    
+                    dialog_utils::request_builder_from_dialog_template(
+                        &template_struct,
+                        method.clone(),
+                        body_string,
+                        None // Auto-detect content type
+                    )
+                }
+            }.map_err(|e| crate::errors::DialogError::InternalError {
+                message: format!("Failed to build {} request using Phase 3 dialog functions: {}", method, e),
+                context: None,
+            })?;
+            
+            (destination, request)
         };
         
         // Use transaction-core helpers to create appropriate transaction
@@ -117,7 +260,7 @@ impl TransactionIntegration for DialogManager {
                 message: format!("Failed to send request: {}", e),
             })?;
         
-        debug!("Successfully sent {} request for dialog {} (transaction: {})", method, dialog_id, transaction_id);
+        debug!("Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions", method, dialog_id, transaction_id);
         Ok(transaction_id)
     }
     

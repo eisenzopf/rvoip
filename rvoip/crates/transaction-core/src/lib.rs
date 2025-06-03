@@ -7,6 +7,7 @@ pub mod timer;
 pub mod utils;
 pub mod method;
 pub mod transport;
+pub mod dialog;
 
 // Re-export core types
 pub use error::{Error, Result};
@@ -29,7 +30,7 @@ pub use transport::{
 pub mod builders {
     /// Client-side request builders for common SIP operations
     pub use crate::client::builders::{
-        InviteBuilder, ByeBuilder, RegisterBuilder,
+        InviteBuilder, ByeBuilder, RegisterBuilder, InDialogRequestBuilder,
         quick as client_quick
     };
     
@@ -38,6 +39,25 @@ pub mod builders {
         ResponseBuilder, InviteResponseBuilder, RegisterResponseBuilder,
         quick as server_quick
     };
+    
+    /// Dialog utility functions for bridging dialog-core integration
+    pub mod dialog_utils {
+        pub use crate::dialog::{
+            DialogRequestTemplate, DialogTransactionContext,
+            request_builder_from_dialog_template, response_builder_for_dialog_transaction,
+            extract_dialog_template_from_request, create_dialog_transaction_context,
+            helpers
+        };
+    }
+    
+    /// Quick dialog functions for one-liner dialog operations  
+    pub mod dialog_quick {
+        pub use crate::dialog::quick::{
+            bye_for_dialog, refer_for_dialog, update_for_dialog, info_for_dialog,
+            notify_for_dialog, message_for_dialog, reinvite_for_dialog,
+            response_for_dialog_transaction
+        };
+    }
 }
 
 /// # SIP Transaction Layer
