@@ -2,6 +2,99 @@
 //!
 //! This module provides shared types and handles used across the dialog-core API,
 //! offering convenient access to dialog operations and events.
+//!
+//! ## Overview
+//!
+//! The common types provide high-level abstractions over SIP dialogs and calls:
+//!
+//! - **DialogHandle**: General-purpose dialog operations and state management
+//! - **CallHandle**: Call-specific operations built on top of DialogHandle
+//! - **CallInfo**: Information about active calls
+//! - **DialogEvent**: Events that can be monitored by applications
+//!
+//! ## Quick Start
+//!
+//! ### Using DialogHandle
+//!
+//! ```rust,no_run
+//! use rvoip_dialog_core::api::common::DialogHandle;
+//! use rvoip_sip_core::Method;
+//!
+//! # async fn example(dialog: DialogHandle) -> Result<(), Box<dyn std::error::Error>> {
+//! // Send a request within the dialog
+//! let tx_key = dialog.send_request(Method::Info, Some("Hello".to_string())).await?;
+//! println!("Sent INFO request: {}", tx_key);
+//!
+//! // Check dialog state
+//! let state = dialog.state().await?;
+//! println!("Dialog state: {:?}", state);
+//!
+//! // Send BYE to terminate
+//! dialog.send_bye().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Using CallHandle
+//!
+//! ```rust,no_run
+//! use rvoip_dialog_core::api::common::CallHandle;
+//!
+//! # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+//! // Get call information
+//! let info = call.info().await?;
+//! println!("Call from {} to {}", info.local_uri, info.remote_uri);
+//!
+//! // Put call on hold
+//! call.hold(Some("SDP with hold attributes".to_string())).await?;
+//!
+//! // Transfer the call
+//! call.transfer("sip:voicemail@example.com".to_string()).await?;
+//!
+//! // Hang up
+//! call.hangup().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Handle Architecture
+//!
+//! ```text
+//! CallHandle
+//!     │
+//!     └── DialogHandle
+//!             │
+//!             └── DialogManager
+//!                     │
+//!                     └── Dialog (actual state)
+//! ```
+//!
+//! CallHandle provides call-specific operations while DialogHandle provides
+//! general dialog operations. Both are lightweight wrappers that delegate
+//! to the underlying DialogManager.
+//!
+//! ## Event Monitoring
+//!
+//! Applications can monitor dialog events for state changes:
+//!
+//! ```rust,no_run
+//! use rvoip_dialog_core::api::common::DialogEvent;
+//!
+//! fn handle_dialog_event(event: DialogEvent) {
+//!     match event {
+//!         DialogEvent::Created { dialog_id } => {
+//!             println!("New dialog: {}", dialog_id);
+//!         },
+//!         DialogEvent::StateChanged { dialog_id, old_state, new_state } => {
+//!             println!("Dialog {} changed from {:?} to {:?}", dialog_id, old_state, new_state);
+//!         },
+//!         DialogEvent::Terminated { dialog_id, reason } => {
+//!             println!("Dialog {} terminated: {}", dialog_id, reason);
+//!         },
+//!         _ => {}
+//!     }
+//! }
+//! ```
 
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -15,7 +108,97 @@ use super::{ApiResult, ApiError};
 /// A handle to a SIP dialog for convenient operations
 /// 
 /// Provides a high-level interface to dialog operations without exposing
-/// the underlying DialogManager complexity.
+/// the underlying DialogManager complexity. DialogHandle is the primary
+/// way applications interact with SIP dialogs, offering both basic and
+/// advanced dialog management capabilities.
+///
+/// ## Key Features
+///
+/// - **State Management**: Query and monitor dialog state changes
+/// - **Request Sending**: Send arbitrary SIP methods within the dialog
+/// - **Response Handling**: Send responses to incoming requests
+/// - **Lifecycle Control**: Terminate dialogs gracefully or immediately
+/// - **SIP Methods**: Convenient methods for common SIP operations
+///
+/// ## Examples
+///
+/// ### Basic Dialog Operations
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogHandle;
+/// use rvoip_sip_core::Method;
+///
+/// # async fn example(dialog: DialogHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Check if dialog is still active
+/// if dialog.is_active().await {
+///     println!("Dialog {} is active", dialog.id());
+///     
+///     // Get current state
+///     let state = dialog.state().await?;
+///     println!("State: {:?}", state);
+///     
+///     // Send a custom request
+///     let tx_key = dialog.send_request(Method::Update, Some("new parameters".to_string())).await?;
+///     println!("Sent UPDATE: {}", tx_key);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Advanced Dialog Usage
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogHandle;
+/// use rvoip_sip_core::Method;
+///
+/// # async fn example(dialog: DialogHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Get full dialog information
+/// let info = dialog.info().await?;
+/// println!("Dialog: {} -> {}", info.local_uri, info.remote_uri);
+/// println!("Call-ID: {}, State: {:?}", info.call_id, info.state);
+///
+/// // Send application-specific information
+/// dialog.send_info("Custom application data".to_string()).await?;
+///
+/// // Send a notification about an event
+/// dialog.send_notify("presence".to_string(), Some("online".to_string())).await?;
+///
+/// // Gracefully terminate the dialog
+/// dialog.terminate().await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Dialog State Monitoring
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogHandle;
+/// use rvoip_dialog_core::dialog::DialogState;
+///
+/// # async fn example(dialog: DialogHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Monitor dialog state changes
+/// loop {
+///     let state = dialog.state().await?;
+///     match state {
+///         DialogState::Initial => println!("Dialog starting..."),
+///         DialogState::Early => println!("Dialog in early state"),
+///         DialogState::Confirmed => {
+///             println!("Dialog confirmed - ready for operations");
+///             break;
+///         },
+///         DialogState::Terminated => {
+///             println!("Dialog terminated");
+///             break;
+///         },
+///         DialogState::Recovering => {
+///             println!("Dialog recovering...");
+///         },
+///     }
+///     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct DialogHandle {
     dialog_id: DialogId,
@@ -178,6 +361,134 @@ impl DialogHandle {
 /// A handle to a SIP call (specific type of dialog) for call-related operations
 /// 
 /// Provides call-specific convenience methods on top of the basic dialog operations.
+/// CallHandle extends DialogHandle with operations that are specifically relevant
+/// to voice/video calls, such as hold/resume, transfer, and media management.
+///
+/// ## Key Features
+///
+/// - **Call Lifecycle**: Answer, reject, and hang up calls
+/// - **Call Control**: Hold, resume, transfer, and mute operations
+/// - **Media Management**: Update media parameters and handle media events
+/// - **Call Information**: Access to call-specific metadata and state
+/// - **Dialog Access**: Full access to underlying dialog operations
+///
+/// ## Examples
+///
+/// ### Basic Call Operations
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::CallHandle;
+/// use rvoip_sip_core::StatusCode;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Get call information
+/// let info = call.info().await?;
+/// println!("Call {} from {} to {}", info.call_id, info.local_uri, info.remote_uri);
+/// println!("State: {:?}", info.state);
+///
+/// // Answer an incoming call
+/// call.answer(Some("SDP answer with media info".to_string())).await?;
+///
+/// // Or reject a call
+/// // call.reject(StatusCode::Busy, Some("Busy right now".to_string())).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Call Control Operations
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::CallHandle;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Put call on hold
+/// let hold_sdp = "v=0\r\no=- 123 456 IN IP4 0.0.0.0\r\n...";
+/// call.hold(Some(hold_sdp.to_string())).await?;
+/// println!("Call on hold");
+///
+/// // Resume from hold
+/// let resume_sdp = "v=0\r\no=- 123 457 IN IP4 192.168.1.100\r\n...";
+/// call.resume(Some(resume_sdp.to_string())).await?;
+/// println!("Call resumed");
+///
+/// // Transfer to another party
+/// call.transfer("sip:alice@example.com".to_string()).await?;
+/// println!("Call transferred");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Advanced Call Management
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::CallHandle;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Update media parameters
+/// let new_sdp = "v=0\r\no=- 123 458 IN IP4 192.168.1.100\r\n...";
+/// call.update_media(Some(new_sdp.to_string())).await?;
+///
+/// // Send call-related information
+/// call.send_info("DTMF: 1".to_string()).await?;
+///
+/// // Send call event notification
+/// call.notify("call-status".to_string(), Some("ringing".to_string())).await?;
+///
+/// // Advanced transfer with custom REFER
+/// let refer_body = "Refer-To: sip:bob@example.com\r\nReplaces: abc123";
+/// call.transfer_with_body("sip:bob@example.com".to_string(), refer_body.to_string()).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Call State Monitoring
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::CallHandle;
+/// use rvoip_dialog_core::dialog::DialogState;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Monitor call state
+/// while call.is_active().await {
+///     let state = call.dialog_state().await?;
+///     match state {
+///         DialogState::Early => println!("Call ringing..."),
+///         DialogState::Confirmed => {
+///             println!("Call answered and active");
+///             break;
+///         },
+///         DialogState::Terminated => {
+///             println!("Call ended");
+///             break;
+///         },
+///         _ => {}
+///     }
+///     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Integration with Dialog Operations
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::CallHandle;
+/// use rvoip_sip_core::Method;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// // Access underlying dialog handle
+/// let dialog = call.dialog();
+/// 
+/// // Use dialog operations directly
+/// let tx_key = dialog.send_request(Method::Options, None).await?;
+/// println!("Sent OPTIONS via dialog: {}", tx_key);
+///
+/// // Or use call-specific shortcuts
+/// let tx_key = call.send_request(Method::Info, Some("Call info".to_string())).await?;
+/// println!("Sent INFO via call: {}", tx_key);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct CallHandle {
     dialog_handle: DialogHandle,
@@ -389,6 +700,65 @@ impl CallHandle {
 }
 
 /// Information about a call
+///
+/// Provides comprehensive metadata about an active call including identifiers,
+/// state information, and participant details. This is typically obtained from
+/// CallHandle.info() and used for monitoring and debugging purposes.
+///
+/// ## Examples
+///
+/// ### Displaying Call Information
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::{CallHandle, CallInfo};
+/// use rvoip_dialog_core::dialog::DialogState;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// let info = call.info().await?;
+///
+/// println!("=== Call Information ===");
+/// println!("Call ID: {}", info.call_id);
+/// println!("SIP Call-ID: {}", info.call_id_header);
+/// println!("From: {} (tag: {:?})", info.local_uri, info.local_tag);
+/// println!("To: {} (tag: {:?})", info.remote_uri, info.remote_tag);
+/// println!("State: {:?}", info.state);
+///
+/// match info.state {
+///     DialogState::Early => println!("Call is ringing"),
+///     DialogState::Confirmed => println!("Call is active"),
+///     DialogState::Terminated => println!("Call has ended"),
+///     _ => println!("Call in transition"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Conditional Operations Based on Call Info
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::{CallHandle, CallInfo};
+/// use rvoip_dialog_core::dialog::DialogState;
+///
+/// # async fn example(call: CallHandle) -> Result<(), Box<dyn std::error::Error>> {
+/// let info = call.info().await?;
+///
+/// // Only allow transfer if call is confirmed
+/// if info.state == DialogState::Confirmed {
+///     call.transfer("sip:voicemail@example.com".to_string()).await?;
+///     println!("Call transferred to voicemail");
+/// } else {
+///     println!("Cannot transfer call in state: {:?}", info.state);
+/// }
+///
+/// // Check if this is an outbound call (local tag exists)
+/// if info.local_tag.is_some() {
+///     println!("This is an outbound call");
+/// } else {
+///     println!("This is an inbound call");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct CallInfo {
     /// Call ID (dialog ID)
@@ -414,6 +784,150 @@ pub struct CallInfo {
 }
 
 /// Dialog events that applications can listen for
+///
+/// Represents various events that occur during the dialog lifecycle,
+/// allowing applications to monitor and react to dialog state changes,
+/// incoming requests, and responses.
+///
+/// ## Event Categories
+///
+/// - **Lifecycle Events**: Created, StateChanged, Terminated
+/// - **Message Events**: RequestReceived, ResponseReceived
+///
+/// ## Examples
+///
+/// ### Basic Event Handling
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogEvent;
+/// use rvoip_dialog_core::dialog::DialogState;
+/// use rvoip_sip_core::Method;
+///
+/// fn handle_dialog_event(event: DialogEvent) {
+///     match event {
+///         DialogEvent::Created { dialog_id } => {
+///             println!("New dialog created: {}", dialog_id);
+///         },
+///         DialogEvent::StateChanged { dialog_id, old_state, new_state } => {
+///             println!("Dialog {} transitioned from {:?} to {:?}", 
+///                     dialog_id, old_state, new_state);
+///             
+///             if new_state == DialogState::Confirmed {
+///                 println!("Dialog is now ready for operations");
+///             }
+///         },
+///         DialogEvent::Terminated { dialog_id, reason } => {
+///             println!("Dialog {} ended: {}", dialog_id, reason);
+///         },
+///         DialogEvent::RequestReceived { dialog_id, method, body } => {
+///             println!("Dialog {} received {} request", dialog_id, method);
+///             if let Some(body) = body {
+///                 println!("Request body: {}", body);
+///             }
+///         },
+///         DialogEvent::ResponseReceived { dialog_id, status_code, body } => {
+///             println!("Dialog {} received {} response", dialog_id, status_code);
+///             if let Some(body) = body {
+///                 println!("Response body: {}", body);
+///             }
+///         },
+///     }
+/// }
+/// ```
+///
+/// ### Advanced Event Processing
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogEvent;
+/// use rvoip_dialog_core::dialog::DialogState;
+/// use rvoip_sip_core::{Method, StatusCode};
+/// use std::collections::HashMap;
+///
+/// struct CallManager {
+///     active_calls: HashMap<String, CallInfo>,
+/// }
+///
+/// impl CallManager {
+///     fn handle_event(&mut self, event: DialogEvent) {
+///         match event {
+///             DialogEvent::Created { dialog_id } => {
+///                 println!("Tracking new dialog: {}", dialog_id);
+///                 // Initialize call tracking
+///             },
+///             DialogEvent::StateChanged { dialog_id, new_state, .. } => {
+///                 match new_state {
+///                     DialogState::Confirmed => {
+///                         println!("Call {} is now active", dialog_id);
+///                         // Start call timer, enable features, etc.
+///                     },
+///                     DialogState::Terminated => {
+///                         println!("Call {} ended", dialog_id);
+///                         // Cleanup call resources
+///                     },
+///                     _ => {}
+///                 }
+///             },
+///             DialogEvent::RequestReceived { dialog_id, method, .. } => {
+///                 match method {
+///                     Method::Invite => println!("Re-INVITE received on {}", dialog_id),
+///                     Method::Bye => println!("BYE received on {}", dialog_id),
+///                     Method::Info => println!("INFO received on {}", dialog_id),
+///                     _ => println!("Other request: {} on {}", method, dialog_id),
+///                 }
+///             },
+///             DialogEvent::ResponseReceived { dialog_id, status_code, .. } => {
+///                 // Pattern match on specific status codes
+///                 match status_code {
+///                     StatusCode::Ok | StatusCode::Accepted => {
+///                         println!("Success response {} on {}", status_code, dialog_id);
+///                     },
+///                     StatusCode::BadRequest | StatusCode::NotFound | StatusCode::ServerInternalError => {
+///                         println!("Error response {} on {}", status_code, dialog_id);
+///                     },
+///                     _ => {
+///                         println!("Other response {} on {}", status_code, dialog_id);
+///                     }
+///                 }
+///             },
+///             _ => {}
+///         }
+///     }
+/// }
+/// # struct CallInfo;
+/// ```
+///
+/// ### Event Filtering and Routing
+///
+/// ```rust,no_run
+/// use rvoip_dialog_core::api::common::DialogEvent;
+/// use rvoip_dialog_core::dialog::{DialogId, DialogState};
+///
+/// fn route_dialog_event(event: DialogEvent, call_id: &DialogId) {
+///     // Only process events for the dialog we care about
+///     let event_dialog_id = match &event {
+///         DialogEvent::Created { dialog_id } => dialog_id,
+///         DialogEvent::StateChanged { dialog_id, .. } => dialog_id,
+///         DialogEvent::Terminated { dialog_id, .. } => dialog_id,
+///         DialogEvent::RequestReceived { dialog_id, .. } => dialog_id,
+///         DialogEvent::ResponseReceived { dialog_id, .. } => dialog_id,
+///     };
+///
+///     if event_dialog_id == call_id {
+///         println!("Processing event for our dialog: {:?}", event);
+///         
+///         // Handle the specific event
+///         match event {
+///             DialogEvent::StateChanged { new_state: DialogState::Confirmed, .. } => {
+///                 println!("Our call is now active!");
+///             },
+///             DialogEvent::Terminated { reason, .. } => {
+///                 println!("Our call ended: {}", reason);
+///             },
+///             _ => {}
+///         }
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub enum DialogEvent {
     /// Dialog was created
