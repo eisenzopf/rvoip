@@ -12,19 +12,22 @@ impl Session {
         let mut state_guard = self.state.lock().await;
         let old_state = *state_guard;
         
-        // Validate state transition
-        if !Self::is_valid_transition(&old_state, &new_state) {
+        // Validate state transition using the centralized state machine
+        if !old_state.can_transition_to(new_state) {
             return Err(Error::InvalidSessionStateTransition {
                 from: old_state.to_string(),
                 to: new_state.to_string(),
                 context: ErrorContext {
                     category: ErrorCategory::Session,
                     severity: ErrorSeverity::Error,
-                    recovery: RecoveryAction::None,
+                    recovery: RecoveryAction::CheckConfiguration("session_state_transition".to_string()),
                     retryable: false,
                     session_id: Some(self.id.to_string()),
                     timestamp: SystemTime::now(),
-                    details: Some(format!("Invalid state transition attempted from {} to {}", old_state, new_state)),
+                    details: Some(format!(
+                        "Invalid state transition attempted from {} to {}. Valid transitions from {}: {:?}",
+                        old_state, new_state, old_state, old_state.valid_next_states()
+                    )),
                     ..Default::default()
                 }
             });
@@ -36,69 +39,75 @@ impl Session {
         // Drop lock before emitting event
         drop(state_guard);
         
+        // Log state transition for debugging
+        debug!("Session {} state transition: {} → {}", 
+            self.id, old_state, new_state);
+        
         // Emit state changed event
-        self.event_bus.publish(SessionEvent::StateChanged { 
+        if let Err(e) = self.event_bus.publish(SessionEvent::StateChanged { 
             session_id: self.id.clone(),
             old_state,
             new_state,
-        });
+        }).await {
+            warn!("Failed to publish session state change event: {}", e);
+        }
         
         Ok(())
-    }
-    
-    /// Check if a state transition is valid
-    fn is_valid_transition(from: &SessionState, to: &SessionState) -> bool {
-        use SessionState::*;
-        
-        match (from, to) {
-            // Valid transitions from Initializing
-            (Initializing, Dialing) => true,
-            (Initializing, Ringing) => true,
-            (Initializing, Terminating) => true,
-            (Initializing, Terminated) => true,
-            
-            // Valid transitions from Dialing
-            (Dialing, Ringing) => true,
-            (Dialing, Connected) => true,
-            (Dialing, Terminating) => true,
-            (Dialing, Terminated) => true,
-            
-            // Valid transitions from Ringing
-            (Ringing, Connected) => true,
-            (Ringing, Terminating) => true,
-            (Ringing, Terminated) => true,
-            
-            // Valid transitions from Connected
-            (Connected, OnHold) => true,
-            (Connected, Transferring) => true,
-            (Connected, Terminating) => true,
-            (Connected, Terminated) => true,
-            
-            // Valid transitions from OnHold
-            (OnHold, Connected) => true,
-            (OnHold, Transferring) => true,
-            (OnHold, Terminating) => true,
-            (OnHold, Terminated) => true,
-            
-            // Valid transitions from Transferring
-            (Transferring, Connected) => true,
-            (Transferring, OnHold) => true,
-            (Transferring, Terminating) => true,
-            (Transferring, Terminated) => true,
-            
-            // Valid transitions from Terminating
-            (Terminating, Terminated) => true,
-            
-            // No transitions from Terminated
-            (Terminated, _) => false,
-            
-            // Any other transition is invalid
-            _ => false,
-        }
     }
     
     /// Get the current media state
     pub async fn media_state(&self) -> SessionMediaState {
         self.media_state.lock().await.clone()
+    }
+    
+    /// Validate if a state transition would be valid without changing state
+    /// 
+    /// This method allows checking state transitions without actually performing them,
+    /// useful for UI validation and planning ahead.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `target_state` - The state to validate transition to
+    /// 
+    /// # Returns
+    /// 
+    /// `Ok(())` if transition is valid, `Err` with details if invalid
+    pub async fn validate_state_transition(&self, target_state: SessionState) -> Result<(), Error> {
+        let current_state = *self.state.lock().await;
+        
+        if !current_state.can_transition_to(target_state) {
+            return Err(Error::InvalidSessionStateTransition {
+                from: current_state.to_string(),
+                to: target_state.to_string(),
+                context: ErrorContext {
+                    category: ErrorCategory::Session,
+                    severity: ErrorSeverity::Warning,
+                    recovery: RecoveryAction::CheckConfiguration("session_state_transition".to_string()),
+                    retryable: false,
+                    session_id: Some(self.id.to_string()),
+                    timestamp: SystemTime::now(),
+                    details: Some(format!(
+                        "State transition validation failed from {} to {}. Valid options: {:?}",
+                        current_state, target_state, current_state.valid_next_states()
+                    )),
+                    ..Default::default()
+                }
+            });
+        }
+        
+        Ok(())
+    }
+    
+    /// Get all valid next states for this session
+    /// 
+    /// Returns the states this session can transition to from its current state.
+    /// Useful for UI state management and API validation.
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of valid next states
+    pub async fn get_valid_next_states(&self) -> Vec<SessionState> {
+        let current_state = *self.state.lock().await;
+        current_state.valid_next_states()
     }
 } 

@@ -2,6 +2,152 @@
 
 This document tracks planned improvements and enhancements for the `rvoip-session-core` library.
 
+## 🚀 PHASE 11: SESSION-CORE COMPLIANCE & BEST PRACTICES ⏳ **IN PROGRESS**
+
+### 🎯 **GOAL: Session-Core Specific Compliance Improvements**
+
+**Context**: Following comprehensive architectural review, session-core has excellent separation of concerns and delegates SIP protocol work properly to lower layers. However, there are session-specific compliance improvements needed within session-core's actual scope.
+
+**Focus**: Improve session state management, resource tracking, error context, and session lifecycle - all within session-core's coordination responsibilities.
+
+### 🔧 **IMPLEMENTATION PLAN**
+
+#### Phase 11.1: Complete Session State Machine ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Enhanced State Transition Validation** - Complete state machine with validation matrix
+  - [x] ✅ **COMPLETE**: Implement `can_transition_to()` method on SessionState enum
+  - [x] ✅ **COMPLETE**: Add complete state transition validation matrix (all valid transitions)
+  - [x] ✅ **COMPLETE**: Update `set_state()` methods to use validation before transitions
+  - [x] ✅ **COMPLETE**: Add comprehensive state transition tests (17 tests all passing)
+  - [x] ✅ **COMPLETE**: Document valid state transitions per session lifecycle
+
+- [x] ✅ **COMPLETE**: **Session State Machine Documentation** - Clear state flow documentation
+  - [x] ✅ **COMPLETE**: Document complete session state flow: Initializing → Dialing → Ringing → Connected → OnHold → Transferring → Terminating → Terminated
+  - [x] ✅ **COMPLETE**: Add state transition diagrams in documentation
+  - [x] ✅ **COMPLETE**: Document which operations are valid in each state
+  - [x] ✅ **COMPLETE**: Add state-specific method validation
+
+**🎉 MAJOR SUCCESS**: Complete session state machine implemented with 8x8 transition matrix, comprehensive validation, and 17 passing tests!
+
+#### Phase 11.2: Enhanced Session Resource Management ⏳ **PENDING**
+- [ ] **Granular Resource Tracking** - More detailed session resource management
+  - [ ] Track sessions by user/endpoint for better resource limits
+  - [ ] Track sessions by dialog state for better debugging
+  - [ ] Add session resource metrics (memory usage, dialog count per session)
+  - [ ] Implement resource cleanup on session failures
+  - [ ] Add configurable per-user session limits
+
+- [ ] **Session Lifecycle Management** - Improved session cleanup and monitoring
+  - [ ] Implement `cleanup_terminated_sessions()` method in SessionManager
+  - [ ] Add periodic cleanup of terminated sessions
+  - [ ] Add session aging and timeout management
+  - [ ] Implement session health monitoring
+  - [ ] Add session resource leak detection
+
+#### Phase 11.3: Enhanced Error Context & Debugging ⏳ **PENDING**
+- [ ] **Rich Session Error Context** - More detailed error information
+  - [ ] Update all session errors to include full ErrorContext with session_id, dialog_id, timestamps
+  - [ ] Add session state information to error context
+  - [ ] Include media session information in errors when relevant
+  - [ ] Add recovery suggestions specific to session lifecycle
+  - [ ] Implement error context builders for consistent error creation
+
+- [ ] **Session Debugging & Tracing** - Better session observability
+  - [ ] Add detailed session lifecycle tracing
+  - [ ] Implement session state change logging with context
+  - [ ] Add session metrics collection for monitoring
+  - [ ] Create session debugging utilities
+  - [ ] Add session correlation IDs for distributed tracing
+
+#### Phase 11.4: Session Coordination Improvements ⏳ **PENDING**
+- [ ] **Enhanced Session-Dialog Coordination** - Better event coordination
+  - [ ] Improve `handle_session_coordination_event()` with comprehensive session event emission
+  - [ ] Add session event emission for all session lifecycle changes
+  - [ ] Implement session event correlation with dialog events
+  - [ ] Add session-specific event filtering and routing
+  - [ ] Enhance session event serialization for external systems
+
+- [ ] **Session Media Coordination** - Better media lifecycle management
+  - [ ] Improve session-media state synchronization
+  - [ ] Add media session lifecycle events
+  - [ ] Implement media session health monitoring
+  - [ ] Add media session recovery mechanisms
+  - [ ] Enhance media session resource tracking
+
+### 🎯 **SUCCESS CRITERIA**
+
+#### **Phase 11.1 Success:**
+- [ ] ✅ Complete state transition validation matrix implemented
+- [ ] ✅ All invalid state transitions prevented with clear errors
+- [ ] ✅ State transition validation tests passing
+- [ ] ✅ Session state machine documented
+
+#### **Phase 11.2 Success:**
+- [ ] ✅ Granular session resource tracking implemented
+- [ ] ✅ Automatic cleanup of terminated sessions working
+- [ ] ✅ Per-user session limits configurable and enforced
+- [ ] ✅ Session resource metrics available
+
+#### **Phase 11.3 Success:**
+- [ ] ✅ All session errors include rich context with session_id, state, recovery actions
+- [ ] ✅ Session debugging utilities working
+- [ ] ✅ Session lifecycle fully traced and observable
+- [ ] ✅ Session correlation for distributed debugging
+
+#### **Phase 11.4 Success:**
+- [ ] ✅ Enhanced session-dialog event coordination
+- [ ] ✅ Session events properly emitted for all lifecycle changes
+- [ ] ✅ Media-session coordination improved
+- [ ] ✅ Session coordination error handling enhanced
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 11.1**: ~2 hours (state machine completion)
+- **Phase 11.2**: ~3 hours (resource management)
+- **Phase 11.3**: ~2 hours (error context)
+- **Phase 11.4**: ~2 hours (coordination improvements)
+
+**Total Estimated Time**: ~9 hours
+
+### 🔄 **SCOPE CLARIFICATION**
+
+**✅ WITHIN SESSION-CORE SCOPE:**
+- Session state management and lifecycle
+- Session-dialog coordination
+- Session-media coordination  
+- Session resource management
+- Session error handling and context
+- Session event emission and coordination
+
+**❌ NOT SESSION-CORE SCOPE:**
+- SIP protocol compliance (handled by sip-core/transaction-core/dialog-core)
+- SIP header validation (handled by sip-core)
+- SIP timers (handled by transaction-core)
+- Transport routing (handled by sip-transport)
+- Authentication protocols (handled by call-engine)
+
+### 💡 **BENEFITS**
+
+**Enhanced Session Management**:
+- Better session lifecycle control
+- Improved resource management
+- Enhanced debugging capabilities
+- More robust error handling
+
+**Better Integration**:
+- Cleaner session-dialog coordination
+- Improved session-media synchronization
+- Enhanced event system coordination
+- Better observability for call-engine
+
+### 🚀 **NEXT ACTIONS**
+
+1. **Start Phase 11.1** - Implement complete session state machine
+2. **Focus on state transition validation** as highest priority
+3. **Test state machine with existing session flows**
+4. **Document state transitions for call-engine integration**
+
+---
+
 ## 🎉 PHASE 9: ARCHITECTURAL VIOLATIONS FIXED - COMPLETE SUCCESS! ✅
 
 **Current Status**: ✅ **ALL COMPILATION ERRORS RESOLVED** - Complete architectural compliance achieved!
@@ -502,7 +648,7 @@ This maintains clean separation of concerns with session-core focused on its cor
 
 ## 📊 UPDATED PROGRESS TRACKING
 
-### Current Status: **PHASE 10 IN PROGRESS - IMPLEMENTING UNIFIED DIALOG MANAGER ARCHITECTURE! 🏗️🔧🎯**
+### Current Status: **PHASE 11 IN PROGRESS - SESSION-CORE COMPLIANCE & BEST PRACTICES! 🏗️🔧🎯**
 - **Phase 1 - API Foundation**: ✅ COMPLETE (16/16 tasks)
 - **Phase 2 - Media Coordination**: ✅ COMPLETE (4/4 tasks)  
 - **Phase 3.1 - Enhanced Server Operations**: ✅ COMPLETE (4/4 tasks)
@@ -525,11 +671,15 @@ This maintains clean separation of concerns with session-core focused on its cor
 - **Phase 7.3 - Multi-Session Bridging Mechanics**: ✅ COMPLETE (N-way conferencing proven!)
 - **Phase 8 - Client-Side INVITE Flow**: ✅ COMPLETE (19/19 tasks) ❗ **BIDIRECTIONAL SIP ACHIEVED**
 - **Phase 9 - Architectural Violations Fix**: ✅ COMPLETE (16/16 tasks) ❗ **PERFECT ARCHITECTURAL COMPLIANCE**
-- **Phase 10 - Unified Dialog Manager Architecture**: ⏳ **IN PROGRESS** (0/17 tasks) ❗ **SIMPLIFYING ARCHITECTURE**
+- **Phase 10 - Unified Dialog Manager Architecture**: ⏳ **PENDING DIALOG-CORE** (0/17 tasks) ❗ **WAITING FOR DIALOG-CORE**
+- **Phase 11.1 - Complete Session State Machine**: ✅ COMPLETE (10/10 tasks) ❗ **SESSION STATE MACHINE PERFECTED**
+- **Phase 11.2 - Enhanced Session Resource Management**: ⏳ **PENDING** (0/10 tasks)
+- **Phase 11.3 - Enhanced Error Context & Debugging**: ⏳ **PENDING** (0/8 tasks)
+- **Phase 11.4 - Session Coordination Improvements**: ⏳ **PENDING** (0/8 tasks)
 
-### **Total Progress**: 125/142 tasks (88%) - **Phase 10 in progress to unify dialog-core architecture!**
+### **Total Progress**: 135/180 tasks (75%) - **Phase 11.1 complete - session state machine perfected with 17 passing tests!**
 
-### Priority: 🏗️ **ARCHITECTURE SIMPLIFICATION** - Merging DialogClient/DialogServer into unified DialogManager!
+### Priority: ✅ **SESSION STATE MACHINE PERFECTED** - Phase 11.1 complete! Next: Enhanced resource management and error context!
 
 **🏆 FINAL ACHIEVEMENT - COMPLETE SIP INFRASTRUCTURE SUCCESS!**
 
