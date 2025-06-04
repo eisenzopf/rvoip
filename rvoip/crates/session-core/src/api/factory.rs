@@ -12,7 +12,7 @@ use crate::api::server::config::ServerConfig;
 use crate::api::client::config::ClientConfig;
 use crate::api::server::manager::ServerManager;
 use crate::session::manager::SessionManager;
-use rvoip_dialog_core::api::DialogServer;
+use rvoip_dialog_core::UnifiedDialogApi;
 use crate::media::MediaManager;
 
 /// High-level SIP server manager
@@ -180,7 +180,7 @@ impl SipClient {
 /// instead of creating infrastructure directly
 pub async fn create_sip_server_with_managers(
     config: ServerConfig,
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     media_manager: Arc<MediaManager>,
 ) -> Result<SipServer> {
     info!("Creating SIP server with dependency injection - proper architecture!");
@@ -195,7 +195,7 @@ pub async fn create_sip_server_with_managers(
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
     let session_manager = Arc::new(crate::session::SessionManager::new(
-        dialog_manager.clone(),
+        dialog_api.clone(),
         session_config,
         event_bus
     ).await.context("Failed to create session manager")?);
@@ -228,7 +228,7 @@ pub async fn create_sip_server_with_managers(
 /// instead of creating infrastructure directly
 pub async fn create_sip_client_with_managers(
     config: ClientConfig,
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     media_manager: Arc<MediaManager>,
 ) -> Result<SipClient> {
     info!("Creating SIP client with dependency injection - proper architecture!");
@@ -247,7 +247,7 @@ pub async fn create_sip_client_with_managers(
         .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
     
     let session_manager = Arc::new(crate::session::SessionManager::new(
-        dialog_manager,
+        dialog_api,
         session_config,
         event_bus
     ).await.context("Failed to create session manager for client")?);
@@ -260,22 +260,74 @@ pub async fn create_sip_client_with_managers(
     })
 }
 
-/// **DEPRECATED**: Legacy factory function - use create_sip_server_with_managers instead
+/// Create a SIP server with clean abstraction (hides dialog-core implementation details)
 /// 
-/// This function violates architectural principles by creating infrastructure directly.
-/// It's kept for backward compatibility but should not be used in new code.
-#[deprecated(note = "Use create_sip_server_with_managers instead for proper dependency injection")]
+/// This is the **clean API** that users should use. It internally creates all required
+/// components (UnifiedDialogApi, MediaManager) so users don't need to import dialog-core.
 pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
-    anyhow::bail!("create_sip_server is deprecated - use create_sip_server_with_managers with proper dependency injection")
+    info!("Creating SIP server with clean abstraction API");
+    
+    // Validate configuration first
+    config.validate()
+        .context("Invalid server configuration")?;
+    
+    // Create dialog-core configuration based on session-core config
+    let dialog_config = rvoip_dialog_core::config::DialogManagerConfig::server(config.bind_address)
+        .with_domain(&format!("{}", config.bind_address.ip())) // Use IP as domain for now
+        .with_auto_options() // Enable automatic OPTIONS responses for servers
+        .build();
+    
+    // Create dialog API internally
+    let dialog_api = Arc::new(rvoip_dialog_core::UnifiedDialogApi::create(dialog_config).await
+        .context("Failed to create dialog API")?);
+    
+    info!("✅ Created dialog API internally");
+    
+    // Create media manager internally
+    let media_manager = Arc::new(MediaManager::new().await
+        .context("Failed to create media manager")?);
+    
+    info!("✅ Created media manager internally");
+    
+    // Now use the dependency injection version with our internally created components
+    create_sip_server_with_managers(config, dialog_api, media_manager).await
+        .context("Failed to create SIP server with internal managers")
 }
 
-/// **DEPRECATED**: Legacy factory function - use create_sip_client_with_managers instead
+/// Create a SIP client with clean abstraction (hides dialog-core implementation details)
 /// 
-/// This function violates architectural principles by creating infrastructure directly.
-/// It's kept for backward compatibility but should not be used in new code.
-#[deprecated(note = "Use create_sip_client_with_managers instead for proper dependency injection")]
+/// This is the **clean API** that users should use. It internally creates all required
+/// components (UnifiedDialogApi, MediaManager) so users don't need to import dialog-core.
 pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
-    anyhow::bail!("create_sip_client is deprecated - use create_sip_client_with_managers with proper dependency injection")
+    info!("Creating SIP client with clean abstraction API");
+    
+    // Validate configuration first
+    config.validate()
+        .context("Invalid client configuration")?;
+    
+    // Determine local address for dialog configuration
+    let local_address = config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+    
+    // Create dialog-core configuration based on session-core config
+    let dialog_config = rvoip_dialog_core::config::DialogManagerConfig::client(local_address)
+        .with_from_uri(&config.effective_from_uri()) // Use client from URI
+        .build();
+    
+    // Create dialog API internally
+    let dialog_api = Arc::new(rvoip_dialog_core::UnifiedDialogApi::create(dialog_config).await
+        .context("Failed to create dialog API for client")?);
+    
+    info!("✅ Created dialog API internally for client");
+    
+    // Create media manager internally
+    let media_manager = Arc::new(MediaManager::new().await
+        .context("Failed to create media manager for client")?);
+    
+    info!("✅ Created media manager internally for client");
+    
+    // Now use the dependency injection version with our internally created components
+    create_sip_client_with_managers(config, dialog_api, media_manager).await
+        .context("Failed to create SIP client with internal managers")
 }
 
 #[cfg(test)]

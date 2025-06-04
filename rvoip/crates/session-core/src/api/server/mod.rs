@@ -24,7 +24,7 @@ use crate::{
         BridgeEvent, BridgeEventType, BridgeStats, BridgeError
     },
 };
-use rvoip_dialog_core::api::DialogServer;
+use rvoip_dialog_core::UnifiedDialogApi;
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{RwLock, mpsc};
@@ -140,10 +140,10 @@ pub struct ServerSessionManager {
 impl ServerSessionManager {
     /// Create a new server session manager
     /// 
-    /// **ARCHITECTURE**: Server receives DialogServer via dependency injection
+    /// **ARCHITECTURE**: Server receives UnifiedDialogApi via dependency injection
     /// and coordinates with dialog-core for SIP protocol handling.
     pub async fn new(
-        dialog_manager: Arc<DialogServer>,
+        dialog_api: Arc<UnifiedDialogApi>,
         config: ServerConfig
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let event_bus = EventBus::new(1000).await?;
@@ -155,7 +155,7 @@ impl ServerSessionManager {
         };
         
         let session_manager = SessionManager::new(
-            dialog_manager,
+            dialog_api,
             session_config,
             event_bus
         ).await?;
@@ -171,10 +171,10 @@ impl ServerSessionManager {
     
     /// Create a new server session manager (synchronous)
     /// 
-    /// **ARCHITECTURE**: Server receives DialogServer via dependency injection
+    /// **ARCHITECTURE**: Server receives UnifiedDialogApi via dependency injection
     /// and coordinates with dialog-core for SIP protocol handling.
     pub fn new_sync(
-        dialog_manager: Arc<DialogServer>,
+        dialog_api: Arc<UnifiedDialogApi>,
         config: ServerConfig
     ) -> Self {
         let event_bus = EventBus::new_simple(1000);
@@ -186,7 +186,7 @@ impl ServerSessionManager {
         };
         
         let session_manager = SessionManager::new_sync(
-            dialog_manager,
+            dialog_api,
             session_config,
             event_bus
         );
@@ -411,37 +411,37 @@ pub struct ServerStats {
 
 /// Create a session manager configured for server use
 pub async fn create_server_session_manager(
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     config: ServerConfig
 ) -> Result<Arc<SessionManager>, Box<dyn std::error::Error>> {
-    let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
+    let server_manager = ServerSessionManager::new(dialog_api, config).await?;
     Ok(server_manager.session_manager().clone())
 }
 
 /// Create a session manager configured for server use (synchronous)
 pub fn create_server_session_manager_sync(
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     config: ServerConfig
 ) -> Arc<SessionManager> {
-    let server_manager = ServerSessionManager::new_sync(dialog_manager, config);
+    let server_manager = ServerSessionManager::new_sync(dialog_api, config);
     server_manager.session_manager().clone()
 }
 
 /// Create a full-featured server session manager
 pub async fn create_full_server_manager(
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     config: ServerConfig
 ) -> Result<Arc<ServerSessionManager>, Box<dyn std::error::Error>> {
-    let server_manager = ServerSessionManager::new(dialog_manager, config).await?;
+    let server_manager = ServerSessionManager::new(dialog_api, config).await?;
     Ok(Arc::new(server_manager))
 }
 
 /// Create a full-featured server session manager (synchronous)
 pub fn create_full_server_manager_sync(
-    dialog_manager: Arc<DialogServer>,
+    dialog_api: Arc<UnifiedDialogApi>,
     config: ServerConfig
 ) -> Arc<ServerSessionManager> {
-    let server_manager = ServerSessionManager::new_sync(dialog_manager, config);
+    let server_manager = ServerSessionManager::new_sync(dialog_api, config);
     Arc::new(server_manager)
 }
 

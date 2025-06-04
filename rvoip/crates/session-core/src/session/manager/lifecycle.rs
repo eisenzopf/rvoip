@@ -27,7 +27,7 @@ impl SessionManager {
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
         
         // Start the dialog manager (it now handles its own cleanup)
-        if let Err(e) = self.dialog_manager.start().await {
+        if let Err(e) = self.dialog_api.start().await {
             error!("Failed to start dialog manager: {}", e);
             return Err(Error::InternalError(
                 format!("Failed to start dialog manager: {}", e),
@@ -116,8 +116,8 @@ impl SessionManager {
         }
         
         // Stop the dialog manager
-        if let Err(e) = self.dialog_manager.stop().await {
-            error!("Error stopping dialog manager: {}", e);
+        if let Err(e) = self.dialog_api.stop().await {
+            error!("Failed to stop dialog manager: {}", e);
         }
         
         println!("Session manager stopped");
@@ -426,7 +426,7 @@ impl SessionManager {
             let dialog_id = entry.key();
             let session_id = entry.value();
             
-            if let Ok(dialog) = self.dialog_manager.get_dialog_info(dialog_id).await {
+            if let Ok(dialog) = self.dialog_api.get_dialog_info(dialog_id).await {
                 if dialog.call_id == call_id &&
                    dialog.local_tag.as_deref() == Some(from_tag) &&
                    dialog.remote_tag.as_deref() == Some(to_tag) {
