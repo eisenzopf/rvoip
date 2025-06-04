@@ -15,6 +15,7 @@ use rvoip_sip_core::{Request, Response, Method};
 use crate::dialog::{DialogId, Dialog, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, SessionCoordinationEvent};
+use crate::config::DialogManagerConfig;
 
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,10 @@ pub struct DialogManager {
     
     /// Local address for this dialog manager (used in Via headers)
     pub(crate) local_address: SocketAddr,
+    
+    /// **NEW**: Optional unified configuration for behavioral modes
+    /// When present, enables mode-specific behavior (auto-responses, etc.)
+    pub(crate) config: Option<DialogManagerConfig>,
     
     /// Active dialogs by dialog ID
     pub(crate) dialogs: Arc<DashMap<DialogId, Dialog>>,
@@ -65,6 +70,7 @@ impl DialogManager {
         Ok(Self {
             transaction_manager,
             local_address,
+            config: None,
             dialogs: Arc::new(DashMap::new()),
             dialog_lookup: Arc::new(DashMap::new()),
             transaction_to_dialog: Arc::new(DashMap::new()),
@@ -96,6 +102,7 @@ impl DialogManager {
         let manager = Self {
             transaction_manager,
             local_address,
+            config: None,
             dialogs: Arc::new(DashMap::new()),
             dialog_lookup: Arc::new(DashMap::new()),
             transaction_to_dialog: Arc::new(DashMap::new()),
@@ -419,6 +426,82 @@ impl DialogManager {
         // Remove from transaction-to-dialog mapping if present
         if self.transaction_to_dialog.remove(transaction_id).is_some() {
             debug!("Cleaned up transaction-dialog mapping for completed transaction {}", transaction_id);
+        }
+    }
+    
+    // ========================================
+    // **NEW**: UNIFIED CONFIGURATION SUPPORT
+    // ========================================
+    
+    /// Set the unified configuration for this DialogManager
+    /// 
+    /// Enables mode-specific behavior based on configuration.
+    /// This method allows the UnifiedDialogManager to inject configuration.
+    /// 
+    /// # Arguments
+    /// * `config` - Unified configuration determining behavior mode
+    pub fn set_config(&mut self, config: DialogManagerConfig) {
+        debug!("Setting unified configuration to {:?} mode", Self::config_mode_name(&config));
+        self.config = Some(config);
+    }
+    
+    /// Get the current configuration (if any)
+    /// 
+    /// Returns the unified configuration if it was provided.
+    pub fn config(&self) -> Option<&DialogManagerConfig> {
+        self.config.as_ref()
+    }
+    
+    /// Check if auto-response to OPTIONS requests is enabled
+    /// 
+    /// Returns true if the unified configuration enables automatic OPTIONS responses.
+    /// If no configuration is set, defaults to false (session layer handling).
+    pub fn should_auto_respond_to_options(&self) -> bool {
+        self.config
+            .as_ref()
+            .map(|config| config.auto_options_enabled())
+            .unwrap_or(false)
+    }
+    
+    /// Check if auto-response to REGISTER requests is enabled
+    /// 
+    /// Returns true if the unified configuration enables automatic REGISTER responses.
+    /// If no configuration is set, defaults to false (session layer handling).
+    pub fn should_auto_respond_to_register(&self) -> bool {
+        self.config
+            .as_ref()
+            .map(|config| config.auto_register_enabled())
+            .unwrap_or(false)
+    }
+    
+    /// Check if outgoing calls are supported
+    /// 
+    /// Returns true if the configuration supports outgoing calls (Client/Hybrid modes).
+    /// If no configuration is set, defaults to true for backward compatibility.
+    pub fn supports_outgoing_calls(&self) -> bool {
+        self.config
+            .as_ref()
+            .map(|config| config.supports_outgoing_calls())
+            .unwrap_or(true) // Default to true for backward compatibility
+    }
+    
+    /// Check if incoming calls are supported
+    /// 
+    /// Returns true if the configuration supports incoming calls (Server/Hybrid modes).
+    /// If no configuration is set, defaults to true for backward compatibility.
+    pub fn supports_incoming_calls(&self) -> bool {
+        self.config
+            .as_ref()
+            .map(|config| config.supports_incoming_calls())
+            .unwrap_or(true) // Default to true for backward compatibility
+    }
+    
+    /// Get configuration mode name for logging
+    fn config_mode_name(config: &DialogManagerConfig) -> &'static str {
+        match config {
+            DialogManagerConfig::Client(_) => "Client",
+            DialogManagerConfig::Server(_) => "Server",
+            DialogManagerConfig::Hybrid(_) => "Hybrid",
         }
     }
 }

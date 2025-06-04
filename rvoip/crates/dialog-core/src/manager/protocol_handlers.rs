@@ -181,7 +181,7 @@ impl ProtocolHandlers for DialogManager {
         }
     }
     
-    /// Handle OPTIONS requests
+    /// Handle OPTIONS requests with unified configuration support
     async fn handle_options_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing OPTIONS request from {}", source);
         
@@ -195,18 +195,28 @@ impl ProtocolHandlers for DialogManager {
         
         let transaction_id = server_transaction.id().clone();
         
-        // Send session coordination event for capability query
-        let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
-            transaction_id: transaction_id.clone(),
-            request: request.clone(),
-            source,
-        };
-        
-        if let Err(e) = self.notify_session_layer(event).await {
-            debug!("Failed to notify session layer of OPTIONS: {}", e);
-            
-            // Fallback: send basic 200 OK with supported methods
+        // **NEW**: Check unified configuration for auto-response behavior
+        // If the manager is configured for auto-OPTIONS response, send immediate response
+        // Otherwise, forward to session layer for application handling
+        if self.should_auto_respond_to_options() {
+            debug!("Auto-responding to OPTIONS request (configured for auto-response)");
             self.send_basic_options_response(&transaction_id, &request).await?;
+        } else {
+            debug!("Forwarding OPTIONS request to session layer (auto-response disabled)");
+            
+            // Send session coordination event for capability query
+            let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
+                transaction_id: transaction_id.clone(),
+                request: request.clone(),
+                source,
+            };
+            
+            if let Err(e) = self.notify_session_layer(event).await {
+                debug!("Failed to notify session layer of OPTIONS: {}, sending fallback response", e);
+                
+                // Fallback: send basic 200 OK with supported methods
+                self.send_basic_options_response(&transaction_id, &request).await?;
+            }
         }
         
         debug!("OPTIONS request processed");

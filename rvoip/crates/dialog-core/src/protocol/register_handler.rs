@@ -39,9 +39,10 @@ pub trait RegisterHandler {
 
 /// Implementation of REGISTER handling for DialogManager
 impl RegisterHandler for DialogManager {
-    /// Handle REGISTER requests according to RFC 3261 Section 10
+    /// Handle REGISTER requests according to RFC 3261 Section 10 with unified configuration support
     /// 
     /// REGISTER requests don't create dialogs but are handled for completeness.
+    /// Supports auto-response behavior based on unified configuration.
     async fn handle_register_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing REGISTER request from {}", source);
         
@@ -53,7 +54,7 @@ impl RegisterHandler for DialogManager {
         let contact_uri = self.extract_contact_uri(&request).unwrap_or_else(|| from_uri.clone());
         let expires = self.extract_expires(&request);
         
-        // Create server transaction and send coordination event
+        // Create server transaction
         let server_transaction = self.transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
@@ -63,15 +64,31 @@ impl RegisterHandler for DialogManager {
         
         let transaction_id = server_transaction.id().clone();
         
-        let event = SessionCoordinationEvent::RegistrationRequest {
-            transaction_id,
-            from_uri,
-            contact_uri,
-            expires,
-        };
+        // **NEW**: Check unified configuration for auto-response behavior
+        // If the manager is configured for auto-REGISTER response, send immediate response
+        // Otherwise, forward to session layer for application handling
+        if self.should_auto_respond_to_register() {
+            debug!("Auto-responding to REGISTER request (configured for auto-response)");
+            self.send_basic_register_response(&transaction_id, &request, expires).await?;
+        } else {
+            debug!("Forwarding REGISTER request to session layer (auto-response disabled)");
+            
+            let event = SessionCoordinationEvent::RegistrationRequest {
+                transaction_id: transaction_id.clone(),
+                from_uri,
+                contact_uri,
+                expires,
+            };
+            
+            if let Err(e) = self.notify_session_layer(event).await {
+                debug!("Failed to notify session layer of REGISTER: {}, sending fallback response", e);
+                
+                // Fallback: send basic 200 OK response
+                self.send_basic_register_response(&transaction_id, &request, expires).await?;
+            }
+        }
         
-        self.notify_session_layer(event).await?;
-        debug!("REGISTER request forwarded to session layer");
+        debug!("REGISTER request processed");
         Ok(())
     }
 }
@@ -97,5 +114,29 @@ impl DialogManager {
         request.typed_header::<rvoip_sip_core::types::expires::Expires>()
             .map(|exp| exp.0)
             .unwrap_or(3600) // Default to 1 hour
+    }
+    
+    /// Send basic REGISTER response (for auto-response mode)
+    pub async fn send_basic_register_response(
+        &self,
+        transaction_id: &rvoip_transaction_core::TransactionKey,
+        request: &Request,
+        expires: u32,
+    ) -> DialogResult<()> {
+        use rvoip_sip_core::StatusCode;
+        
+        // Create basic 200 OK response for REGISTER
+        let response = rvoip_transaction_core::utils::response_builders::create_response(request, StatusCode::Ok);
+        
+        // TODO: Could add Contact header with the registered URI and expires
+        // For basic auto-response, just send 200 OK
+        
+        self.transaction_manager.send_response(transaction_id, response).await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send REGISTER response: {}", e),
+            })?;
+        
+        debug!("Sent basic REGISTER response with expires {}", expires);
+        Ok(())
     }
 } 

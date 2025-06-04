@@ -129,18 +129,30 @@ pub mod sdp;
 pub mod recovery;
 pub mod events;
 
+// **NEW**: Configuration system (unified and legacy)
+pub mod config;
+
 // **NEW**: Clean API layer for easy consumption
 pub mod api;
 
 // Re-export main types
-pub use manager::DialogManager;
+pub use manager::{DialogManager, UnifiedDialogManager};
 pub use dialog::{DialogId, Dialog, DialogState};
 pub use errors::{DialogError, DialogResult};
 pub use events::{SessionCoordinationEvent, DialogEvent};
 
+// **NEW**: Re-export unified configuration types
+pub use config::{
+    DialogManagerConfig, 
+    ClientBehavior, 
+    ServerBehavior, 
+    HybridBehavior,
+};
+
 // **NEW**: Re-export clean API types
-pub use api::{DialogClient, DialogServer};
+pub use api::{DialogClient, DialogServer, UnifiedDialogApi};
 pub use api::config::{ClientConfig, ServerConfig};
+pub use api::{ApiResult, ApiError, DialogStats};
 
 // Re-export for convenience
 pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};

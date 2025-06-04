@@ -502,7 +502,7 @@ This maintains clean separation of concerns with session-core focused on its cor
 
 ## 📊 UPDATED PROGRESS TRACKING
 
-### Current Status: **PHASE 9 COMPLETE - PERFECT ARCHITECTURAL COMPLIANCE ACHIEVED! 🎉🏗️🎉**
+### Current Status: **PHASE 10 IN PROGRESS - IMPLEMENTING UNIFIED DIALOG MANAGER ARCHITECTURE! 🏗️🔧🎯**
 - **Phase 1 - API Foundation**: ✅ COMPLETE (16/16 tasks)
 - **Phase 2 - Media Coordination**: ✅ COMPLETE (4/4 tasks)  
 - **Phase 3.1 - Enhanced Server Operations**: ✅ COMPLETE (4/4 tasks)
@@ -525,10 +525,11 @@ This maintains clean separation of concerns with session-core focused on its cor
 - **Phase 7.3 - Multi-Session Bridging Mechanics**: ✅ COMPLETE (N-way conferencing proven!)
 - **Phase 8 - Client-Side INVITE Flow**: ✅ COMPLETE (19/19 tasks) ❗ **BIDIRECTIONAL SIP ACHIEVED**
 - **Phase 9 - Architectural Violations Fix**: ✅ COMPLETE (16/16 tasks) ❗ **PERFECT ARCHITECTURAL COMPLIANCE**
+- **Phase 10 - Unified Dialog Manager Architecture**: ⏳ **IN PROGRESS** (0/17 tasks) ❗ **SIMPLIFYING ARCHITECTURE**
 
-### **Total Progress**: 125/125 tasks (100%) - **COMPLETE ARCHITECTURAL COMPLIANCE WITH BIDIRECTIONAL SIP!**
+### **Total Progress**: 125/142 tasks (88%) - **Phase 10 in progress to unify dialog-core architecture!**
 
-### Priority: 🎉 **COMPLETE SUCCESS** - Full bidirectional SIP communication with server and client INVITE flows working!
+### Priority: 🏗️ **ARCHITECTURE SIMPLIFICATION** - Merging DialogClient/DialogServer into unified DialogManager!
 
 **🏆 FINAL ACHIEVEMENT - COMPLETE SIP INFRASTRUCTURE SUCCESS!**
 
@@ -652,182 +653,109 @@ Session-core is now **architecturally compliant** and ready for integration with
 
 **Next Steps**: Session-core is now ready for enhanced feature development on top of this solid architectural foundation!
 
-## 🎉 PHASE 10: DIALOG-CORE API LAYER CREATION - COMPLETE SUCCESS! ✅
+## 🚀 PHASE 10: SESSION-CORE INTEGRATION WITH UNIFIED DIALOG MANAGER ⏳ **PENDING DIALOG-CORE**
 
-**Current Status**: ✅ **DIALOG-CORE API LAYER COMPLETE** - Perfect architectural consistency achieved across all crates!
+### 🎯 **GOAL: Integrate with Unified DialogManager from Dialog-Core**
 
-### 🚀 **NEWLY CREATED API LAYER**
+**Context**: Dialog-core is implementing unified DialogManager architecture (see `dialog-core/TODO.md` Phase 9) to replace the split DialogClient/DialogServer approach.
 
-**Motivation**: Created a comprehensive API layer for dialog-core to match the patterns established in session-core and transaction-core, providing clean developer interfaces and hiding internal complexity.
+**This Phase**: Handle the session-core integration changes needed once dialog-core provides the unified DialogManager.
 
-**New Components Created**:
-1. ✅ **API Module Structure** (`dialog-core/src/api/`):
-   - `mod.rs` - Main API types and traits
-   - `config.rs` - Configuration for client/server scenarios
-   - `server.rs` - High-level server interface (`DialogServer`)
-   - `client.rs` - High-level client interface (`DialogClient`)
-   - `common.rs` - Shared handles and convenience types
+**Expected Outcome**: ✅ `create_sip_client()` works, ✅ `create_sip_server()` continues working, ✅ SessionManager simplified (no complex trait abstractions needed).
 
-2. ✅ **Clean Developer Interfaces**:
-   - `DialogServer::new("0.0.0.0:5060")` - Simple server creation
-   - `DialogClient::new("127.0.0.1:0")` - Simple client creation
-   - `CallHandle` - High-level call management
-   - `DialogHandle` - Dialog-specific operations
+### 🔧 **IMPLEMENTATION PLAN**
 
-3. ✅ **Advanced Configuration Support**:
-   - `DialogConfig` - Base configuration
-   - `ServerConfig` - Server-specific settings
-   - `ClientConfig` - Client-specific settings with authentication
-   - `Credentials` - Authentication support
+#### Phase 10.1: Update Imports and Types ⏳ **PENDING DIALOG-CORE PHASE 9**
+- [ ] **Update Session-Core Imports** - Use unified DialogManager
+  - [ ] Change `use rvoip_dialog_core::api::DialogServer` to `use rvoip_dialog_core::DialogManager`
+  - [ ] Remove any DialogClient-specific imports
+  - [ ] Update type annotations in SessionManager from `Arc<DialogServer>` to `Arc<DialogManager>`
+  - [ ] Verify all method calls work with unified interface
 
-4. ✅ **Simplified Error Types**:
-   - `ApiError` - Clean error categories
-   - `ApiResult<T>` - Convenient result type
-   - Automatic conversion from internal `DialogError`
+#### Phase 10.2: Fix Factory Functions ⏳ **PENDING DIALOG-CORE PHASE 9**
+- [ ] **Update create_sip_server Function** - Use unified DialogManager
+  - [ ] Change dialog creation from `DialogServer::with_global_events()` to `DialogManager::new(DialogManagerConfig::Server(config))`
+  - [ ] Verify server functionality continues to work
+  - [ ] Test with existing SIPp server tests
 
-### 🎯 **ARCHITECTURAL BENEFITS ACHIEVED**
+- [ ] **Fix create_sip_client Function** - Use unified DialogManager for client
+  - [ ] Remove the `anyhow::bail!()` error from `create_sip_client()` function
+  - [ ] Implement full client factory: transport → transaction → dialog → session creation chain
+  - [ ] Use `DialogManager::new(DialogManagerConfig::Client(config))` for dialog layer
+  - [ ] Test client factory creates working SipClient
 
-#### **1. Developer Experience Improvements**
+- [ ] **Update create_sip_client_with_managers** - Support dependency injection
+  - [ ] Update signature to accept `Arc<DialogManager>` instead of `Arc<DialogServer>`
+  - [ ] Ensure dependency injection pattern continues to work
+  - [ ] Test with both client and server configurations
+
+#### Phase 10.3: Integration Testing ⏳ **PENDING DIALOG-CORE PHASE 9**
+- [ ] **Test Both Factory Functions** - Verify end-to-end functionality
+  - [ ] Test `create_sip_server()` creates working server with unified DialogManager
+  - [ ] Test `create_sip_client()` creates working client with unified DialogManager
+  - [ ] Verify both can make and receive calls
+  - [ ] Test session management works with unified dialog provider
+
+- [ ] **Update Session-Core Tests** - Remove client/server API split references
+  - [ ] Update any tests that use DialogServer specifically
+  - [ ] Update integration tests to use unified DialogManager
+  - [ ] Verify no regressions in existing functionality
+
+### 🎯 **SUCCESS CRITERIA**
+
+#### **Minimal Success:**
+- [ ] ✅ SessionManager accepts unified DialogManager
+- [ ] ✅ `create_sip_client()` and `create_sip_server()` both work
+- [ ] ✅ No breaking changes to session-core public API
+- [ ] ✅ All existing tests pass
+
+#### **Full Success:**
+- [ ] ✅ Real client-to-server SIP calls work end-to-end
+- [ ] ✅ No performance regressions
+- [ ] ✅ Clean integration with unified dialog-core architecture
+- [ ] ✅ Simplified codebase (no complex trait abstractions)
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 10.1**: ~30 minutes (import updates)
+- **Phase 10.2**: ~1 hour (factory function fixes)
+- **Phase 10.3**: ~30 minutes (testing)
+
+**Total Estimated Time**: ~2 hours (waiting on dialog-core Phase 9)
+
+### 🔄 **DEPENDENCIES**
+
+**Blocked By**: 
+- ✅ **dialog-core Phase 9** - Unified DialogManager implementation
+
+**Enables**:
+- ✅ Complete client integration
+- ✅ Simplified session-core architecture  
+- ✅ Full client-server SIP functionality
+
+### 💡 **IMPACT**
+
+**Before (Current Issue)**:
 ```rust
-// OLD: Complex DialogManager construction
-let transaction_manager = Arc::new(TransactionManager::new().await?);
-let dialog_manager = Arc::new(DialogManager::new(transaction_manager, local_addr).await?);
-
-// NEW: Simple API layer construction
-let server = DialogServer::new("0.0.0.0:5060").await?;
-let client = DialogClient::new("127.0.0.1:0").await?;
+// Doesn't work - SessionManager can't accept DialogClient
+let dialog_client = DialogClient::new(config).await?;
+SessionManager::new(dialog_client, config, event_bus).await?; // ❌ Compilation error
 ```
 
-#### **2. Consistent Architecture Pattern**
-- ✅ **session-core**: Has `api::client` and `api::server` modules
-- ✅ **transaction-core**: Has clean API abstractions  
-- ✅ **dialog-core**: Now has matching `api::client` and `api::server` modules
-
-#### **3. Clean High-Level Operations**
+**After (With Unified DialogManager)**:
 ```rust
-// Making a call with new API
-let call = client.make_call(
-    "sip:alice@example.com", 
-    "sip:bob@example.com",
-    Some("SDP offer".to_string())
-).await?;
-
-// Call management
-call.answer(Some("SDP answer".to_string())).await?;
-call.hold(Some("SDP on hold".to_string())).await?;
-call.transfer("sip:transfer@example.com".to_string()).await?;
-call.hangup().await?;
+// Works - SessionManager accepts any DialogManager
+let dialog_manager = DialogManager::new(DialogManagerConfig::Client(config)).await?;
+SessionManager::new(dialog_manager, config, event_bus).await?; // ✅ Works!
 ```
 
-#### **4. Simplified Integration with Session-Core**
-```rust
-// Clean dependency injection
-let dialog_server = DialogServer::with_dependencies(transaction_manager, config).await?;
-let session_manager = SessionManager::new(dialog_server, session_config, event_bus).await?;
-```
+### 🚀 **NEXT ACTIONS**
 
-### 🔍 **VERIFICATION OF API COMPLETENESS**
+1. **Wait for dialog-core Phase 9** to complete unified DialogManager
+2. **Monitor dialog-core progress** for API availability
+3. **Start Phase 10.1** as soon as unified DialogManager is available
+4. **Test incrementally** to ensure no regressions
 
-**All session-core usage patterns verified to be supported**:
-- ✅ `dialog_manager.start()` → `DialogApi::start()`
-- ✅ `dialog_manager.set_session_coordinator()` → `DialogApi::set_session_coordinator()`
-- ✅ `dialog_manager.send_request()` → Available via `DialogHandle::send_request()`
-- ✅ `dialog_manager.create_outgoing_dialog()` → `DialogClient::make_call()` or `DialogClient::create_dialog()`
-- ✅ `dialog_manager.get_dialog()` → `DialogHandle::info()`
-- ✅ Event handling → `SessionCoordinationEvent` still supported
+**Note**: Most complexity moved to dialog-core where it belongs. Session-core changes are minimal! 🎯
 
-### 📊 **API LAYER STATISTICS**
-
-**New Code Created**:
-- **5 modules**: mod.rs, config.rs, server.rs, client.rs, common.rs
-- **4 main types**: DialogServer, DialogClient, DialogHandle, CallHandle  
-- **6 config types**: DialogConfig, ServerConfig, ClientConfig, Credentials, etc.
-- **1 error system**: ApiError with clean categories
-- **10+ convenience methods**: make_call(), answer(), hangup(), transfer(), etc.
-
-**Lines of Clean API Code**: ~1000+ lines of developer-friendly interfaces
-
-### 🎯 **SUCCESS CRITERIA - ALL ACHIEVED**
-
-- ✅ **Consistent API Pattern**: Now matches session-core and transaction-core architecture
-- ✅ **Developer Friendly**: Simple construction and usage patterns
-- ✅ **Complete Coverage**: All session-core usage patterns supported
-- ✅ **Zero Breaking Changes**: session-core continues to work unchanged
-- ✅ **Clean Error Handling**: Simplified error types for API consumers
-- ✅ **Dependency Injection**: Supports both simple and advanced usage
-- ✅ **Future Extensible**: API can evolve without breaking internal changes
-
-**Implementation Time**: ~1 hour for complete API layer creation
-
-## 🏗️ **FINAL ARCHITECTURE ACHIEVED**
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│              Application Layer                              │
-│         (call-engine, client applications)                 │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│             Session Layer (session-core)                   │  ✅ FULLY IMPLEMENTED
-│  • session-core/src/api/ (client.rs, server.rs)            │  ✅ CLEAN API
-│  • Uses dialog-core/api instead of raw DialogManager       │  ✅ NEW IMPROVEMENT
-│  • Perfect separation of concerns                          │  ✅ ARCHITECTURAL COMPLIANCE
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Dialog Layer (dialog-core)                    │  ✅ FULLY IMPLEMENTED
-│  • dialog-core/src/api/ (client.rs, server.rs)             │  ✅ NEW API LAYER
-│  • High-level DialogServer, DialogClient interfaces        │  ✅ DEVELOPER FRIENDLY
-│  • Hides DialogManager complexity from consumers           │  ✅ CLEAN ABSTRACTION
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│           Transaction Layer (transaction-core)             │  ✅ WORKING
-│        • SIP transaction reliability per RFC 3261          │
-│        • Clean API abstractions                            │  ✅ CONSISTENT PATTERN
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 🎉 **DEVELOPER EXPERIENCE COMPARISON**
-
-**Before (Raw DialogManager)**:
-```rust
-// Complex setup
-let transaction_manager = Arc::new(TransactionManager::new().await?);
-let dialog_manager = Arc::new(DialogManager::new(transaction_manager, addr).await?);
-dialog_manager.start().await?;
-
-// Manual coordination setup
-let (coord_tx, coord_rx) = mpsc::channel(100);
-dialog_manager.set_session_coordinator(coord_tx).await;
-
-// Complex dialog creation
-let dialog_id = dialog_manager.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-let transaction_key = dialog_manager.send_request(&dialog_id, Method::Invite, body).await?;
-```
-
-**After (Clean API Layer)**:
-```rust
-// Simple setup
-let server = DialogServer::new("0.0.0.0:5060").await?;
-server.start().await?;
-
-// Automatic coordination
-server.set_session_coordinator(coord_tx).await?;
-
-// High-level operations
-let call = client.make_call("sip:from@example.com", "sip:to@example.com", sdp_offer).await?;
-call.answer(sdp_answer).await?;
-```
-
-## 🚀 **READY FOR PRODUCTION WITH PERFECT ARCHITECTURE**
-
-All three core libraries now have:
-- ✅ **Consistent API patterns** across session-core, dialog-core, transaction-core
-- ✅ **Clean developer interfaces** hiding internal complexity
-- ✅ **Proper architectural separation** with clear layer boundaries
-- ✅ **Excellent developer experience** with intuitive method names
-- ✅ **Complete RFC 3261 compliance** with modern Rust best practices
+---
