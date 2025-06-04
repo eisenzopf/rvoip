@@ -2,6 +2,179 @@
 
 This document tracks planned improvements and enhancements for the `rvoip-session-core` library.
 
+## 🚨 PHASE 12: ARCHITECTURAL REFACTORING - MOVE BUSINESS LOGIC TO CALL-ENGINE ⚠️ **CRITICAL**
+
+### 🎯 **GOAL: Fix Separation of Concerns Violations**
+
+**Context**: Architectural review identified that **2,400+ lines of business logic** were incorrectly placed in session-core instead of call-engine. This violates separation of concerns and duplicates functionality.
+
+**Root Issue**: Session-core currently contains sophisticated business orchestration that should be call-engine's responsibility.
+
+**Target Outcome**: Session-core provides **low-level session primitives only**, call-engine handles **business logic and service orchestration**.
+
+### 🚨 **MAJOR VIOLATIONS IDENTIFIED**
+
+#### **❌ MOVE TO CALL-ENGINE (Business Logic)**
+1. **SessionGroupManager** (934 lines) → `call-engine/src/conference/`
+   - Conference call management and lifecycle
+   - Transfer group coordination and state management  
+   - Leader election algorithms and group policies
+   - **Violation**: This is call center business logic, not session primitives
+
+2. **SessionPolicyManager** (927 lines) → `call-engine/src/policy/`
+   - Resource sharing policies (Exclusive, Priority-based, Load-balanced)
+   - Policy enforcement and violation detection  
+   - Business rule evaluation and resource allocation decisions
+   - **Violation**: This is business policy enforcement, not session coordination
+
+3. **SessionPriorityManager** (722 lines) → `call-engine/src/priority/`
+   - QoS level management (Voice, Video, ExpeditedForwarding) 
+   - Scheduling policies (FIFO, Priority, WFQ, RoundRobin)
+   - Resource allocation with bandwidth/CPU/memory limits
+   - **Violation**: This is service-level orchestration, not session management
+
+4. **Complex Event Orchestration** (50% of CrossSessionEventPropagator) → `call-engine/src/orchestrator/`
+   - Business event routing and complex propagation rules
+   - Service-level event coordination and filtering
+   - **Violation**: This is service orchestration, not basic session pub/sub
+
+#### **✅ KEEP IN SESSION-CORE (Low-Level Primitives)**
+1. **SessionDependencyTracker** (655 lines) ✓ **APPROPRIATE**
+   - Basic parent-child relationship tracking
+   - Dependency state management and cycle detection
+   - Automatic cleanup on session termination
+   - **Correct**: These are low-level session relationship primitives
+
+2. **Basic Event Bus** (50% of CrossSessionEventPropagator) ✓ **APPROPRIATE**  
+   - Simple pub/sub between sessions
+   - Basic event filtering and session-to-session communication
+   - **Correct**: Basic session communication primitives
+
+3. **Basic Session Sequencing** (50% of SessionSequenceCoordinator) ✓ **APPROPRIATE**
+   - Simple A-leg/B-leg session linking
+   - Basic sequence state tracking
+   - **Correct**: Low-level session coordination primitives
+
+### 🔧 **REFACTORING IMPLEMENTATION PLAN**
+
+#### Phase 12.1: Move SessionGroupManager to Call-Engine ⏳ **HIGH PRIORITY**
+- [ ] **Create call-engine Conference Management**
+  - [ ] Move `session/coordination/groups.rs` → `call-engine/src/conference/manager.rs`
+  - [ ] Update GroupType enum to focus on call center use cases (Conference, Transfer, Consultation)
+  - [ ] Integrate with existing `CallCenterEngine::create_conference()` method
+  - [ ] Remove session-core exports of SessionGroupManager
+
+- [ ] **Keep Basic Session Grouping Primitives**
+  - [ ] Create minimal `session/basic_groups.rs` with data structures only
+  - [ ] Basic SessionGroup struct without business logic
+  - [ ] Simple group membership tracking (no leader election, no complex policies)
+  - [ ] Export only basic primitives for call-engine to use
+
+#### Phase 12.2: Move SessionPolicyManager to Call-Engine ⏳ **HIGH PRIORITY**
+- [ ] **Create call-engine Policy Engine**
+  - [ ] Move `session/coordination/policies.rs` → `call-engine/src/policy/engine.rs`
+  - [ ] Integrate with existing empty policy stubs in `routing/policies.rs` and `queue/policies.rs`
+  - [ ] Connect policy engine to routing decisions in `CallCenterEngine`
+  - [ ] Remove session-core exports of SessionPolicyManager
+
+- [ ] **Keep Basic Resource Tracking Primitives**
+  - [ ] Create minimal `session/resource_limits.rs` with data structures only
+  - [ ] Basic resource allocation tracking without business policies
+  - [ ] Simple resource usage monitoring (no enforcement logic)
+  - [ ] Export only resource primitives for call-engine to use
+
+#### Phase 12.3: Move SessionPriorityManager to Call-Engine ⏳ **HIGH PRIORITY**
+- [ ] **Create call-engine QoS Management**
+  - [ ] Move `session/coordination/priority.rs` → `call-engine/src/priority/qos_manager.rs`
+  - [ ] Integrate with existing basic priority system in `CallInfo::priority: u8`
+  - [ ] Enhance call-engine priority management with sophisticated scheduling
+  - [ ] Remove session-core exports of SessionPriorityManager
+
+- [ ] **Keep Basic Priority Primitives**
+  - [ ] Create minimal `session/basic_priority.rs` with enum only
+  - [ ] Simple SessionPriority enum (Emergency, High, Normal, Low)
+  - [ ] Basic priority assignment (no scheduling, no resource allocation)
+  - [ ] Export only priority primitives for call-engine to use
+
+#### Phase 12.4: Refactor Event Propagation ⏳ **MEDIUM PRIORITY**
+- [ ] **Move Complex Event Orchestration to Call-Engine**
+  - [ ] Move business event logic from `session/coordination/events.rs` → `call-engine/src/orchestrator/events.rs`
+  - [ ] Integrate with call center event coordination
+  - [ ] Connect to bridge events and call lifecycle events
+
+- [ ] **Keep Basic Session Event Bus**
+  - [ ] Simplify `session/coordination/events.rs` to basic pub/sub only
+  - [ ] Simple SessionEvent enum and EventBus struct
+  - [ ] Basic event publishing and subscription (no complex routing)
+  - [ ] Export basic event primitives for call-engine to use
+
+#### Phase 12.5: Update Dependencies and APIs ⏳ **CLEANUP**
+- [ ] **Update Call-Engine Integration**
+  - [ ] Update call-engine imports to use session-core basic primitives only
+  - [ ] Enhance call-engine to use its own business logic instead of session-core's
+  - [ ] Test that all call-engine functionality continues working
+
+- [ ] **Clean Session-Core Exports**
+  - [ ] Remove business logic types from `session/mod.rs`
+  - [ ] Remove business logic types from `session/coordination/mod.rs`
+  - [ ] Update session-core API to export only primitives
+  - [ ] Update session-core documentation to clarify scope
+
+### 🎯 **SUCCESS CRITERIA**
+
+#### **Session-Core Success:**
+- [ ] ✅ Session-core exports only low-level session primitives
+- [ ] ✅ No business logic, policy enforcement, or service orchestration in session-core
+- [ ] ✅ Basic dependency tracking, grouping, and events only
+- [ ] ✅ Call-engine can compose session-core primitives into business logic
+
+#### **Call-Engine Integration Success:**
+- [ ] ✅ Call-engine has sophisticated conference, policy, and priority management
+- [ ] ✅ Empty policy stubs replaced with full business logic from session-core
+- [ ] ✅ All existing call-engine functionality continues working
+- [ ] ✅ Enhanced call-engine orchestration using session-core primitives
+
+#### **Architectural Compliance Success:**
+- [ ] ✅ Clean separation: call-engine = business logic, session-core = primitives
+- [ ] ✅ No duplication between call-engine and session-core functionality
+- [ ] ✅ Session-core focused on session coordination only
+- [ ] ✅ Call-engine focused on call center business logic only
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 12.1**: ~4 hours (SessionGroupManager move + basic primitives)
+- **Phase 12.2**: ~4 hours (SessionPolicyManager move + basic primitives)  
+- **Phase 12.3**: ~4 hours (SessionPriorityManager move + basic primitives)
+- **Phase 12.4**: ~2 hours (Event propagation refactor)
+- **Phase 12.5**: ~2 hours (Dependencies and API cleanup)
+
+**Total Estimated Time**: ~16 hours
+
+### 💡 **ARCHITECTURAL BENEFITS**
+
+**Session-Core Benefits**:
+- ✅ **Focused Scope**: Clear responsibility for session coordination primitives only
+- ✅ **Reusability**: Low-level primitives can be used by any business logic
+- ✅ **Maintainability**: Much smaller codebase focused on core session concerns
+- ✅ **Performance**: No unnecessary business logic overhead in session layer
+
+**Call-Engine Benefits**:
+- ✅ **Complete Business Logic**: All call center functionality in one place
+- ✅ **Enhanced Capabilities**: Sophisticated policy, priority, and conference management
+- ✅ **Integration**: Business logic properly integrated with call routing and agent management
+- ✅ **Extensibility**: Easy to add new business features without touching session-core
+
+### 🚀 **NEXT ACTIONS**
+
+1. **Start Phase 12.1** - Move SessionGroupManager to call-engine first (highest impact)
+2. **Test incrementally** - Ensure call-engine functionality works after each move
+3. **Keep session-core primitives** - Don't lose valuable infrastructure code
+4. **Focus on integration** - Make sure call-engine properly uses the moved logic
+
+**🎯 Priority**: **CRITICAL** - This fixes a major architectural violation and prevents technical debt
+
+---
+
 ## 🚀 PHASE 11: SESSION-CORE COMPLIANCE & BEST PRACTICES ⏳ **IN PROGRESS**
 
 ### 🎯 **GOAL: Session-Core Specific Compliance Improvements**
@@ -28,20 +201,22 @@ This document tracks planned improvements and enhancements for the `rvoip-sessio
 
 **🎉 MAJOR SUCCESS**: Complete session state machine implemented with 8x8 transition matrix, comprehensive validation, and 17 passing tests!
 
-#### Phase 11.2: Enhanced Session Resource Management ⏳ **PENDING**
-- [ ] **Granular Resource Tracking** - More detailed session resource management
-  - [ ] Track sessions by user/endpoint for better resource limits
-  - [ ] Track sessions by dialog state for better debugging
-  - [ ] Add session resource metrics (memory usage, dialog count per session)
-  - [ ] Implement resource cleanup on session failures
-  - [ ] Add configurable per-user session limits
+#### Phase 11.2: Enhanced Session Resource Management ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Granular Resource Tracking** - More detailed session resource management
+  - [x] ✅ **COMPLETE**: Track sessions by user/endpoint for better resource limits
+  - [x] ✅ **COMPLETE**: Track sessions by dialog state for better debugging
+  - [x] ✅ **COMPLETE**: Add session resource metrics (memory usage, dialog count per session)
+  - [x] ✅ **COMPLETE**: Implement resource cleanup on session failures
+  - [x] ✅ **COMPLETE**: Add configurable per-user session limits
 
-- [ ] **Session Lifecycle Management** - Improved session cleanup and monitoring
-  - [ ] Implement `cleanup_terminated_sessions()` method in SessionManager
-  - [ ] Add periodic cleanup of terminated sessions
-  - [ ] Add session aging and timeout management
-  - [ ] Implement session health monitoring
-  - [ ] Add session resource leak detection
+- [x] ✅ **COMPLETE**: **Session Lifecycle Management** - Improved session cleanup and monitoring
+  - [x] ✅ **COMPLETE**: Implement `cleanup_terminated_sessions()` method in SessionManager
+  - [x] ✅ **COMPLETE**: Add periodic cleanup of terminated sessions
+  - [x] ✅ **COMPLETE**: Add session aging and timeout management
+  - [x] ✅ **COMPLETE**: Implement session health monitoring
+  - [x] ✅ **COMPLETE**: Add session resource leak detection
+
+**🎉 MAJOR SUCCESS**: SessionResourceManager integrated with comprehensive tracking, automatic cleanup, health monitoring, and user-based session limits!
 
 #### Phase 11.3: Enhanced Error Context & Debugging ⏳ **PENDING**
 - [ ] **Rich Session Error Context** - More detailed error information
@@ -673,13 +848,13 @@ This maintains clean separation of concerns with session-core focused on its cor
 - **Phase 9 - Architectural Violations Fix**: ✅ COMPLETE (16/16 tasks) ❗ **PERFECT ARCHITECTURAL COMPLIANCE**
 - **Phase 10 - Unified Dialog Manager Architecture**: ⏳ **PENDING DIALOG-CORE** (0/17 tasks) ❗ **WAITING FOR DIALOG-CORE**
 - **Phase 11.1 - Complete Session State Machine**: ✅ COMPLETE (10/10 tasks) ❗ **SESSION STATE MACHINE PERFECTED**
-- **Phase 11.2 - Enhanced Session Resource Management**: ⏳ **PENDING** (0/10 tasks)
+- **Phase 11.2 - Enhanced Session Resource Management**: ✅ COMPLETE (10/10 tasks)
 - **Phase 11.3 - Enhanced Error Context & Debugging**: ⏳ **PENDING** (0/8 tasks)
 - **Phase 11.4 - Session Coordination Improvements**: ⏳ **PENDING** (0/8 tasks)
 
-### **Total Progress**: 135/180 tasks (75%) - **Phase 11.1 complete - session state machine perfected with 17 passing tests!**
+### **Total Progress**: 145/180 tasks (81%) - **Phase 11.2 complete - comprehensive session resource management implemented!**
 
-### Priority: ✅ **SESSION STATE MACHINE PERFECTED** - Phase 11.1 complete! Next: Enhanced resource management and error context!
+### Priority: ✅ **SESSION RESOURCE MANAGEMENT COMPLETE** - Phase 11.1 & 11.2 done! Next: Enhanced error context and debugging!
 
 **🏆 FINAL ACHIEVEMENT - COMPLETE SIP INFRASTRUCTURE SUCCESS!**
 

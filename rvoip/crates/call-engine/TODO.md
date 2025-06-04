@@ -126,6 +126,188 @@ We have achieved **complete Phase 2 implementation** with sophisticated call cen
   - Routing performance metrics
 ```
 
+## 🚨 **PHASE 2.5: INTEGRATE BUSINESS LOGIC FROM SESSION-CORE** ⚠️ **CRITICAL**
+
+### 🎯 **GOAL: Receive and Integrate Advanced Business Logic from Session-Core**
+
+**Context**: Session-core architectural refactoring (session-core Phase 12) is moving **2,400+ lines of sophisticated business logic** to call-engine where it properly belongs.
+
+**Root Issue**: Call-engine currently has **empty policy stubs** (32 lines total) while session-core has **complete business logic implementations** that belong here.
+
+**Target Outcome**: Call-engine becomes the **complete business logic layer** with sophisticated conference, policy, and priority management integrated with existing orchestration.
+
+### 🎉 **MAJOR ENHANCEMENTS INCOMING**
+
+#### **✅ RECEIVING FROM SESSION-CORE (Advanced Business Logic)**
+1. **Conference Management System** (934 lines) ← `SessionGroupManager`
+   - Complete conference call lifecycle management
+   - Transfer group coordination and consultation handling
+   - Leader election algorithms and dynamic membership
+   - **Integration**: Enhance existing `create_conference()` with full business logic
+
+2. **Advanced Policy Engine** (927 lines) ← `SessionPolicyManager`
+   - Resource sharing policies (Exclusive, Priority-based, Load-balanced)
+   - Policy enforcement and violation detection
+   - Business rule evaluation and resource allocation
+   - **Integration**: Replace empty policy stubs with complete implementation
+
+3. **QoS and Priority Management** (722 lines) ← `SessionPriorityManager`
+   - Sophisticated scheduling policies (FIFO, Priority, WFQ, RoundRobin)
+   - QoS level management (Voice, Video, ExpeditedForwarding)
+   - Resource allocation with bandwidth/CPU/memory limits
+   - **Integration**: Enhance `CallInfo::priority: u8` with full QoS system
+
+4. **Advanced Event Orchestration** (~300 lines) ← `CrossSessionEventPropagator`
+   - Complex business event routing and propagation
+   - Service-level event coordination and filtering
+   - **Integration**: Enhance existing bridge event system
+
+### 🔧 **INTEGRATION IMPLEMENTATION PLAN**
+
+#### Phase 2.5.1: Integrate Conference Management ⏳ **HIGH PRIORITY**
+- [ ] **Receive SessionGroupManager from Session-Core**
+  - [ ] Create `src/conference/manager.rs` from session-core `SessionGroupManager`
+  - [ ] Adapt GroupType enum for call center use cases (Conference, Transfer, Consultation)
+  - [ ] Remove session-level concerns, focus on call center business logic
+  - [ ] Integrate with existing agent and queue management
+
+- [ ] **Enhance Existing Conference Infrastructure**
+  - [ ] Upgrade `CallCenterEngine::create_conference()` to use ConferenceManager
+  - [ ] Connect conference management to agent skill matching
+  - [ ] Integrate conference policies with customer type analysis
+  - [ ] Add conference analytics and reporting
+
+- [ ] **Bridge Integration**
+  - [ ] Connect ConferenceManager to existing session-core bridge API
+  - [ ] Use session-core basic primitives for low-level coordination
+  - [ ] Maintain existing bridge functionality while adding business logic
+  - [ ] Test 3-way conference scenarios with enhanced management
+
+#### Phase 2.5.2: Integrate Advanced Policy Engine ⏳ **HIGH PRIORITY**
+- [ ] **Receive SessionPolicyManager from Session-Core**
+  - [ ] Create `src/policy/engine.rs` from session-core `SessionPolicyManager`
+  - [ ] Replace empty stubs in `routing/policies.rs` and `queue/policies.rs`
+  - [ ] Adapt policies for call center business rules (agent capacity, customer SLA, queue limits)
+  - [ ] Remove session-level enforcement, focus on call-level policies
+
+- [ ] **Integrate with Call Routing**
+  - [ ] Connect policy engine to `make_routing_decision()` logic
+  - [ ] Add policy-based routing (VIP customer policies, agent availability policies)
+  - [ ] Integrate with existing customer type analysis (`CustomerType::VIP`, etc.)
+  - [ ] Add policy-based queue management and overflow handling
+
+- [ ] **Enhanced Resource Management**
+  - [ ] Integrate policy engine with agent capacity management
+  - [ ] Add call center resource allocation policies
+  - [ ] Connect to database for policy persistence and management
+  - [ ] Add policy violation reporting and alerting
+
+#### Phase 2.5.3: Integrate QoS and Priority Management ⏳ **HIGH PRIORITY**
+- [ ] **Receive SessionPriorityManager from Session-Core**
+  - [ ] Create `src/priority/qos_manager.rs` from session-core `SessionPriorityManager`
+  - [ ] Enhance existing `CallInfo::priority: u8` with sophisticated priority system
+  - [ ] Adapt scheduling for call center scenarios (agent assignment, queue processing)
+  - [ ] Focus on call-level QoS rather than session-level QoS
+
+- [ ] **Integrate with Agent Assignment**
+  - [ ] Connect QoS manager to agent selection algorithms
+  - [ ] Add priority-based agent assignment (VIP customers get best agents)
+  - [ ] Integrate with existing performance scoring system
+  - [ ] Add QoS-based queue processing and wait time management
+
+- [ ] **Resource Allocation Enhancement**
+  - [ ] Connect QoS manager to call center resource allocation
+  - [ ] Add agent capacity management based on priority
+  - [ ] Integrate with existing routing statistics and metrics
+  - [ ] Add priority-based call processing and handling
+
+#### Phase 2.5.4: Integrate Advanced Event Orchestration ⏳ **MEDIUM PRIORITY**
+- [ ] **Receive Event Orchestration from Session-Core**
+  - [ ] Create `src/orchestrator/events.rs` from session-core event orchestration
+  - [ ] Focus on call center business events (agent state changes, queue events)
+  - [ ] Remove session-level event concerns, focus on call-level coordination
+  - [ ] Integrate with existing bridge event monitoring
+
+- [ ] **Enhance Call Center Event System**
+  - [ ] Connect to existing call lifecycle events
+  - [ ] Add advanced event routing for call center scenarios
+  - [ ] Integrate with agent status changes and queue state events
+  - [ ] Add event-based analytics and reporting
+
+#### Phase 2.5.5: Integration Testing and Optimization ⏳ **VALIDATION**
+- [ ] **Test Enhanced Business Logic**
+  - [ ] Test enhanced conference management with existing SIPp scenarios
+  - [ ] Validate policy engine integration with call routing
+  - [ ] Test QoS management with agent assignment scenarios
+  - [ ] Verify event orchestration works with call center workflows
+
+- [ ] **Performance and Integration Validation**
+  - [ ] Ensure no performance regressions with enhanced business logic
+  - [ ] Validate integration with session-core basic primitives
+  - [ ] Test scalability with enhanced conference and policy management
+  - [ ] Verify existing call-engine functionality continues working
+
+- [ ] **Documentation and API Cleanup**
+  - [ ] Update call-engine documentation to reflect enhanced capabilities
+  - [ ] Document integration patterns with session-core primitives
+  - [ ] Update API documentation for enhanced business logic
+  - [ ] Create migration guide for call-engine users
+
+### 🎯 **SUCCESS CRITERIA**
+
+#### **Enhanced Business Logic Success:**
+- [ ] ✅ Call-engine has complete conference management (not just basic `create_conference()`)
+- [ ] ✅ Empty policy stubs replaced with full business policy engine
+- [ ] ✅ Basic priority enhanced to sophisticated QoS management
+- [ ] ✅ Advanced event orchestration integrated with call center workflows
+
+#### **Integration Success:**
+- [ ] ✅ All existing call-engine functionality continues working
+- [ ] ✅ Enhanced business logic properly integrated with existing orchestration
+- [ ] ✅ Session-core integration uses basic primitives only (no business logic)
+- [ ] ✅ Performance improvements from better business logic organization
+
+#### **Call Center Enhancement Success:**
+- [ ] ✅ Conference calls with sophisticated management and policies
+- [ ] ✅ Agent assignment based on advanced policies and QoS requirements
+- [ ] ✅ Queue management with complete policy enforcement
+- [ ] ✅ Real-time event orchestration for call center operations
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 2.5.1**: ~5 hours (Conference management integration)
+- **Phase 2.5.2**: ~5 hours (Policy engine integration)
+- **Phase 2.5.3**: ~4 hours (QoS management integration)
+- **Phase 2.5.4**: ~2 hours (Event orchestration integration)
+- **Phase 2.5.5**: ~3 hours (Testing and validation)
+
+**Total Estimated Time**: ~19 hours
+
+### 💡 **ARCHITECTURAL BENEFITS**
+
+**Call-Engine Benefits**:
+- ✅ **Complete Business Logic**: All call center functionality consolidated in one place
+- ✅ **Enhanced Capabilities**: Sophisticated features that were previously scattered
+- ✅ **Better Integration**: Business logic properly integrated with call routing and agent management
+- ✅ **Scalability**: Advanced business logic designed for enterprise call center scenarios
+
+**System-Wide Benefits**:
+- ✅ **Proper Separation**: Business logic in call-engine, primitives in session-core
+- ✅ **No Duplication**: Single source of truth for call center business logic
+- ✅ **Maintainability**: Clear architectural boundaries and responsibilities
+- ✅ **Extensibility**: Easy to enhance call center features without affecting session layer
+
+### 🚀 **NEXT ACTIONS**
+
+1. **Wait for session-core Phase 12.1** - SessionGroupManager movement to start
+2. **Start Phase 2.5.1** - Begin conference management integration as soon as available
+3. **Test incrementally** - Ensure existing functionality works as each component is integrated
+4. **Focus on business integration** - Make sure business logic enhances existing orchestration
+
+**🎯 Priority**: **CRITICAL** - This will make call-engine the complete call center platform
+
+---
+
 ## 🚀 **PHASE 3: Advanced Call Center Features** (READY TO IMPLEMENT)
 
 With Phase 2's solid foundation, we can now implement advanced call center capabilities:

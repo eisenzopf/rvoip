@@ -112,6 +112,9 @@ pub enum RecoveryAction {
     /// Wait for system recovery
     Wait(std::time::Duration),
     
+    /// Wait and retry after specified duration
+    WaitAndRetry(std::time::Duration),
+    
     /// Restart the component
     RestartComponent(String),
     
@@ -132,6 +135,8 @@ impl fmt::Display for RecoveryAction {
                 write!(f, "Check configuration parameter: {}", param),
             RecoveryAction::Wait(duration) => 
                 write!(f, "Wait for {:?} before retrying", duration),
+            RecoveryAction::WaitAndRetry(duration) => 
+                write!(f, "Wait and retry after {:?} before retrying", duration),
             RecoveryAction::RestartComponent(component) => 
                 write!(f, "Restart component: {}", component),
             RecoveryAction::Custom(action) => write!(f, "{}", action),
@@ -202,6 +207,214 @@ impl ErrorContext {
     pub fn with_message(mut self, message: &str) -> Self {
         self.details = Some(message.to_string());
         self
+    }
+    
+    /// Builder for session-specific error context
+    pub fn session(session_id: &str) -> SessionErrorContextBuilder {
+        SessionErrorContextBuilder {
+            context: ErrorContext {
+                category: ErrorCategory::Session,
+                session_id: Some(session_id.to_string()),
+                timestamp: std::time::SystemTime::now(),
+                ..Default::default()
+            }
+        }
+    }
+    
+    /// Builder for dialog-specific error context
+    pub fn dialog(dialog_id: &str) -> DialogErrorContextBuilder {
+        DialogErrorContextBuilder {
+            context: ErrorContext {
+                category: ErrorCategory::Dialog,
+                dialog_id: Some(dialog_id.to_string()),
+                timestamp: std::time::SystemTime::now(),
+                ..Default::default()
+            }
+        }
+    }
+    
+    /// Builder for resource-specific error context
+    pub fn resource(resource_name: &str) -> ResourceErrorContextBuilder {
+        ResourceErrorContextBuilder {
+            context: ErrorContext {
+                category: ErrorCategory::Resource,
+                details: Some(format!("Resource: {}", resource_name)),
+                timestamp: std::time::SystemTime::now(),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Builder for session-specific error contexts
+pub struct SessionErrorContextBuilder {
+    context: ErrorContext,
+}
+
+impl SessionErrorContextBuilder {
+    /// Add session state information
+    pub fn with_state(mut self, state: &str) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, state: {}", details, state);
+        } else {
+            self.context.details = Some(format!("state: {}", state));
+        }
+        self
+    }
+    
+    /// Add dialog ID
+    pub fn with_dialog(mut self, dialog_id: &str) -> Self {
+        self.context.dialog_id = Some(dialog_id.to_string());
+        self
+    }
+    
+    /// Add media session information
+    pub fn with_media_session(mut self, media_session_id: &str) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, media_session: {}", details, media_session_id);
+        } else {
+            self.context.details = Some(format!("media_session: {}", media_session_id));
+        }
+        self
+    }
+    
+    /// Add session duration information
+    pub fn with_duration(mut self, duration: std::time::Duration) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, duration: {:?}", details, duration);
+        } else {
+            self.context.details = Some(format!("duration: {:?}", duration));
+        }
+        self
+    }
+    
+    /// Set error severity
+    pub fn severity(mut self, severity: ErrorSeverity) -> Self {
+        self.context.severity = severity;
+        self
+    }
+    
+    /// Set recovery action
+    pub fn recovery(mut self, action: RecoveryAction) -> Self {
+        self.context.recovery = action;
+        self
+    }
+    
+    /// Mark as retryable
+    pub fn retryable(mut self) -> Self {
+        self.context.retryable = true;
+        self
+    }
+    
+    /// Add detailed message
+    pub fn message(mut self, message: &str) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, {}", details, message);
+        } else {
+            self.context.details = Some(message.to_string());
+        }
+        self
+    }
+    
+    /// Build the error context
+    pub fn build(self) -> ErrorContext {
+        self.context
+    }
+}
+
+/// Builder for dialog-specific error contexts
+pub struct DialogErrorContextBuilder {
+    context: ErrorContext,
+}
+
+impl DialogErrorContextBuilder {
+    /// Add session ID
+    pub fn with_session(mut self, session_id: &str) -> Self {
+        self.context.session_id = Some(session_id.to_string());
+        self
+    }
+    
+    /// Add transaction ID
+    pub fn with_transaction(mut self, transaction_id: &str) -> Self {
+        self.context.transaction_id = Some(transaction_id.to_string());
+        self
+    }
+    
+    /// Set error severity
+    pub fn severity(mut self, severity: ErrorSeverity) -> Self {
+        self.context.severity = severity;
+        self
+    }
+    
+    /// Set recovery action
+    pub fn recovery(mut self, action: RecoveryAction) -> Self {
+        self.context.recovery = action;
+        self
+    }
+    
+    /// Add detailed message
+    pub fn message(mut self, message: &str) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, {}", details, message);
+        } else {
+            self.context.details = Some(message.to_string());
+        }
+        self
+    }
+    
+    /// Build the error context
+    pub fn build(self) -> ErrorContext {
+        self.context
+    }
+}
+
+/// Builder for resource-specific error contexts
+pub struct ResourceErrorContextBuilder {
+    context: ErrorContext,
+}
+
+impl ResourceErrorContextBuilder {
+    /// Add session ID
+    pub fn with_session(mut self, session_id: &str) -> Self {
+        self.context.session_id = Some(session_id.to_string());
+        self
+    }
+    
+    /// Add current and limit values
+    pub fn with_limits(mut self, current: usize, limit: usize) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, usage: {}/{}", details, current, limit);
+        } else {
+            self.context.details = Some(format!("usage: {}/{}", current, limit));
+        }
+        self
+    }
+    
+    /// Set error severity
+    pub fn severity(mut self, severity: ErrorSeverity) -> Self {
+        self.context.severity = severity;
+        self
+    }
+    
+    /// Set recovery action
+    pub fn recovery(mut self, action: RecoveryAction) -> Self {
+        self.context.recovery = action;
+        self
+    }
+    
+    /// Add detailed message
+    pub fn message(mut self, message: &str) -> Self {
+        if let Some(ref mut details) = self.context.details {
+            *details = format!("{}, {}", details, message);
+        } else {
+            self.context.details = Some(message.to_string());
+        }
+        self
+    }
+    
+    /// Build the error context
+    pub fn build(self) -> ErrorContext {
+        self.context
     }
 }
 
@@ -417,6 +630,19 @@ pub enum Error {
     #[error("Resource limit exceeded: {0}")]
     ResourceLimitExceeded(String, ErrorContext),
 
+    /// Resource limit exceeded with detailed information
+    #[error("Resource limit exceeded for {resource}: {current}/{limit}")]
+    ResourceLimitExceededDetailed {
+        /// The resource that exceeded its limit
+        resource: String,
+        /// The limit that was exceeded
+        limit: usize,
+        /// Current usage
+        current: usize,
+        /// Error context
+        context: ErrorContext,
+    },
+
     /// Memory allocation failed
     #[error("Memory allocation failed: {0}")]
     MemoryAllocationFailed(String, ErrorContext),
@@ -551,8 +777,9 @@ impl Error {
             Error::ResponseTimeout(_, ctx) => ctx,
             Error::DialogTimeout(_, ctx) => ctx,
             Error::ResourceAllocationFailed(_, ctx) => ctx,
-            Error::ResourceLimitExceeded(_, ctx) => ctx,
-            Error::MemoryAllocationFailed(_, ctx) => ctx,
+            Error::ResourceLimitExceeded(_, context) => context,
+            Error::ResourceLimitExceededDetailed { context, .. } => context,
+            Error::MemoryAllocationFailed(_, context) => context,
             Error::DialogError(_, ctx) => ctx,
             Error::SipError(_, ctx) => ctx,
             Error::RtpError(_, ctx) => ctx,
@@ -671,6 +898,109 @@ impl Error {
                 severity: ErrorSeverity::Error,
                 recovery: RecoveryAction::Retry,
                 retryable: true,
+                ..Default::default()
+            }
+        )
+    }
+
+    /// Create a session error with rich context
+    pub fn session_error(session_id: &str, message: &str) -> Self {
+        Error::InternalError(
+            message.to_string(),
+            ErrorContext::session(session_id)
+                .message(message)
+                .severity(ErrorSeverity::Error)
+                .build()
+        )
+    }
+    
+    /// Create a session state transition error with rich context
+    pub fn session_state_error(session_id: &str, from_state: &str, to_state: &str, reason: &str) -> Self {
+        Error::InvalidSessionStateTransition {
+            from: from_state.to_string(),
+            to: to_state.to_string(),
+            context: ErrorContext::session(session_id)
+                .with_state(from_state)
+                .message(&format!("Cannot transition from {} to {}: {}", from_state, to_state, reason))
+                .severity(ErrorSeverity::Error)
+                .recovery(RecoveryAction::CheckConfiguration("session_state".to_string()))
+                .build()
+        }
+    }
+    
+    /// Create a session timeout error with context
+    pub fn session_timeout(session_id: &str, timeout_duration: std::time::Duration) -> Self {
+        Error::OperationTimeout(
+            format!("Session {} timed out after {:?}", session_id, timeout_duration),
+            ErrorContext::session(session_id)
+                .with_duration(timeout_duration)
+                .message("Session operation timed out")
+                .severity(ErrorSeverity::Warning)
+                .recovery(RecoveryAction::RetryWithBackoff(std::time::Duration::from_secs(5)))
+                .retryable()
+                .build()
+        )
+    }
+    
+    /// Create a media session error with context
+    pub fn media_session_error(session_id: &str, media_session_id: &str, details: &str) -> Self {
+        Error::MediaStreamError(
+            details.to_string(),
+            ErrorContext::session(session_id)
+                .with_media_session(media_session_id)
+                .message(details)
+                .severity(ErrorSeverity::Error)
+                .recovery(RecoveryAction::RecreateSession)
+                .build()
+        )
+    }
+    
+    /// Create a dialog error with rich context
+    pub fn dialog_error(dialog_id: &str, session_id: Option<&str>, message: &str) -> Self {
+        let mut builder = ErrorContext::dialog(dialog_id)
+            .message(message)
+            .severity(ErrorSeverity::Error);
+            
+        if let Some(sid) = session_id {
+            builder = builder.with_session(sid);
+        }
+        
+        Error::DialogError(
+            message.to_string(),
+            builder.build()
+        )
+    }
+    
+    /// Create a resource limit error with detailed context
+    pub fn resource_limit_error(resource_name: &str, current: usize, limit: usize, session_id: Option<&str>) -> Self {
+        let mut builder = ErrorContext::resource(resource_name)
+            .with_limits(current, limit)
+            .severity(ErrorSeverity::Error)
+            .recovery(RecoveryAction::WaitAndRetry(std::time::Duration::from_secs(30)));
+            
+        if let Some(sid) = session_id {
+            builder = builder.with_session(sid);
+        }
+        
+        Error::ResourceLimitExceededDetailed {
+            resource: resource_name.to_string(),
+            limit,
+            current,
+            context: builder.build()
+        }
+    }
+    
+    /// Create a configuration error with helpful context
+    pub fn config_error(parameter: &str, details: &str) -> Self {
+        Error::ConfigurationError(
+            details.to_string(),
+            ErrorContext {
+                category: ErrorCategory::Configuration,
+                severity: ErrorSeverity::Error,
+                recovery: RecoveryAction::CheckConfiguration(parameter.to_string()),
+                retryable: false,
+                details: Some(format!("Configuration parameter '{}': {}", parameter, details)),
+                timestamp: std::time::SystemTime::now(),
                 ..Default::default()
             }
         )

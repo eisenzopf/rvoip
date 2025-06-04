@@ -17,6 +17,15 @@ pub mod call_lifecycle;
 // **NEW**: Multi-session bridge infrastructure for call-engine
 pub mod bridge;
 
+// **NEW**: Session resource management
+pub mod resource;
+
+// **NEW**: Session debugging and tracing utilities
+pub mod debug;
+
+// **NEW**: Session coordination patterns for multi-session management
+pub mod coordination;
+
 // Re-export main types
 pub use session_id::SessionId;
 pub use session_types::{
@@ -31,5 +40,24 @@ pub use call_lifecycle::CallLifecycleCoordinator;
 // **NEW**: Re-export bridge types for call-engine API
 pub use bridge::{
     SessionBridge, BridgeId, BridgeState, BridgeInfo, BridgeConfig,
-    BridgeEvent, BridgeEventType, BridgeStats
+    BridgeEvent, BridgeEventType, BridgeStats, BridgeError
+};
+
+// **NEW**: Export resource types
+pub use resource::{SessionResourceManager, SessionResourceMetrics, SessionResourceConfig, UserSessionLimits};
+
+// **NEW**: Export debug types
+pub use debug::{
+    SessionTracer, SessionCorrelationId, SessionLifecycleEvent, SessionLifecycleEventType,
+    SessionDebugInfo, SessionStatistics, SessionHealthStatus, SessionDebugger
+};
+
+// **NEW**: Export coordination types
+pub use coordination::{
+    SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
+    SessionGroupManager, SessionGroup, GroupType, GroupState, GroupConfig,
+    SessionSequenceCoordinator, SessionSequence, SequenceType, SequenceState,
+    CrossSessionEventPropagator, SessionCoordinationEvent, PropagationRule,
+    SessionPriorityManager, SessionPriority, PriorityClass, SchedulingPolicy,
+    SessionPolicyManager, ResourceSharingPolicy, CoordinationPolicy, ResourceType
 }; 

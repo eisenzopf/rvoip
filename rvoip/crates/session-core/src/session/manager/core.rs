@@ -34,6 +34,16 @@ use super::super::bridge::{
     BridgeEvent, BridgeEventType, BridgeStats, BridgeError
 };
 
+// **NEW**: Import resource management types
+use super::super::resource::{
+    SessionResourceManager, SessionResourceConfig, SessionResourceMetrics, UserSessionLimits
+};
+
+// **NEW**: Import debug and tracing types
+use super::super::debug::{
+    SessionTracer, SessionCorrelationId, SessionLifecycleEventType, SessionDebugInfo
+};
+
 // Constants for configuration
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 
@@ -105,6 +115,12 @@ pub struct SessionManager {
     
     /// **NEW**: Bridge event sender for call-engine notifications
     pub(crate) bridge_event_sender: Arc<RwLock<Option<mpsc::UnboundedSender<BridgeEvent>>>>,
+    
+    /// **NEW**: Session resource manager for enhanced tracking and monitoring
+    pub(crate) resource_manager: Arc<SessionResourceManager>,
+    
+    /// **NEW**: Session tracer for debugging and lifecycle tracking
+    pub(crate) session_tracer: Arc<SessionTracer>,
 }
 
 impl SessionManager {
@@ -147,6 +163,8 @@ impl SessionManager {
             session_bridges: Arc::new(DashMap::new()),
             session_to_bridge: Arc::new(DashMap::new()),
             bridge_event_sender: Arc::new(RwLock::new(None)),
+            resource_manager: Arc::new(SessionResourceManager::new(SessionResourceConfig::default())),
+            session_tracer: Arc::new(SessionTracer::new(10000)),
         };
         
         // Set up session coordination channel with dialog-core
@@ -164,6 +182,11 @@ impl SessionManager {
         tokio::spawn(async move {
             manager_clone.process_session_events(event_receiver).await;
         });
+        
+        // **NEW**: Start resource management
+        if let Err(e) = session_manager.resource_manager.start().await {
+            error!("Failed to start session resource manager: {}", e);
+        }
         
         // Start the dialog manager
         session_manager.dialog_api.start().await
@@ -192,6 +215,19 @@ impl SessionManager {
                 
                 // Create new session for incoming call
                 let session_id = SessionId::new();
+                
+                // **NEW**: Start session tracing with correlation ID
+                let correlation_id = self.session_tracer.start_session_trace(
+                    session_id,
+                    SessionState::Ringing,
+                    None,
+                ).await;
+                
+                // **NEW**: Add initial context to trace
+                self.session_tracer.add_context(session_id, "direction", "incoming").await;
+                self.session_tracer.add_context(session_id, "source", &source.to_string()).await;
+                self.session_tracer.add_context(session_id, "dialog_id", &dialog_id.to_string()).await;
+                
                 let session = Arc::new(Session::new_incoming(
                     session_id.clone(),
                     request.clone(),
@@ -205,6 +241,29 @@ impl SessionManager {
                 // Associate dialog with session
                 self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
                 self.default_dialogs.insert(session_id.clone(), dialog_id.clone());
+                
+                // **NEW**: Record dialog association
+                self.session_tracer.record_event(
+                    session_id,
+                    SessionLifecycleEventType::DialogAssociated {
+                        dialog_id: dialog_id.to_string(),
+                    },
+                    None,
+                    HashMap::new(),
+                ).await;
+                
+                // **NEW**: Register session with resource manager
+                if let Err(e) = self.resource_manager.register_session(
+                    session_id.clone(),
+                    None, // TODO: Extract user ID from request
+                    Some(source),
+                    SessionState::Ringing,
+                ).await {
+                    warn!("Failed to register session {} with resource manager: {}", session_id, e);
+                    
+                    // **NEW**: Record error in trace
+                    self.session_tracer.record_error(session_id, &e).await;
+                }
                 
                 // Handle incoming call notification
                 if let Some(notifier) = self.incoming_call_notifier.read().await.as_ref() {
@@ -224,10 +283,14 @@ impl SessionManager {
                     // Auto-reject if no handler
                     if let Err(e) = self.reject_call(&session_id, StatusCode::TemporarilyUnavailable).await {
                         error!("Failed to auto-reject call: {}", e);
+                        
+                        // **NEW**: Record error in trace
+                        self.session_tracer.record_error(session_id, &e).await;
                     }
                 }
                 
-                info!("✅ Incoming call session {} created for dialog {}", session_id, dialog_id);
+                info!("✅ Incoming call session {} created for dialog {} with correlation {}", 
+                    session_id, dialog_id, correlation_id);
             },
             
             SessionCoordinationEvent::ReInvite { dialog_id, transaction_id, request } => {
@@ -237,15 +300,23 @@ impl SessionManager {
                 if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
                     let session_id = session_id.clone();
                     
+                    // **NEW**: Start operation tracking
+                    self.session_tracer.start_operation(session_id, "re_invite").await;
+                    
                     // Handle re-INVITE in session context
                     if let Ok(session) = self.get_session(&session_id) {
                         // Update session with new SDP if present
                         if let Some(sdp) = request.body_string() {
                             if !sdp.is_empty() {
-                                session.update_remote_sdp(sdp).await?;
+                                if let Err(e) = session.update_remote_sdp(sdp).await {
+                                    self.session_tracer.record_error(session_id, &e).await;
+                                    self.session_tracer.complete_operation(session_id, "re_invite", false).await;
+                                    return Err(e);
+                                }
                             }
                         }
                         
+                        self.session_tracer.complete_operation(session_id, "re_invite", true).await;
                         info!("✅ Re-INVITE processed for session {}", session_id);
                     }
                 } else {
@@ -260,14 +331,35 @@ impl SessionManager {
                 if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
                     let session_id = session_id.clone();
                     
+                    // **NEW**: Start termination tracking
+                    self.session_tracer.start_operation(session_id, "call_termination").await;
+                    
                     if let Ok(session) = self.get_session(&session_id) {
-                        session.set_state(SessionState::Terminated).await?;
+                        if let Err(e) = session.set_state(SessionState::Terminated).await {
+                            self.session_tracer.record_error(session_id, &e).await;
+                        } else {
+                            // **NEW**: Record state change
+                            self.session_tracer.record_state_change(
+                                session_id,
+                                SessionState::Connected, // Assume was connected
+                                SessionState::Terminated,
+                            ).await;
+                        }
+                    }
+                    
+                    // **NEW**: Update resource manager state
+                    if let Err(e) = self.resource_manager.update_session_state(&session_id, SessionState::Terminated).await {
+                        warn!("Failed to update resource manager state for session {}: {}", session_id, e);
                     }
                     
                     // Clean up mappings
                     self.sessions.remove(&session_id);
                     self.dialog_to_session.remove(&dialog_id);
                     self.default_dialogs.remove(&session_id);
+                    
+                    // **NEW**: Terminate session tracing
+                    self.session_tracer.terminate_session_trace(session_id, &reason).await;
+                    self.session_tracer.complete_operation(session_id, "call_termination", true).await;
                     
                     // Publish session event
                     let session_event = SessionEvent::Terminated {
@@ -291,9 +383,30 @@ impl SessionManager {
                 if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
                     let session_id = session_id.clone();
                     
+                    // **NEW**: Start operation tracking
+                    self.session_tracer.start_operation(session_id, "call_answer").await;
+                    
                     if let Ok(session) = self.get_session(&session_id) {
-                        session.set_state(SessionState::Connected).await?;
-                        session.update_local_sdp(session_answer).await?;
+                        // **NEW**: Record state change
+                        let old_state = session.state().await;
+                        
+                        if let Err(e) = session.set_state(SessionState::Connected).await {
+                            self.session_tracer.record_error(session_id, &e).await;
+                            self.session_tracer.complete_operation(session_id, "call_answer", false).await;
+                        } else {
+                            self.session_tracer.record_state_change(session_id, old_state, SessionState::Connected).await;
+                            
+                            if let Err(e) = session.update_local_sdp(session_answer).await {
+                                self.session_tracer.record_error(session_id, &e).await;
+                            }
+                            
+                            self.session_tracer.complete_operation(session_id, "call_answer", true).await;
+                        }
+                    }
+                    
+                    // **NEW**: Update resource manager state
+                    if let Err(e) = self.resource_manager.update_session_state(&session_id, SessionState::Connected).await {
+                        warn!("Failed to update resource manager state for session {}: {}", session_id, e);
                     }
                     
                     info!("✅ Session {} connected", session_id);
@@ -432,6 +545,52 @@ impl SessionManager {
         *lock = Some(notifier);
     }
     
+    /// **NEW**: Get session resource metrics
+    pub async fn get_session_metrics(&self, session_id: &SessionId) -> Option<SessionResourceMetrics> {
+        self.resource_manager.get_session_metrics(session_id).await
+    }
+    
+    /// **NEW**: Get metrics for all active sessions
+    pub async fn get_all_session_metrics(&self) -> Vec<SessionResourceMetrics> {
+        self.resource_manager.get_all_session_metrics().await
+    }
+    
+    /// **NEW**: Get global resource metrics
+    pub async fn get_global_metrics(&self) -> super::super::resource::GlobalResourceMetrics {
+        self.resource_manager.get_global_metrics().await
+    }
+    
+    /// **NEW**: Get user session limits and current usage
+    pub async fn get_user_limits(&self, user_id: &str) -> Option<UserSessionLimits> {
+        self.resource_manager.get_user_limits(user_id).await
+    }
+    
+    /// **NEW**: Manually trigger cleanup of terminated sessions
+    pub async fn cleanup_terminated_sessions(&self) -> Result<usize, Error> {
+        self.resource_manager.cleanup_terminated_sessions().await
+    }
+    
+    /// **NEW**: Perform health checks on all sessions
+    pub async fn perform_health_checks(&self) -> Result<usize, Error> {
+        self.resource_manager.perform_health_checks().await
+    }
+    
+    /// **NEW**: Update session resource usage (for integration with media-core, etc.)
+    pub async fn update_session_resources(
+        &self,
+        session_id: &SessionId,
+        dialog_count: Option<usize>,
+        media_session_count: Option<usize>,
+        memory_usage: Option<usize>,
+    ) -> Result<(), Error> {
+        self.resource_manager.update_session_resources(
+            session_id,
+            dialog_count,
+            media_session_count,
+            memory_usage,
+        ).await
+    }
+    
     /// **NEW**: Generate SDP answer using CallLifecycleCoordinator (moved from direct implementation)
     async fn build_sdp_answer(&self, session_id: &SessionId, offer_sdp: &str) -> Result<String, Error> {
         info!("🎵 Generating SDP answer using session-level CallLifecycleCoordinator for session {}...", session_id);
@@ -508,12 +667,30 @@ impl SessionManager {
         let current_state = session.state().await;
         info!("Session {} current state before ending: {}", session_id, current_state);
         
+        // **NEW**: Start operation tracking
+        self.session_tracer.start_operation(session_id.clone(), "terminate_call").await;
+        
         // Use CallLifecycleCoordinator for proper session termination coordination
         if let Err(e) = self.call_lifecycle_coordinator.coordinate_session_termination(session_id).await {
             warn!("Failed to coordinate session termination via CallLifecycleCoordinator: {}", e);
+            
+            // **NEW**: Record error with enhanced context
+            let enhanced_error = Error::media_session_error(
+                &session_id.to_string(),
+                "call_lifecycle_coordinator",
+                &format!("Session termination coordination failed: {}", e)
+            );
+            self.session_tracer.record_error(session_id.clone(), &enhanced_error).await;
+            
             // Fall back to direct media cleanup
             if let Err(e) = session.stop_media().await {
                 warn!("Failed to stop media for session {}: {}", session_id, e);
+                let media_error = Error::media_session_error(
+                    &session_id.to_string(),
+                    "unknown_media_session",
+                    &format!("Failed to stop media: {}", e)
+                );
+                self.session_tracer.record_error(session_id.clone(), &media_error).await;
             } else {
                 info!("✅ Media automatically cleaned up for session {}", session_id);
             }
@@ -523,17 +700,34 @@ impl SessionManager {
         }
         
         // Set session to terminated state
+        let old_state = session.state().await;
         session.set_state(SessionState::Terminated).await
-            .map_err(|e| Error::InternalError(
-                format!("Failed to set session state to terminated: {}", e),
-                ErrorContext::default().with_message("State transition failed")
-            ))?;
+            .map_err(|e| {
+                // **NEW**: Enhanced error context for state transition failures
+                let context_error = Error::session_state_error(
+                    &session_id.to_string(),
+                    &old_state.to_string(),
+                    "Terminated",
+                    &format!("Failed to set session state during termination: {}", e)
+                );
+                let _ = self.session_tracer.record_error(session_id.clone(), &context_error);
+                context_error
+            })?;
+        
+        // **NEW**: Record state change
+        self.session_tracer.record_state_change(session_id.clone(), old_state, SessionState::Terminated).await;
         
         // Clean up dialog in dialog-core
         if let Some(dialog_id) = self.default_dialogs.get(session_id) {
             let dialog_id = dialog_id.clone();
             if let Err(e) = self.dialog_api.send_bye(&dialog_id).await {
                 warn!("Failed to send BYE for session {}: {}", session_id, e);
+                let bye_error = Error::dialog_error(
+                    &dialog_id.to_string(),
+                    Some(&session_id.to_string()),
+                    &format!("Failed to send BYE: {}", e)
+                );
+                self.session_tracer.record_error(session_id.clone(), &bye_error).await;
             } else {
                 info!("✅ BYE sent for session {} via dialog {}", session_id, dialog_id);
             }
@@ -544,6 +738,10 @@ impl SessionManager {
         if let Some(dialog_id) = self.default_dialogs.remove(session_id) {
             self.dialog_to_session.remove(&dialog_id.1);
         }
+        
+        // **NEW**: Complete operation tracking and terminate trace
+        self.session_tracer.complete_operation(session_id.clone(), "terminate_call", true).await;
+        self.session_tracer.terminate_session_trace(session_id.clone(), "call_terminated").await;
         
         info!("✅ Call termination coordinated for session {} (state: Terminated, coordinated cleanup)", session_id);
         Ok(())
@@ -677,5 +875,58 @@ impl SessionManager {
             Self::new(dialog_api, config, event_bus).await
                 .expect("Failed to create session manager")
         })
+    }
+
+    /// **NEW**: Get session debug information for troubleshooting
+    pub async fn get_session_debug_info(&self, session_id: &SessionId) -> Option<SessionDebugInfo> {
+        self.session_tracer.get_session_debug_info(session_id.clone()).await
+    }
+    
+    /// **NEW**: Get session by correlation ID for distributed tracing
+    pub async fn get_session_by_correlation(&self, correlation_id: &SessionCorrelationId) -> Option<SessionId> {
+        self.session_tracer.get_session_by_correlation(correlation_id).await
+    }
+    
+    /// **NEW**: Get session tracing metrics
+    pub async fn get_tracing_metrics(&self) -> super::super::debug::TracingMetrics {
+        self.session_tracer.get_metrics().await
+    }
+    
+    /// **NEW**: Add context to session trace for debugging
+    pub async fn add_session_trace_context(&self, session_id: &SessionId, key: &str, value: &str) {
+        self.session_tracer.add_context(session_id.clone(), key, value).await;
+    }
+    
+    /// **NEW**: Start tracking a session operation for performance monitoring
+    pub async fn start_session_operation(&self, session_id: &SessionId, operation: &str) {
+        self.session_tracer.start_operation(session_id.clone(), operation).await;
+    }
+    
+    /// **NEW**: Complete tracking a session operation
+    pub async fn complete_session_operation(&self, session_id: &SessionId, operation: &str, success: bool) {
+        self.session_tracer.complete_operation(session_id.clone(), operation, success).await;
+    }
+    
+    /// **NEW**: Record a session error for debugging
+    pub async fn record_session_error(&self, session_id: &SessionId, error: &Error) {
+        self.session_tracer.record_error(session_id.clone(), error).await;
+    }
+    
+    /// **NEW**: Generate human-readable session timeline for debugging
+    pub async fn generate_session_timeline(&self, session_id: &SessionId) -> Option<String> {
+        if let Some(debug_info) = self.get_session_debug_info(session_id).await {
+            Some(super::super::debug::SessionDebugger::generate_session_timeline(&debug_info))
+        } else {
+            None
+        }
+    }
+    
+    /// **NEW**: Analyze session health and get diagnostic issues
+    pub async fn analyze_session_health(&self, session_id: &SessionId) -> Option<Vec<String>> {
+        if let Some(debug_info) = self.get_session_debug_info(session_id).await {
+            Some(super::super::debug::SessionDebugger::analyze_session_health(&debug_info))
+        } else {
+            None
+        }
     }
 } 

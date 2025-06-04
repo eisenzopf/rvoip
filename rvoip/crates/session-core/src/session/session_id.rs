@@ -3,7 +3,7 @@ use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 
 /// Unique identifier for a SIP session
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
 
 impl SessionId {

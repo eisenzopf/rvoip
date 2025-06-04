@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
 /// SIP session state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionState {
     /// Session is being initialized
     Initializing,

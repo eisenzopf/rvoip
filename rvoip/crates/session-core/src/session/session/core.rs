@@ -181,17 +181,23 @@ impl Session {
         *state == SessionState::Terminated
     }
     
-    /// Update remote SDP for the session
-    pub async fn update_remote_sdp(&self, sdp: String) -> Result<(), Error> {
+    /// Get a reference to the dialog API  
+    pub fn dialog_api(&self) -> Option<&Arc<rvoip_dialog_core::UnifiedDialogApi>> {
+        // This would need to be provided via dependency injection or similar
+        None
+    }
+    
+    /// Update the remote SDP (placeholder for now)
+    pub async fn update_remote_sdp(&self, _sdp: String) -> Result<(), Error> {
+        // For now, this is a placeholder since we don't have SDP storage in Session
         debug!("Updating remote SDP for session {}", self.id);
-        info!("Remote SDP updated for session {}", self.id);
         Ok(())
     }
     
-    /// Update local SDP for the session
-    pub async fn update_local_sdp(&self, sdp: String) -> Result<(), Error> {
+    /// Update the local SDP (placeholder for now)  
+    pub async fn update_local_sdp(&self, _sdp: String) -> Result<(), Error> {
+        // For now, this is a placeholder since we don't have SDP storage in Session
         debug!("Updating local SDP for session {}", self.id);
-        info!("Local SDP updated for session {}", self.id);
         Ok(())
     }
 } 
