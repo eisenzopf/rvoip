@@ -419,13 +419,10 @@ async fn process_session_lifecycle(
                 Ok(event) => {
                     log(&format!("Session {} received UAC event: {:?}", session_idx, event));
                     match event {
-                        TransactionEvent::ProvisionalResponse { transaction_id, response, .. } 
-                            if transaction_id == uac_transaction_id && response.status() == StatusCode::Ringing => {
-                            return true;
-                        },
-                        TransactionEvent::Response { transaction_id, response, .. } 
-                            if transaction_id == uac_transaction_id && response.status() == StatusCode::Ringing => {
-                            return true;
+                        TransactionEvent::ProvisionalResponse { transaction_id, response, .. } |
+                        TransactionEvent::SuccessResponse { transaction_id, response, .. } |
+                        TransactionEvent::FailureResponse { transaction_id, response, .. } => {
+                            debug!("Received response {} for transaction {}", response.status_code(), transaction_id);
                         },
                         _ => continue,
                     }
@@ -539,13 +536,10 @@ async fn process_session_lifecycle(
                 Ok(event) => {
                     log(&format!("Session {} received UAC event: {:?}", session_idx, event));
                     match event {
-                        TransactionEvent::SuccessResponse { transaction_id, response, .. } 
-                            if transaction_id == uac_transaction_id && response.status() == StatusCode::Ok => {
-                            return true;
-                        },
-                        TransactionEvent::Response { transaction_id, response, .. } 
-                            if transaction_id == uac_transaction_id && response.status() == StatusCode::Ok => {
-                            return true;
+                        TransactionEvent::ProvisionalResponse { transaction_id, response, .. } |
+                        TransactionEvent::SuccessResponse { transaction_id, response, .. } |
+                        TransactionEvent::FailureResponse { transaction_id, response, .. } => {
+                            debug!("Received response {} for transaction {}", response.status_code(), transaction_id);
                         },
                         _ => continue,
                     }

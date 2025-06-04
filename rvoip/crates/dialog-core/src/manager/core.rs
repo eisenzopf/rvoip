@@ -7,25 +7,17 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey};
+use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
 use rvoip_sip_core::{Request, Response, Method};
 
 use crate::dialog::{DialogId, Dialog, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::SessionCoordinationEvent;
+use crate::events::{DialogEvent, SessionCoordinationEvent};
 
-use super::{
-    dialog_operations::DialogStore,
-    protocol_handlers::ProtocolHandlers,
-    message_routing::MessageRouter,
-    transaction_integration::TransactionIntegration,
-    session_coordination::SessionCoordinator,
-    utils::MessageExtensions,
-};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
@@ -34,16 +26,22 @@ pub struct DialogManager {
     pub(crate) local_address: SocketAddr,
     
     /// Active dialogs by dialog ID
-    pub(crate) dialogs: DashMap<DialogId, Dialog>,
+    pub(crate) dialogs: Arc<DashMap<DialogId, Dialog>>,
     
     /// Dialog lookup by call-id + tags (key: "call-id:local-tag:remote-tag")
-    pub(crate) dialog_lookup: DashMap<String, DialogId>,
+    pub(crate) dialog_lookup: Arc<DashMap<String, DialogId>>,
     
     /// Transaction to dialog mapping
-    pub(crate) transaction_to_dialog: DashMap<TransactionKey, DialogId>,
+    pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
     
     /// Channel for sending session coordination events to session-core
-    pub(crate) session_coordinator: tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>,
+    pub(crate) session_coordinator: Arc<tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
+    
+    /// Channel for sending dialog events to external consumers (session-core)
+    pub(crate) dialog_event_sender: Arc<tokio::sync::RwLock<Option<mpsc::Sender<DialogEvent>>>>,
+    
+    /// Shutdown signal for global event processor
+    pub(crate) shutdown_signal: Arc<tokio::sync::Notify>,
 }
 
 impl DialogManager {
@@ -67,11 +65,133 @@ impl DialogManager {
         Ok(Self {
             transaction_manager,
             local_address,
-            dialogs: DashMap::new(),
-            dialog_lookup: DashMap::new(),
-            transaction_to_dialog: DashMap::new(),
-            session_coordinator: tokio::sync::RwLock::new(None),
+            dialogs: Arc::new(DashMap::new()),
+            dialog_lookup: Arc::new(DashMap::new()),
+            transaction_to_dialog: Arc::new(DashMap::new()),
+            session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+    
+    /// Create a new dialog manager with global transaction events (RECOMMENDED)
+    /// 
+    /// This constructor follows the working pattern from transaction-core examples
+    /// by receiving global transaction events for proper event consumption.
+    /// 
+    /// # Arguments
+    /// * `transaction_manager` - The transaction manager to use for SIP message reliability
+    /// * `transaction_events` - Global transaction event receiver
+    /// * `local_address` - The local address to use in Via headers and Contact headers
+    /// 
+    /// # Returns
+    /// A new DialogManager instance with proper event consumption
+    pub async fn with_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<TransactionEvent>,
+        local_address: SocketAddr,
+    ) -> DialogResult<Self> {
+        info!("Creating new DialogManager with global transaction events and local address {}", local_address);
+        
+        let manager = Self {
+            transaction_manager,
+            local_address,
+            dialogs: Arc::new(DashMap::new()),
+            dialog_lookup: Arc::new(DashMap::new()),
+            transaction_to_dialog: Arc::new(DashMap::new()),
+            session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+        };
+        
+        // Spawn global transaction event processor
+        let event_processor = manager.clone();
+        tokio::spawn(async move {
+            event_processor.process_global_transaction_events(transaction_events).await;
+        });
+        
+        Ok(manager)
+    }
+    
+    /// Process global transaction events (similar to working transaction-core examples)
+    /// 
+    /// This follows the exact pattern from working examples that use global event consumption
+    /// instead of individual transaction subscriptions.
+    async fn process_global_transaction_events(&self, mut events: mpsc::Receiver<TransactionEvent>) {
+        info!("🔄 Starting global transaction event processor for dialog-core");
+        
+        loop {
+            tokio::select! {
+                // Process transaction events
+                event = events.recv() => {
+                    match event {
+                        Some(event) => {
+                            // Extract transaction ID from the event
+                            let transaction_id = self.extract_transaction_id(&event);
+                            
+                            // Find the dialog associated with this transaction
+                            if let Some(dialog_id) = self.find_dialog_for_transaction_event(&transaction_id) {
+                                if let Err(e) = self.process_transaction_event(&transaction_id, &dialog_id, event).await {
+                                    error!("Failed to process transaction event for dialog {}: {}", dialog_id, e);
+                                }
+                            } else {
+                                // Event for transaction not associated with any dialog - could be standalone or server transaction
+                                debug!("Received transaction event not associated with any dialog: {:?}", event);
+                            }
+                        },
+                        None => {
+                            // Channel closed
+                            debug!("Transaction events channel closed");
+                            break;
+                        }
+                    }
+                },
+                
+                // Wait for shutdown signal
+                _ = self.shutdown_signal.notified() => {
+                    info!("🛑 Global transaction event processor received shutdown signal");
+                    break;
+                }
+            }
+        }
+        
+        info!("🏁 Global transaction event processor for dialog-core stopped");
+    }
+    
+    /// Extract transaction ID from any TransactionEvent variant
+    fn extract_transaction_id(&self, event: &TransactionEvent) -> TransactionKey {
+        match event {
+            TransactionEvent::AckReceived { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::CancelReceived { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::ProvisionalResponse { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::SuccessResponse { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::FailureResponse { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::ProvisionalResponseSent { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::FinalResponseSent { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::TransactionTimeout { transaction_id } => transaction_id.clone(),
+            TransactionEvent::AckTimeout { transaction_id } => transaction_id.clone(),
+            TransactionEvent::TransportError { transaction_id } => transaction_id.clone(),
+            TransactionEvent::Error { transaction_id, .. } => {
+                transaction_id.clone().unwrap_or_else(|| TransactionKey::new("unknown".to_string(), Method::Info, false))
+            },
+            TransactionEvent::TransactionTerminated { transaction_id } => transaction_id.clone(),
+            TransactionEvent::StateChanged { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::TimerTriggered { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::CancelRequest { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::AckRequest { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::InviteRequest { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::NonInviteRequest { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::StrayRequest { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+            TransactionEvent::StrayResponse { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+            TransactionEvent::StrayAck { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+            TransactionEvent::StrayCancel { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+            TransactionEvent::StrayAckRequest { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+        }
+    }
+    
+    /// Find dialog associated with a transaction event
+    fn find_dialog_for_transaction_event(&self, transaction_id: &TransactionKey) -> Option<DialogId> {
+        self.transaction_to_dialog.get(transaction_id).map(|entry| entry.clone())
     }
     
     /// Get the configured local address
@@ -94,6 +214,68 @@ impl DialogManager {
         debug!("Session coordinator configured");
     }
     
+    /// Set the dialog event sender for external consumers (session-core)
+    /// 
+    /// This establishes the dialog event communication channel that session-core
+    /// can use to receive high-level dialog state changes and events.
+    /// 
+    /// # Arguments
+    /// * `sender` - Channel sender for dialog events
+    pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) {
+        *self.dialog_event_sender.write().await = Some(sender);
+        debug!("Dialog event sender configured for session-core");
+    }
+    
+    /// Subscribe to dialog events
+    /// 
+    /// Returns a receiver for dialog events that session-core can use to monitor
+    /// dialog state changes and other dialog-level events.
+    /// 
+    /// # Returns
+    /// A receiver for dialog events
+    pub fn subscribe_to_dialog_events(&self) -> mpsc::Receiver<DialogEvent> {
+        let (tx, rx) = mpsc::channel(100);
+        
+        // Store the sender for future use
+        tokio::spawn({
+            let dialog_event_sender = self.dialog_event_sender.clone();
+            async move {
+                *dialog_event_sender.write().await = Some(tx);
+            }
+        });
+        
+        rx
+    }
+    
+    /// Emit a dialog event to external consumers
+    /// 
+    /// Sends dialog events to session-core for high-level dialog state management.
+    /// This maintains the proper architectural separation where dialog-core handles
+    /// SIP protocol details and session-core handles session logic.
+    pub async fn emit_dialog_event(&self, event: DialogEvent) {
+        if let Some(sender) = self.dialog_event_sender.read().await.as_ref() {
+            if let Err(e) = sender.send(event.clone()).await {
+                warn!("Failed to send dialog event to session-core: {}", e);
+            } else {
+                debug!("Emitted dialog event: {:?}", event);
+            }
+        }
+    }
+    
+    /// Emit a session coordination event
+    /// 
+    /// Sends session coordination events for legacy compatibility and specific
+    /// session management operations.
+    pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
+        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+            if let Err(e) = sender.send(event.clone()).await {
+                warn!("Failed to send session coordination event: {}", e);
+            } else {
+                debug!("Emitted session coordination event: {:?}", event);
+            }
+        }
+    }
+    
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
     /// 
     /// This is the main entry point for processing SIP messages in dialog-core.
@@ -111,7 +293,7 @@ impl DialogManager {
             rvoip_sip_core::Message::Request(request) => {
                 self.handle_request(request, source).await
             },
-            rvoip_sip_core::Message::Response(response) => {
+            rvoip_sip_core::Message::Response(_response) => {
                 // For responses, we need the transaction ID to route properly
                 // This would typically come from the transaction layer
                 warn!("Response handling requires transaction ID - use handle_response() directly");
@@ -175,6 +357,10 @@ impl DialogManager {
     pub async fn stop(&self) -> DialogResult<()> {
         info!("DialogManager stopping");
         
+        // Signal shutdown to global event processor first
+        self.shutdown_signal.notify_one();
+        debug!("Sent shutdown signal to global event processor");
+        
         // Terminate all active dialogs gracefully
         let dialog_ids: Vec<DialogId> = self.dialogs.iter()
             .map(|entry| entry.key().clone())
@@ -221,6 +407,19 @@ impl DialogManager {
     /// true if the dialog exists, false otherwise
     pub fn has_dialog(&self, dialog_id: &DialogId) -> bool {
         self.dialogs.contains_key(dialog_id)
+    }
+    
+    /// Clean up completed transaction event receivers
+    /// 
+    /// This method removes transaction-to-dialog mappings for completed transactions.
+    /// 
+    /// # Arguments
+    /// * `transaction_id` - The transaction ID to clean up
+    pub fn cleanup_transaction_receiver(&self, transaction_id: &TransactionKey) {
+        // Remove from transaction-to-dialog mapping if present
+        if self.transaction_to_dialog.remove(transaction_id).is_some() {
+            debug!("Cleaned up transaction-dialog mapping for completed transaction {}", transaction_id);
+        }
     }
 }
 

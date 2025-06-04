@@ -3,14 +3,12 @@
 //! This example demonstrates dialog recovery mechanisms in the face of
 //! network failures and other issues.
 
-use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn, Level};
 use tracing_subscriber;
 
-use rvoip_dialog_core::{DialogManager, DialogError, SessionCoordinationEvent, Dialog, DialogState};
-use rvoip_transaction_core::TransactionManager;
+use rvoip_dialog_core::{DialogError, SessionCoordinationEvent, Dialog};
 
 #[tokio::main]
 async fn main() -> Result<(), DialogError> {
@@ -30,7 +28,7 @@ async fn main() -> Result<(), DialogError> {
     info!("Dialog recovery example - demonstrating recovery state management");
 
     // Set up session coordination channel
-    let (session_tx, mut session_rx) = tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
+    let (_session_tx, mut session_rx) = tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
 
     info!("Session coordination channel created for recovery testing");
 

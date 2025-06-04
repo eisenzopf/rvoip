@@ -25,7 +25,7 @@ pub use common::{DialogHandle, CallHandle, DialogEvent as ApiDialogEvent};
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::errors::{DialogError, DialogResult};
+use crate::errors::DialogError;
 use crate::events::SessionCoordinationEvent;
 use crate::manager::DialogManager;
 

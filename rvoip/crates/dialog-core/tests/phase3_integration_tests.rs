@@ -14,13 +14,14 @@ use rvoip_transaction_core::TransactionManager;
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
 use rvoip_transaction_core::builders::client_quick; // Phase 3 functions
 use rvoip_sip_core::Uri;
+use uuid;
 
 /// Test environment for Phase 3 dialog function validation
 struct Phase3TestEnvironment {
     pub server: Arc<DialogServer>,
     pub client: Arc<DialogClient>,
-    pub server_transport: TransportManager,
-    pub client_transport: TransportManager,
+    pub _server_transport: TransportManager,
+    pub _client_transport: TransportManager,
     pub server_addr: SocketAddr,
     pub client_addr: SocketAddr,
 }
@@ -45,7 +46,7 @@ impl Phase3TestEnvironment {
         let server_addr = server_transport.default_transport().await
             .ok_or("No default transport")?.local_addr()?;
         
-        let (server_transaction_manager, _) = TransactionManager::with_transport_manager(
+        let (server_transaction_manager, server_global_rx) = TransactionManager::with_transport_manager(
             server_transport.clone(),
             server_transport_rx,
             Some(100),
@@ -66,34 +67,88 @@ impl Phase3TestEnvironment {
         let client_addr = client_transport.default_transport().await
             .ok_or("No default transport")?.local_addr()?;
         
-        let (client_transaction_manager, _) = TransactionManager::with_transport_manager(
+        let (client_transaction_manager, client_global_rx) = TransactionManager::with_transport_manager(
             client_transport.clone(),
             client_transport_rx,
             Some(100),
         ).await?;
         
-        // Create API instances
+        // Create API instances using GLOBAL EVENTS PATTERN (recommended)
         let server_config = rvoip_dialog_core::api::config::ServerConfig::default();
         let client_config = rvoip_dialog_core::api::config::ClientConfig::default();
         
-        let server = DialogServer::with_dependencies(
+        let server = DialogServer::with_global_events(
             Arc::new(server_transaction_manager),
+            server_global_rx,
             server_config
         ).await?;
         
-        let client = DialogClient::with_dependencies(
+        let client = DialogClient::with_global_events(
             Arc::new(client_transaction_manager),
+            client_global_rx,
             client_config
         ).await?;
         
         Ok(Self {
             server: Arc::new(server),
             client: Arc::new(client),
-            server_transport,
-            client_transport,
+            _server_transport: server_transport,
+            _client_transport: client_transport,
             server_addr,
             client_addr,
         })
+    }
+    
+    /// Create an established dialog for Phase 3 testing with DialogClient
+    /// 
+    /// This creates a dialog and manually establishes it with both tags
+    /// so that in-dialog requests can be tested.
+    async fn create_established_dialog_client(
+        &self
+    ) -> Result<DialogId, Box<dyn std::error::Error>> {
+        let local_uri: Uri = format!("sip:alice@{}", self.client_addr).parse()?;
+        let remote_uri: Uri = format!("sip:bob@{}", self.server_addr).parse()?;
+        
+        // Create the dialog
+        let dialog_id = self.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
+        
+        // Access the dialog manager to manually establish the dialog for testing
+        let dialog_manager = self.client.dialog_manager();
+        {
+            let mut dialog = dialog_manager.get_dialog_mut(&dialog_id)?;
+            
+            // Set remote tag and establish the dialog
+            dialog.set_remote_tag(format!("remote-tag-{}", uuid::Uuid::new_v4().as_simple()));
+            dialog.state = rvoip_dialog_core::DialogState::Confirmed;
+        }
+        
+        Ok(dialog_id)
+    }
+    
+    /// Create an established dialog for Phase 3 testing with DialogServer
+    /// 
+    /// This creates a dialog and manually establishes it with both tags
+    /// so that in-dialog requests can be tested.
+    async fn create_established_dialog_server(
+        &self
+    ) -> Result<DialogId, Box<dyn std::error::Error>> {
+        let local_uri: Uri = format!("sip:server@{}", self.server_addr).parse()?;
+        let remote_uri: Uri = format!("sip:client@{}", self.client_addr).parse()?;
+        
+        // Create the dialog
+        let dialog_id = self.server.create_outgoing_dialog(local_uri, remote_uri, None).await?;
+        
+        // Access the dialog manager to manually establish the dialog for testing
+        let dialog_manager = self.server.dialog_manager();
+        {
+            let mut dialog = dialog_manager.get_dialog_mut(&dialog_id)?;
+            
+            // Set remote tag and establish the dialog
+            dialog.set_remote_tag(format!("remote-tag-{}", uuid::Uuid::new_v4().as_simple()));
+            dialog.state = rvoip_dialog_core::DialogState::Confirmed;
+        }
+        
+        Ok(dialog_id)
     }
     
     async fn shutdown(self) {
@@ -113,12 +168,9 @@ async fn test_phase3_bye_integration() -> Result<(), Box<dyn std::error::Error>>
     env.server.start().await?;
     env.client.start().await?;
     
-    // Create a dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created dialog: {}", dialog_id);
+    // Create an established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Created established dialog: {}", dialog_id);
     
     // Test send_bye method (this should use dialog_quick::bye_for_dialog internally)
     let transaction_id = env.client.send_bye(&dialog_id).await?;
@@ -141,12 +193,9 @@ async fn test_phase3_refer_integration() -> Result<(), Box<dyn std::error::Error
     env.server.start().await?;
     env.client.start().await?;
     
-    // Create a dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created dialog for REFER test: {}", dialog_id);
+    // Create an established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Created established dialog for REFER test: {}", dialog_id);
     
     // Test send_refer method (should use dialog_quick::refer_for_dialog internally)
     let target_uri = format!("sip:transfer@{}", env.server_addr);
@@ -170,12 +219,9 @@ async fn test_phase3_update_integration() -> Result<(), Box<dyn std::error::Erro
     env.server.start().await?;
     env.client.start().await?;
     
-    // Create a dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created dialog for UPDATE test: {}", dialog_id);
+    // Create an established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Created established dialog for UPDATE test: {}", dialog_id);
     
     // Test send_update method (should use dialog_quick::update_for_dialog internally)
     let new_sdp = "v=0\r\no=alice 456 789 IN IP4 127.0.0.1\r\nc=IN IP4 127.0.0.1\r\nm=audio 5004 RTP/AVP 0\r\n";
@@ -199,12 +245,9 @@ async fn test_phase3_info_integration() -> Result<(), Box<dyn std::error::Error>
     env.server.start().await?;
     env.client.start().await?;
     
-    // Create a dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created dialog for INFO test: {}", dialog_id);
+    // Create an established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Created established dialog for INFO test: {}", dialog_id);
     
     // Test send_info method (should use dialog_quick::info_for_dialog internally)
     let info_content = "Custom application data for testing";
@@ -228,12 +271,9 @@ async fn test_phase3_notify_integration() -> Result<(), Box<dyn std::error::Erro
     env.server.start().await?;
     env.client.start().await?;
     
-    // Create a dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created dialog for NOTIFY test: {}", dialog_id);
+    // Create an established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Created established dialog for NOTIFY test: {}", dialog_id);
     
     // Test send_notify method (should use dialog_quick::notify_for_dialog internally)
     let event_type = "dialog";
@@ -268,10 +308,10 @@ async fn test_phase3_response_building_integration() -> Result<(), Box<dyn std::
     
     // Handle the INVITE to create a transaction
     let call_handle = env.server.handle_invite(invite_request, env.client_addr).await?;
-    let dialog_id = call_handle.dialog().id().clone();
+    let _dialog_id = call_handle.dialog().id().clone();
     
-    // Get transaction manager to find the transaction
-    let transaction_manager = env.server.dialog_manager().transaction_manager();
+    // Get transaction manager for advanced operations
+    let _transaction_manager = env.server.dialog_manager().transaction_manager();
     
     // Wait a moment for transaction processing
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -295,12 +335,9 @@ async fn test_phase3_complete_dialog_workflow() -> Result<(), Box<dyn std::error
     env.server.start().await?;
     env.client.start().await?;
     
-    // Step 1: Create dialog
-    let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
-    let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
-    
-    let dialog_id = env.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Step 1: Created dialog using dialog-core API");
+    // Step 1: Create established dialog for testing
+    let dialog_id = env.create_established_dialog_client().await?;
+    println!("✅ Step 1: Created established dialog using test helper");
     
     // Step 2: Send INFO (using Phase 3 dialog_quick::info_for_dialog)
     let info_tx = env.client.send_info(&dialog_id, "Session info".to_string()).await?;
@@ -374,12 +411,9 @@ async fn test_phase3_server_side_integration() -> Result<(), Box<dyn std::error:
     
     env.server.start().await?;
     
-    // Create dialog on server side
-    let local_uri: Uri = format!("sip:server@{}", env.server_addr).parse()?;
-    let remote_uri: Uri = format!("sip:client@{}", env.client_addr).parse()?;
-    
-    let dialog_id = env.server.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-    println!("✅ Created server-side dialog: {}", dialog_id);
+    // Create established dialog on server side for testing
+    let dialog_id = env.create_established_dialog_server().await?;
+    println!("✅ Created established server-side dialog: {}", dialog_id);
     
     // Test server-side SIP method calls (using Phase 3 functions)
     let info_tx = env.server.send_info(&dialog_id, "Server info".to_string()).await?;

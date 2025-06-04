@@ -6,12 +6,10 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey};
-use rvoip_transaction_core::server::builders::ResponseBuilder;
-use rvoip_transaction_core::client::builders::{InviteBuilder, ByeBuilder};
-use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
+use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
+use rvoip_transaction_core::builders::dialog_quick;
 use rvoip_sip_core::{Uri, Method, Response, StatusCode};
 
 use crate::manager::DialogManager;
@@ -19,7 +17,7 @@ use crate::events::SessionCoordinationEvent;
 use crate::dialog::{DialogId, Dialog, DialogState};
 use super::{
     ApiResult, ApiError, DialogApi, DialogStats,
-    config::{ClientConfig, DialogConfig},
+    config::ClientConfig,
     common::{DialogHandle, CallHandle},
 };
 
@@ -99,19 +97,75 @@ impl DialogClient {
     
     /// Create a dialog client with custom configuration
     /// 
-    /// Use this for advanced configuration scenarios where you need to customize
-    /// authentication, timeouts, or other client behavior.
+    /// **ARCHITECTURAL NOTE**: This method requires dependency injection to maintain
+    /// proper separation of concerns. dialog-core should not directly manage transport
+    /// concerns - that's the responsibility of transaction-core.
+    /// 
+    /// Use `with_global_events()` or `with_dependencies()` instead, where you provide
+    /// a pre-configured TransactionManager that handles all transport setup.
     /// 
     /// # Arguments
+    /// * `config` - Client configuration (for validation and future use)
+    /// 
+    /// # Returns
+    /// An error directing users to the proper dependency injection constructors
+    pub async fn with_config(config: ClientConfig) -> ApiResult<Self> {
+        // Validate configuration for future use
+        config.validate()
+            .map_err(|e| ApiError::Configuration { message: e })?;
+            
+        // Return architectural guidance error
+        Err(ApiError::Configuration { 
+            message: format!(
+                "Simple construction violates architectural separation of concerns. \
+                 dialog-core should not manage transport directly. \
+                 \nUse dependency injection instead:\
+                 \n\n1. with_global_events(transaction_manager, events, config) - RECOMMENDED\
+                 \n2. with_dependencies(transaction_manager, config)\
+                 \n\nExample setup in your application:\
+                 \n  // Set up transport and transaction manager in your app\
+                 \n  let (tx_mgr, events) = TransactionManager::with_transport(transport).await?;\
+                 \n  let client = DialogClient::with_global_events(tx_mgr, events, config).await?;\
+                 \n\nSee examples/ directory for complete setup patterns.",
+            )
+        })
+    }
+    
+    /// Create a dialog client with dependency injection and global events (RECOMMENDED)
+    /// 
+    /// This constructor follows the working pattern from transaction-core examples
+    /// by using global transaction event subscription for proper event consumption.
+    /// 
+    /// # Arguments
+    /// * `transaction_manager` - Pre-configured transaction manager
+    /// * `transaction_events` - Global transaction event receiver
     /// * `config` - Client configuration
     /// 
     /// # Returns
     /// A configured DialogClient ready to start
-    pub async fn with_config(config: ClientConfig) -> ApiResult<Self> {
-        // For now, require dependency injection for proper architecture
-        // TODO: Add simple construction once we have a default transport setup
-        Err(ApiError::Configuration { 
-            message: "Use with_dependencies() method for now - simple construction requires transport setup".to_string() 
+    pub async fn with_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<TransactionEvent>,
+        config: ClientConfig,
+    ) -> ApiResult<Self> {
+        // Validate configuration
+        config.validate()
+            .map_err(|e| ApiError::Configuration { message: e })?;
+        
+        info!("Creating DialogClient with global transaction events (RECOMMENDED PATTERN)");
+        
+        // Create dialog manager with global event subscription (ROOT CAUSE FIX)
+        let dialog_manager = Arc::new(
+            DialogManager::with_global_events(transaction_manager, transaction_events, config.dialog.local_address).await
+                .map_err(|e| ApiError::Internal { 
+                    message: format!("Failed to create dialog manager with global events: {}", e) 
+                })?
+        );
+        
+        Ok(Self {
+            dialog_manager,
+            config,
+            stats: Arc::new(tokio::sync::RwLock::new(ClientStats::default())),
         })
     }
     
@@ -119,6 +173,9 @@ impl DialogClient {
     /// 
     /// Use this when you want full control over dependencies, particularly
     /// useful for testing or when integrating with existing infrastructure.
+    /// 
+    /// **NOTE**: This method still uses the old individual transaction subscription pattern.
+    /// For proper event consumption, use `with_global_events()` instead.
     /// 
     /// # Arguments
     /// * `transaction_manager` - Pre-configured transaction manager
@@ -135,8 +192,9 @@ impl DialogClient {
             .map_err(|e| ApiError::Configuration { message: e })?;
         
         info!("Creating DialogClient with injected dependencies");
+        warn!("WARNING: Using old DialogManager::new() pattern - consider upgrading to with_global_events() for better reliability");
         
-        // Create dialog manager with injected dependencies
+        // Create dialog manager with injected dependencies (OLD PATTERN - may have event issues)
         let dialog_manager = Arc::new(
             DialogManager::new(transaction_manager, config.dialog.local_address).await
                 .map_err(|e| ApiError::Internal { 

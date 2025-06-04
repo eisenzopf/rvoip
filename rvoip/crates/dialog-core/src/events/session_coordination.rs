@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use rvoip_sip_core::{Request, Uri};
+use rvoip_sip_core::{Request, Response, Uri};
 use rvoip_transaction_core::TransactionKey;
 
 use crate::dialog::DialogId;
@@ -50,6 +50,12 @@ pub enum SessionCoordinationEvent {
         session_answer: String,
     },
     
+    /// Call is ringing (180 Ringing received)
+    CallRinging {
+        /// Dialog ID for the ringing call
+        dialog_id: DialogId,
+    },
+    
     /// Call has been terminated
     CallTerminated {
         /// Dialog ID for the terminated call
@@ -66,6 +72,18 @@ pub enum SessionCoordinationEvent {
         
         /// Reason for cancellation
         reason: String,
+    },
+    
+    /// Response received for a transaction
+    ResponseReceived {
+        /// Dialog ID associated with the response
+        dialog_id: DialogId,
+        
+        /// The SIP response received
+        response: Response,
+        
+        /// Transaction ID that received the response
+        transaction_id: TransactionKey,
     },
     
     /// Registration request received

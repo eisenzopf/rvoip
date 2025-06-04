@@ -16,7 +16,7 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogApi};
-use rvoip_dialog_core::{DialogError, SessionCoordinationEvent};
+use rvoip_dialog_core::{SessionCoordinationEvent, DialogState};
 use rvoip_transaction_core::TransactionManager;
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
 use rvoip_sip_core::Uri;
@@ -49,7 +49,7 @@ impl BasicDialogExample {
         let server_addr = server_transport.default_transport().await
             .ok_or("No default transport")?.local_addr()?;
         
-        let (server_transaction_manager, _) = TransactionManager::with_transport_manager(
+        let (server_transaction_manager, server_global_rx) = TransactionManager::with_transport_manager(
             server_transport,
             server_transport_rx,
             Some(100),
@@ -70,23 +70,25 @@ impl BasicDialogExample {
         let client_addr = client_transport.default_transport().await
             .ok_or("No default transport")?.local_addr()?;
         
-        let (client_transaction_manager, _) = TransactionManager::with_transport_manager(
+        let (client_transaction_manager, client_global_rx) = TransactionManager::with_transport_manager(
             client_transport,
             client_transport_rx,
             Some(100),
         ).await?;
         
-        // Create dialog server and client
+        // Create dialog server and client using global events pattern (RECOMMENDED)
         let server_config = rvoip_dialog_core::api::config::ServerConfig::default();
         let client_config = rvoip_dialog_core::api::config::ClientConfig::default();
         
-        let server = DialogServer::with_dependencies(
+        let server = DialogServer::with_global_events(
             Arc::new(server_transaction_manager),
+            server_global_rx,
             server_config
         ).await?;
         
-        let client = DialogClient::with_dependencies(
+        let client = DialogClient::with_global_events(
             Arc::new(client_transaction_manager),
+            client_global_rx,
             client_config
         ).await?;
         
@@ -101,6 +103,30 @@ impl BasicDialogExample {
         })
     }
     
+    /// Create an established dialog for testing Phase 3 functions
+    /// 
+    /// This creates a dialog and manually establishes it with both tags
+    /// so that in-dialog requests can be tested. In production, dialogs
+    /// are established through proper SIP message flows.
+    async fn create_established_dialog_for_demo(&self) -> Result<rvoip_dialog_core::DialogId, Box<dyn std::error::Error>> {
+        let local_uri: Uri = format!("sip:alice@{}", self.client_addr).parse()?;
+        let remote_uri: Uri = format!("sip:bob@{}", self.server_addr).parse()?;
+        
+        // Create the dialog
+        let dialog_id = self.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
+        
+        // Access the dialog manager to manually establish the dialog for testing
+        let dialog_manager = self.client.dialog_manager().clone();
+        let mut dialog_guard = dialog_manager.get_dialog_mut(&dialog_id)?;
+            
+        // Manually set remote tag and state to Confirmed for testing
+        dialog_guard.remote_tag = Some("test-remote-tag".to_string());
+        dialog_guard.state = DialogState::Confirmed;
+        
+        info!("✅ Created and established demo dialog: {}", dialog_id);
+        Ok(dialog_id)
+    }
+    
     /// Demonstrate basic dialog operations
     async fn run_basic_dialog_demo(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("\n📞 === Basic Dialog Operations Demo ===");
@@ -111,12 +137,8 @@ impl BasicDialogExample {
         
         info!("✅ Dialog services started");
         
-        // Create dialog using simplified API
-        let local_uri: Uri = format!("sip:alice@{}", self.client_addr).parse()?;
-        let remote_uri: Uri = format!("sip:bob@{}", self.server_addr).parse()?;
-        
-        let dialog_id = self.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
-        info!("✅ Created dialog: {}", dialog_id);
+        // Create established dialog for Phase 3 testing
+        let dialog_id = self.create_established_dialog_for_demo().await?;
         
         // Retrieve and display dialog information
         let dialog_info = self.client.get_dialog_info(&dialog_id).await?;
@@ -137,7 +159,7 @@ impl BasicDialogExample {
         info!("✅ Sent INFO request - Transaction: {}", info_tx);
         
         // Send UPDATE request (one-liner with Phase 3 integration)
-        let sdp_content = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\nc=IN IP4 127.0.0.1\r\nm=audio 5004 RTP/AVP 0\r\n";
+        let sdp_content = "v=0\\r\\no=alice 123 456 IN IP4 127.0.0.1\\r\\nc=IN IP4 127.0.0.1\\r\\nm=audio 5004 RTP/AVP 0\\r\\n";
         let update_tx = self.client.send_update(&dialog_id, Some(sdp_content.to_string())).await?;
         info!("✅ Sent UPDATE request - Transaction: {}", update_tx);
         
@@ -146,7 +168,7 @@ impl BasicDialogExample {
         info!("✅ Sent NOTIFY request - Transaction: {}", notify_tx);
         
         // Wait for message processing
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(200)).await;
         
         // Terminate dialog (one-liner with Phase 3 integration)
         let bye_tx = self.client.send_bye(&dialog_id).await?;

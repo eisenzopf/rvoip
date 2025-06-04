@@ -1,12 +1,11 @@
 use std::str::FromStr;
 use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
-use rvoip_sip_core::{Uri, Method, TypedHeader};
-use rvoip_sip_core::types::address::Address;
-use rvoip_sip_core::types::contact::{ContactParamInfo, ContactValue};
+use rvoip_sip_core::Uri;
+use rvoip_sip_core::types::contact::ContactValue;
 use tracing::{warn, debug};
 
 /// Extract tag from header with parameter
-pub fn extract_tag(header: &rvoip_sip_core::Header) -> Option<String> {
+pub fn extract_tag(_header: &rvoip_sip_core::Header) -> Option<String> {
     // Just return empty tag for now
     None
 }

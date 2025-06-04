@@ -1,27 +1,22 @@
-//! API Layer Integration Tests
+//! API Layer Tests for Dialog Core
 //!
-//! Comprehensive tests for the DialogServer and DialogClient API interfaces,
-//! using **REAL TRANSPORT** following transaction-core examples pattern.
+//! Tests for the high-level API functionality provided by dialog-core.
 
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
-use uuid::Uuid;
+use tracing::{info, Level};
+use tracing_subscriber;
 
-use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogApi};
-use rvoip_dialog_core::DialogId;
-use rvoip_transaction_core::TransactionManager;
-use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
-use rvoip_transaction_core::utils::response_builders::*; // Use transaction-core helpers
-use rvoip_transaction_core::builders::{client_quick, server_quick}; // Use the new builders
-use rvoip_sip_core::{Method, StatusCode, Uri, Request};
+use rvoip_dialog_core::api::{DialogClient, DialogServer, DialogApi};
+use rvoip_dialog_core::{DialogError, SessionCoordinationEvent, DialogId};
+use rvoip_transaction_core::builders::{client_quick}; // Use the new builders
+use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri, TypedHeader, ContentLength};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::types::header::TypedHeader;
-use rvoip_sip_core::types::content_length::ContentLength;
-use rvoip_sip_core::types::max_forwards::MaxForwards;
-use rvoip_sip_core::types::cseq::CSeq;
-use rvoip_sip_transport::{Transport, TransportEvent};
-use rvoip_transaction_core::timer::TimerSettings;
+use rvoip_transaction_core::{TransactionManager, TransportManager};
+use rvoip_transaction_core::transport::TransportManagerConfig;
+use uuid::Uuid;
 
 /// Test environment for dialog-core API testing using **REAL TRANSPORT**
 struct DialogApiTestEnvironment {

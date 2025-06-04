@@ -3,7 +3,6 @@
 //! This module handles coordination with session-core, maintaining
 //! proper architectural layer separation between dialog and session management.
 
-use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use crate::events::SessionCoordinationEvent;
 use crate::errors::DialogResult;

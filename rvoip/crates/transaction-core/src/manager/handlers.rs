@@ -825,12 +825,29 @@ impl TransactionManager {
                         source,
                     }).await.ok();
                 } else {
-                    // All other responses
-                    self.events_tx.send(crate::TransactionEvent::Response {
-                        transaction_id: key,
-                        response,
-                        source,
-                    }).await.ok();
+                    // All other responses - classify by status code
+                    let status_code = response.status_code();
+                    if status_code >= 100 && status_code < 200 {
+                        // 1xx provisional response
+                        self.events_tx.send(crate::TransactionEvent::ProvisionalResponse {
+                            transaction_id: key,
+                            response,
+                        }).await.ok();
+                    } else if status.is_success() && key.method() != &Method::Invite {
+                        // 2xx success response for non-INVITE
+                        self.events_tx.send(crate::TransactionEvent::SuccessResponse {
+                            transaction_id: key,
+                            response,
+                            need_ack: false,
+                            source,
+                        }).await.ok();
+                    } else {
+                        // 3xx, 4xx, 5xx, 6xx failure response
+                        self.events_tx.send(crate::TransactionEvent::FailureResponse {
+                            transaction_id: key,
+                            response,
+                        }).await.ok();
+                    }
                 }
             }
             

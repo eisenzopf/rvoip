@@ -83,7 +83,7 @@ impl SourceExtractor {
                 if let rvoip_sip_core::types::contact::ContactValue::Params(params) = contact {
                     if let Some(param) = params.first() {
                         let uri_str = param.address.uri.to_string();
-                        if let Ok(uri) = uri_str.parse::<rvoip_sip_core::Uri>() {
+                        if let Ok(_uri) = uri_str.parse::<rvoip_sip_core::Uri>() {
                             // Extract host and port from URI string parsing
                             // Since URI methods don't exist, we'll parse the string
                             if let Ok(parsed_uri) = uri_str.parse::<http::Uri>() {

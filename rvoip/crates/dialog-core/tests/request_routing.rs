@@ -169,11 +169,11 @@ fn test_route_set_handling_real() {
     
     // Create a real request using deprecated but functional method
     #[allow(deprecated)]
-    let request = dialog.create_request(Method::Bye);
+    let request = dialog.create_request_template(Method::Bye);
     
     // The request should be created with the remote target
-    assert_eq!(request.uri, dialog.remote_target);
-    println!("✅ Real request created with correct remote target: {}", request.uri);
+    assert_eq!(request.target_uri, dialog.remote_target);
+    println!("✅ Real request created with correct remote target: {}", request.target_uri);
     
     // Verify the route set is available for request building
     assert_eq!(dialog.route_set.len(), 2);
@@ -237,27 +237,24 @@ fn test_sequence_number_validation_real() {
     );
     
     // Set initial sequence numbers
-    dialog.local_seq = 5;
-    dialog.remote_seq = 3;
+    dialog.local_cseq = 5;
+    dialog.remote_cseq = 3;
     
-    println!("✅ Initial sequence numbers: local={}, remote={}", dialog.local_seq, dialog.remote_seq);
+    println!("✅ Initial sequence numbers: local={}, remote={}", dialog.local_cseq, dialog.remote_cseq);
     
     // Create real requests and verify sequence number increments
-    #[allow(deprecated)]
-    let _request1 = dialog.create_request(Method::Info);
-    assert_eq!(dialog.local_seq, 6);
-    println!("✅ INFO request incremented sequence to: {}", dialog.local_seq);
+    let _request1 = dialog.create_request_template(Method::Info);
+    assert_eq!(dialog.local_cseq, 6);
+    println!("✅ INFO request incremented sequence to: {}", dialog.local_cseq);
     
-    #[allow(deprecated)]
-    let _request2 = dialog.create_request(Method::Bye);
-    assert_eq!(dialog.local_seq, 7);
-    println!("✅ BYE request incremented sequence to: {}", dialog.local_seq);
+    let _request2 = dialog.create_request_template(Method::Bye);
+    assert_eq!(dialog.local_cseq, 7);
+    println!("✅ BYE request incremented sequence to: {}", dialog.local_cseq);
     
     // ACK should not increment (RFC 3261 requirement)
-    #[allow(deprecated)]
-    let _ack_request = dialog.create_request(Method::Ack);
-    assert_eq!(dialog.local_seq, 7); // Should remain the same
-    println!("✅ ACK request correctly did NOT increment sequence: {}", dialog.local_seq);
+    let _ack_request = dialog.create_request_template(Method::Ack);
+    assert_eq!(dialog.local_cseq, 7); // Should remain the same
+    println!("✅ ACK request correctly did NOT increment sequence: {}", dialog.local_cseq);
 }
 
 /// Test dialog state transitions with real state management

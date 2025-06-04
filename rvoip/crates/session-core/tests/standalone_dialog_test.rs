@@ -86,8 +86,8 @@ fn test_dialog_creation_from_2xx() {
     assert_eq!(dialog.call_id, "test-call-id");
     assert_eq!(dialog.local_tag, Some("alice-tag".to_string()));
     assert_eq!(dialog.remote_tag, Some("bob-tag".to_string()));
-    assert_eq!(dialog.local_seq, 1);
-    assert_eq!(dialog.remote_seq, 0);
+    assert_eq!(dialog.local_cseq, 1);
+    assert_eq!(dialog.remote_cseq, 0);
     assert_eq!(dialog.is_initiator, true);
 }
 
@@ -107,7 +107,7 @@ fn test_dialog_create_request() {
     
     // Verify the request
     assert_eq!(bye_request.method, Method::Bye);
-    assert_eq!(dialog.local_seq, 2); // Should be incremented
+    assert_eq!(dialog.local_cseq, 2); // Should be incremented
     
     // Check headers
     assert!(bye_request.header(&HeaderName::CallId).is_some());

@@ -126,19 +126,6 @@ pub enum TransactionEvent {
         /// The failure response message (e.g., "404 Not Found", "503 Service Unavailable").
         response: Response,
     },
-    
-    /// A generic response event, primarily for maintaining compatibility with older code or for
-    /// scenarios where the distinction between provisional, success, or failure is handled
-    /// uniformly by the TU. It's generally recommended to use the more specific response events.
-    #[deprecated(note = "Prefer ProvisionalResponse, SuccessResponse, or FailureResponse")]
-    Response {
-        /// The unique identifier for the client transaction that received the response.
-        transaction_id: TransactionKey,
-        /// The SIP response message.
-        response: Response,
-        /// The network address from which the response was received.
-        source: SocketAddr,
-    },
 
     // --- Response Sending (Informational events, primarily for Server Transactions) ---
     /// Informs the TU that a provisional response was successfully sent by a server transaction.
@@ -168,13 +155,6 @@ pub enum TransactionEvent {
     /// * Non-INVITE Server: Timer J (timeout for retransmitting non-2xx if no further request).
     /// The transaction typically moves to a `Terminated` state.
     TransactionTimeout {
-        /// The unique identifier for the transaction that timed out.
-        transaction_id: TransactionKey,
-    },
-    /// A generic timeout event, primarily for maintaining compatibility.
-    /// Prefer `TransactionTimeout` or `AckTimeout` for more specific timeout information.
-    #[deprecated(note = "Prefer TransactionTimeout or AckTimeout")]
-    Timeout {
         /// The unique identifier for the transaction that timed out.
         transaction_id: TransactionKey,
     },
@@ -244,14 +224,6 @@ pub enum TransactionEvent {
     /// The TU should consider this transaction complete and can perform any necessary cleanup.
     /// The `TransactionManager` will typically remove the transaction from its active list shortly after this event.
     TransactionTerminated {
-        /// The unique identifier for the transaction that has terminated.
-        transaction_id: TransactionKey,
-    },
-    
-    /// A generic terminated event, primarily for maintaining compatibility.
-    /// Prefer `TransactionTerminated`.
-    #[deprecated(note = "Prefer TransactionTerminated")]
-    Terminated {
         /// The unique identifier for the transaction that has terminated.
         transaction_id: TransactionKey,
     },

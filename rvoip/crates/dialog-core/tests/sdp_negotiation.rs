@@ -76,7 +76,7 @@ fn test_real_sdp_coordination_with_2xx() {
     assert_eq!(dialog.state, DialogState::Initial);
     
     // Create a real 2xx response with SDP content
-    let mock_request = create_real_invite_request();
+    let _mock_request = create_real_invite_request();
     let mock_response = create_real_200_ok_response_with_sdp();
     
     // Simulate receiving a 2xx response (would contain SDP answer)
@@ -110,24 +110,17 @@ fn test_real_reinvite_sdp_negotiation() {
     assert!(dialog.state.is_active());
     
     // Create a real re-INVITE request
-    #[allow(deprecated)]
-    let reinvite_request = dialog.create_request(Method::Invite);
+    let reinvite_request = dialog.create_request_template(Method::Invite);
     assert_eq!(reinvite_request.method, Method::Invite);
     
     // Verify sequence number was incremented for re-INVITE
-    assert_eq!(dialog.local_seq, 1);
-    println!("✅ Real re-INVITE created with incremented sequence: {}", dialog.local_seq);
-    
-    // In real implementation, this re-INVITE would:
-    // 1. Include new SDP offer in the body
-    // 2. Track renegotiation state
-    // 3. Handle the 2xx response with SDP answer
-    // 4. Update media parameters
+    assert_eq!(dialog.local_cseq, 1);
+    println!("✅ Real re-INVITE created with incremented sequence: {}", dialog.local_cseq);
     
     // Verify the request has proper dialog context
-    assert!(reinvite_request.call_id().is_some());
-    assert!(reinvite_request.from().is_some());
-    assert!(reinvite_request.to().is_some());
+    assert_eq!(reinvite_request.call_id, dialog.call_id);
+    assert_eq!(reinvite_request.local_uri, dialog.local_uri);
+    assert_eq!(reinvite_request.remote_uri, dialog.remote_uri);
     
     println!("✅ Real re-INVITE has proper SIP headers for dialog context");
 }
@@ -150,25 +143,22 @@ fn test_real_sdp_session_modification() {
     // Test different real modification scenarios
     
     // 1. Hold/Unhold via real re-INVITE
-    #[allow(deprecated)]
-    let hold_request = dialog.create_request(Method::Invite);
+    let hold_request = dialog.create_request_template(Method::Invite);
     assert_eq!(hold_request.method, Method::Invite);
-    println!("✅ Real hold re-INVITE created (seq={})", dialog.local_seq);
+    println!("✅ Real hold re-INVITE created (seq={})", dialog.local_cseq);
     
     // 2. Codec change via real re-INVITE  
-    #[allow(deprecated)]
-    let codec_change_request = dialog.create_request(Method::Invite);
+    let codec_change_request = dialog.create_request_template(Method::Invite);
     assert_eq!(codec_change_request.method, Method::Invite);
-    println!("✅ Real codec change re-INVITE created (seq={})", dialog.local_seq);
+    println!("✅ Real codec change re-INVITE created (seq={})", dialog.local_cseq);
     
     // 3. Session parameter update via real UPDATE
-    #[allow(deprecated)]
-    let update_request = dialog.create_request(Method::Update);
+    let update_request = dialog.create_request_template(Method::Update);
     assert_eq!(update_request.method, Method::Update);
-    println!("✅ Real UPDATE request created (seq={})", dialog.local_seq);
+    println!("✅ Real UPDATE request created (seq={})", dialog.local_cseq);
     
     // Verify sequence numbers incremented properly for real requests
-    assert_eq!(dialog.local_seq, 3);
+    assert_eq!(dialog.local_cseq, 3); // After 3 requests: hold(1), codec(2), update(3)
     println!("✅ Real SDP modification requests properly sequenced");
 }
 
@@ -311,8 +301,8 @@ fn test_real_concurrent_sdp_negotiations() {
     assert_ne!(dialog1.remote_tag, dialog2.remote_tag);
     
     // Each dialog should handle its own SDP negotiation independently
-    assert_eq!(dialog1.local_seq, 0);
-    assert_eq!(dialog2.local_seq, 0);
+    assert_eq!(dialog1.local_cseq, 0);
+    assert_eq!(dialog2.local_cseq, 0);
     
     println!("✅ Real concurrent dialogs are independent");
     println!("   Dialog1: {} -> {}", dialog1.local_uri, dialog1.remote_uri);

@@ -3,24 +3,20 @@
 //! This module contains the main Dialog struct and its implementation,
 //! handling dialog creation, state management, and request/response processing.
 
-use std::str::FromStr;
 use std::net::SocketAddr;
 use serde::{Serialize, Deserialize};
-use tracing::{debug, error};
+use tracing::debug;
 
 use rvoip_sip_core::{
     Request, Response, Method, StatusCode, 
-    Uri, Header, HeaderName, TypedHeader
+    Uri, HeaderName, TypedHeader
 };
 
-use rvoip_sip_core::types::address::Address;
-use rvoip_sip_core::types::from::From as FromHeader;
-use rvoip_sip_core::types::to::To as ToHeader;
 use rvoip_transaction_core::utils::DialogRequestTemplate;
 
 use super::dialog_state::DialogState;
 use super::dialog_id::DialogId;
-use super::dialog_utils::{extract_tag, extract_uri_from_contact};
+use super::dialog_utils::extract_uri_from_contact;
 use crate::errors::{DialogError, DialogResult};
 
 /// A SIP dialog as defined in RFC 3261
@@ -48,10 +44,10 @@ pub struct Dialog {
     pub remote_tag: Option<String>,
     
     /// Local sequence number
-    pub local_seq: u32,
+    pub local_cseq: u32,
     
     /// Remote sequence number
-    pub remote_seq: u32,
+    pub remote_cseq: u32,
     
     /// Remote target URI (where to send requests)
     pub remote_target: Uri,
@@ -99,8 +95,8 @@ impl Dialog {
             remote_uri: remote_uri.clone(),
             local_tag,
             remote_tag,
-            local_seq: 0,
-            remote_seq: 0,
+            local_cseq: 0,
+            remote_cseq: 0,
             remote_target: remote_uri, // Initially same as remote URI
             route_set: Vec::new(),
             is_initiator,
@@ -146,13 +142,13 @@ impl Dialog {
             let new_seq = cseq.sequence();
             
             // Validate sequence number (should be higher than last known)
-            if new_seq <= self.remote_seq && self.remote_seq != 0 {
+            if new_seq <= self.remote_cseq && self.remote_cseq != 0 {
                 return Err(DialogError::protocol_error(&format!(
-                    "Invalid CSeq: got {}, expected > {}", new_seq, self.remote_seq
+                    "Invalid CSeq: got {}, expected > {}", new_seq, self.remote_cseq
                 )));
             }
             
-            self.remote_seq = new_seq;
+            self.remote_cseq = new_seq;
             Ok(())
         } else {
             Err(DialogError::protocol_error("Request missing CSeq header"))
@@ -263,8 +259,8 @@ impl Dialog {
             remote_uri,
             local_tag,
             remote_tag,
-            local_seq: if is_initiator { cseq_number } else { 0 },
-            remote_seq: if is_initiator { 0 } else { cseq_number },
+            local_cseq: if is_initiator { cseq_number } else { 0 },
+            remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
             route_set,
             is_initiator,
@@ -351,8 +347,8 @@ impl Dialog {
             remote_uri,
             local_tag,
             remote_tag,
-            local_seq: if is_initiator { cseq_number } else { 0 },
-            remote_seq: if is_initiator { 0 } else { cseq_number },
+            local_cseq: if is_initiator { cseq_number } else { 0 },
+            remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
             route_set,
             is_initiator,
@@ -367,13 +363,13 @@ impl Dialog {
     
     /// Create a new request within this dialog
     /// 
-    /// **ARCHITECTURAL NOTE**: This method now creates a basic dialog-aware request template
-    /// that should be further processed by transaction-core helpers for proper RFC 3261 compliance.
+    /// **ARCHITECTURAL NOTE**: This method creates a dialog-aware request template
+    /// that should be processed by transaction-core helpers for proper RFC 3261 compliance.
     /// The DialogManager's transaction integration layer handles the complete request creation.
     pub fn create_request_template(&mut self, method: Method) -> DialogRequestTemplate {
         // Increment local sequence number for new request (except ACK)
         if method != Method::Ack {
-            self.local_seq += 1;
+            self.local_cseq += 1;
         }
         
         DialogRequestTemplate {
@@ -384,59 +380,9 @@ impl Dialog {
             remote_uri: self.remote_uri.clone(),
             local_tag: self.local_tag.clone(),
             remote_tag: self.remote_tag.clone(),
-            cseq_number: self.local_seq,
+            cseq_number: self.local_cseq,
             route_set: self.route_set.clone(),
         }
-    }
-    
-    /// **DEPRECATED**: Use DialogManager::send_request_in_dialog instead
-    /// 
-    /// This method violates architectural separation by creating SIP messages directly.
-    /// It's kept for backward compatibility but should not be used in new code.
-    #[deprecated(since = "0.1.0", note = "Use DialogManager::send_request_in_dialog for proper transaction-core integration")]
-    pub fn create_request(&mut self, method: Method) -> Request {
-        // This is the old implementation that violates architecture
-        // Keep for backward compatibility but discourage use
-        
-        // Increment local sequence number for new request (except ACK)
-        if method != Method::Ack {
-            self.local_seq += 1;
-        }
-        
-        // Create base request
-        let mut request = Request::new(method.clone(), self.remote_target.clone());
-        
-        // Add Call-ID
-        request.headers.push(TypedHeader::CallId(
-            rvoip_sip_core::types::call_id::CallId(self.call_id.clone())
-        ));
-        
-        // Add From header with our tag
-        if let Some(local_tag) = &self.local_tag {
-            let mut from_addr = Address::new(self.local_uri.clone());
-            from_addr.set_tag(local_tag);
-            request.headers.push(TypedHeader::From(FromHeader(from_addr)));
-        } else {
-            let from_addr = Address::new(self.local_uri.clone());
-            request.headers.push(TypedHeader::From(FromHeader(from_addr)));
-        }
-        
-        // Add To header with remote tag
-        if let Some(remote_tag) = &self.remote_tag {
-            let mut to_addr = Address::new(self.remote_uri.clone());
-            to_addr.set_tag(remote_tag);
-            request.headers.push(TypedHeader::To(rvoip_sip_core::types::to::To(to_addr)));
-        } else {
-            let to_addr = Address::new(self.remote_uri.clone());
-            request.headers.push(TypedHeader::To(rvoip_sip_core::types::to::To(to_addr)));
-        }
-        
-        // Add CSeq header
-        request.headers.push(TypedHeader::CSeq(
-            rvoip_sip_core::types::cseq::CSeq::new(self.local_seq, method)
-        ));
-        
-        request
     }
     
     /// Get the dialog ID tuple (Call-ID, local tag, remote tag)
@@ -491,6 +437,15 @@ impl Dialog {
         self.last_successful_transaction_time = Some(std::time::SystemTime::now());
     }
     
+    /// Set the remote tag for this dialog
+    /// 
+    /// Updates the remote tag, typically when receiving a response with a to-tag.
+    /// This is used during dialog state transitions and response processing.
+    pub fn set_remote_tag(&mut self, tag: String) {
+        debug!("Setting remote tag for dialog {}: {}", self.id, tag);
+        self.remote_tag = Some(tag);
+    }
+    
     /// Enter recovery mode
     pub fn enter_recovery_mode(&mut self, reason: &str) {
         if self.state != DialogState::Terminated {
@@ -516,6 +471,13 @@ impl Dialog {
         } else {
             false
         }
+    }
+    
+    /// Increment the local CSeq number
+    /// 
+    /// Used for sequence number management during dialog operations.
+    pub fn increment_local_cseq(&mut self) {
+        self.local_cseq += 1;
     }
 }
 

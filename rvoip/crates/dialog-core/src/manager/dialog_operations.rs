@@ -3,17 +3,16 @@
 //! This module handles all Create, Read, Update, Delete operations for SIP dialogs,
 //! implementing RFC 3261 compliant dialog management with proper state transitions.
 
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use dashmap::mapref::one::RefMut;
 
-use rvoip_sip_core::{Request, Response, Uri};
+use rvoip_sip_core::{Request, Uri};
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use super::core::DialogManager;
-use super::utils::{DialogUtils, MessageExtensions};
+use super::utils::DialogUtils;
 
 /// Trait for dialog storage operations
 /// 
@@ -282,10 +281,8 @@ impl DialogStore for DialogManager {
                 (DialogState::Confirmed, DialogState::Confirmed) => {},
                 
                 // Valid transitions: Initial can go to any state (covers all Initial cases)
-                (DialogState::Initial, _) => {},
                 
                 // Valid transitions: Recovering can transition to any state (covers all Recovering cases)
-                (DialogState::Recovering, _) => {},
                 
                 // Invalid transitions - Confirmed cannot go back to Early
                 (DialogState::Confirmed, DialogState::Early) => {

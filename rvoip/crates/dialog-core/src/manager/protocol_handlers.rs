@@ -4,16 +4,17 @@
 //! dialog management, following RFC 3261 and related specifications.
 
 use std::net::SocketAddr;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use rvoip_sip_core::{Request, Response, Method, StatusCode};
 use rvoip_transaction_core::TransactionKey;
+use rvoip_transaction_core::utils::response_builders;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use super::core::DialogManager;
 use super::utils::{MessageExtensions, SourceExtractor};
-use super::dialog_operations::{DialogStore, DialogLookup};
+use super::dialog_operations::DialogLookup;
 use super::session_coordination::SessionCoordinator;
 
 /// Trait for SIP method handling
@@ -152,8 +153,8 @@ impl ProtocolHandlers for DialogManager {
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             self.process_bye_in_dialog(transaction_id, request, dialog_id).await
         } else {
-            // Send 481 Call/Transaction Does Not Exist
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            // Send 481 Call/Transaction Does Not Exist using transaction-core helper
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to BYE: {}", e),
@@ -190,7 +191,7 @@ impl ProtocolHandlers for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -273,7 +274,7 @@ impl ProtocolHandlers for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -376,7 +377,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -425,7 +426,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -502,7 +503,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = Response::from_request(StatusCode::CallOrTransactionDoesNotExist, &request);
+            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -592,7 +593,7 @@ impl DialogManager {
         }
         
         // Send 200 OK response
-        let response = Response::from_request(StatusCode::Ok, &request);
+        let response = response_builders::create_response(&request, StatusCode::Ok);
         self.transaction_manager.send_response(&transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
@@ -612,7 +613,7 @@ impl DialogManager {
     /// Process CANCEL for INVITE transaction
     async fn process_cancel_for_invite(
         &self,
-        request: Request,
+        _request: Request,
         invite_tx_id: TransactionKey,
     ) -> DialogResult<()> {
         debug!("Processing CANCEL for INVITE transaction {}", invite_tx_id);
@@ -711,7 +712,7 @@ impl DialogManager {
     async fn process_response_in_dialog(
         &self,
         response: Response,
-        transaction_id: TransactionKey,
+        _transaction_id: TransactionKey,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
         debug!("Processing response {} for dialog {}", response.status_code(), dialog_id);
@@ -765,21 +766,19 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         request: &Request,
     ) -> DialogResult<()> {
-        let mut response = Response::from_request(StatusCode::Ok, request);
+        // Use transaction-core helper for OPTIONS response with Allow header
+        let allowed_methods = vec![
+            Method::Invite,
+            Method::Bye,
+            Method::Cancel,
+            Method::Ack,
+            Method::Options,
+            Method::Update,
+            Method::Info,
+            Method::Refer,
+        ];
         
-        // Add supported methods
-        response.headers.push(rvoip_sip_core::TypedHeader::Allow(
-            rvoip_sip_core::types::allow::Allow(vec![
-                Method::Invite,
-                Method::Bye,
-                Method::Cancel,
-                Method::Ack,
-                Method::Options,
-                Method::Update,
-                Method::Info,
-                Method::Refer,
-            ])
-        ));
+        let response = response_builders::create_ok_response_for_options(request, &allowed_methods);
         
         self.transaction_manager.send_response(transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {

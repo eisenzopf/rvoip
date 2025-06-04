@@ -149,8 +149,8 @@ fn test_dialog_creation_from_2xx() {
         panic!("Response is missing To header");
     }
     
-    assert_eq!(dialog.local_seq, 1);
-    assert_eq!(dialog.remote_seq, 0);
+    assert_eq!(dialog.local_cseq, 1);
+    assert_eq!(dialog.remote_cseq, 0);
     assert_eq!(dialog.is_initiator, true);
 }
 
@@ -184,8 +184,8 @@ fn test_dialog_creation_from_provisional() {
         assert_eq!(dialog.remote_tag, to.tag().map(|s| s.to_string()));
     }
     
-    assert_eq!(dialog.local_seq, 1);
-    assert_eq!(dialog.remote_seq, 0);
+    assert_eq!(dialog.local_cseq, 1);
+    assert_eq!(dialog.remote_cseq, 0);
     assert_eq!(dialog.is_initiator, true);
 }
 
@@ -226,7 +226,7 @@ fn test_dialog_create_request() {
     
     // Verify the request
     assert_eq!(bye_request.method, Method::Bye);
-    assert_eq!(dialog.local_seq, 2); // Should be incremented
+    assert_eq!(dialog.local_cseq, 2); // Should be incremented
     
     // Check required headers
     assert!(bye_request.header(&HeaderName::CallId).is_some());
@@ -250,7 +250,7 @@ fn test_dialog_create_request() {
     
     // Verify CSeq has correct number and method
     if let Some(TypedHeader::CSeq(cseq)) = bye_request.header(&HeaderName::CSeq) {
-        assert_eq!(cseq.sequence(), dialog.local_seq);
+        assert_eq!(cseq.sequence(), dialog.local_cseq);
         assert_eq!(cseq.method, Method::Bye);
     } else {
         panic!("BYE request missing CSeq header");

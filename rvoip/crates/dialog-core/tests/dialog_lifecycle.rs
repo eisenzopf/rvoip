@@ -1,85 +1,20 @@
-//! Integration tests for dialog lifecycle management
+//! Dialog lifecycle tests
 //!
-//! Tests the complete lifecycle of SIP dialogs from creation to termination.
+//! Tests for the complete SIP dialog lifecycle from creation to termination.
 
-use std::sync::Arc;
-use std::net::SocketAddr;
-use tokio::time::{timeout, Duration};
-use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+use tracing::{info, Level};
+use tracing_subscriber;
 
-use rvoip_dialog_core::{DialogManager, DialogError, Dialog, DialogState};
-use rvoip_transaction_core::TransactionManager;
-use rvoip_sip_core::{Method, StatusCode};
+use rvoip_dialog_core::{DialogError, Dialog, DialogState};
+use rvoip_sip_core::Method;
 
-/// Mock transport for testing
-#[derive(Debug, Clone)]
-struct MockTransport {
-    local_addr: SocketAddr,
-}
-
-impl MockTransport {
-    fn new(addr: &str) -> Self {
-        Self {
-            local_addr: addr.parse().unwrap(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl rvoip_sip_transport::Transport for MockTransport {
-    fn local_addr(&self) -> Result<SocketAddr, rvoip_sip_transport::error::Error> {
-        Ok(self.local_addr)
-    }
-    
-    async fn send_message(
-        &self, 
-        _message: rvoip_sip_core::Message, 
-        _destination: SocketAddr
-    ) -> Result<(), rvoip_sip_transport::error::Error> {
-        // Mock implementation: just succeed
-        Ok(())
-    }
-    
-    async fn close(&self) -> Result<(), rvoip_sip_transport::error::Error> {
-        Ok(())
-    }
-    
-    fn is_closed(&self) -> bool {
-        false
-    }
-}
-
-/// Helper to create a test transaction manager
-async fn create_test_transaction_manager() -> Result<Arc<TransactionManager>, DialogError> {
-    let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
-    let (_tx, rx) = mpsc::channel(10);
-    
-    let (transaction_manager, _events_rx) = TransactionManager::new(transport, rx, Some(10)).await
-        .map_err(|e| DialogError::internal_error(&format!("Transaction manager error: {}", e), None))?;
-    
-    Ok(Arc::new(transaction_manager))
-}
-
-/// Helper to create a test dialog manager
-async fn create_test_dialog_manager() -> Result<DialogManager, DialogError> {
-    let transaction_manager = create_test_transaction_manager().await?;
-    let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    
-    DialogManager::new(transaction_manager, local_addr).await
-}
-
-/// Test basic dialog creation and termination
+/// Test basic dialog creation and state management
 #[tokio::test]
-async fn test_dialog_creation_and_termination() -> Result<(), DialogError> {
-    // Create dialog manager
-    let dialog_manager = create_test_dialog_manager().await?;
-
-    // Start dialog manager
-    dialog_manager.start().await?;
-
-    // Create a test dialog
-    let dialog = Dialog::new(
-        "test-call-id".to_string(),
+async fn test_dialog_creation_and_initial_state() -> Result<(), DialogError> {
+    // Create dialog with both tags (starts in Initial state)
+    let dialog_early = Dialog::new(
+        "test-call-id-early".to_string(),
         "sip:alice@example.com".parse().unwrap(),
         "sip:bob@example.com".parse().unwrap(),
         Some("alice-tag".to_string()),
@@ -87,18 +22,30 @@ async fn test_dialog_creation_and_termination() -> Result<(), DialogError> {
         true,
     );
 
-    // Verify initial state
-    assert_eq!(dialog.state, DialogState::Initial);
-    assert!(dialog.is_initiator);
-    assert!(!dialog.is_terminated());
+    // Should start in Initial state even when both tags are present
+    // (transitions to Early/Confirmed happen through SIP message processing)
+    assert_eq!(dialog_early.state, DialogState::Initial);
+    assert!(dialog_early.is_initiator);
+    assert!(!dialog_early.is_terminated());
+    assert!(!dialog_early.is_recovering());
 
-    // Stop dialog manager
-    dialog_manager.stop().await?;
+    // Create dialog with only local tag (Initial state)
+    let dialog_initial = Dialog::new(
+        "test-call-id-initial".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        None, // No remote tag
+        true,
+    );
+
+    // Should start in Initial state when remote tag is missing
+    assert_eq!(dialog_initial.state, DialogState::Initial);
 
     Ok(())
 }
 
-/// Test dialog state transitions
+/// Test complete dialog state transitions
 #[tokio::test]
 async fn test_dialog_state_transitions() -> Result<(), DialogError> {
     let mut dialog = Dialog::new(
@@ -106,24 +53,33 @@ async fn test_dialog_state_transitions() -> Result<(), DialogError> {
         "sip:alice@example.com".parse().unwrap(),
         "sip:bob@example.com".parse().unwrap(),
         Some("alice-tag".to_string()),
-        None, // No remote tag initially
+        None, // Start without remote tag (Initial state)
         true,
     );
 
     // Initial state
     assert_eq!(dialog.state, DialogState::Initial);
 
-    // Simulate entering recovery mode
-    dialog.enter_recovery_mode("Test failure");
+    // Transition to Early by setting remote tag
+    dialog.set_remote_tag("bob-tag".to_string());
+    dialog.state = DialogState::Early; // Simulate early dialog creation
+    assert_eq!(dialog.state, DialogState::Early);
+
+    // Manually transition to Confirmed (confirm() method doesn't exist)
+    dialog.state = DialogState::Confirmed;
+    assert_eq!(dialog.state, DialogState::Confirmed);
+
+    // Test recovery mode (Confirmed -> Recovering -> Confirmed)
+    dialog.enter_recovery_mode("Test recovery");
     assert_eq!(dialog.state, DialogState::Recovering);
     assert!(dialog.is_recovering());
 
-    // Simulate recovery completion
-    assert!(dialog.complete_recovery());
+    let recovered = dialog.complete_recovery();
+    assert!(recovered);
     assert_eq!(dialog.state, DialogState::Confirmed);
     assert!(!dialog.is_recovering());
 
-    // Terminate dialog
+    // Terminate dialog (Confirmed -> Terminated)
     dialog.terminate();
     assert_eq!(dialog.state, DialogState::Terminated);
     assert!(dialog.is_terminated());
@@ -143,20 +99,28 @@ async fn test_dialog_id_tuple() {
         true,
     );
 
+    // With both tags, should return complete tuple
     let tuple = dialog.dialog_id_tuple().unwrap();
     assert_eq!(tuple.0, "tuple-test-call-id");
     assert_eq!(tuple.1, "alice-tag");
     assert_eq!(tuple.2, "bob-tag");
+
+    // Dialog without remote tag should return None
+    let incomplete_dialog = Dialog::new(
+        "incomplete-call-id".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        None, // No remote tag
+        true,
+    );
+    
+    assert!(incomplete_dialog.dialog_id_tuple().is_none());
 }
 
-/// Test dialog request creation (via dialog manager)
+/// Test dialog request template creation
 #[tokio::test]
-async fn test_dialog_request_creation() -> Result<(), DialogError> {
-    let dialog_manager = create_test_dialog_manager().await?;
-    
-    // Start dialog manager
-    dialog_manager.start().await?;
-
+async fn test_dialog_request_template_creation() -> Result<(), DialogError> {
     let mut dialog = Dialog::new(
         "request-test-call-id".to_string(),
         "sip:alice@example.com".parse().unwrap(),
@@ -166,37 +130,179 @@ async fn test_dialog_request_creation() -> Result<(), DialogError> {
         true,
     );
 
-    // Note: In the new architecture, request creation should go through DialogManager
-    // For now, we'll test the deprecation warning and move toward proper API usage
+    // Initial CSeq should be 0
+    assert_eq!(dialog.local_cseq, 0);
     
-    // Create a BYE request (this will show deprecation warning)
-    let _request = dialog.create_request(Method::Bye);
+    // Create a BYE request template
+    let bye_request = dialog.create_request_template(Method::Bye);
+    assert_eq!(dialog.local_cseq, 1); // Should increment
     
-    // Verify sequence number was incremented
-    assert_eq!(dialog.local_seq, 1);
+    // Verify request has proper headers (using fields, not methods)
+    assert_eq!(bye_request.call_id, "request-test-call-id");
+    assert_eq!(bye_request.method, Method::Bye);
     
     // Create another request
-    let _request2 = dialog.create_request(Method::Info);
-    assert_eq!(dialog.local_seq, 2);
+    let info_request = dialog.create_request_template(Method::Info);
+    assert_eq!(dialog.local_cseq, 2); // Should increment further
+    assert_eq!(info_request.method, Method::Info);
 
-    // Stop dialog manager
-    dialog_manager.stop().await?;
+    // ACK requests should not increment CSeq
+    let _ack_request = dialog.create_request_template(Method::Ack);
+    assert_eq!(dialog.local_cseq, 2); // Should remain the same for ACK
 
     Ok(())
 }
 
-/// Test dialog manager lifecycle with timeout
+/// Test dialog sequence number management
 #[tokio::test]
-async fn test_dialog_manager_lifecycle_with_timeout() -> Result<(), DialogError> {
-    let dialog_manager = create_test_dialog_manager().await?;
+async fn test_dialog_sequence_numbers() -> Result<(), DialogError> {
+    let mut dialog = Dialog::new(
+        "seq-test-call-id".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        Some("bob-tag".to_string()),
+        true,
+    );
 
-    // Test start/stop with timeout to ensure it doesn't hang
-    timeout(Duration::from_secs(5), async {
-        dialog_manager.start().await?;
-        dialog_manager.stop().await
-    })
-    .await
-    .map_err(|_| DialogError::internal_error("Dialog manager lifecycle timed out", None))??;
+    // Test local sequence number management
+    assert_eq!(dialog.local_cseq, 0);
+    
+    dialog.increment_local_cseq();
+    assert_eq!(dialog.local_cseq, 1);
+    
+    // Test remote sequence number management
+    assert_eq!(dialog.remote_cseq, 0); // Initially unset
+    
+    // Test that we can manually set remote sequence number
+    dialog.remote_cseq = 42;
+    assert_eq!(dialog.remote_cseq, 42);
 
     Ok(())
+}
+
+/// Test dialog termination scenarios
+#[tokio::test]
+async fn test_dialog_termination_scenarios() -> Result<(), DialogError> {
+    // Test termination from different states
+    let states_to_test = vec![
+        (DialogState::Initial, "initial-call-id"),
+        (DialogState::Early, "early-call-id"),
+        (DialogState::Confirmed, "confirmed-call-id"),
+    ];
+
+    for (initial_state, call_id) in states_to_test {
+        let mut dialog = Dialog::new(
+            call_id.to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            if initial_state == DialogState::Initial { Some("alice-tag".to_string()) } else { Some("alice-tag".to_string()) },
+            if initial_state == DialogState::Initial { None } else { Some("bob-tag".to_string()) },
+            true,
+        );
+
+        // Set the desired initial state
+        match initial_state {
+            DialogState::Initial => {}, // Already set
+            DialogState::Early => {
+                dialog.state = DialogState::Early;
+            },
+            DialogState::Confirmed => {
+                dialog.state = DialogState::Confirmed;
+            },
+            _ => {},
+        }
+
+        assert_eq!(dialog.state, initial_state);
+        assert!(!dialog.is_terminated());
+
+        // Terminate dialog
+        dialog.terminate();
+        assert_eq!(dialog.state, DialogState::Terminated);
+        assert!(dialog.is_terminated());
+    }
+
+    Ok(())
+}
+
+/// Test dialog lifecycle with timing simulation
+#[tokio::test]
+async fn test_dialog_lifecycle_with_timing() -> Result<(), DialogError> {
+    let mut dialog = Dialog::new(
+        "timing-test-call-id".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        None, // Start in Initial state
+        true,
+    );
+
+    info!("Dialog created in Initial state");
+    assert_eq!(dialog.state, DialogState::Initial);
+
+    // Simulate time passing during call setup
+    sleep(Duration::from_millis(50)).await;
+
+    // Transition to Early
+    dialog.set_remote_tag("bob-tag".to_string());
+    dialog.state = DialogState::Early;
+    info!("Dialog transitioned to Early state");
+    assert_eq!(dialog.state, DialogState::Early);
+
+    // Simulate ringing time
+    sleep(Duration::from_millis(50)).await;
+
+    // Confirm dialog (call answered) - manually set state
+    dialog.state = DialogState::Confirmed;
+    info!("Dialog confirmed (call answered)");
+    assert_eq!(dialog.state, DialogState::Confirmed);
+
+    // Simulate call duration
+    sleep(Duration::from_millis(50)).await;
+
+    // Terminate dialog (call ended)
+    dialog.terminate();
+    info!("Dialog terminated (call ended)");
+    assert_eq!(dialog.state, DialogState::Terminated);
+
+    Ok(())
+}
+
+/// Test dialog metadata and properties
+#[tokio::test]
+async fn test_dialog_metadata() {
+    let dialog = Dialog::new(
+        "metadata-test-call-id".to_string(),
+        "sip:alice@example.com".parse().unwrap(),
+        "sip:bob@example.com".parse().unwrap(),
+        Some("alice-tag".to_string()),
+        Some("bob-tag".to_string()),
+        true,
+    );
+
+    // Test basic properties
+    assert_eq!(dialog.call_id, "metadata-test-call-id");
+    assert_eq!(dialog.local_uri.to_string(), "sip:alice@example.com");
+    assert_eq!(dialog.remote_uri.to_string(), "sip:bob@example.com");
+    assert_eq!(dialog.local_tag.as_ref().unwrap(), "alice-tag");
+    assert_eq!(dialog.remote_tag.as_ref().unwrap(), "bob-tag");
+    assert!(dialog.is_initiator);
+    
+    // Test route set (should be empty initially)
+    assert!(dialog.route_set.is_empty());
+    
+    // Test recovery metadata (no timestamp fields)
+    assert_eq!(dialog.recovery_attempts, 0);
+    assert!(dialog.recovery_reason.is_none());
+    assert!(dialog.recovered_at.is_none());
+}
+
+/// Architecture documentation test
+#[tokio::test]
+async fn test_dialog_lifecycle_architecture_note() {
+    info!("DIALOG LIFECYCLE ARCHITECTURE:");
+    info!("  - dialog-core: Manages pure dialog state and lifecycle");
+    info!("  - transaction-core: Handles SIP message transport and routing");
+    info!("  - Separation: Dialog tests focus on state, not transport");
+    info!("  - Integration: Full SIP message flow tested at transaction-core level");
 } 
