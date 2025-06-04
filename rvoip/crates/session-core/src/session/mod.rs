@@ -54,10 +54,20 @@ pub use debug::{
 
 // **NEW**: Export coordination types
 pub use coordination::{
+    // ✅ BASIC PRIMITIVES (keeping in session-core)
     SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
+    BasicSessionGroup, BasicGroupType, BasicGroupState, BasicGroupConfig,
+    BasicSessionMembership, BasicGroupEvent,
+    
+    // ⚠️ BUSINESS LOGIC (temporary exports - will be moved to call-engine in Phase 12)
+    // Phase 12.1: Group management business logic
     SessionGroupManager, SessionGroup, GroupType, GroupState, GroupConfig,
-    SessionSequenceCoordinator, SessionSequence, SequenceType, SequenceState,
-    CrossSessionEventPropagator, SessionCoordinationEvent, PropagationRule,
+    // Phase 12.2: Policy management business logic  
+    SessionPolicyManager, ResourceSharingPolicy, CoordinationPolicy, ResourceType,
+    // Phase 12.3: Priority management business logic
     SessionPriorityManager, SessionPriority, PriorityClass, SchedulingPolicy,
-    SessionPolicyManager, ResourceSharingPolicy, CoordinationPolicy, ResourceType
+    // Phase 12.4: Event orchestration business logic
+    CrossSessionEventPropagator, SessionCoordinationEvent, PropagationRule,
+    // Phases 12.2-12.4: Sequence coordination business logic
+    SessionSequenceCoordinator, SessionSequence, SequenceType, SequenceState,
 }; 

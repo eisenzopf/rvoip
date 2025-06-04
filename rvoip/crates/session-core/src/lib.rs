@@ -30,6 +30,14 @@ pub use rvoip_dialog_core::{DialogId, DialogManager, SessionCoordinationEvent, D
 pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirection, SessionManager};
 pub use session::session::SessionMediaState;
 pub use session::session_types::{TransferId, TransferState, TransferType, TransferContext};
+
+// ✅ BASIC PRIMITIVES (Phase 12.1): Export basic session coordination primitives
+pub use session::{
+    BasicSessionGroup, BasicGroupType, BasicGroupState, BasicGroupConfig,
+    BasicSessionMembership, BasicGroupEvent,
+    SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
+};
+
 pub use events::{EventBus, SessionEvent};
 pub use errors::{
     Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction
