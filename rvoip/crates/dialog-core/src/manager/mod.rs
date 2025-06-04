@@ -2,6 +2,24 @@
 //!
 //! This module provides the main DialogManager and all its supporting functionality,
 //! organized into focused submodules for better maintainability and separation of concerns.
+//!
+//! ## Submodules
+//!
+//! - `core`: Main DialogManager implementation and lifecycle management
+//! - `dialog_operations`: Dialog storage, lookup, and CRUD operations  
+//! - `protocol_handlers`: SIP method handlers (INVITE, BYE, etc.)
+//! - `message_routing`: Routes incoming messages to appropriate dialogs
+//! - `transaction_integration`: Integration with transaction-core for reliability
+//! - `session_coordination`: Coordination with session-core for call management
+//! - `utils`: Utility functions for message processing and source extraction
+//!
+//! ## Architecture
+//!
+//! The DialogManager serves as the central coordinator between:
+//! - SIP transport layer (via transaction-core)
+//! - Dialog state management
+//! - Session coordination (via session-core)
+//! - API layer (DialogClient/DialogServer)
 
 // Core dialog manager implementation
 mod core;

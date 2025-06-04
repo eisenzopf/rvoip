@@ -1,3 +1,11 @@
+//! Dialog utility functions
+//!
+//! This module provides utility functions for dialog management including:
+//! - SIP header parsing and extraction (tags, URIs)  
+//! - URI resolution and contact handling
+//! - Network address resolution for SIP URIs
+//! - Helper functions for dialog operations
+
 use std::str::FromStr;
 use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
 use rvoip_sip_core::Uri;

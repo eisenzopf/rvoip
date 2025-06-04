@@ -1,3 +1,9 @@
+//! Dialog ID implementation
+//!
+//! This module provides the DialogId type, which uniquely identifies SIP dialogs
+//! throughout their lifecycle. Each dialog gets a unique UUID-based identifier
+//! for tracking and management purposes.
+
 use std::fmt;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};

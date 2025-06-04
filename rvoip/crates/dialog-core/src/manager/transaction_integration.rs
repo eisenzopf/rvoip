@@ -1,7 +1,16 @@
 //! Transaction Integration for Dialog Management
 //!
-//! This module handles integration with transaction-core, maintaining
-//! proper separation of concerns between dialog and transaction layers.
+//! This module handles the integration between dialog-core and transaction-core,
+//! managing transaction lifecycle events, request/response routing, and event processing.
+//! It provides the bridge between SIP transaction reliability and dialog state management.
+//!
+//! ## Key Responsibilities
+//!
+//! - Processing transaction events and routing to appropriate dialogs
+//! - Managing transaction-to-dialog associations  
+//! - Handling transaction completion and cleanup
+//! - Converting between transaction and dialog abstractions
+//! - Coordinating request sending through transaction layer
 
 use std::net::SocketAddr;
 use tracing::{debug, warn, info};

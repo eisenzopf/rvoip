@@ -1,7 +1,22 @@
 //! Message Routing for Dialog Management
 //!
-//! This module handles routing of SIP messages to appropriate dialogs
-//! and implements RFC 3261 compliant message matching rules.
+//! This module implements RFC 3261 compliant SIP message routing for dialog management.
+//! It handles the complex logic of routing incoming requests and responses to the
+//! appropriate existing dialogs or creating new dialogs as needed.
+//!
+//! ## Key Features
+//!
+//! - **Dialog Matching**: Uses Call-ID, From tag, and To tag for RFC 3261 dialog identification
+//! - **Request Routing**: Routes incoming requests to existing dialogs or creates new ones
+//! - **Response Routing**: Routes responses to the correct dialog using transaction context
+//! - **Early Dialog Handling**: Manages multiple early dialogs from forking scenarios
+//! - **Stateless Request Handling**: Processes stateless requests that don't belong to dialogs
+//!
+//! ## RFC 3261 Compliance
+//!
+//! The routing logic follows RFC 3261 Section 12.2 for dialog identification:
+//! - For UAC: local tag = From tag, remote tag = To tag
+//! - For UAS: local tag = To tag, remote tag = From tag
 
 use crate::dialog::DialogId;
 use crate::errors::DialogResult;

@@ -1,7 +1,26 @@
 //! Session Coordination for Dialog Management
 //!
-//! This module handles coordination with session-core, maintaining
-//! proper architectural layer separation between dialog and session management.
+//! This module handles coordination between dialog-core and session-core layers,
+//! maintaining proper architectural separation while enabling high-level session
+//! management operations.
+//!
+//! ## Architecture Pattern
+//!
+//! ```text
+//! session-core (High-level call/session logic)
+//!      ↓ SessionCoordinationEvent
+//! dialog-core (SIP protocol operations)  ← THIS MODULE
+//!      ↓ TransactionKey  
+//! transaction-core (SIP reliability)
+//! ```
+//!
+//! ## Key Responsibilities
+//!
+//! - **Event Emission**: Send session coordination events to session-core
+//! - **Event Translation**: Convert dialog events to session events
+//! - **Layer Boundary**: Maintain clean separation between protocol and session logic
+//! - **Backward Compatibility**: Support legacy session coordination patterns
+//! - **Event Filtering**: Send only relevant events to avoid session-core overload
 
 use tokio::sync::mpsc;
 use crate::events::SessionCoordinationEvent;
