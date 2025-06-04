@@ -98,9 +98,10 @@
 //!     client.start().await?;
 //!     
 //!     // Create an outgoing dialog and make a call
-//!     let local_uri = "sip:alice@example.com".parse()?;
-//!     let remote_uri = "sip:bob@example.com".parse()?;
-//!     let dialog_id = client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
+//!     let local_uri = "sip:alice@example.com";
+//!     let remote_uri = "sip:bob@example.com";
+//!     let dialog = client.create_dialog(local_uri, remote_uri).await?;
+//!     let dialog_id = dialog.id().clone();
 //!     
 //!     // Send in-dialog requests using Phase 3 one-liner functions
 //!     let _info_tx = client.send_info(&dialog_id, "Application data".to_string()).await?;

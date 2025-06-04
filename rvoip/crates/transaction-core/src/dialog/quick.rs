@@ -204,9 +204,20 @@ pub fn update_for_dialog(
     route_set: Option<Vec<Uri>>
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    let from_uri_string = from_uri.into();
+    
+    // Generate Contact URI for UPDATE request (RFC 3311 requirement)
+    // Extract user part from From URI if available, otherwise use "user"
+    let user_part = if let Ok(from_uri_parsed) = from_uri_string.parse::<Uri>() {
+        from_uri_parsed.user.as_ref().map(|u| u.as_str().to_string()).unwrap_or_else(|| "user".to_string())
+    } else {
+        "user".to_string()
+    };
+    let contact_uri = format!("sip:{}@{}", user_part, local_address);
+    
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
-        from_uri: from_uri.into(),
+        from_uri: from_uri_string,
         from_tag: from_tag.into(),
         to_uri: to_uri_string.clone(),
         to_tag: to_tag.into(),
@@ -214,7 +225,7 @@ pub fn update_for_dialog(
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
-        contact: None,
+        contact: Some(contact_uri), // Include Contact header for target refresh capability
     };
     
     let content_type = if sdp_content.is_some() {

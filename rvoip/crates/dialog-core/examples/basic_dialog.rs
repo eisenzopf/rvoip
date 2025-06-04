@@ -113,7 +113,8 @@ impl BasicDialogExample {
         let remote_uri: Uri = format!("sip:bob@{}", self.server_addr).parse()?;
         
         // Create the dialog
-        let dialog_id = self.client.create_outgoing_dialog(local_uri, remote_uri, None).await?;
+        let dialog = self.client.create_dialog(&local_uri.to_string(), &remote_uri.to_string()).await?;
+        let dialog_id = dialog.id().clone();
         
         // Access the dialog manager to manually establish the dialog for testing
         let dialog_manager = self.client.dialog_manager().clone();

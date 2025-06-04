@@ -125,6 +125,21 @@ pub fn request_builder_from_dialog_template(
                 builder = builder.with_sdp(sdp_content);
             }
             
+            // Add Contact header if specified in template
+            if let Some(contact_uri) = &template.contact {
+                use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
+                use rvoip_sip_core::types::address::Address;
+                use rvoip_sip_core::types::uri::Uri;
+                
+                // Parse the contact URI and create a Contact header
+                if let Ok(contact_uri_parsed) = contact_uri.parse::<Uri>() {
+                    let contact_addr = Address::new(contact_uri_parsed);
+                    let contact_param = ContactParamInfo { address: contact_addr };
+                    let contact_header = Contact::new_params(vec![contact_param]);
+                    builder = builder.header(TypedHeader::Contact(contact_header));
+                }
+            }
+            
             builder.build()
         },
         
@@ -156,6 +171,21 @@ pub fn request_builder_from_dialog_template(
                     template.local_address,
                     template.route_set.clone()
                 );
+            
+            // Add Contact header if specified in template
+            if let Some(contact_uri) = &template.contact {
+                use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
+                use rvoip_sip_core::types::address::Address;
+                use rvoip_sip_core::types::uri::Uri;
+                
+                // Parse the contact URI and create a Contact header
+                if let Ok(contact_uri_parsed) = contact_uri.parse::<Uri>() {
+                    let contact_addr = Address::new(contact_uri_parsed);
+                    let contact_param = ContactParamInfo { address: contact_addr };
+                    let contact_header = Contact::new_params(vec![contact_param]);
+                    builder = builder.header(TypedHeader::Contact(contact_header));
+                }
+            }
             
             if let Some(request_body) = body {
                 builder = builder.with_body(request_body);

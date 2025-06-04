@@ -48,6 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create server transport
     let server_config = TransportManagerConfig {
         enable_udp: true,
+        enable_tcp: false,
+        enable_ws: false,
+        enable_tls: false,
         bind_addresses: vec!["127.0.0.1:5060".parse()?],
         ..Default::default()
     };
@@ -62,6 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create client transport
     let client_config = TransportManagerConfig {
         enable_udp: true,
+        enable_tcp: false,
+        enable_ws: false,
+        enable_tls: false,
         bind_addresses: vec!["127.0.0.1:0".parse()?],
         ..Default::default()
     };

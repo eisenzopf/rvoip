@@ -263,7 +263,8 @@ async fn test_dialog_client_operations_real_transport() -> Result<(), Box<dyn st
     let local_uri: Uri = format!("sip:alice@{}", env.client_addr).parse()?;
     let remote_uri: Uri = format!("sip:bob@{}", env.server_addr).parse()?;
     
-    let dialog_id = env.client.create_outgoing_dialog(local_uri.clone(), remote_uri.clone(), None).await?;
+    let dialog = env.client.create_dialog(&local_uri.to_string(), &remote_uri.to_string()).await?;
+    let dialog_id = dialog.id().clone();
     println!("✅ Created client dialog: {}", dialog_id);
     
     // Test dialog operations

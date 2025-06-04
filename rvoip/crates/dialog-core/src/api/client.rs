@@ -761,7 +761,7 @@ impl DialogClient {
     /// ## Advanced Event Processing
     ///
     /// ```rust,no_run
-    /// use rvoip_dialog_core::api::{DialogClient, ClientConfig};
+    /// use rvoip_dialog_core::api::{DialogClient, ClientConfig, DialogApi};
     /// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
     /// use tokio::sync::mpsc;
     /// use std::sync::Arc;
@@ -893,7 +893,7 @@ impl DialogClient {
     /// ### Integration with Existing Infrastructure
     ///
     /// ```rust,no_run
-    /// use rvoip_dialog_core::api::{DialogClient, ClientConfig};
+    /// use rvoip_dialog_core::api::{DialogClient, ClientConfig, DialogApi};
     /// use rvoip_transaction_core::TransactionManager;
     /// use std::sync::Arc;
     ///
@@ -1057,7 +1057,6 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::DialogClient;
-    /// use futures::future::try_join_all;
     ///
     /// # async fn batch_calls(client: DialogClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let call_targets = vec![
@@ -1066,12 +1065,12 @@ impl DialogClient {
     ///     ("sip:alice@company.com", "sip:customer3@external.com"),
     /// ];
     ///
-    /// // Make multiple calls concurrently
-    /// let call_futures = call_targets.into_iter().map(|(from, to)| {
-    ///     client.make_call(from, to, None)
-    /// });
-    ///
-    /// let calls = try_join_all(call_futures).await?;
+    /// // Make multiple calls sequentially for simplicity
+    /// let mut calls = Vec::new();
+    /// for (from, to) in call_targets {
+    ///     let call = client.make_call(from, to, None).await?;
+    ///     calls.push(call);
+    /// }
     /// println!("Successfully initiated {} calls", calls.len());
     ///
     /// // Monitor all calls
@@ -1246,7 +1245,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::DialogClient;
-    /// use futures::future::try_join_all;
+    /// use std::future::Future;
     ///
     /// # async fn batch_dialogs(client: DialogClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let targets = vec![
@@ -1255,12 +1254,12 @@ impl DialogClient {
     ///     "sip:customer3@external.com",
     /// ];
     ///
-    /// // Create multiple dialogs concurrently
-    /// let dialog_futures = targets.into_iter().map(|target| {
-    ///     client.create_dialog("sip:service@company.com", target)
-    /// });
-    ///
-    /// let dialogs = try_join_all(dialog_futures).await?;
+    /// // Create multiple dialogs concurrently using join_all from std
+    /// let mut dialogs = Vec::new();
+    /// for target in targets {
+    ///     let dialog = client.create_dialog("sip:service@company.com", target).await?;
+    ///     dialogs.push(dialog);
+    /// }
     /// println!("Created {} dialogs", dialogs.len());
     ///
     /// // Now you can coordinate operations across all dialogs

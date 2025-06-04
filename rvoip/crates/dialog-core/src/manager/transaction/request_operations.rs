@@ -6,7 +6,7 @@
 use tracing::debug;
 
 use rvoip_sip_core::{Request, Response, Method};
-use rvoip_transaction_core::{TransactionKey, client::builders::InviteBuilder};
+use rvoip_transaction_core::TransactionKey;
 use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
 use rvoip_transaction_core::utils::DialogRequestTemplate;
 use crate::errors::DialogResult;
@@ -182,39 +182,61 @@ impl DialogManager {
     ) -> DialogResult<Request> {
         let request = match method {
             Method::Invite => {
-                // Use enhanced InviteBuilder with dialog context
-                let mut builder = if template.route_set.is_empty() {
-                    InviteBuilder::from_dialog(
-                        template.call_id.clone(), 
-                        template.local_uri.to_string(), 
-                        local_tag, 
-                        template.remote_uri.to_string(), 
-                        remote_tag.unwrap_or_else(|| "".to_string()), // INVITE can have empty remote tag initially
-                        template.cseq_number, 
-                        self.local_address
-                    )
-                } else {
-                    InviteBuilder::from_dialog_enhanced(
-                        template.call_id.clone(), 
-                        template.local_uri.to_string(), 
-                        local_tag, 
-                        None, 
-                        template.remote_uri.to_string(), 
-                        remote_tag.unwrap_or_else(|| "".to_string()), 
-                        None,
-                        template.target_uri.to_string(), 
-                        template.cseq_number, 
-                        self.local_address, 
-                        template.route_set.clone(), 
-                        None
-                    )
-                };
-                
-                if let Some(sdp) = body_string {
-                    builder = builder.with_sdp(sdp);
+                // Distinguish between initial INVITE and re-INVITE based on remote tag
+                match remote_tag {
+                    Some(remote_tag) => {
+                        // re-INVITE: We have a remote tag, so this is for an established dialog
+                        // re-INVITE requires SDP content for session modification
+                        let sdp_content = body_string.ok_or_else(|| {
+                            crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
+                        })?;
+                        
+                        dialog_quick::reinvite_for_dialog(
+                            &template.call_id,
+                            &template.local_uri.to_string(),
+                            &local_tag,
+                            &template.remote_uri.to_string(),
+                            &remote_tag,
+                            &sdp_content,
+                            template.cseq_number,
+                            self.local_address,
+                            if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                            None // Let reinvite_for_dialog generate appropriate Contact
+                        )
+                    },
+                    None => {
+                        // Initial INVITE: No remote tag yet, creating new dialog
+                        use rvoip_transaction_core::client::builders::InviteBuilder;
+                        
+                        let mut invite_builder = InviteBuilder::new()
+                            .from_detailed(
+                                Some("User"), // Display name
+                                template.local_uri.to_string(),
+                                Some(&local_tag)
+                            )
+                            .to_detailed(
+                                Some("User"), // Display name  
+                                template.remote_uri.to_string(),
+                                None // No remote tag for initial INVITE
+                            )
+                            .call_id(&template.call_id)
+                            .cseq(template.cseq_number)
+                            .request_uri(template.target_uri.to_string())
+                            .local_address(self.local_address);
+                        
+                        // Add route set if present
+                        for route in &template.route_set {
+                            invite_builder = invite_builder.add_route(route.clone());
+                        }
+                        
+                        // Add SDP content if provided
+                        if let Some(sdp_content) = body_string {
+                            invite_builder = invite_builder.with_sdp(sdp_content);
+                        }
+                        
+                        invite_builder.build()
+                    }
                 }
-                
-                builder.build()
             },
             
             Method::Bye => {
