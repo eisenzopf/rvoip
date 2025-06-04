@@ -38,6 +38,18 @@ pub use session::{
     SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
 };
 
+// ✅ BASIC PRIMITIVES (Phase 12.2): Export basic resource tracking primitives
+pub use session::{
+    BasicResourceType, BasicResourceAllocation, BasicResourceUsage, BasicResourceLimits,
+    BasicResourceRequest, BasicResourceStats,
+};
+
+// ✅ BASIC PRIMITIVES (Phase 12.3): Export basic priority classification primitives
+pub use session::{
+    BasicSessionPriority, BasicPriorityClass, BasicQoSLevel, BasicPriorityInfo,
+    BasicPriorityConfig,
+};
+
 pub use events::{EventBus, SessionEvent};
 pub use errors::{
     Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction

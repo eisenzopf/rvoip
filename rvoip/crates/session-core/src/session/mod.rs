@@ -58,13 +58,17 @@ pub use coordination::{
     SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
     BasicSessionGroup, BasicGroupType, BasicGroupState, BasicGroupConfig,
     BasicSessionMembership, BasicGroupEvent,
+    BasicResourceType, BasicResourceAllocation, BasicResourceUsage, BasicResourceLimits,
+    BasicResourceRequest, BasicResourceStats,
+    BasicSessionPriority, BasicPriorityClass, BasicQoSLevel, BasicPriorityInfo,
+    BasicPriorityConfig,
     
     // ⚠️ BUSINESS LOGIC (temporary exports - will be moved to call-engine in Phase 12)
-    // Phase 12.1: Group management business logic
+    // Phase 12.1: Group management business logic ✅ COMPLETE 
     SessionGroupManager, SessionGroup, GroupType, GroupState, GroupConfig,
-    // Phase 12.2: Policy management business logic  
+    // Phase 12.2: Policy management business logic ✅ COMPLETE
     SessionPolicyManager, ResourceSharingPolicy, CoordinationPolicy, ResourceType,
-    // Phase 12.3: Priority management business logic
+    // Phase 12.3: Priority management business logic ⏳ IN PROGRESS
     SessionPriorityManager, SessionPriority, PriorityClass, SchedulingPolicy,
     // Phase 12.4: Event orchestration business logic
     CrossSessionEventPropagator, SessionCoordinationEvent, PropagationRule,
