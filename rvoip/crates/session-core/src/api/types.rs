@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 use std::time::Instant;
+use serde::{Serialize, Deserialize};
 use crate::errors::Result;
 
 /// Unique identifier for a session
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
@@ -116,7 +117,7 @@ impl IncomingCall {
 }
 
 /// Current state of a call session
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallState {
     /// Call is being initiated
     Initiating,

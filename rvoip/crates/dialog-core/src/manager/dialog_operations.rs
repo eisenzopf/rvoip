@@ -339,28 +339,49 @@ impl DialogLookup for DialogManager {
     /// 
     /// Implements RFC 3261 Section 12.2 dialog identification rules.
     /// Uses Call-ID, From tag, and To tag for proper dialog matching.
+    /// 
+    /// **FIXED**: Added fallback lookup for early dialogs that don't have both tags yet.
     async fn find_dialog_for_request(&self, request: &Request) -> Option<DialogId> {
         // Extract dialog identification info
         let (call_id, from_tag, to_tag) = DialogUtils::extract_dialog_info(request)?;
         let from_tag = from_tag?;
-        let to_tag = to_tag?;
         
-        debug!("Looking for dialog: Call-ID={}, From-tag={}, To-tag={}", 
-               call_id, from_tag, to_tag);
-        
-        // Try both scenarios: UAC and UAS perspective
-        let (key1, key2) = DialogUtils::create_bidirectional_keys(&call_id, &from_tag, &to_tag);
-        
-        // Scenario 1: Local is From, Remote is To (UAC perspective)
-        if let Some(dialog_id) = self.dialog_lookup.get(&key1) {
-            debug!("Found dialog {} using UAC perspective", dialog_id.value());
-            return Some(dialog_id.clone());
+        // First try: Standard lookup with both tags (for confirmed dialogs)
+        if let Some(to_tag) = &to_tag {
+            debug!("Looking for confirmed dialog: Call-ID={}, From-tag={}, To-tag={}", 
+                   call_id, from_tag, to_tag);
+            
+            // Try both scenarios: UAC and UAS perspective
+            let (key1, key2) = DialogUtils::create_bidirectional_keys(&call_id, &from_tag, &to_tag);
+            
+            // Scenario 1: Local is From, Remote is To (UAC perspective)
+            if let Some(dialog_id) = self.dialog_lookup.get(&key1) {
+                debug!("Found confirmed dialog {} using UAC perspective", dialog_id.value());
+                return Some(dialog_id.clone());
+            }
+            
+            // Scenario 2: Local is To, Remote is From (UAS perspective)
+            if let Some(dialog_id) = self.dialog_lookup.get(&key2) {
+                debug!("Found confirmed dialog {} using UAS perspective", dialog_id.value());
+                return Some(dialog_id.clone());
+            }
         }
         
-        // Scenario 2: Local is To, Remote is From (UAS perspective)
-        if let Some(dialog_id) = self.dialog_lookup.get(&key2) {
-            debug!("Found dialog {} using UAS perspective", dialog_id.value());
-            return Some(dialog_id.clone());
+        // Second try: Fallback lookup for early dialogs (only have call-id and from-tag)
+        // This is needed for initial INVITEs where we created an early dialog but don't have to-tag yet
+        debug!("Searching for early dialog: Call-ID={}, From-tag={}, To-tag=None", call_id, from_tag);
+        
+        // Search through all dialogs for matching call-id and remote-tag (early dialogs)
+        for dialog_entry in self.dialogs.iter() {
+            let dialog = dialog_entry.value();
+            
+            // Check if this is an early dialog matching our request
+            if dialog.call_id == call_id && 
+               dialog.state == crate::dialog::DialogState::Early &&
+               dialog.remote_tag.as_ref() == Some(&from_tag) {
+                debug!("Found early dialog {} for initial INVITE", dialog.id);
+                return Some(dialog.id.clone());
+            }
         }
         
         debug!("No matching dialog found for request");

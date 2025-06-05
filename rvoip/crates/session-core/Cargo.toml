@@ -47,24 +47,3 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
-
-# New comprehensive examples demonstrating clean architectural separation
-[[example]]
-name = "01_basic_infrastructure"
-path = "examples2/01_basic_infrastructure.rs"
-
-[[example]]
-name = "02_session_lifecycle"
-path = "examples2/02_session_lifecycle.rs"
-
-[[example]]
-name = "03_event_handling"
-path = "examples2/03_event_handling.rs"
-
-[[example]]
-name = "03_handler_examples"
-path = "examples2/03_handler_examples.rs"
-
-[[example]]
-name = "04_media_coordination"
-path = "examples2/04_media_coordination.rs"

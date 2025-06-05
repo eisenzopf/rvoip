@@ -18,11 +18,15 @@ pub use errors::{SessionError, Result};
 // Re-export the main API for convenience
 pub use api::*;
 
+// Re-export SessionManager for direct access
+pub use manager::SessionManager;
+
 // Prelude module for common imports
 pub mod prelude {
     pub use crate::api::*;
     pub use crate::errors::{SessionError, Result};
     pub use crate::events::{SessionEvent, EventBus};
+    pub use crate::manager::SessionManager;
 }
 
 #[cfg(test)]

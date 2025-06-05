@@ -536,9 +536,93 @@ impl CallHandle {
     pub async fn answer(&self, sdp_answer: Option<String>) -> ApiResult<()> {
         info!("Answering call {}", self.call_id());
         
-        // TODO: This should send a 200 OK response when response API is available
-        debug!("Call {} would be answered with SDP: {:?}", self.call_id(), sdp_answer.is_some());
+        // Find the transaction associated with this dialog
+        // We need to look through the transaction-to-dialog mappings to find the INVITE transaction
+        let transaction_id = {
+            let dialog_manager = &self.dialog_handle.dialog_manager;
+            let mut found_tx_id = None;
+            
+            // Search through transaction mappings to find the INVITE transaction for this dialog
+            for entry in dialog_manager.transaction_to_dialog.iter() {
+                if entry.value() == self.call_id() {
+                    // Check if this is an INVITE transaction (server-side)
+                    let tx_key = entry.key();
+                    if tx_key.to_string().contains("INVITE") && tx_key.to_string().contains("server") {
+                        found_tx_id = Some(tx_key.clone());
+                        break;
+                    }
+                }
+            }
+            
+            found_tx_id.ok_or_else(|| ApiError::Internal {
+                message: "No INVITE transaction found for this call".to_string()
+            })?
+        };
         
+        // Get the original INVITE request to build a proper response
+        let original_request = self.dialog_handle.dialog_manager
+            .transaction_manager()
+            .original_request(&transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to get original INVITE request: {}", e)
+            })?
+            .ok_or_else(|| ApiError::Internal {
+                message: "Original INVITE request not found".to_string()
+            })?;
+        
+        // Build 200 OK response with SDP
+        let response = {
+            use rvoip_sip_core::StatusCode;
+            use rvoip_transaction_core::utils::response_builders;
+            
+            let mut response = response_builders::create_response(&original_request, StatusCode::Ok);
+            
+            // Add SDP body if provided
+            if let Some(sdp) = &sdp_answer {
+                response = response.with_body(sdp.as_bytes().to_vec());
+                // TODO: Add Content-Type: application/sdp header
+            }
+            
+            response
+        };
+        
+        // Send the 200 OK response
+        self.dialog_handle.dialog_manager.send_response(&transaction_id, response).await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to send 200 OK response: {}", e)
+            })?;
+        
+        // Update dialog state to Confirmed and set local tag
+        {
+            let mut dialog = self.dialog_handle.dialog_manager.get_dialog_mut(self.call_id())
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to get dialog for state update: {}", e)
+                })?;
+            
+            // Generate local tag if not already set
+            if dialog.local_tag.is_none() {
+                let local_tag = dialog.generate_local_tag();
+                dialog.local_tag = Some(local_tag);
+            }
+            
+            // Transition from Early to Confirmed
+            if dialog.state == crate::dialog::DialogState::Early {
+                dialog.state = crate::dialog::DialogState::Confirmed;
+                info!("Dialog {} transitioned to Confirmed state", self.call_id());
+            }
+        }
+        
+        // Emit session coordination event
+        if let Some(sdp) = sdp_answer {
+            let event = crate::events::SessionCoordinationEvent::CallAnswered {
+                dialog_id: self.call_id().clone(),
+                session_answer: sdp,
+            };
+            self.dialog_handle.dialog_manager.emit_session_coordination_event(event).await;
+        }
+        
+        info!("Successfully answered call {}", self.call_id());
         Ok(())
     }
     

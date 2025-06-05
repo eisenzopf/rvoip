@@ -1,138 +1,171 @@
-//! Event Processor
+//! Session Event System
 //!
-//! Handles processing of session-related events.
+//! Integrates with infra-common zero-copy event system for high-performance session event handling.
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use crate::api::types::{SessionId, CallSession};
+use std::any::Any;
+use tokio::sync::RwLock;
+use serde::{Serialize, Deserialize};
+use infra_common::events::{
+    types::{Event, EventPriority, EventResult},
+    system::EventSystem,
+    builder::{EventSystemBuilder, ImplementationType},
+    api::{EventSystem as EventSystemTrait, EventSubscriber},
+};
+use crate::api::types::{SessionId, CallSession, CallState};
 use crate::errors::Result;
 
-/// Event processor for session events
-#[derive(Debug)]
-pub struct EventProcessor {
-    event_sender: Arc<RwLock<Option<mpsc::UnboundedSender<SessionEvent>>>>,
-    is_running: Arc<RwLock<bool>>,
-}
-
-/// Session events that can be processed
-#[derive(Debug, Clone)]
+/// Session events that can be published through the event system
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// Session was created
-    SessionCreated { session_id: SessionId, session: CallSession },
+    SessionCreated { 
+        session_id: SessionId, 
+        from: String,
+        to: String,
+        call_state: CallState,
+    },
     
     /// Session state changed
-    StateChanged { session_id: SessionId, old_state: String, new_state: String },
+    StateChanged { 
+        session_id: SessionId, 
+        old_state: CallState, 
+        new_state: CallState,
+    },
     
     /// Session was terminated
-    SessionTerminated { session_id: SessionId, reason: String },
+    SessionTerminated { 
+        session_id: SessionId, 
+        reason: String,
+    },
     
     /// Media event
-    MediaEvent { session_id: SessionId, event: String },
+    MediaEvent { 
+        session_id: SessionId, 
+        event: String,
+    },
     
     /// Error event
-    Error { session_id: Option<SessionId>, error: String },
+    Error { 
+        session_id: Option<SessionId>, 
+        error: String,
+    },
 }
 
-impl EventProcessor {
-    /// Create a new event processor
+impl Event for SessionEvent {
+    fn event_type() -> &'static str {
+        "session_event"
+    }
+    
+    fn priority() -> EventPriority {
+        // Default priority for all session events, individual events can override if needed
+        EventPriority::Normal
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Event processor for session events using infra-common zero-copy event system
+pub struct SessionEventProcessor {
+    event_system: EventSystem,
+    publisher: Arc<RwLock<Option<Box<dyn infra_common::events::api::EventPublisher<SessionEvent> + Send + Sync>>>>,
+}
+
+impl std::fmt::Debug for SessionEventProcessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionEventProcessor")
+            .field("has_publisher", &self.publisher.try_read().map(|p| p.is_some()).unwrap_or(false))
+            .finish()
+    }
+}
+
+impl SessionEventProcessor {
+    /// Create a new session event processor
     pub fn new() -> Self {
+        let event_system = EventSystemBuilder::new()
+            .implementation(ImplementationType::ZeroCopy)
+            .channel_capacity(10_000)
+            .max_concurrent_dispatches(1_000)
+            .enable_priority(true)
+            .shard_count(8)
+            .enable_metrics(false)
+            .build();
+
         Self {
-            event_sender: Arc::new(RwLock::new(None)),
-            is_running: Arc::new(RwLock::new(false)),
+            event_system,
+            publisher: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Start the event processor
     pub async fn start(&self) -> Result<()> {
-        let mut is_running = self.is_running.write().await;
-        if *is_running {
-            return Ok(()); // Already running
-        }
+        self.event_system.start()
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start event system: {}", e)))?;
+        
+        // Create publisher
+        let publisher = self.event_system.create_publisher::<SessionEvent>();
+        *self.publisher.write().await = Some(publisher);
 
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        *self.event_sender.write().await = Some(sender);
-        *is_running = true;
-
-        // Spawn event processing task
-        tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                if let Err(e) = Self::process_event(event).await {
-                    tracing::error!("Error processing event: {}", e);
-                }
-            }
-        });
-
-        tracing::info!("Event processor started");
+        tracing::info!("Session event processor started");
         Ok(())
     }
 
     /// Stop the event processor
     pub async fn stop(&self) -> Result<()> {
-        let mut is_running = self.is_running.write().await;
-        if !*is_running {
-            return Ok(()); // Already stopped
-        }
+        *self.publisher.write().await = None;
+        
+        self.event_system.shutdown()
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop event system: {}", e)))?;
 
-        *self.event_sender.write().await = None;
-        *is_running = false;
-
-        tracing::info!("Event processor stopped");
+        tracing::info!("Session event processor stopped");
         Ok(())
     }
 
-    /// Send an event for processing
-    pub async fn send_event(&self, event: SessionEvent) -> Result<()> {
-        let sender = self.event_sender.read().await;
-        if let Some(sender) = sender.as_ref() {
-            sender.send(event).map_err(|e| crate::errors::SessionError::Other(format!("Failed to send event: {}", e)))?;
+    /// Publish a session event
+    pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
+        let publisher = self.publisher.read().await;
+        if let Some(publisher) = publisher.as_ref() {
+            publisher.publish(event)
+                .await
+                .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to publish event: {}", e)))?;
         } else {
             tracing::warn!("Event processor not running, dropping event");
         }
         Ok(())
     }
 
-    /// Process a single event
-    async fn process_event(event: SessionEvent) -> Result<()> {
-        match event {
-            SessionEvent::SessionCreated { session_id, .. } => {
-                tracing::debug!("Processing session created: {}", session_id);
-                // TODO: Notify handlers, update metrics, etc.
-            }
-            
-            SessionEvent::StateChanged { session_id, old_state, new_state } => {
-                tracing::debug!("Session {} state changed: {} -> {}", session_id, old_state, new_state);
-                // TODO: Update session state, notify handlers
-            }
-            
-            SessionEvent::SessionTerminated { session_id, reason } => {
-                tracing::debug!("Session {} terminated: {}", session_id, reason);
-                // TODO: Cleanup resources, notify handlers
-            }
-            
-            SessionEvent::MediaEvent { session_id, event } => {
-                tracing::debug!("Media event for session {}: {}", session_id, event);
-                // TODO: Handle media events
-            }
-            
-            SessionEvent::Error { session_id, error } => {
-                if let Some(session_id) = session_id {
-                    tracing::error!("Error for session {}: {}", session_id, error);
-                } else {
-                    tracing::error!("General error: {}", error);
-                }
-                // TODO: Handle errors, possibly terminate sessions
-            }
-        }
-        Ok(())
+    /// Subscribe to session events (for testing and monitoring)
+    pub async fn subscribe(&self) -> Result<Box<dyn EventSubscriber<SessionEvent> + Send>> {
+        let subscriber = self.event_system.subscribe::<SessionEvent>()
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to subscribe to events: {}", e)))?;
+        
+        Ok(subscriber)
+    }
+
+    /// Subscribe to session events with a filter
+    pub async fn subscribe_filtered<F>(&self, filter: F) -> Result<Box<dyn EventSubscriber<SessionEvent> + Send>>
+    where
+        F: Fn(&SessionEvent) -> bool + Send + Sync + 'static,
+    {
+        let subscriber = self.event_system.subscribe_filtered::<SessionEvent, F>(filter)
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to subscribe to filtered events: {}", e)))?;
+        
+        Ok(subscriber)
     }
 
     /// Check if the event processor is running
     pub async fn is_running(&self) -> bool {
-        *self.is_running.read().await
+        self.publisher.read().await.is_some()
     }
 }
 
-impl Default for EventProcessor {
+impl Default for SessionEventProcessor {
     fn default() -> Self {
         Self::new()
     }

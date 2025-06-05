@@ -103,4 +103,8 @@ impl SessionError {
     pub fn timeout(msg: &str) -> Self {
         SessionError::Timeout(msg.to_string())
     }
+
+    pub fn internal(msg: &str) -> Self {
+        SessionError::Other(msg.to_string())
+    }
 } 
