@@ -31,6 +31,12 @@ pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirect
 pub use session::session::SessionMediaState;
 pub use session::session_types::{TransferId, TransferState, TransferType, TransferContext};
 
+// ✅ BRIDGE TYPES: Re-export bridge types for API use
+pub use session::bridge::{
+    SessionBridge, BridgeId, BridgeState, BridgeInfo, BridgeConfig,
+    BridgeEvent, BridgeEventType, BridgeStats, BridgeError
+};
+
 // ✅ BASIC PRIMITIVES (Phase 12.1): Export basic session coordination primitives
 pub use session::{
     BasicSessionGroup, BasicGroupType, BasicGroupState, BasicGroupConfig,
@@ -50,6 +56,12 @@ pub use session::{
     BasicPriorityConfig,
 };
 
+// ✅ BASIC PRIMITIVES (Phase 12.4): Export basic event communication primitives
+pub use session::{
+    BasicSessionEvent, BasicEventBus, BasicEventBusConfig, BasicEventFilter,
+    FilteredEventSubscriber,
+};
+
 pub use events::{EventBus, SessionEvent};
 pub use errors::{
     Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction
@@ -67,11 +79,27 @@ pub use media::{
     SampleRate, MediaSessionParams, MediaSessionHandle, MediaEngine, MediaEngineConfig
 };
 
-// Re-export API modules for convenience
+// Re-export API types - NEW CLEAN API
 pub use api::{
-    client, server,
-    ApiCapabilities, ApiConfig, get_api_capabilities, is_feature_supported,
+    // ✅ NEW CLEAN API: SessionManager creation
+    SessionManagerConfig, SessionMode,
+    
+    // Session core capabilities
+    SessionCoreCapabilities, get_session_core_capabilities, is_session_feature_supported,
+    SessionApiConfig,
+    
+    // Constants
     API_VERSION, SUPPORTED_SIP_VERSIONS, DEFAULT_USER_AGENT,
+    
+    // Legacy APIs (deprecated)
+    SessionInfrastructure, SessionInfrastructureConfig,
+    create_session_manager_for_sip_server, create_session_manager_for_sip_endpoint,
+};
+
+// ✅ SIMPLE DEVELOPER API: Ultra-simple APIs for developers
+pub use api::simple::{
+    CallHandler, CallAction, CallSession, IncomingCall,
+    handlers::{AutoAnswerHandler, SelectiveAnswerHandler},
 };
 
 /// Re-export types from dependent crates that are used in our public API
@@ -96,10 +124,14 @@ pub mod prelude {
         // Transfer types
         TransferId, TransferState, TransferType, TransferContext,
         // API modules
-        api, client, server,
+        api,
         // API types
-        ApiCapabilities, ApiConfig, get_api_capabilities, is_feature_supported,
+        SessionCoreCapabilities, get_session_core_capabilities, is_session_feature_supported,
         // Dialog types from dialog-core (already imported above, no need to duplicate)
         DialogId, DialogManager, SessionCoordinationEvent, Dialog, DialogState,
     };
 }
+
+// Re-export event handling types that users need
+pub use events::EventHandler;
+pub use session::manager::core::{IncomingCallNotification, IncomingCallEvent, CallDecision};

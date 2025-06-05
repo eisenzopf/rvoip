@@ -1,6 +1,6 @@
 // Session Manager module - refactored into focused components
 
-mod core;
+pub mod core;
 mod lifecycle;
 mod media;
 mod transfer;

@@ -10,7 +10,7 @@
 //! - Session dependencies and parent-child relationships
 //! - Basic session grouping data structures  
 //! - Simple session sequence coordination
-//! - Basic cross-session event communication
+//! - Basic cross-session event communication (simple pub/sub)
 //! - Basic resource tracking and limits
 //! - Basic priority classification and QoS levels
 //! 
@@ -20,17 +20,26 @@
 //! - Sophisticated priority scheduling and QoS management
 //! - Complex event routing and business coordination
 
-// Core coordination primitives
+// ✅ BASIC PRIMITIVES (keeping in session-core)
 pub mod dependencies;
 pub mod basic_groups;
 pub mod resource_limits;
 pub mod basic_priority;
-// Note: groups.rs contains business logic - will be moved to call-engine in Phase 12.1 ✅ COMPLETE
-// Note: policies.rs contains business logic - will be moved to call-engine in Phase 12.2 ✅ COMPLETE
-// Note: priority.rs contains business logic - will be moved to call-engine in Phase 12.3
-// Note: sequences.rs, events.rs contain business logic - will be refactored in subsequent phases
+pub mod basic_events;
 
-// Re-export basic coordination primitives
+// ❌ BUSINESS LOGIC MODULES (keeping for backward compatibility during transition)
+// These modules contain sophisticated business logic that belongs in call-engine:
+// - groups.rs: Conference management, leader election, group policies (934 lines) → call-engine/src/conference/
+// - policies.rs: Resource allocation, policy enforcement, business rules (927 lines) → call-engine/src/policy/
+// - priority.rs: QoS scheduling, resource allocation, task management (722 lines) → call-engine/src/priority/
+// - events.rs: Event orchestration, propagation rules, complex filtering (542 lines) → call-engine/src/orchestrator/
+// - sequences.rs: Complex sequence coordination and business orchestration → call-engine/src/sequences/
+
+// NOTE: Business logic modules are temporarily kept for backward compatibility
+// but are NOT re-exported. Applications should migrate to call-engine for business logic.
+
+
+// Re-export ONLY basic coordination primitives
 pub use dependencies::{
     SessionDependencyTracker, SessionDependency, DependencyType, DependencyState,
     DependencyConfig, DependencyMetrics
@@ -51,41 +60,7 @@ pub use basic_priority::{
     BasicPriorityConfig
 };
 
-// TODO: These will be refactored in subsequent phases to extract basic primitives:
-// - sequences.rs → basic sequence primitives only
-// - events.rs → basic event bus only  
-
-// Temporary exports during transition (Phase 12.3 focuses on priority)
-pub mod sequences;
-pub mod events;
-pub mod priority; // Contains business logic - to be removed after call-engine integration
-pub mod policies; // Contains business logic - to be removed after call-engine integration ✅ Ready for Phase 2.5.2
-pub mod groups; // Contains business logic - to be removed after call-engine integration ✅ Ready for Phase 2.5.1
-
-pub use sequences::{
-    SessionSequenceCoordinator, SessionSequence, SequenceType, SequenceState,
-    SequenceStep, SequenceStatistics, SequenceConfig, CoordinatorConfig, SequenceMetrics
-};
-
-pub use events::{
-    CrossSessionEventPropagator, SessionCoordinationEvent, PropagationRule, EventFilter,
-    PropagationConfig, PropagationMetrics
-};
-
-pub use priority::{
-    SessionPriorityManager, SessionPriority, PriorityClass, SchedulingPolicy, SessionPriorityInfo,
-    ResourceLimits, ResourceAllocation, QoSLevel, ScheduledTask, PriorityManagerConfig,
-    PriorityMetrics, ResourceUsage
-};
-
-pub use policies::{
-    SessionPolicyManager, ResourceSharingPolicy, CoordinationPolicy, ResourceType,
-    EnforcementLevel, PolicyScope, PolicyConfig, ResourceRequest, PolicyViolation,
-    ViolationSeverity, PolicyMetrics, PolicyManagerConfig
-};
-
-// Business logic exports (to be removed as they move to call-engine)
-pub use groups::{
-    SessionGroupManager, SessionGroup, GroupType, GroupState, GroupConfig,
-    SessionMembership, GroupEvent, GroupStatistics, GroupManagerConfig, GroupManagerMetrics
+pub use basic_events::{
+    BasicSessionEvent, BasicEventBus, BasicEventBusConfig, BasicEventFilter,
+    FilteredEventSubscriber
 }; 

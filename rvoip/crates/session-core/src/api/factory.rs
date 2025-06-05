@@ -1,362 +1,347 @@
-//! API Factory Functions
+//! Session Manager Factory
 //!
-//! This module provides high-level factory functions for creating SIP servers
-//! and clients with dependency injection for proper architectural separation.
+//! This module provides the core SessionManager creation API.
+//! Clean, simple, and intuitive - just one function with clear parameters.
 
 use std::sync::Arc;
 use anyhow::{Result, Context};
-use tokio::sync::mpsc;
 use tracing::{info, debug};
 
-use crate::api::server::config::ServerConfig;
-use crate::api::client::config::ClientConfig;
-use crate::api::server::manager::ServerManager;
 use crate::session::manager::SessionManager;
-use rvoip_dialog_core::UnifiedDialogApi;
+use crate::session::SessionConfig;
+use crate::events::EventBus;
 use crate::media::MediaManager;
 
-/// High-level SIP server manager
-pub struct SipServer {
-    session_manager: Arc<SessionManager>,
-    server_manager: Arc<ServerManager>,
-    session_events: mpsc::Receiver<crate::events::SessionEvent>,
-    config: ServerConfig,
+/// Session mode for transport configuration
+#[derive(Debug, Clone)]
+pub enum SessionMode {
+    /// Server mode - listens for incoming SIP connections
+    Server {
+        /// SIP domain for the server
+        domain: Option<String>,
+        /// Enable automatic OPTIONS responses
+        auto_options: bool,
+    },
+    /// Endpoint mode - makes outgoing SIP connections
+    Endpoint {
+        /// Remote server address for registration/proxy
+        remote_server: Option<std::net::SocketAddr>,
+        /// Authentication credentials
+        auth_username: Option<String>,
+        auth_password: Option<String>,
+    },
 }
 
-/// High-level SIP client manager  
-pub struct SipClient {
-    session_manager: Arc<SessionManager>,
-    config: ClientConfig,
+impl Default for SessionMode {
+    fn default() -> Self {
+        SessionMode::Server {
+            domain: None,
+            auto_options: true,
+        }
+    }
 }
 
-impl SipServer {
-    /// Get the session manager
-    pub fn session_manager(&self) -> Arc<SessionManager> {
-        self.session_manager.clone()
+/// Configuration for SessionManager
+#[derive(Debug, Clone)]
+pub struct SessionManagerConfig {
+    /// Local signaling address
+    pub local_signaling_addr: std::net::SocketAddr,
+    
+    /// Local media address
+    pub local_media_addr: std::net::SocketAddr,
+    
+    /// Maximum concurrent sessions
+    pub max_sessions: Option<usize>,
+    
+    /// Enable debug logging
+    pub debug_logging: bool,
+    
+    /// Event buffer size
+    pub event_buffer_size: usize,
+    
+    /// Display name for sessions
+    pub display_name: Option<String>,
+    
+    /// User agent string
+    pub user_agent: String,
+}
+
+impl Default for SessionManagerConfig {
+    fn default() -> Self {
+        Self {
+            local_signaling_addr: "127.0.0.1:5060".parse().unwrap(),
+            local_media_addr: "127.0.0.1:10000".parse().unwrap(),
+            max_sessions: None,
+            debug_logging: false,
+            event_buffer_size: 1000,
+            display_name: None,
+            user_agent: "RVOIP-SessionCore/1.0".to_string(),
+        }
+    }
+}
+
+impl SessionManagerConfig {
+    /// Create new configuration with addresses
+    pub fn new(local_signaling_addr: std::net::SocketAddr, local_media_addr: std::net::SocketAddr) -> Self {
+        Self {
+            local_signaling_addr,
+            local_media_addr,
+            ..Default::default()
+        }
     }
     
-    /// Get the server manager
-    pub fn server_manager(&self) -> Arc<ServerManager> {
-        self.server_manager.clone()
+    /// Set maximum sessions
+    pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = Some(max_sessions);
+        self
     }
     
-    /// Get the server configuration
-    pub fn config(&self) -> &ServerConfig {
-        &self.config
+    /// Enable debug logging
+    pub fn with_debug_logging(mut self, enable: bool) -> Self {
+        self.debug_logging = enable;
+        self
     }
     
-    /// Start processing session events
-    pub async fn run(&mut self) -> Result<()> {
-        info!("Starting SIP server session event processing");
-        
-        let mut event_count = 0;
-        while let Some(event) = self.session_events.recv().await {
-            event_count += 1;
-            debug!("SipServer received session event #{}: {:?}", event_count, event);
-            
-            if let Err(e) = self.server_manager.handle_session_event(event).await {
-                tracing::error!("Error handling session event: {}", e);
+    /// Set event buffer size
+    pub fn with_event_buffer_size(mut self, size: usize) -> Self {
+        self.event_buffer_size = size;
+        self
+    }
+    
+    /// Set display name
+    pub fn with_display_name(mut self, display_name: String) -> Self {
+        self.display_name = Some(display_name);
+        self
+    }
+    
+    /// Set user agent
+    pub fn with_user_agent(mut self, user_agent: String) -> Self {
+        self.user_agent = user_agent;
+        self
+    }
+    
+    /// Validate configuration
+    pub fn validate(&self) -> Result<()> {
+        if let Some(max_sessions) = self.max_sessions {
+            if max_sessions == 0 {
+                return Err(anyhow::anyhow!("max_sessions must be greater than 0"));
             }
         }
         
-        info!("SIP server session event processing ended (received {} events total)", event_count);
+        if self.event_buffer_size == 0 {
+            return Err(anyhow::anyhow!("event_buffer_size must be greater than 0"));
+        }
+        
         Ok(())
     }
-    
-    /// Accept an incoming call
-    pub async fn accept_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        self.server_manager.accept_call(session_id).await
-            .context("Failed to accept call")
+}
+
+impl SessionMode {
+    /// Create server mode with domain
+    pub fn server(domain: &str) -> Self {
+        SessionMode::Server {
+            domain: Some(domain.to_string()),
+            auto_options: true,
+        }
     }
     
-    /// Reject an incoming call
-    pub async fn reject_call(&self, session_id: &crate::SessionId, status_code: rvoip_sip_core::StatusCode) -> Result<()> {
-        self.server_manager.reject_call(session_id, status_code).await
-            .context("Failed to reject call")
+    /// Create endpoint mode with server
+    pub fn endpoint(remote_server: std::net::SocketAddr) -> Self {
+        SessionMode::Endpoint {
+            remote_server: Some(remote_server),
+            auth_username: None,
+            auth_password: None,
+        }
     }
     
-    /// End an active call
-    pub async fn end_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        self.server_manager.end_call(session_id).await
-            .context("Failed to end call")
+    /// Set authentication for endpoint mode
+    pub fn with_auth(mut self, username: String, password: String) -> Self {
+        if let SessionMode::Endpoint { ref mut auth_username, ref mut auth_password, .. } = self {
+            *auth_username = Some(username);
+            *auth_password = Some(password);
+        }
+        self
     }
     
-    /// Get all active sessions
-    pub async fn get_active_sessions(&self) -> Vec<crate::SessionId> {
-        self.server_manager.get_active_sessions().await
-    }
-    
-    /// Hold/pause a call
-    pub async fn hold_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        self.server_manager.hold_call(session_id).await
-            .context("Failed to hold call")
-    }
-    
-    /// Resume a held call
-    pub async fn resume_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        self.server_manager.resume_call(session_id).await
-            .context("Failed to resume call")
+    /// Set domain for server mode
+    pub fn with_domain(mut self, domain_name: String) -> Self {
+        if let SessionMode::Server { ref mut domain, .. } = self {
+            *domain = Some(domain_name);
+        }
+        self
     }
 }
 
-impl SipClient {
-    /// Get the session manager
-    pub fn session_manager(&self) -> Arc<SessionManager> {
-        self.session_manager.clone()
-    }
-    
-    /// Get the client configuration
-    pub fn config(&self) -> &ClientConfig {
-        &self.config
-    }
-
-    /// Make an outgoing call (create session + send INVITE)
-    pub async fn make_call(&self, target_uri: &str) -> Result<crate::SessionId> {
-        info!("📞 SipClient making call to {}", target_uri);
+impl SessionManager {
+    /// ✅ **PRIMARY API**: Create SessionManager with mode and configuration
+    /// 
+    /// This is the main API - clean, simple, and intuitive.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Server that accepts calls
+    /// let config = SessionManagerConfig::new(signaling_addr, media_addr);
+    /// let session_manager = SessionManager::create(
+    ///     SessionMode::server("example.com"), 
+    ///     config
+    /// ).await?;
+    /// 
+    /// // Endpoint that makes calls
+    /// let mode = SessionMode::endpoint(server_addr).with_auth("user".into(), "pass".into());
+    /// let session_manager = SessionManager::create(mode, config).await?;
+    /// ```
+    pub async fn create(mode: SessionMode, config: SessionManagerConfig) -> Result<Arc<Self>> {
+        info!("Creating SessionManager with mode: {:?}", mode);
         
-        // Get from URI from configuration
-        let from_uri = self.config.from_uri.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("from_uri not configured in ClientConfig"))?;
+        // Validate configuration
+        config.validate()
+            .context("Invalid SessionManager configuration")?;
         
-        // Create outgoing session
-        let session = self.session_manager.create_outgoing_session().await
-            .context("Failed to create outgoing session")?;
+        // Create dialog configuration based on mode
+        let dialog_config = match &mode {
+            SessionMode::Server { domain, auto_options } => {
+                let mut dialog_config = rvoip_dialog_core::config::DialogManagerConfig::server(config.local_signaling_addr);
+                
+                if let Some(domain) = domain {
+                    dialog_config = dialog_config.with_domain(domain);
+                } else {
+                    dialog_config = dialog_config.with_domain(&format!("{}", config.local_signaling_addr.ip()));
+                }
+                
+                if *auto_options {
+                    dialog_config = dialog_config.with_auto_options();
+                }
+                
+                dialog_config.build()
+            },
+            SessionMode::Endpoint { remote_server, auth_username, auth_password } => {
+                let mut dialog_config = rvoip_dialog_core::config::DialogManagerConfig::client(config.local_signaling_addr);
+                
+                if let (Some(username), Some(password)) = (auth_username, auth_password) {
+                    dialog_config = dialog_config.with_auth(username.clone(), password.clone());
+                }
+                
+                dialog_config.build()
+            }
+        };
         
-        let session_id = session.id.clone();
+        // Create dialog API internally
+        let dialog_api = Arc::new(rvoip_dialog_core::UnifiedDialogApi::create(dialog_config).await
+            .context("Failed to create dialog API")?);
         
-        // Send the INVITE
-        self.session_manager.initiate_outgoing_call(
-            &session_id,
-            target_uri,
-            from_uri,
-            None // Let session-core generate SDP offer
-        ).await.context("Failed to initiate outgoing call")?;
+        debug!("✅ Created dialog API internally");
         
-        info!("✅ SipClient call initiated: session {} → {}", session_id, target_uri);
-        Ok(session_id)
-    }
-
-    /// Answer an incoming call
-    pub async fn answer_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        info!("✅ SipClient answering call for session {}", session_id);
+        // Create media manager internally
+        let media_manager = Arc::new(MediaManager::new().await
+            .context("Failed to create media manager")?);
         
-        self.session_manager.accept_call(session_id).await
-            .context("Failed to answer call")
-    }
-
-    /// Reject an incoming call
-    pub async fn reject_call(&self, session_id: &crate::SessionId, status_code: rvoip_sip_core::StatusCode) -> Result<()> {
-        info!("❌ SipClient rejecting call for session {} with status {:?}", session_id, status_code);
+        debug!("✅ Created media manager internally");
         
-        self.session_manager.reject_call(session_id, status_code).await
-            .context("Failed to reject call")
-    }
-
-    /// Hang up an active call
-    pub async fn hangup_call(&self, session_id: &crate::SessionId) -> Result<()> {
-        info!("📴 SipClient hanging up call for session {}", session_id);
+        // Create event bus
+        let event_bus = EventBus::new(config.event_buffer_size).await
+            .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
         
-        self.session_manager.terminate_call(session_id).await
-            .context("Failed to hang up call")
-    }
-
-    /// Get all active sessions
-    pub async fn get_active_sessions(&self) -> Vec<crate::SessionId> {
-        self.session_manager.list_sessions()
-            .iter()
-            .map(|session| session.id.clone())
-            .collect()
-    }
-
-    /// Check if a session exists and is active
-    pub async fn has_active_session(&self, session_id: &crate::SessionId) -> bool {
-        self.session_manager.has_session(session_id)
+        debug!("✅ Created event bus with buffer size {}", config.event_buffer_size);
+        
+        // Create session configuration
+        let session_config = SessionConfig {
+            local_signaling_addr: config.local_signaling_addr,
+            local_media_addr: config.local_media_addr,
+            supported_codecs: vec![crate::media::AudioCodecType::PCMU, crate::media::AudioCodecType::PCMA],
+            display_name: config.display_name.clone(),
+            user_agent: config.user_agent.clone(),
+            max_duration: 0, // Unlimited by default
+            max_sessions: config.max_sessions,
+        };
+        
+        // Create session manager with injected dependencies
+        let session_manager = Arc::new(SessionManager::new(
+            dialog_api,
+            session_config.clone(),
+            event_bus.clone()
+        ).await.context("Failed to create session manager")?);
+        
+        info!("✅ Created SessionManager with clean API");
+        
+        Ok(session_manager)
     }
 }
 
-/// Create a SIP server with dependency injection (proper architecture)
-/// 
-/// **ARCHITECTURE**: API layer now receives pre-constructed managers
-/// instead of creating infrastructure directly
-pub async fn create_sip_server_with_managers(
-    config: ServerConfig,
-    dialog_api: Arc<UnifiedDialogApi>,
-    media_manager: Arc<MediaManager>,
-) -> Result<SipServer> {
-    info!("Creating SIP server with dependency injection - proper architecture!");
-    
-    // Validate configuration
-    config.validate()
-        .context("Invalid server configuration")?;
-    
-    // Create session manager with injected dependencies
-    let session_config = crate::session::SessionConfig::default();
-    let event_bus = crate::events::EventBus::new(1000).await
-        .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
-    
-    let session_manager = Arc::new(crate::session::SessionManager::new(
-        dialog_api.clone(),
-        session_config,
-        event_bus
-    ).await.context("Failed to create session manager")?);
-    
-    info!("✅ Created session manager with injected dialog and media managers");
-    
-    // Create server manager with session manager
-    let server_manager = Arc::new(ServerManager::new(
-        session_manager.clone(),
-        config.clone()
-    ));
-    
-    info!("✅ Created server manager");
-    info!("🎯 SIP server ready with proper dependency injection architecture");
-    
-    // Create mock session events for now - in real implementation this would come from dialog manager
-    let (_tx, session_events) = mpsc::channel(100);
-    
-    Ok(SipServer {
-        session_manager,
-        server_manager,
-        session_events,
-        config,
-    })
+// ============================================================================
+// DEPRECATED APIs - For backward compatibility only  
+// ============================================================================
+
+/// Legacy session infrastructure container
+#[deprecated(note = "Use SessionManager::create(mode, config) instead")]
+pub struct SessionInfrastructure {
+    pub session_manager: Arc<SessionManager>,
+    pub media_manager: Arc<MediaManager>,
+    pub event_bus: EventBus,
+    pub config: SessionConfig,
 }
 
-/// Create a SIP client with dependency injection (proper architecture)
-/// 
-/// **ARCHITECTURE**: API layer now receives pre-constructed managers
-/// instead of creating infrastructure directly
-pub async fn create_sip_client_with_managers(
-    config: ClientConfig,
-    dialog_api: Arc<UnifiedDialogApi>,
-    media_manager: Arc<MediaManager>,
-) -> Result<SipClient> {
-    info!("Creating SIP client with dependency injection - proper architecture!");
-    
-    // Validate configuration
-    config.validate()
-        .context("Invalid client configuration")?;
-    
-    // Create session manager with injected dependencies
-    let local_address = config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-    let session_config = crate::session::SessionConfig {
-        local_media_addr: local_address,
-        ..Default::default()
+/// Legacy configuration - just an alias to the new one
+#[deprecated(note = "Use SessionManagerConfig instead")]
+pub type SessionInfrastructureConfig = SessionManagerConfig;
+
+#[deprecated(note = "Use SessionManager::create(SessionMode::server(domain), config) instead")]
+pub async fn create_session_manager_for_sip_server(
+    config: SessionManagerConfig,
+) -> Result<Arc<SessionManager>> {
+    let mode = SessionMode::Server { domain: None, auto_options: true };
+    SessionManager::create(mode, config).await
+}
+
+#[deprecated(note = "Use SessionManager::create(SessionMode::endpoint(server), config) instead")]  
+pub async fn create_session_manager_for_sip_endpoint(
+    config: SessionManagerConfig,
+) -> Result<Arc<SessionManager>> {
+    let mode = SessionMode::Endpoint { 
+        remote_server: None, 
+        auth_username: None, 
+        auth_password: None 
     };
-    let event_bus = crate::events::EventBus::new(100).await
-        .map_err(|e| anyhow::anyhow!("Failed to create event bus: {}", e))?;
-    
-    let session_manager = Arc::new(crate::session::SessionManager::new(
-        dialog_api,
-        session_config,
-        event_bus
-    ).await.context("Failed to create session manager for client")?);
-    
-    info!("✅ SIP client created successfully with dependency injection");
-    
-    Ok(SipClient {
-        session_manager,
-        config,
-    })
-}
-
-/// Create a SIP server with clean abstraction (hides dialog-core implementation details)
-/// 
-/// This is the **clean API** that users should use. It internally creates all required
-/// components (UnifiedDialogApi, MediaManager) so users don't need to import dialog-core.
-pub async fn create_sip_server(config: ServerConfig) -> Result<SipServer> {
-    info!("Creating SIP server with clean abstraction API");
-    
-    // Validate configuration first
-    config.validate()
-        .context("Invalid server configuration")?;
-    
-    // Create dialog-core configuration based on session-core config
-    let dialog_config = rvoip_dialog_core::config::DialogManagerConfig::server(config.bind_address)
-        .with_domain(&format!("{}", config.bind_address.ip())) // Use IP as domain for now
-        .with_auto_options() // Enable automatic OPTIONS responses for servers
-        .build();
-    
-    // Create dialog API internally
-    let dialog_api = Arc::new(rvoip_dialog_core::UnifiedDialogApi::create(dialog_config).await
-        .context("Failed to create dialog API")?);
-    
-    info!("✅ Created dialog API internally");
-    
-    // Create media manager internally
-    let media_manager = Arc::new(MediaManager::new().await
-        .context("Failed to create media manager")?);
-    
-    info!("✅ Created media manager internally");
-    
-    // Now use the dependency injection version with our internally created components
-    create_sip_server_with_managers(config, dialog_api, media_manager).await
-        .context("Failed to create SIP server with internal managers")
-}
-
-/// Create a SIP client with clean abstraction (hides dialog-core implementation details)
-/// 
-/// This is the **clean API** that users should use. It internally creates all required
-/// components (UnifiedDialogApi, MediaManager) so users don't need to import dialog-core.
-pub async fn create_sip_client(config: ClientConfig) -> Result<SipClient> {
-    info!("Creating SIP client with clean abstraction API");
-    
-    // Validate configuration first
-    config.validate()
-        .context("Invalid client configuration")?;
-    
-    // Determine local address for dialog configuration
-    let local_address = config.local_address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-    
-    // Create dialog-core configuration based on session-core config
-    let dialog_config = rvoip_dialog_core::config::DialogManagerConfig::client(local_address)
-        .with_from_uri(&config.effective_from_uri()) // Use client from URI
-        .build();
-    
-    // Create dialog API internally
-    let dialog_api = Arc::new(rvoip_dialog_core::UnifiedDialogApi::create(dialog_config).await
-        .context("Failed to create dialog API for client")?);
-    
-    info!("✅ Created dialog API internally for client");
-    
-    // Create media manager internally
-    let media_manager = Arc::new(MediaManager::new().await
-        .context("Failed to create media manager for client")?);
-    
-    info!("✅ Created media manager internally for client");
-    
-    // Now use the dependency injection version with our internally created components
-    create_sip_client_with_managers(config, dialog_api, media_manager).await
-        .context("Failed to create SIP client with internal managers")
+    SessionManager::create(mode, config).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     
-    #[tokio::test]
-    async fn test_dependency_injection_architecture() {
-        // This test validates that the new architecture requires proper dependency injection
-        let config = ServerConfig::default();
+    #[test]
+    fn test_session_manager_config_validation() {
+        let mut config = SessionManagerConfig::default();
+        assert!(config.validate().is_ok());
         
-        // Old way should fail
-        let result = create_sip_server(config.clone()).await;
-        assert!(result.is_err(), "Deprecated function should fail");
+        // Test invalid event_buffer_size
+        config.event_buffer_size = 0;
+        assert!(config.validate().is_err());
         
-        // New way requires proper dependencies (test would need real managers)
-        // let dialog_manager = Arc::new(DialogServer::new(...));
-        // let media_manager = Arc::new(MediaManager::new().await.unwrap());
-        // let result = create_sip_server_with_managers(config, dialog_manager, media_manager).await;
-        // This would work with real dependencies
+        // Test invalid max_sessions
+        config.event_buffer_size = 1000;
+        config.max_sessions = Some(0);
+        assert!(config.validate().is_err());
     }
     
     #[test]
-    fn test_server_config_validation() {
-        let mut config = ServerConfig::default();
-        assert!(config.validate().is_ok());
+    fn test_session_mode_builders() {
+        // Test server mode
+        let server_mode = SessionMode::server("example.com").with_domain("updated.com".to_string());
+        match server_mode {
+            SessionMode::Server { domain, .. } => assert_eq!(domain, Some("updated.com".to_string())),
+            _ => panic!("Expected server mode"),
+        }
         
-        // Test invalid config
-        config.max_sessions = 0;
-        assert!(config.validate().is_err());
+        // Test endpoint mode
+        let endpoint_mode = SessionMode::endpoint("127.0.0.1:5060".parse().unwrap())
+            .with_auth("user".to_string(), "pass".to_string());
+        match endpoint_mode {
+            SessionMode::Endpoint { auth_username, auth_password, .. } => {
+                assert_eq!(auth_username, Some("user".to_string()));
+                assert_eq!(auth_password, Some("pass".to_string()));
+            },
+            _ => panic!("Expected endpoint mode"),
+        }
     }
 } 

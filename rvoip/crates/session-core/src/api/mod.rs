@@ -1,85 +1,97 @@
 //! RVOIP Session Core API
 //!
-//! This module provides high-level APIs for building SIP clients and servers
-//! using the RVOIP session-core library. It includes factory functions,
-//! configuration structures, and specialized functionality for both client
-//! and server applications.
+//! This module provides **session coordination infrastructure** for building SIP applications.
+//! session-core provides the essential SessionManager and coordination primitives that 
+//! call-engine and client-core use for their business logic.
 //!
-//! # Client API
+//! ## Architectural Principle
 //!
-//! The client API provides functionality for building SIP clients such as
-//! softphones, SIP endpoints, and mobile applications.
+//! **✅ session-core provides**: SessionManager, Session primitives, Bridge infrastructure
+//! **✅ call-engine uses**: SessionManager for business logic (call routing, policies)  
+//! **✅ client-core uses**: SessionManager for client-specific behavior patterns
 //!
-//! ```rust
-//! use rvoip_session_core::api::client::*;
+//! # SessionManager Infrastructure API
 //!
-//! let config = ClientConfig {
-//!     display_name: "My SIP Phone".to_string(),
-//!     uri: "sip:alice@example.com".to_string(),
-//!     ..Default::default()
-//! };
-//!
-//! let client = create_full_client_manager(transaction_manager, config).await?;
-//! let session = client.make_call(destination_uri).await?;
-//! ```
-//!
-//! # Server API
-//!
-//! The server API provides functionality for building SIP servers such as
-//! PBX systems, SIP proxies, and call centers.
+//! The core API provides SessionManager that call-engine and client-core orchestrate:
 //!
 //! ```rust
-//! use rvoip_session_core::api::server::*;
+//! use rvoip_session_core::api::*;
 //!
-//! let config = ServerConfig {
-//!     server_name: "My PBX".to_string(),
-//!     domain: "example.com".to_string(),
-//!     max_sessions: 10000,
-//!     ..Default::default()
-//! };
-//!
-//! let server = create_full_server_manager(transaction_manager, config).await?;
-//! let session = server.handle_incoming_call(&request).await?;
+//! // Create SessionManager infrastructure
+//! let session_manager = create_session_manager(dialog_api, media_manager, config).await?;
 //! 
-//! // Bridge sessions for call routing
-//! let bridge_id = server.create_bridge(BridgeConfig::default()).await?;
-//! server.add_session_to_bridge(&bridge_id, &session_a).await?;
-//! server.add_session_to_bridge(&bridge_id, &session_b).await?;
+//! // call-engine orchestrates business logic using SessionManager
+//! let bridge_id = session_manager.create_bridge(BridgeConfig::default()).await?;
 //! ```
+//!
+//! # Infrastructure Components Available
+//!
+//! Session-core provides these coordination components:
+//!
+//! - **SessionManager**: Central session coordination infrastructure
+//! - **Session Primitives**: SessionId, Session, SessionState, etc.
+//! - **Bridge Infrastructure**: Multi-session bridging mechanics  
+//! - **Basic Groups**: Session grouping data structures
+//! - **Basic Resources**: Resource tracking primitives
+//! - **Basic Priorities**: Priority classification primitives
+//! - **Basic Events**: Simple pub/sub event communication
 
-pub mod client;
-pub mod server;
+// Session coordination infrastructure
 pub mod factory;
+pub mod handler;
 
-// Re-export the main types and functions for convenience
-pub use client::{
-    ClientConfig, ClientSessionManager,
-    create_client_session_manager, create_client_session_manager_sync,
-    create_full_client_manager, create_full_client_manager_sync,
+// NEW: Simple developer-focused API module
+pub mod simple;
+
+// ✅ **INFRASTRUCTURE EXPORTS**: Core session coordination infrastructure
+pub use crate::{
+    // SessionManager - the central infrastructure component
+    SessionManager, SessionConfig,
+    
+    // Session primitives
+    SessionId, Session, SessionState, SessionDirection,
+    
+    // Bridge infrastructure for call-engine orchestration
+    session::bridge::{
+        BridgeId, BridgeState, BridgeConfig, BridgeInfo, BridgeEvent, BridgeEventType, 
+        BridgeStats, BridgeError, SessionBridge,
+    },
+    
+    // Event infrastructure
+    EventBus, SessionEvent,
+    
+    // Media coordination infrastructure
+    MediaManager, MediaSessionId, MediaConfig,
 };
 
-pub use server::{
-    ServerConfig, ServerSessionManager, RouteInfo, UserRegistration, ServerStats,
-    create_server_session_manager, create_server_session_manager_sync,
-    create_full_server_manager, create_full_server_manager_sync,
-    // Incoming call notification types for call-engine
-    IncomingCallEvent, CallerInfo, CallDecision, IncomingCallNotification,
+// ✅ **BASIC PRIMITIVES**: All basic coordination primitives for call-engine composition
+pub use crate::{
+    // Basic session grouping primitives
+    BasicSessionGroup, BasicGroupType, BasicGroupState, BasicGroupConfig,
+    BasicSessionMembership, BasicGroupEvent,
+    
+    // Basic resource tracking primitives
+    BasicResourceType, BasicResourceAllocation, BasicResourceUsage, BasicResourceLimits,
+    BasicResourceRequest, BasicResourceStats,
+    
+    // Basic priority classification primitives
+    BasicSessionPriority, BasicPriorityClass, BasicQoSLevel, BasicPriorityInfo,
+    BasicPriorityConfig,
+    
+    // Basic event communication primitives
+    BasicSessionEvent, BasicEventBus, BasicEventBusConfig, BasicEventFilter,
+    FilteredEventSubscriber,
 };
 
-// Re-export server config types for convenience
-pub use crate::api::server::config::TransportProtocol;
-
-// Re-export fundamental session types for API consumers
-pub use crate::{SessionId, Session};
-
-// Re-export bridge types for call-engine orchestration
-pub use crate::session::bridge::{
-    BridgeId, BridgeState, BridgeConfig, BridgeInfo, BridgeEvent, BridgeEventType, 
-    BridgeStats, BridgeError, SessionBridge,
+// ✅ **FACTORY EXPORTS**: Clean SessionManager creation API
+pub use factory::{
+    // NEW CLEAN API
+    SessionManagerConfig, SessionMode,
+    
+    // Legacy APIs for backward compatibility (deprecated)
+    SessionInfrastructure, SessionInfrastructureConfig,
+    create_session_manager_for_sip_server, create_session_manager_for_sip_endpoint,
 };
-
-// Re-export factory functions
-pub use factory::{create_sip_server, create_sip_client, SipServer, SipClient};
 
 /// API version information
 pub const API_VERSION: &str = "1.0.0";
@@ -90,78 +102,80 @@ pub const SUPPORTED_SIP_VERSIONS: &[&str] = &["2.0"];
 /// Default user agent string for the API
 pub const DEFAULT_USER_AGENT: &str = "RVOIP-SessionCore/1.0";
 
-/// API capabilities
+/// Session-core infrastructure capabilities
 #[derive(Debug, Clone)]
-pub struct ApiCapabilities {
-    /// Supports call transfer
-    pub call_transfer: bool,
+pub struct SessionCoreCapabilities {
+    /// Supports SessionManager infrastructure
+    pub session_manager: bool,
     
-    /// Supports media coordination
+    /// Supports session coordination
+    pub session_coordination: bool,
+    
+    /// Supports media coordination infrastructure
     pub media_coordination: bool,
     
-    /// Supports call hold/resume
-    pub call_hold: bool,
-    
-    /// Supports call routing
-    pub call_routing: bool,
-    
-    /// Supports user registration
-    pub user_registration: bool,
-    
-    /// Supports conference calls
-    pub conference_calls: bool,
-    
-    /// Supports session bridging
+    /// Supports session bridging infrastructure
     pub session_bridging: bool,
     
-    /// Maximum concurrent sessions
+    /// Supports basic grouping primitives
+    pub basic_groups: bool,
+    
+    /// Supports basic resource tracking
+    pub basic_resources: bool,
+    
+    /// Supports basic priority classification
+    pub basic_priorities: bool,
+    
+    /// Supports basic event communication
+    pub basic_events: bool,
+    
+    /// Maximum concurrent sessions (infrastructure limit)
     pub max_sessions: usize,
 }
 
-impl Default for ApiCapabilities {
+impl Default for SessionCoreCapabilities {
     fn default() -> Self {
         Self {
-            call_transfer: true,
+            session_manager: true,
+            session_coordination: true,
             media_coordination: true,
-            call_hold: true,
-            call_routing: true,
-            user_registration: true,
-            conference_calls: false, // Not yet implemented
             session_bridging: true,
+            basic_groups: true,
+            basic_resources: true,
+            basic_priorities: true,
+            basic_events: true,
             max_sessions: 10000,
         }
     }
 }
 
-/// Get the current API capabilities
-pub fn get_api_capabilities() -> ApiCapabilities {
-    ApiCapabilities::default()
+/// Get session-core infrastructure capabilities
+pub fn get_session_core_capabilities() -> SessionCoreCapabilities {
+    SessionCoreCapabilities::default()
 }
 
-/// Check if a feature is supported
-pub fn is_feature_supported(feature: &str) -> bool {
-    let capabilities = get_api_capabilities();
+/// Check if a session-core feature is supported
+pub fn is_session_feature_supported(feature: &str) -> bool {
+    let capabilities = get_session_core_capabilities();
     
     match feature {
-        "call_transfer" => capabilities.call_transfer,
+        "session_manager" => capabilities.session_manager,
+        "session_coordination" => capabilities.session_coordination,
         "media_coordination" => capabilities.media_coordination,
-        "call_hold" => capabilities.call_hold,
-        "call_routing" => capabilities.call_routing,
-        "user_registration" => capabilities.user_registration,
-        "conference_calls" => capabilities.conference_calls,
         "session_bridging" => capabilities.session_bridging,
+        "basic_groups" => capabilities.basic_groups,
+        "basic_resources" => capabilities.basic_resources,
+        "basic_priorities" => capabilities.basic_priorities,
+        "basic_events" => capabilities.basic_events,
         _ => false,
     }
 }
 
-/// API configuration for both client and server
+/// Session infrastructure configuration
 #[derive(Debug, Clone)]
-pub struct ApiConfig {
+pub struct SessionApiConfig {
     /// API version to use
     pub version: String,
-    
-    /// User agent string
-    pub user_agent: String,
     
     /// Enable debug logging
     pub debug_logging: bool,
@@ -171,16 +185,19 @@ pub struct ApiConfig {
     
     /// Event buffer size
     pub event_buffer_size: usize,
+    
+    /// Maximum sessions
+    pub max_sessions: usize,
 }
 
-impl Default for ApiConfig {
+impl Default for SessionApiConfig {
     fn default() -> Self {
         Self {
             version: API_VERSION.to_string(),
-            user_agent: DEFAULT_USER_AGENT.to_string(),
             debug_logging: false,
             enable_metrics: true,
             event_buffer_size: 1000,
+            max_sessions: 10000,
         }
     }
 } 
