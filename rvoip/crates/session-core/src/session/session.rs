@@ -1,9 +1,28 @@
-// Session implementation split into focused modules
+//! Session Implementation
+//!
+//! Core session handling logic.
 
-mod core;
-mod state;
-mod media;
-mod transfer;
+use crate::api::types::{SessionId, CallState};
+use crate::errors::Result;
 
-// Re-export the main types and implementations
-pub use core::{Session, SessionMediaState}; 
+/// Internal session implementation details
+#[derive(Debug, Clone)]
+pub struct SessionImpl {
+    pub id: SessionId,
+    pub state: CallState,
+}
+
+impl SessionImpl {
+    pub fn new(id: SessionId) -> Self {
+        Self {
+            id,
+            state: CallState::Initiating,
+        }
+    }
+
+    pub fn update_state(&mut self, new_state: CallState) -> Result<()> {
+        tracing::debug!("Session {} state: {:?} -> {:?}", self.id, self.state, new_state);
+        self.state = new_state;
+        Ok(())
+    }
+} 
