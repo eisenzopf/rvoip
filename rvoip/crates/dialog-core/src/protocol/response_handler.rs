@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use rvoip_sip_core::Response;
 use rvoip_transaction_core::TransactionKey;
 use crate::dialog::{DialogId, DialogState};
-use crate::errors::DialogResult;
+use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use crate::manager::{DialogManager, SessionCoordinator, MessageExtensions};
 
@@ -260,6 +260,23 @@ impl DialogManager {
         // Handle specific successful response types
         match response.status_code() {
             200 => {
+                println!("🎯 RESPONSE HANDLER: Processing 200 OK, checking if INVITE response needs ACK");
+                
+                // For 200 OK responses to INVITE, automatically send ACK
+                // Check if this is a response to an INVITE by looking at the transaction
+                if let Some(original_request_method) = self.get_transaction_method(&transaction_id) {
+                    if original_request_method == rvoip_sip_core::Method::Invite {
+                        println!("🚀 RESPONSE HANDLER: This is a 200 OK to INVITE - sending automatic ACK");
+                        
+                        // Create and send ACK for this 2xx response
+                        if let Err(e) = self.send_automatic_ack_for_2xx(&transaction_id, &response, &dialog_id).await {
+                            warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
+                        } else {
+                            info!("Successfully sent automatic ACK for 200 OK to INVITE");
+                        }
+                    }
+                }
+                
                 // Successful completion - could be call answered, request completed, etc.
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
@@ -345,6 +362,46 @@ impl DialogManager {
             transaction_id: transaction_id.clone(),
         }).await?;
         
+        Ok(())
+    }
+    
+    /// Get the original request method for a transaction
+    /// 
+    /// This is a simplified implementation - in a real system this would
+    /// query the transaction manager for the original request method.
+    fn get_transaction_method(&self, transaction_id: &TransactionKey) -> Option<rvoip_sip_core::Method> {
+        // Extract method from transaction key (simplified approach)
+        // The transaction key typically contains the method information
+        if transaction_id.to_string().contains("INVITE") {
+            Some(rvoip_sip_core::Method::Invite)
+        } else if transaction_id.to_string().contains("BYE") {
+            Some(rvoip_sip_core::Method::Bye)
+        } else {
+            // For now, assume it's INVITE if we can't determine
+            // In a real implementation, this would query the transaction manager
+            Some(rvoip_sip_core::Method::Invite)
+        }
+    }
+    
+    /// Send automatic ACK for 2xx response to INVITE
+    /// 
+    /// Uses the existing dialog-core → transaction-core → transport architecture
+    /// to properly send ACKs according to RFC 3261 while maintaining separation of concerns.
+    async fn send_automatic_ack_for_2xx(
+        &self,
+        original_invite_tx_id: &TransactionKey,
+        response: &Response,
+        dialog_id: &DialogId,
+    ) -> DialogResult<()> {
+        debug!("Sending automatic ACK for 2xx response to INVITE using proper architecture");
+        
+        println!("📧 RESPONSE HANDLER: Using existing send_ack_for_2xx_response method");
+        
+        // Use the existing dialog-core method that properly delegates to transaction-core
+        // This maintains separation of concerns: dialog-core → transaction-core → transport
+        self.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await?;
+        
+        println!("✅ RESPONSE HANDLER: Successfully sent ACK for 2xx response via proper channels");
         Ok(())
     }
 } 

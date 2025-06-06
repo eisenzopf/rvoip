@@ -711,6 +711,27 @@ impl UnifiedDialogApi {
         handles
     }
     
+    /// Send ACK for 2xx response to INVITE
+    ///
+    /// Handles the automatic ACK sending required by RFC 3261 for 200 OK responses to INVITE.
+    /// This method ensures proper completion of the 3-way handshake (INVITE → 200 OK → ACK).
+    ///
+    /// # Arguments
+    /// * `dialog_id` - Dialog ID for the call
+    /// * `original_invite_tx_id` - Transaction ID of the original INVITE
+    /// * `response` - The 200 OK response to acknowledge
+    ///
+    /// # Returns
+    /// Success or error
+    pub async fn send_ack_for_2xx_response(
+        &self,
+        dialog_id: &DialogId,
+        original_invite_tx_id: &TransactionKey,
+        response: &Response
+    ) -> ApiResult<()> {
+        self.manager.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await
+    }
+    
     // ========================================
     // CONVENIENCE METHODS
     // ========================================

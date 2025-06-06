@@ -97,7 +97,7 @@
 //! ```
 
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use rvoip_sip_core::{Method, StatusCode, Response};
 use rvoip_transaction_core::TransactionKey;
@@ -571,21 +571,40 @@ impl CallHandle {
                 message: "Original INVITE request not found".to_string()
             })?;
         
-        // Build 200 OK response with SDP
+        // Build 200 OK response with SDP and proper To tag for dialog establishment
         let response = {
-            use rvoip_sip_core::StatusCode;
             use rvoip_transaction_core::utils::response_builders;
             
-            let mut response = response_builders::create_response(&original_request, StatusCode::Ok);
+            // Use the dialog-aware response builder that adds To tags
+            let mut response = response_builders::create_ok_response_with_dialog_info(
+                &original_request,
+                "server",                    // contact_user
+                "127.0.0.1",                // contact_host - TODO: use actual local address
+                Some(5060)                  // contact_port - TODO: use actual local port
+            );
             
             // Add SDP body if provided
             if let Some(sdp) = &sdp_answer {
                 response = response.with_body(sdp.as_bytes().to_vec());
-                // TODO: Add Content-Type: application/sdp header
+                // Add Content-Type header for SDP
+                use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
+                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
+                response.headers.push(TypedHeader::ContentType(ContentType::new(
+                    ContentTypeValue {
+                        m_type: "application".to_string(),
+                        m_subtype: "sdp".to_string(),
+                        parameters: std::collections::HashMap::new(),
+                    }
+                )));
             }
             
             response
         };
+        
+        // CRITICAL FIX: Extract the tag from the response BEFORE sending it
+        let response_local_tag = response.to()
+            .and_then(|to_header| to_header.tag())
+            .map(|tag| tag.to_string());
         
         // Send the 200 OK response
         self.dialog_handle.dialog_manager.send_response(&transaction_id, response).await
@@ -593,23 +612,38 @@ impl CallHandle {
                 message: format!("Failed to send 200 OK response: {}", e)
             })?;
         
-        // Update dialog state to Confirmed and set local tag
+        // Update dialog state to Confirmed and set local tag to match the response
         {
             let mut dialog = self.dialog_handle.dialog_manager.get_dialog_mut(self.call_id())
                 .map_err(|e| ApiError::Internal {
                     message: format!("Failed to get dialog for state update: {}", e)
                 })?;
             
-            // Generate local tag if not already set
+            // CRITICAL FIX: Use the tag from the response we just sent to ensure consistency
             if dialog.local_tag.is_none() {
-                let local_tag = dialog.generate_local_tag();
-                dialog.local_tag = Some(local_tag);
+                if let Some(response_tag) = response_local_tag {
+                    dialog.local_tag = Some(response_tag.clone());
+                    info!("Dialog {} local tag set to match response: {}", self.call_id(), response_tag);
+                } else {
+                    // Fallback: generate tag if response doesn't have one (shouldn't happen)
+                    let local_tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(local_tag);
+                    warn!("Dialog {} fallback tag generation used", self.call_id());
+                }
             }
             
             // Transition from Early to Confirmed
             if dialog.state == crate::dialog::DialogState::Early {
                 dialog.state = crate::dialog::DialogState::Confirmed;
                 info!("Dialog {} transitioned to Confirmed state", self.call_id());
+                
+                // CRITICAL FIX: Update dialog lookup now that we have both tags
+                if let Some(tuple) = dialog.dialog_id_tuple() {
+                    use crate::manager::utils::DialogUtils;
+                    let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
+                    self.dialog_handle.dialog_manager.dialog_lookup.insert(key, dialog.id.clone());
+                    info!("Updated dialog lookup for confirmed dialog {}", dialog.id);
+                }
             }
         }
         

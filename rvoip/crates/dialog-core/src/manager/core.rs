@@ -142,8 +142,11 @@ impl DialogManager {
                                     error!("Failed to process transaction event for dialog {}: {}", dialog_id, e);
                                 }
                             } else {
-                                // Event for transaction not associated with any dialog - could be standalone or server transaction
-                                debug!("Received transaction event not associated with any dialog: {:?}", event);
+                                // Event for transaction not associated with any dialog
+                                // Check if this is a new incoming INVITE that should create a dialog
+                                if let Err(e) = self.handle_unassociated_transaction_event(&transaction_id, event).await {
+                                    error!("Failed to handle unassociated transaction event {}: {}", transaction_id, e);
+                                }
                             }
                         },
                         None => {
@@ -199,6 +202,37 @@ impl DialogManager {
     /// Find dialog associated with a transaction event
     fn find_dialog_for_transaction_event(&self, transaction_id: &TransactionKey) -> Option<DialogId> {
         self.transaction_to_dialog.get(transaction_id).map(|entry| entry.clone())
+    }
+    
+    /// Handle transaction events not associated with any existing dialog
+    /// 
+    /// This handles new incoming requests that should create dialogs.
+    async fn handle_unassociated_transaction_event(&self, transaction_id: &TransactionKey, event: TransactionEvent) -> DialogResult<()> {
+        match event {
+            TransactionEvent::InviteRequest { request, source, .. } => {
+                println!("🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}", source);
+                debug!("Processing new incoming INVITE request from transaction {}", transaction_id);
+                
+                // This is a new incoming INVITE - create dialog and process it
+                self.handle_initial_invite(transaction_id.clone(), request, source).await?;
+                
+                debug!("Successfully processed new incoming INVITE from {}", source);
+                Ok(())
+            },
+            
+            TransactionEvent::NonInviteRequest { request, source, .. } => {
+                debug!("Processing new incoming {} request from transaction {}", request.method(), transaction_id);
+                
+                // Handle non-INVITE requests (REGISTER, OPTIONS, etc.)
+                self.handle_request(request, source).await
+            },
+            
+            _ => {
+                // Other unassociated events (responses, timeouts, etc.) - just log them
+                debug!("Received unassociated transaction event: {:?}", event);
+                Ok(())
+            }
+        }
     }
     
     /// Get the configured local address
@@ -275,11 +309,16 @@ impl DialogManager {
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+            println!("🚀 DIALOG-CORE: About to send session coordination event: {:?}", event);
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
+                println!("❌ DIALOG-CORE: Failed to send session coordination event: {}", e);
             } else {
                 debug!("Emitted session coordination event: {:?}", event);
+                println!("✅ DIALOG-CORE: Successfully sent session coordination event");
             }
+        } else {
+            println!("⚠️ DIALOG-CORE: No session coordinator set, dropping event: {:?}", event);
         }
     }
     

@@ -85,23 +85,24 @@ impl SessionManager {
     /// Initialize the session manager and all subsystems
     async fn initialize(&self, mut session_events_rx: mpsc::Receiver<SessionCoordinationEvent>) -> Result<()> {
         // Set up session coordination with dialog-core
+        println!("🔗 SETUP: Setting up session coordination with dialog-core");
         self.dialog_api.set_session_coordinator(self.session_events_tx.clone())
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to set session coordinator: {}", e)))?;
+        println!("✅ SETUP: Session coordination setup complete");
 
         // Spawn task to handle session coordination events
-        let manager = Arc::downgrade(&Arc::new(self.clone()));
+        println!("🎬 SPAWN: Starting session coordination event loop");
+        let manager = self.clone();
         tokio::spawn(async move {
+            println!("📡 EVENT LOOP: Session coordination event loop started");
             while let Some(event) = session_events_rx.recv().await {
-                if let Some(manager) = manager.upgrade() {
-                    if let Err(e) = manager.handle_session_coordination_event(event).await {
-                        tracing::error!("Error handling session coordination event: {}", e);
-                    }
-                } else {
-                    // Manager has been dropped, exit the task
-                    break;
+                println!("📨 EVENT LOOP: Received session coordination event in background task");
+                if let Err(e) = manager.handle_session_coordination_event(event).await {
+                    tracing::error!("Error handling session coordination event: {}", e);
                 }
             }
+            println!("🏁 EVENT LOOP: Session coordination event loop ended");
         });
 
         tracing::info!("SessionManager initialized on port {}", self.config.sip_port);
@@ -338,6 +339,7 @@ impl SessionManager {
 
     /// Handle session coordination events from dialog-core
     async fn handle_session_coordination_event(&self, event: SessionCoordinationEvent) -> Result<()> {
+        println!("🎪 SESSION COORDINATION: Received event: {:?}", event);
         match event {
             SessionCoordinationEvent::IncomingCall { dialog_id, transaction_id, request, source } => {
                 // Extract From and To headers - simplified for now
@@ -456,6 +458,35 @@ impl SessionManager {
                         },
                     }
                 }
+            },
+            
+            SessionCoordinationEvent::ResponseReceived { dialog_id, response, transaction_id } => {
+                println!("🎯 SESSION COORDINATION: Received response {} for dialog {}", response.status_code(), dialog_id);
+                
+                // Check if this is a 200 OK response to an INVITE that needs an ACK
+                if response.status_code() == 200 && transaction_id.to_string().contains("INVITE") && transaction_id.to_string().contains("client") {
+                    println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
+                    
+                    // Send ACK for 2xx response using the proper dialog-core API
+                    // We need to access the dialog manager directly since CallHandle doesn't expose ACK
+                    if let Ok(dialog_handle) = self.dialog_api.get_dialog_handle(&dialog_id).await {
+                        // Get the underlying dialog manager from the unified API
+                        // We'll call the send_ack_for_2xx_response method directly
+                        match self.dialog_api.send_ack_for_2xx_response(&dialog_id, &transaction_id, &response).await {
+                            Ok(_) => {
+                                println!("✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response");
+                                tracing::info!("ACK sent successfully for dialog {} transaction {}", dialog_id, transaction_id);
+                            },
+                            Err(e) => {
+                                println!("❌ SESSION COORDINATION: Failed to send ACK: {}", e);
+                                tracing::error!("Failed to send ACK for dialog {} transaction {}: {}", dialog_id, transaction_id, e);
+                            }
+                        }
+                    }
+                }
+                
+                // Continue with other response processing...
+                tracing::debug!("Response {} received for dialog {}", response.status_code(), dialog_id);
             },
             
             SessionCoordinationEvent::CallAnswered { dialog_id, session_answer } => {

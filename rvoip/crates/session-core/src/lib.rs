@@ -9,7 +9,6 @@ pub mod session;
 pub mod manager;
 pub mod coordination;
 pub mod bridge;
-pub mod events;
 
 // Core error types
 mod errors;
@@ -25,7 +24,7 @@ pub use manager::SessionManager;
 pub mod prelude {
     pub use crate::api::*;
     pub use crate::errors::{SessionError, Result};
-    pub use crate::events::{SessionEvent, EventBus};
+    pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
     pub use crate::manager::SessionManager;
 }
 
