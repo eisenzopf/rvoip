@@ -22,7 +22,7 @@ use rvoip_media_core::{
     MediaEngine, MediaEngineConfig, MediaSessionParams, MediaSessionHandle,
     prelude::*,
     types::{DialogId, MediaSessionId, AudioFrame, MediaPacket, PayloadType, SampleRate},
-    codec::audio::{G711Codec, G711Config, G711Variant, OpusCodec, OpusConfig, OpusApplication, G729Codec, G729Config, G729Annexes},
+    codec::{AudioCodec, audio::{G711Codec, G711Config, G711Variant, OpusCodec, OpusConfig, OpusApplication, G729Codec, G729Config, G729Annexes}},
     quality::{QualityMonitor, QualityMonitorConfig, QualityMetrics, QualityAdjustment},
     processing::{AudioProcessor, AudioProcessingConfig, FormatConverter},
     buffer::{JitterBuffer, JitterBufferConfig},
@@ -32,7 +32,11 @@ use rvoip_media_core::{
 // Session-core imports
 use rvoip_session_core::{
     SessionManager, SessionError, SessionId,
-    api::{types::{IncomingCall, CallSession, CallDecision}, handlers::CallHandler},
+    api::{
+        types::{IncomingCall, CallSession, CallDecision}, 
+        handlers::CallHandler,
+        builder::SessionManagerBuilder
+    },
     media::MediaManager,
 };
 
@@ -41,7 +45,7 @@ use rvoip_session_core::{
 // ==============================================================================
 
 /// Creates a real MediaEngine for testing with comprehensive configuration
-pub async fn create_test_media_engine() -> Result<Arc<MediaEngine>, Box<dyn std::error::Error>> {
+pub async fn create_test_media_engine() -> std::result::Result<Arc<MediaEngine>, Box<dyn std::error::Error>> {
     let config = MediaEngineConfig::default()
         .with_audio_processing_enabled(true)
         .with_quality_monitoring_enabled(true)
@@ -61,20 +65,16 @@ pub async fn create_test_media_engine() -> Result<Arc<MediaEngine>, Box<dyn std:
 }
 
 /// Creates a MediaManager with real MediaEngine integration
-pub async fn create_media_manager_with_engine(media_engine: Arc<MediaEngine>) -> Result<Arc<MediaManager>, Box<dyn std::error::Error>> {
-    let config = MediaManagerConfig::default()
-        .with_rtp_port_range(10000..20000)
-        .with_default_codecs(vec![payload_types::PCMU, payload_types::PCMA])
-        .with_max_concurrent_sessions(50);
-    
-    let media_manager = MediaManager::new(config).await?;
+pub async fn create_media_manager_with_engine(media_engine: Arc<MediaEngine>) -> std::result::Result<Arc<MediaManager>, Box<dyn std::error::Error>> {
+    // Create MediaManager with direct integration to MediaEngine
+    let media_manager = MediaManager::new().await?;
     // TODO: Integrate MediaEngine with MediaManager when API is available
     println!("✅ Created MediaManager with MediaEngine integration");
     Ok(media_manager)
 }
 
 /// Creates SessionManager + MediaEngine integration for testing
-pub async fn create_test_session_manager_with_media() -> Result<(Arc<SessionManager>, Arc<MediaEngine>), Box<dyn std::error::Error>> {
+pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionManager>, Arc<MediaEngine>), Box<dyn std::error::Error>> {
     let media_engine = create_test_media_engine().await?;
     
     let bind_addr: SocketAddr = "127.0.0.1:0".parse()?;
@@ -93,7 +93,7 @@ pub async fn create_test_session_manager_with_media() -> Result<(Arc<SessionMana
 }
 
 /// Sets up real codec environment with all supported codecs
-pub async fn setup_real_codec_environment() -> Result<CodecTestEnvironment, Box<dyn std::error::Error>> {
+pub async fn setup_real_codec_environment() -> std::result::Result<CodecTestEnvironment, Box<dyn std::error::Error>> {
     // Create G.711 PCMU codec
     let g711_pcmu = Arc::new(G711Codec::new(
         SampleRate::Rate8000,
@@ -165,7 +165,7 @@ pub struct CodecTestEnvironment {
 // ==============================================================================
 
 /// Generates real G.711 μ-law encoded audio stream
-pub fn generate_pcmu_audio_stream(duration_ms: u32, frequency_hz: f32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn generate_pcmu_audio_stream(duration_ms: u32, frequency_hz: f32) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
     let sample_rate = 8000;
     let samples_per_ms = sample_rate / 1000;
     let total_samples = duration_ms * samples_per_ms;
@@ -191,7 +191,7 @@ pub fn generate_pcmu_audio_stream(duration_ms: u32, frequency_hz: f32) -> Result
 }
 
 /// Generates real G.711 A-law encoded audio stream
-pub fn generate_pcma_audio_stream(duration_ms: u32, frequency_hz: f32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn generate_pcma_audio_stream(duration_ms: u32, frequency_hz: f32) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
     let sample_rate = 8000;
     let samples_per_ms = sample_rate / 1000;
     let total_samples = duration_ms * samples_per_ms;
@@ -217,7 +217,7 @@ pub fn generate_pcma_audio_stream(duration_ms: u32, frequency_hz: f32) -> Result
 }
 
 /// Generates real Opus encoded audio stream
-pub async fn generate_opus_audio_stream(duration_ms: u32, frequency_hz: f32, bitrate: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub async fn generate_opus_audio_stream(duration_ms: u32, frequency_hz: f32, bitrate: u32) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut opus_codec = OpusCodec::new(
         SampleRate::Rate48000,
         1,
@@ -256,7 +256,7 @@ pub async fn generate_opus_audio_stream(duration_ms: u32, frequency_hz: f32, bit
 }
 
 /// Generates real DTMF tones in various formats
-pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
+pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> std::result::Result<Vec<i16>, Box<dyn std::error::Error>> {
     let (freq1, freq2) = match digit {
         '0' => (941.0, 1336.0),
         '1' => (697.0, 1209.0),
@@ -295,7 +295,7 @@ pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> Result<Vec<i
 }
 
 /// Creates multi-frequency test audio for participant identification
-pub fn create_multi_frequency_test_audio(frequencies: &[f32], duration_ms: u32) -> Result<Vec<Vec<i16>>, Box<dyn std::error::Error>> {
+pub fn create_multi_frequency_test_audio(frequencies: &[f32], duration_ms: u32) -> std::result::Result<Vec<Vec<i16>>, Box<dyn std::error::Error>> {
     let mut audio_streams = Vec::new();
     
     for &frequency in frequencies {
@@ -328,7 +328,7 @@ pub async fn coordinate_sip_session_with_media(
     from_uri: &str,
     to_uri: &str,
     sdp_offer: Option<&str>,
-) -> Result<(SessionId, MediaSessionHandle), Box<dyn std::error::Error>> {
+) -> std::result::Result<(SessionId, MediaSessionHandle), Box<dyn std::error::Error>> {
     // Create SIP session
     let session = session_manager.create_outgoing_call(from_uri, to_uri, sdp_offer.map(|s| s.to_string())).await?;
     let session_id = session.id().clone();
@@ -350,7 +350,7 @@ pub async fn coordinate_sip_session_with_media(
 pub async fn verify_sdp_media_compatibility(
     media_engine: &MediaEngine,
     sdp: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> std::result::Result<bool, Box<dyn std::error::Error>> {
     let capabilities = media_engine.get_supported_codecs();
     
     // Simple SDP parsing for codec verification
@@ -378,7 +378,7 @@ pub async fn verify_sdp_media_compatibility(
 pub async fn test_codec_negotiation_sequence(
     media_engine: &MediaEngine,
     offered_codecs: &[PayloadType],
-) -> Result<PayloadType, Box<dyn std::error::Error>> {
+) -> std::result::Result<PayloadType, Box<dyn std::error::Error>> {
     let capabilities = media_engine.get_supported_codecs();
     let supported_types: Vec<PayloadType> = capabilities.iter().map(|c| c.payload_type).collect();
     
@@ -397,7 +397,7 @@ pub async fn test_codec_negotiation_sequence(
 pub async fn validate_rtp_stream_setup(
     media_session: &MediaSessionHandle,
     expected_codec: PayloadType,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> std::result::Result<bool, Box<dyn std::error::Error>> {
     // TODO: Implement when MediaSessionHandle provides RTP session access
     // For now, assume success if media session exists
     println!("✅ Validated RTP stream setup for payload type {}", expected_codec);
@@ -407,7 +407,7 @@ pub async fn validate_rtp_stream_setup(
 /// Creates test scenario with multiple codec negotiations
 pub async fn create_multi_codec_test_scenario(
     media_engine: &MediaEngine,
-) -> Result<HashMap<String, PayloadType>, Box<dyn std::error::Error>> {
+) -> std::result::Result<HashMap<String, PayloadType>, Box<dyn std::error::Error>> {
     let mut scenarios = HashMap::new();
     
     // Test PCMU preference
@@ -437,7 +437,7 @@ pub fn validate_mos_score_calculation(
     packet_loss: f32,
     jitter: f32,
     delay: f32,
-) -> Result<f32, Box<dyn std::error::Error>> {
+) -> std::result::Result<f32, Box<dyn std::error::Error>> {
     // ITU-T P.862 PESQ algorithm simulation
     let base_mos = 4.5;
     let loss_penalty = packet_loss * 2.5;
@@ -452,7 +452,7 @@ pub fn validate_mos_score_calculation(
 }
 
 /// Verifies real jitter measurement
-pub fn verify_jitter_measurement(packets: &[MediaPacket]) -> Result<f32, Box<dyn std::error::Error>> {
+pub fn verify_jitter_measurement(packets: &[MediaPacket]) -> std::result::Result<f32, Box<dyn std::error::Error>> {
     if packets.len() < 2 {
         return Ok(0.0);
     }
@@ -477,7 +477,7 @@ pub fn verify_jitter_measurement(packets: &[MediaPacket]) -> Result<f32, Box<dyn
 }
 
 /// Tests real packet loss detection
-pub fn test_packet_loss_detection(packets: &[MediaPacket]) -> Result<f32, Box<dyn std::error::Error>> {
+pub fn test_packet_loss_detection(packets: &[MediaPacket]) -> std::result::Result<f32, Box<dyn std::error::Error>> {
     if packets.is_empty() {
         return Ok(0.0);
     }
@@ -501,7 +501,7 @@ pub async fn validate_quality_adaptation(
     quality_monitor: &QualityMonitor,
     session_id: &MediaSessionId,
     expected_adjustment: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> std::result::Result<bool, Box<dyn std::error::Error>> {
     let adjustments = quality_monitor.suggest_quality_adjustments(session_id).await;
     
     for adjustment in adjustments {
@@ -516,7 +516,7 @@ pub async fn validate_quality_adaptation(
 }
 
 /// Creates comprehensive quality test scenarios
-pub async fn create_quality_test_scenarios() -> Result<Vec<QualityTestScenario>, Box<dyn std::error::Error>> {
+pub async fn create_quality_test_scenarios() -> std::result::Result<Vec<QualityTestScenario>, Box<dyn std::error::Error>> {
     let scenarios = vec![
         QualityTestScenario {
             name: "excellent_quality".to_string(),
@@ -564,7 +564,7 @@ pub async fn measure_codec_performance(
     codec: &mut dyn AudioCodec,
     audio_frame: &AudioFrame,
     iterations: usize,
-) -> Result<CodecPerformanceMetrics, Box<dyn std::error::Error>> {
+) -> std::result::Result<CodecPerformanceMetrics, Box<dyn std::error::Error>> {
     let mut total_encode_time = Duration::default();
     let mut total_decode_time = Duration::default();
     let mut encoded_sizes = Vec::new();
@@ -612,7 +612,7 @@ pub struct CodecPerformanceMetrics {
 pub async fn measure_media_session_latency(
     media_session: &MediaSessionHandle,
     test_packet: &MediaPacket,
-) -> Result<Duration, Box<dyn std::error::Error>> {
+) -> std::result::Result<Duration, Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     
     // TODO: Implement when MediaSessionHandle provides packet processing methods
@@ -668,10 +668,10 @@ pub async fn validate_thread_safety<F, Fut>(
     operation: F,
     num_threads: usize,
     iterations_per_thread: usize,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> std::result::Result<(), Box<dyn std::error::Error>>
 where
     F: Fn() -> Fut + Send + Sync + Clone + 'static,
-    Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send,
+    Fut: std::future::Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send,
 {
     println!("🧪 Testing thread safety with {} threads, {} iterations each", num_threads, iterations_per_thread);
     

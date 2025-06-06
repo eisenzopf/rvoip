@@ -2,66 +2,69 @@
 //!
 //! Simple functions for controlling active calls (hold, transfer, terminate, etc.).
 
+use std::sync::Arc;
 use crate::api::types::{CallSession, CallState};
+use crate::manager::SessionManager;
 use crate::errors::Result;
 
 /// Put a call on hold
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The active call session to hold
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
-/// hold_call(&call).await?;
-/// assert_eq!(call.state(), &CallState::OnHold);
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
+/// hold_call(&manager, &call).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn hold_call(session: &CallSession) -> Result<()> {
+pub async fn hold_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
     if !session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot hold call in state: {:?}", session.state)
         ));
     }
 
-    session.manager.hold_session(&session.id).await
+    session_manager.hold_session(&session.id).await
 }
 
 /// Resume a call from hold
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The held call session to resume
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// // First hold the call
-/// hold_call(&call).await?;
+/// hold_call(&manager, &call).await?;
 /// 
 /// // Then resume it
-/// resume_call(&call).await?;
-/// assert_eq!(call.state(), &CallState::Active);
+/// resume_call(&manager, &call).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn resume_call(session: &CallSession) -> Result<()> {
+pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
     if !matches!(session.state, CallState::OnHold) {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot resume call not on hold: {:?}", session.state)
         ));
     }
 
-    session.manager.resume_session(&session.id).await
+    session_manager.resume_session(&session.id).await
 }
 
 /// Transfer a call to another destination
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The active call session to transfer
 /// * `target` - The destination URI to transfer to (e.g., "sip:bob@example.com")
 /// 
@@ -69,47 +72,48 @@ pub async fn resume_call(session: &CallSession) -> Result<()> {
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
-/// transfer_call(&call, "sip:transferee@example.com").await?;
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
+/// transfer_call(&manager, &call, "sip:transferee@example.com").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn transfer_call(session: &CallSession, target: &str) -> Result<()> {
+pub async fn transfer_call(session_manager: &Arc<SessionManager>, session: &CallSession, target: &str) -> Result<()> {
     if !session.state.is_in_progress() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot transfer call in state: {:?}", session.state)
         ));
     }
 
-    session.manager.transfer_session(&session.id, target).await
+    session_manager.transfer_session(&session.id, target).await
 }
 
 /// Terminate a call
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The call session to terminate
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
-/// terminate_call(&call).await?;
-/// assert!(call.state().is_final());
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
+/// terminate_call(&manager, &call).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn terminate_call(session: &CallSession) -> Result<()> {
+pub async fn terminate_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
     if session.state.is_final() {
         return Ok(()); // Already terminated
     }
 
-    session.manager.terminate_session(&session.id).await
+    session_manager.terminate_session(&session.id).await
 }
 
 /// Send DTMF tones to the call
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The active call session
 /// * `digits` - The DTMF digits to send (e.g., "123*#")
 /// 
@@ -117,87 +121,91 @@ pub async fn terminate_call(session: &CallSession) -> Result<()> {
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
-/// send_dtmf(&call, "123").await?;
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
+/// send_dtmf(&manager, &call, "123").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn send_dtmf(session: &CallSession, digits: &str) -> Result<()> {
+pub async fn send_dtmf(session_manager: &Arc<SessionManager>, session: &CallSession, digits: &str) -> Result<()> {
     if !session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot send DTMF on inactive call: {:?}", session.state)
         ));
     }
 
-    session.manager.send_dtmf(&session.id, digits).await
+    session_manager.send_dtmf(&session.id, digits).await
 }
 
 /// Mute the call (stop sending audio)
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The active call session to mute
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
-/// mute_call(&call).await?;
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
+/// mute_call(&manager, &call).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn mute_call(session: &CallSession) -> Result<()> {
+pub async fn mute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
     if !session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot mute inactive call: {:?}", session.state)
         ));
     }
 
-    session.manager.mute_session(&session.id, true).await
+    session_manager.mute_session(&session.id, true).await
 }
 
 /// Unmute the call (resume sending audio)
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The muted call session to unmute
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession) -> Result<()> {
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// // First mute
-/// mute_call(&call).await?;
+/// mute_call(&manager, &call).await?;
 /// 
 /// // Then unmute
-/// unmute_call(&call).await?;
+/// unmute_call(&manager, &call).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn unmute_call(session: &CallSession) -> Result<()> {
+pub async fn unmute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
     if !session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot unmute inactive call: {:?}", session.state)
         ));
     }
 
-    session.manager.mute_session(&session.id, false).await
+    session_manager.mute_session(&session.id, false).await
 }
 
 /// Get media information for the call
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The call session to get media info for
 /// 
 /// # Returns
 /// Media information including SDP, ports, and codec details
-pub async fn get_media_info(session: &CallSession) -> Result<crate::api::types::MediaInfo> {
-    session.manager.get_media_info(&session.id).await
+pub async fn get_media_info(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<crate::api::types::MediaInfo> {
+    session_manager.get_media_info(&session.id).await
 }
 
 /// Update the media session (e.g., add/remove streams)
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session` - The call session to update
 /// * `new_sdp` - The new SDP offer/answer
 /// 
@@ -205,17 +213,17 @@ pub async fn get_media_info(session: &CallSession) -> Result<crate::api::types::
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
-/// # async fn example(call: CallSession, sdp: String) -> Result<()> {
-/// update_media(&call, &sdp).await?;
+/// # async fn example(manager: Arc<SessionManager>, call: CallSession, sdp: String) -> Result<()> {
+/// update_media(&manager, &call, &sdp).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn update_media(session: &CallSession, new_sdp: &str) -> Result<()> {
+pub async fn update_media(session_manager: &Arc<SessionManager>, session: &CallSession, new_sdp: &str) -> Result<()> {
     if !session.state.is_in_progress() {
         return Err(crate::errors::SessionError::InvalidState(
             format!("Cannot update media for call in state: {:?}", session.state)
         ));
     }
 
-    session.manager.update_media(&session.id, new_sdp).await
+    session_manager.update_media(&session.id, new_sdp).await
 } 

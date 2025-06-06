@@ -67,7 +67,7 @@ pub mod websocket_bridge {
                 }
                 "hangup" => {
                     if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        terminate_call(&call).await?;
+                        terminate_call(&session_mgr, &call).await?;
                         ws.send(json!({ 
                             "type": "call_ended",
                             "call_id": call.id().as_str() 
@@ -76,7 +76,7 @@ pub mod websocket_bridge {
                 }
                 "hold" => {
                     if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        hold_call(&call).await?;
+                        hold_call(&session_mgr, &call).await?;
                         ws.send(json!({ 
                             "type": "call_held",
                             "call_id": call.id().as_str() 
@@ -85,7 +85,7 @@ pub mod websocket_bridge {
                 }
                 "resume" => {
                     if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        resume_call(&call).await?;
+                        resume_call(&session_mgr, &call).await?;
                         ws.send(json!({ 
                             "type": "call_resumed",
                             "call_id": call.id().as_str() 

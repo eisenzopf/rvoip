@@ -125,7 +125,7 @@ pub fn create_incoming_call(
 /// Helper function to create a CallSession from an accepted IncomingCall
 pub fn create_call_session(
     incoming: &IncomingCall,
-    manager: Arc<SessionManager>,
+    _manager: Arc<SessionManager>,
 ) -> CallSession {
     CallSession {
         id: incoming.id.clone(),
@@ -133,7 +133,6 @@ pub fn create_call_session(
         to: incoming.to.clone(),
         state: CallState::Initiating,
         started_at: Some(std::time::Instant::now()),
-        manager,
     }
 }
 

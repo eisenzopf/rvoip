@@ -37,7 +37,6 @@ pub struct CallSession {
     pub to: String,
     pub state: CallState,
     pub started_at: Option<Instant>,
-    pub manager: Arc<crate::manager::SessionManager>,
 }
 
 impl CallSession {
@@ -63,23 +62,39 @@ impl CallSession {
     }
 
     /// Hold the call
+    /// Note: Use SessionManager::hold_session() method instead
     pub async fn hold(&self) -> Result<()> {
-        crate::api::control::hold_call(self).await
+        // This method now requires the caller to use SessionManager directly
+        Err(crate::errors::SessionError::Other(
+            "Use SessionManager::hold_session() method instead".to_string()
+        ))
     }
 
     /// Resume the call from hold
+    /// Note: Use SessionManager::resume_session() method instead
     pub async fn resume(&self) -> Result<()> {
-        crate::api::control::resume_call(self).await
+        // This method now requires the caller to use SessionManager directly
+        Err(crate::errors::SessionError::Other(
+            "Use SessionManager::resume_session() method instead".to_string()
+        ))
     }
 
     /// Transfer the call to another destination
+    /// Note: Use SessionManager::transfer_session() method instead
     pub async fn transfer(&self, target: &str) -> Result<()> {
-        crate::api::control::transfer_call(self, target).await
+        // This method now requires the caller to use SessionManager directly
+        Err(crate::errors::SessionError::Other(
+            "Use SessionManager::transfer_session() method instead".to_string()
+        ))
     }
 
     /// Terminate the call
+    /// Note: Use SessionManager::terminate_session() method instead
     pub async fn terminate(&self) -> Result<()> {
-        crate::api::control::terminate_call(self).await
+        // This method now requires the caller to use SessionManager directly
+        Err(crate::errors::SessionError::Other(
+            "Use SessionManager::terminate_session() method instead".to_string()
+        ))
     }
 }
 

@@ -141,7 +141,6 @@ impl SessionDialogCoordinator {
             to: to_uri.clone(),
             state: CallState::Ringing,
             started_at: Some(std::time::Instant::now()),
-            manager: Arc::new(self.create_mock_manager()), // TODO: Fix this circular dependency
         };
         
         self.registry.register_session(session_id.clone(), call_session.clone()).await
@@ -355,13 +354,7 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
-    /// Create a mock manager for circular dependency resolution
-    /// TODO: Fix this properly by restructuring dependencies
-    fn create_mock_manager(&self) -> crate::manager::SessionManager {
-        // This is a temporary hack to resolve circular dependency
-        // In the real implementation, this would be handled differently
-        todo!("Fix circular dependency between coordinator and manager")
-    }
+
 }
 
 impl Clone for SessionDialogCoordinator {

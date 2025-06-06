@@ -184,7 +184,6 @@ impl SessionManager {
             to: to.to_string(),
             state: crate::api::types::CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
-            manager: Arc::new(self.clone()),
         };
 
         // Register the session
