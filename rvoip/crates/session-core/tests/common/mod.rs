@@ -10,6 +10,10 @@
 pub mod media_test_utils;
 pub use media_test_utils::*;
 
+// Re-export bridge test utilities
+pub mod bridge_test_utils;
+pub use bridge_test_utils::*;
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicU16, Ordering};
