@@ -133,6 +133,8 @@ pub enum CallState {
     Terminating,
     /// Call has ended
     Terminated,
+    /// Call was cancelled (487 Request Terminated)
+    Cancelled,
     /// Call failed or was rejected
     Failed(String),
 }
@@ -140,7 +142,7 @@ pub enum CallState {
 impl CallState {
     /// Check if this is a final state (call is over)
     pub fn is_final(&self) -> bool {
-        matches!(self, CallState::Terminated | CallState::Failed(_))
+        matches!(self, CallState::Terminated | CallState::Cancelled | CallState::Failed(_))
     }
 
     /// Check if the call is in progress

@@ -6,10 +6,11 @@
 
 pub mod api;
 pub mod session;
-pub mod manager;
+pub mod dialog;        // NEW - dialog-core integration
+pub mod media;         // EXISTING - media-core integration
+pub mod manager;       // SIMPLIFIED - orchestration only
 pub mod coordination;
 pub mod bridge;
-pub mod media;
 
 // Core error types
 mod errors;
@@ -27,6 +28,7 @@ pub mod prelude {
     pub use crate::errors::{SessionError, Result};
     pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
     pub use crate::manager::SessionManager;
+    pub use crate::dialog::DialogManager;  // NEW
 }
 
 #[cfg(test)]
