@@ -31,12 +31,12 @@ impl CallHandler for TransferTestHandler {
 }
 
 /// Create a test session manager for transfer testing
-async fn create_transfer_test_manager() -> Result<Arc<SessionManager>, SessionError> {
+async fn create_transfer_test_manager(port: u16) -> Result<Arc<SessionManager>, SessionError> {
     let handler = Arc::new(TransferTestHandler);
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0)
+        .with_sip_port(port)
         .with_from_uri("sip:transfer@localhost")
         .with_handler(handler)
         .build()
@@ -45,7 +45,7 @@ async fn create_transfer_test_manager() -> Result<Arc<SessionManager>, SessionEr
 
 #[tokio::test]
 async fn test_basic_call_transfer() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5080).await.unwrap();
     manager.start().await.unwrap();
     
     // Create an outgoing call
@@ -70,7 +70,7 @@ async fn test_basic_call_transfer() {
 
 #[tokio::test]
 async fn test_transfer_nonexistent_session() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5081).await.unwrap();
     manager.start().await.unwrap();
     
     let fake_session_id = SessionId::new();
@@ -83,7 +83,7 @@ async fn test_transfer_nonexistent_session() {
 
 #[tokio::test]
 async fn test_transfer_to_various_targets() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5082).await.unwrap();
     manager.start().await.unwrap();
     
     let call = manager.create_outgoing_call(
@@ -117,7 +117,7 @@ async fn test_transfer_to_various_targets() {
 
 #[tokio::test]
 async fn test_multiple_concurrent_transfers() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5083).await.unwrap();
     manager.start().await.unwrap();
     
     // Create multiple calls
@@ -149,7 +149,7 @@ async fn test_multiple_concurrent_transfers() {
 
 #[tokio::test]
 async fn test_transfer_after_other_operations() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5084).await.unwrap();
     manager.start().await.unwrap();
     
     let call = manager.create_outgoing_call(
@@ -179,7 +179,7 @@ async fn test_transfer_after_other_operations() {
 
 #[tokio::test]
 async fn test_rapid_transfer_requests() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5085).await.unwrap();
     manager.start().await.unwrap();
     
     let call = manager.create_outgoing_call(
@@ -211,7 +211,7 @@ async fn test_rapid_transfer_requests() {
 
 #[tokio::test]
 async fn test_transfer_with_session_stats() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5086).await.unwrap();
     manager.start().await.unwrap();
     
     // Create a call
@@ -244,7 +244,7 @@ async fn test_transfer_with_session_stats() {
 
 #[tokio::test]
 async fn test_transfer_then_terminate() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5087).await.unwrap();
     manager.start().await.unwrap();
     
     let call = manager.create_outgoing_call(
@@ -288,7 +288,7 @@ async fn test_transfer_then_terminate() {
 
 #[tokio::test]
 async fn test_transfer_edge_cases() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5088).await.unwrap();
     manager.start().await.unwrap();
     
     let call = manager.create_outgoing_call(
@@ -320,7 +320,7 @@ async fn test_transfer_edge_cases() {
 
 #[tokio::test]
 async fn test_transfer_stress_test() {
-    let manager = create_transfer_test_manager().await.unwrap();
+    let manager = create_transfer_test_manager(5089).await.unwrap();
     manager.start().await.unwrap();
     
     // Create many calls and transfer them concurrently

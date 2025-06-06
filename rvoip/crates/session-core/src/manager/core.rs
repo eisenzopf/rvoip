@@ -218,6 +218,11 @@ impl SessionManager {
 
     /// Hold a session
     pub async fn hold_session(&self, session_id: &SessionId) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Hold session using DialogManager (high-level delegation)
         self.dialog_manager
             .hold_session(session_id)
@@ -230,6 +235,11 @@ impl SessionManager {
 
     /// Resume a session from hold
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Resume session using DialogManager (high-level delegation)
         self.dialog_manager
             .resume_session(session_id)
@@ -242,6 +252,11 @@ impl SessionManager {
 
     /// Transfer a session to another destination
     pub async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Transfer session using DialogManager (high-level delegation)
         self.dialog_manager
             .transfer_session(session_id, target)
@@ -254,6 +269,11 @@ impl SessionManager {
 
     /// Terminate a session
     pub async fn terminate_session(&self, session_id: &SessionId) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Terminate session using DialogManager (high-level delegation)
         self.dialog_manager
             .terminate_session(session_id)
@@ -269,6 +289,11 @@ impl SessionManager {
 
     /// Send DTMF tones
     pub async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Send DTMF using DialogManager (high-level delegation)
         self.dialog_manager
             .send_dtmf(session_id, digits)
@@ -304,6 +329,11 @@ impl SessionManager {
 
     /// Update media for a session
     pub async fn update_media(&self, session_id: &SessionId, sdp: &str) -> Result<()> {
+        // Check if session exists first
+        if self.registry.get_session(session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::session_not_found(&session_id.0));
+        }
+        
         // Update media using DialogManager (high-level delegation)
         self.dialog_manager
             .update_media(session_id, sdp)

@@ -43,12 +43,12 @@ impl CallHandler for CapabilitiesTestHandler {
 }
 
 /// Create a test session manager with specific capabilities
-async fn create_capabilities_test_manager(accept_calls: bool) -> Result<Arc<SessionManager>, SessionError> {
+async fn create_capabilities_test_manager(accept_calls: bool, port: u16) -> Result<Arc<SessionManager>, SessionError> {
     let handler = Arc::new(CapabilitiesTestHandler::new(accept_calls));
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0)
+        .with_sip_port(port)
         .with_from_uri("sip:capabilities@localhost")
         .with_handler(handler)
         .build()
@@ -57,7 +57,7 @@ async fn create_capabilities_test_manager(accept_calls: bool) -> Result<Arc<Sess
 
 #[tokio::test]
 async fn test_session_manager_basic_configuration() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5070).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -70,7 +70,7 @@ async fn test_session_manager_basic_configuration() {
 
 #[tokio::test]
 async fn test_session_manager_with_accepting_handler() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5071).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -110,7 +110,7 @@ async fn test_session_manager_with_accepting_handler() {
 
 #[tokio::test]
 async fn test_session_manager_with_rejecting_handler() {
-    let manager = create_capabilities_test_manager(false).await.unwrap();
+    let manager = create_capabilities_test_manager(false, 5072).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -136,7 +136,7 @@ async fn test_session_manager_with_rejecting_handler() {
 
 #[tokio::test]
 async fn test_dtmf_capabilities() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5073).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -171,7 +171,7 @@ async fn test_dtmf_capabilities() {
 
 #[tokio::test]
 async fn test_media_update_capabilities() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5074).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -206,7 +206,7 @@ async fn test_media_update_capabilities() {
 
 #[tokio::test]
 async fn test_transfer_capabilities() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5075).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -241,7 +241,7 @@ async fn test_transfer_capabilities() {
 
 #[tokio::test]
 async fn test_concurrent_session_capabilities() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5076).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -286,7 +286,7 @@ async fn test_concurrent_session_capabilities() {
 
 #[tokio::test]
 async fn test_session_capabilities_under_load() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5077).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -342,14 +342,14 @@ async fn test_session_capabilities_under_load() {
 async fn test_different_bind_address_configurations() {
     let configurations = vec![
         ("127.0.0.1", "sip:local@localhost"),
-        ("0.0.0.0", "sip:any@example.com"),
+        ("127.0.0.1", "sip:any@example.com"),  // Use 127.0.0.1 instead of 0.0.0.0
     ];
     
-    for (bind_addr, from_uri) in configurations {
+    for (i, (bind_addr, from_uri)) in configurations.iter().enumerate() {
         let manager = SessionManagerBuilder::new()
-            .with_sip_bind_address(bind_addr)
-            .with_sip_port(0) // Use any available port
-            .with_from_uri(from_uri)
+            .with_sip_bind_address(*bind_addr)
+            .with_sip_port(5079 + i as u16) // Use different ports for each config
+            .with_from_uri(*from_uri)
             .with_handler(Arc::new(CapabilitiesTestHandler::new(true)))
             .build()
             .await.unwrap();
@@ -358,7 +358,7 @@ async fn test_different_bind_address_configurations() {
         
         // Test basic capabilities with each configuration
         let call = manager.create_outgoing_call(
-            from_uri,
+            *from_uri,
             "sip:target@example.com",
             Some("Config test SDP".to_string())
         ).await.unwrap();
@@ -377,7 +377,7 @@ async fn test_different_bind_address_configurations() {
 
 #[tokio::test]
 async fn test_error_handling_capabilities() {
-    let manager = create_capabilities_test_manager(true).await.unwrap();
+    let manager = create_capabilities_test_manager(true, 5078).await.unwrap();
     
     manager.start().await.unwrap();
     

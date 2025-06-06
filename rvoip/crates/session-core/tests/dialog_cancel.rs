@@ -57,7 +57,7 @@ async fn create_cancel_test_manager() -> Result<Arc<SessionManager>, SessionErro
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0) // Use any available port
+        .with_sip_port(5061) // Use specific test port
         .with_from_uri("sip:test@localhost")
         .with_handler(handler)
         .build()

@@ -32,12 +32,12 @@ impl CallHandler for RegistrationTestHandler {
 }
 
 /// Create a test session manager for registration testing
-async fn create_registration_test_manager() -> Result<Arc<SessionManager>, SessionError> {
+async fn create_registration_test_manager(port: u16) -> Result<Arc<SessionManager>, SessionError> {
     let handler = Arc::new(RegistrationTestHandler);
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0) // Use any available port
+        .with_sip_port(port)
         .with_from_uri("sip:test@localhost")
         .with_handler(handler)
         .build()
@@ -46,7 +46,7 @@ async fn create_registration_test_manager() -> Result<Arc<SessionManager>, Sessi
 
 #[tokio::test]
 async fn test_session_manager_startup_and_shutdown() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5090).await.unwrap();
     
     // Test startup
     let start_result = manager.start().await;
@@ -59,7 +59,7 @@ async fn test_session_manager_startup_and_shutdown() {
 
 #[tokio::test]
 async fn test_multiple_startup_shutdown_cycles() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5091).await.unwrap();
     
     // Test multiple startup/shutdown cycles
     for _ in 0..3 {
@@ -72,7 +72,7 @@ async fn test_multiple_startup_shutdown_cycles() {
 
 #[tokio::test]
 async fn test_session_manager_stats_during_registration() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5092).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -88,7 +88,7 @@ async fn test_session_manager_with_different_bind_addresses() {
     // Test with IPv4 loopback
     let manager1 = SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0)
+        .with_sip_port(5061)
         .with_from_uri("sip:test1@localhost")
         .with_handler(Arc::new(RegistrationTestHandler))
         .build()
@@ -99,8 +99,8 @@ async fn test_session_manager_with_different_bind_addresses() {
     
     // Test with different port specification
     let manager2 = SessionManagerBuilder::new()
-        .with_sip_bind_address("0.0.0.0")
-        .with_sip_port(0)
+        .with_sip_bind_address("127.0.0.1")  // Use 127.0.0.1 instead of 0.0.0.0
+        .with_sip_port(5093)
         .with_from_uri("sip:test2@localhost") 
         .with_handler(Arc::new(RegistrationTestHandler))
         .build()
@@ -119,11 +119,11 @@ async fn test_session_manager_with_different_from_uris() {
         "sip:service@localhost",
     ];
     
-    for from_uri in from_uris {
+    for (i, from_uri) in from_uris.iter().enumerate() {
         let manager = SessionManagerBuilder::new()
             .with_sip_bind_address("127.0.0.1")
-            .with_sip_port(0)
-            .with_from_uri(from_uri)
+            .with_sip_port(5094 + i as u16)
+            .with_from_uri(*from_uri)
             .with_handler(Arc::new(RegistrationTestHandler))
             .build()
             .await.unwrap();
@@ -141,7 +141,7 @@ async fn test_concurrent_session_managers() {
     for i in 0..3 {
         let manager = SessionManagerBuilder::new()
             .with_sip_bind_address("127.0.0.1")
-            .with_sip_port(0)
+            .with_sip_port(5098 + i as u16)
             .with_from_uri(&format!("sip:user{}@localhost", i))
             .with_handler(Arc::new(RegistrationTestHandler))
             .build()
@@ -187,7 +187,7 @@ async fn test_session_manager_error_handling() {
 
 #[tokio::test]
 async fn test_session_manager_double_start_protection() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5101).await.unwrap();
     
     // Start once
     manager.start().await.unwrap();
@@ -201,7 +201,7 @@ async fn test_session_manager_double_start_protection() {
 
 #[tokio::test]
 async fn test_session_manager_double_stop_protection() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5102).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -215,7 +215,7 @@ async fn test_session_manager_double_stop_protection() {
 
 #[tokio::test]
 async fn test_operations_on_stopped_manager() {
-    let manager = create_registration_test_manager().await.unwrap();
+    let manager = create_registration_test_manager(5103).await.unwrap();
     
     // Try operations without starting
     let stats_result = manager.get_stats().await;

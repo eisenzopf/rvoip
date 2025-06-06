@@ -57,12 +57,12 @@ impl CallHandler for SubscriptionTestHandler {
 }
 
 /// Create a test session manager for subscription testing
-async fn create_subscription_test_manager(behavior: HandlerBehavior) -> Result<Arc<SessionManager>, SessionError> {
+async fn create_subscription_test_manager(behavior: HandlerBehavior, port: u16) -> Result<Arc<SessionManager>, SessionError> {
     let handler = Arc::new(SubscriptionTestHandler::new(behavior));
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0)
+        .with_sip_port(port)
         .with_from_uri("sip:subscription@localhost")
         .with_handler(handler)
         .build()
@@ -71,7 +71,7 @@ async fn create_subscription_test_manager(behavior: HandlerBehavior) -> Result<A
 
 #[tokio::test]
 async fn test_session_manager_event_handling() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5110).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -104,7 +104,7 @@ async fn test_session_manager_event_handling() {
 
 #[tokio::test]
 async fn test_session_manager_with_accepting_behavior() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5111).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -129,7 +129,7 @@ async fn test_session_manager_with_accepting_behavior() {
 
 #[tokio::test]
 async fn test_session_manager_with_rejecting_behavior() {
-    let manager = create_subscription_test_manager(HandlerBehavior::RejectAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::RejectAll, 5112).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -162,7 +162,7 @@ async fn test_session_manager_with_rejecting_behavior() {
 
 #[tokio::test]
 async fn test_session_manager_with_selective_behavior() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptSelective).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptSelective, 5113).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -191,7 +191,7 @@ async fn test_session_manager_with_selective_behavior() {
 
 #[tokio::test]
 async fn test_session_lifecycle_events() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5114).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -259,7 +259,7 @@ async fn test_session_lifecycle_events() {
 
 #[tokio::test]
 async fn test_concurrent_session_operations() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5115).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -306,7 +306,7 @@ async fn test_concurrent_session_operations() {
 
 #[tokio::test]
 async fn test_session_state_consistency() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5116).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -363,7 +363,7 @@ async fn test_session_state_consistency() {
 
 #[tokio::test]
 async fn test_rapid_session_creation_and_termination() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5117).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -401,7 +401,7 @@ async fn test_rapid_session_creation_and_termination() {
 
 #[tokio::test]
 async fn test_session_operation_ordering() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5118).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -489,7 +489,7 @@ async fn test_session_operation_ordering() {
 
 #[tokio::test]
 async fn test_error_recovery() {
-    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll).await.unwrap();
+    let manager = create_subscription_test_manager(HandlerBehavior::AcceptAll, 5119).await.unwrap();
     
     manager.start().await.unwrap();
     

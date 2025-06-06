@@ -48,12 +48,12 @@ impl CallHandler for UpdateTestHandler {
 }
 
 /// Create a test session manager for UPDATE testing
-async fn create_update_test_manager() -> Result<Arc<SessionManager>, SessionError> {
+async fn create_update_test_manager(port: u16) -> Result<Arc<SessionManager>, SessionError> {
     let handler = Arc::new(UpdateTestHandler::new());
     
     SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(0) // Use any available port
+        .with_sip_port(port)
         .with_from_uri("sip:test@localhost")
         .with_handler(handler)
         .build()
@@ -62,7 +62,7 @@ async fn create_update_test_manager() -> Result<Arc<SessionManager>, SessionErro
 
 #[tokio::test]
 async fn test_media_update_basic() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5120).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -89,7 +89,7 @@ async fn test_media_update_basic() {
 
 #[tokio::test]
 async fn test_multiple_media_updates() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5121).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -121,7 +121,7 @@ async fn test_multiple_media_updates() {
 
 #[tokio::test]
 async fn test_update_with_codec_changes() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5122).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -148,7 +148,7 @@ async fn test_update_with_codec_changes() {
 
 #[tokio::test]
 async fn test_update_with_video_addition() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5123).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -175,7 +175,7 @@ async fn test_update_with_video_addition() {
 
 #[tokio::test]
 async fn test_update_nonexistent_session() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5124).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -190,7 +190,7 @@ async fn test_update_nonexistent_session() {
 
 #[tokio::test]
 async fn test_concurrent_media_updates() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5125).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -232,7 +232,7 @@ async fn test_concurrent_media_updates() {
 
 #[tokio::test]
 async fn test_update_after_hold() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5126).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -274,7 +274,7 @@ async fn test_update_after_hold() {
 
 #[tokio::test]
 async fn test_update_session_state_consistency() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5127).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -313,7 +313,7 @@ async fn test_update_session_state_consistency() {
 
 #[tokio::test]
 async fn test_update_with_empty_sdp() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5128).await.unwrap();
     
     manager.start().await.unwrap();
     
@@ -339,7 +339,7 @@ async fn test_update_with_empty_sdp() {
 
 #[tokio::test]
 async fn test_rapid_consecutive_updates() {
-    let manager = create_update_test_manager().await.unwrap();
+    let manager = create_update_test_manager(5129).await.unwrap();
     
     manager.start().await.unwrap();
     
