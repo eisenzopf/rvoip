@@ -9,6 +9,7 @@ pub mod session;
 pub mod manager;
 pub mod coordination;
 pub mod bridge;
+pub mod media;
 
 // Core error types
 mod errors;

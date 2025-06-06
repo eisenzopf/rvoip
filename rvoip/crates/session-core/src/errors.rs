@@ -19,6 +19,9 @@ pub enum SessionError {
     /// Media-related error
     MediaError(String),
     
+    /// Media integration error
+    MediaIntegration { message: String },
+    
     /// SIP protocol error
     SipError(String),
     
@@ -44,6 +47,7 @@ impl fmt::Display for SessionError {
             SessionError::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
             SessionError::SessionNotFound(msg) => write!(f, "Session not found: {}", msg),
             SessionError::MediaError(msg) => write!(f, "Media error: {}", msg),
+            SessionError::MediaIntegration { message } => write!(f, "Media integration error: {}", message),
             SessionError::SipError(msg) => write!(f, "SIP error: {}", msg),
             SessionError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             SessionError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
