@@ -6,6 +6,10 @@
 //! The helpers ensure consistent test setup and provide real event-driven testing
 //! using the infra-common zero-copy event system.
 
+// Re-export media-core integration test utilities
+pub mod media_test_utils;
+pub use media_test_utils::*;
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicU16, Ordering};

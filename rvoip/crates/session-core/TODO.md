@@ -1556,6 +1556,439 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## 🚀 PHASE 14: MEDIA-CORE INTEGRATION - RESTORE AND MODERNIZE ⚠️ **CRITICAL FOR PRODUCTION**
+
+### 🎯 **GOAL: Complete Media-Core Integration in Session-Core**
+
+**Context**: Media integration in session-core is **INCOMPLETE**. Analysis shows we have comprehensive media-core integration from an older version (`src-old/media/`) that needs to be restored and modernized for the current architecture.
+
+**Current State Assessment**:
+- ✅ **What EXISTS**: Minimal media stubs in `src/session/media.rs` (placeholder only)  
+- ❌ **What's MISSING**: Real MediaManager, media lifecycle coordination, SDP conversion, event integration
+- 🏗️ **What's AVAILABLE**: Complete working media integration in `src-old/media/` (MediaManager, SessionMediaCoordinator, MediaConfigConverter)
+
+**Philosophy**: Use REAL media-core components (no mocks) and adapt the proven working implementation from `src-old/media/` to the new session-core architecture.
+
+**Target Outcome**: Complete media-core integration ensuring production-ready SIP sessions with real media coordination.
+
+### 🔧 **IMPLEMENTATION PLAN**
+
+#### **Phase 14.1: Foundation - Restore Core Media Integration** ⚠️ **CRITICAL**
+
+- [ ] **Create Modern Media Module Structure**
+  - [ ] Create `src/media/mod.rs` - Main media module exports  
+  - [ ] Create `src/media/manager.rs` - MediaManager (adapted from src-old)
+  - [ ] Create `src/media/coordinator.rs` - SessionMediaCoordinator (adapted from src-old)
+  - [ ] Create `src/media/config.rs` - MediaConfigConverter (adapted from src-old)
+  - [ ] Create `src/media/bridge.rs` - New: Media-SIP bridge for event integration
+  - [ ] Create `src/media/types.rs` - New: Media types adapted to new architecture
+
+- [ ] **Adapt MediaManager to New Architecture**
+  - [ ] Port MediaManager from `src-old/media/mod.rs` (line 280-517)
+  - [ ] Integrate with current SessionManager event system
+  - [ ] Update error handling to use current `SessionError`
+  - [ ] Add bridge to session event processor
+  - [ ] Update async patterns and dependencies
+
+- [ ] **Port SessionMediaCoordinator**
+  - [ ] Port SessionMediaCoordinator from `src-old/media/coordination.rs`
+  - [ ] Integrate with current session lifecycle events
+  - [ ] Update session types and error handling
+  - [ ] Add automatic media lifecycle based on SessionEvent triggers
+  - [ ] Update configuration and cleanup patterns
+
+#### **Phase 14.2: API Integration - Connect to SessionManager** ⚠️ **HIGH**
+
+- [ ] **Update SessionManager Core**
+  - [ ] Replace stub media methods with real media-core integration
+  - [ ] Add MediaManager as SessionManager component
+  - [ ] Update `create_outgoing_call()` to automatically set up media
+  - [ ] Update session cleanup to properly tear down media
+  - [ ] Integrate media events with session event system
+
+- [ ] **Update API Types**
+  - [ ] Enhance `MediaInfo` type with real media-core data
+  - [ ] Add media configuration options to `SessionManagerBuilder`
+  - [ ] Update `CallSession` to expose media operations
+  - [ ] Add media capability queries to session API
+
+- [ ] **Event System Integration**
+  - [ ] Add media events to `SessionEvent` enum
+  - [ ] Create media event → session event translation
+  - [ ] Update event processor to handle media lifecycle
+  - [ ] Add media failure recovery mechanisms
+
+#### **Phase 14.3: Configuration & Conversion** ⚠️ **HIGH**
+
+- [ ] **Port MediaConfigConverter**
+  - [ ] Port MediaConfigConverter from `src-old/media/config.rs`
+  - [ ] Update for current SDP handling architecture
+  - [ ] Integrate with SessionManagerBuilder configuration
+  - [ ] Add support for new codec types and parameters
+
+- [ ] **SDP Integration**
+  - [ ] Update SIP dialog handling to generate SDP from media capabilities
+  - [ ] Add automatic codec negotiation based on media-core capabilities
+  - [ ] Update SDP answer processing to configure media sessions
+  - [ ] Add SDP validation against media capabilities
+
+- [ ] **Configuration System Update**
+  - [ ] Add media configuration to session-core config types
+  - [ ] Update factory functions to include media manager setup
+  - [ ] Add media port range and codec preference configuration
+  - [ ] Update examples to demonstrate media configuration
+
+#### **Phase 14.4: Test Infrastructure Update** ⚠️ **MEDIUM**
+
+- [ ] **Fix Media Test Utilities**
+  - [ ] Update `common/media_test_utils.rs` to use real API
+  - [ ] Remove non-existent type references
+  - [ ] Add real MediaManager integration helpers
+  - [ ] Fix compilation errors in test infrastructure
+
+- [ ] **Update Integration Tests**
+  - [ ] Fix compilation errors in `media_*.rs` test files
+  - [ ] Update to use real media-core integration
+  - [ ] Add real MediaEngine factory functions
+  - [ ] Update tests to validate actual media functionality
+
+- [ ] **Add Integration Test Suite**
+  - [ ] `tests/media_session_lifecycle.rs` - Real media session coordination
+  - [ ] `tests/media_codec_negotiation.rs` - Real codec negotiation testing
+  - [ ] `tests/media_quality_monitoring.rs` - Real quality monitoring integration
+  - [ ] `tests/media_dtmf_integration.rs` - Real DTMF coordination testing
+  - [ ] `tests/media_performance_tests.rs` - Real performance validation
+
+#### **Phase 14.5: Advanced Features** ⚠️ **MEDIUM**
+
+- [ ] **Quality Monitoring Integration**
+  - [ ] Add QualityMonitor events to session event system
+  - [ ] Create quality-based session decisions (re-INVITE, termination)
+  - [ ] Add MOS score reporting to session statistics
+  - [ ] Implement quality degradation handling
+
+- [ ] **DTMF Integration**
+  - [ ] Add DTMF detection from media-core to SIP INFO coordination
+  - [ ] Create RFC2833 event handling
+  - [ ] Update DTMF method negotiation (in-band vs out-of-band)
+  - [ ] Add DTMF buffering and sequence management
+
+- [ ] **Advanced Media Features**
+  - [ ] Implement hold/resume media coordination
+  - [ ] Add transfer media session management
+  - [ ] Create conference bridge integration foundation
+  - [ ] Add media session health monitoring
+
+### 📋 **CURRENT STATE - MEDIA TEST FILES**
+
+**Test Infrastructure Created**: ✅ **Complete test infrastructure created with stubbed implementations**
+
+- ✅ **`tests/common/media_test_utils.rs`** (839 lines) - Comprehensive media test utilities
+  - Real MediaEngine factory functions for testing
+  - Audio stream generators (PCMU, Opus, DTMF)
+  - Quality validation utilities
+  - Performance measurement tools
+
+- ✅ **Test Files Created** (awaiting media-core integration):
+  - `tests/media_session_lifecycle.rs` - SIP session ↔ media session coordination
+  - `tests/media_codec_negotiation.rs` - Real codec negotiation (G.711, Opus, G.729)
+  - `tests/media_quality_monitoring.rs` - Quality monitoring integration
+  - `tests/media_dtmf_integration.rs` - DTMF coordination between SIP/media
+  - `tests/media_performance_tests.rs` - Performance and scalability testing
+
+**Current Issue**: ⚠️ **All media test files have compilation errors** because the actual media-core integration is incomplete in session-core.
+
+**Error Examples**:
+```
+error[E0432]: unresolved import `rvoip_session_core::media`
+error[E0412]: cannot find type `SessionManagerBuilder` in this scope  
+error[E0412]: cannot find type `MediaManager` in this scope
+error[E0412]: cannot find type `MediaEngine` in this scope
+```
+
+**Resolution Path**: Complete Phase 14.1-14.3 media integration, then all tests will compile and validate real functionality.
+
+### 📋 **COMPREHENSIVE MEDIA-CORE INTEGRATION TEST PLAN** (Post-Integration)
+
+#### **Phase 14.1: Core Media Session Integration Tests** ⚠️ **CRITICAL**
+
+**`media_session_lifecycle.rs`** - **Priority: CRITICAL**
+- **Real SIP Dialog → Media Session Coordination**
+  - Test INVITE processing triggers MediaEngine.create_media_session()
+  - Test 200 OK response includes real SDP from media-core capabilities
+  - Test ACK processing establishes RTP streams via media-core
+  - Test BYE processing properly terminates media sessions and cleans up RTP
+  - Test session state synchronization between SIP dialogs and media sessions
+
+- **Real Media Session State Management**
+  - Test media session creation with real DialogId mapping
+  - Test multiple concurrent media sessions with proper isolation
+  - Test media session destruction with complete resource cleanup
+  - Test media session failure recovery and SIP error response generation
+
+**`media_codec_negotiation.rs`** - **Priority: CRITICAL**
+- **Real SDP Offer/Answer with Media-Core Capabilities**
+  - Test SDP offer generation using real MediaEngine.get_supported_codecs()
+  - Test G.711 (PCMU/PCMA) negotiation with real codec implementations
+  - Test Opus codec negotiation with dynamic payload types from media-core
+  - Test G.729 negotiation with real codec parameters and fallback scenarios
+  - Test codec selection priority and compatibility matching
+
+- **Real Codec Transcoding During Session Modifications**
+  - Test mid-call codec changes via SIP re-INVITE with media-core transcoding
+  - Test real-time transcoding between PCMU ↔ PCMA ↔ Opus ↔ G.729
+  - Test codec parameter negotiation (sample rate, channels, bitrate)
+  - Test codec failure handling and graceful fallback to supported codecs
+
+**`media_session_events.rs`** - **Priority: HIGH**
+- **Real Media Event Propagation to Session-Core**
+  - Test QualityMonitor events affecting SIP session decisions
+  - Test media failure events triggering SIP BYE or re-INVITE
+  - Test media quality degradation reports via session events
+  - Test jitter buffer events and their impact on call quality
+
+- **Real DTMF Integration Testing**
+  - Test DTMF detection via AudioProcessor and SIP INFO method generation
+  - Test in-band DTMF detection during active RTP streams
+  - Test out-of-band DTMF via RFC 4733 telephone-event payload
+  - Test DTMF buffering, timing accuracy, and session coordination
+
+#### **Phase 14.2: Advanced Media Features Integration** ⚠️ **HIGH**
+
+**`media_quality_integration.rs`** - **Priority: HIGH**
+- **Real-Time Quality Monitoring with SIP Coordination**
+  - Test QualityMonitor MOS score calculation affecting session decisions
+  - Test packet loss detection triggering SIP session modifications
+  - Test jitter measurement and adaptive buffer adjustments
+  - Test quality degradation reporting to SIP layer for potential re-negotiation
+
+- **Real Quality Adaptation Triggering SIP Re-negotiation**
+  - Test poor quality conditions triggering SIP re-INVITE for codec change
+  - Test network condition changes affecting media parameters in SDP
+  - Test quality improvement recommendations influencing SIP decisions
+  - Test quality metrics integration with session statistics
+
+**`media_processing_pipeline.rs`** - **Priority: MEDIUM**
+- **Real Audio Processing in SIP Call Context**
+  - Test AEC (Acoustic Echo Cancellation) during full duplex SIP calls
+  - Test AGC (Automatic Gain Control) with various codec configurations
+  - Test VAD (Voice Activity Detection) affecting RTP packet transmission decisions
+  - Test noise suppression integration with real RTP streams
+
+- **Real Format Conversion During SIP Sessions**
+  - Test format conversion between different SIP endpoint requirements
+  - Test sample rate conversion (8kHz ↔ 16kHz ↔ 48kHz) during calls
+  - Test channel conversion (mono ↔ stereo) based on SDP negotiation
+  - Test format conversion performance impact on call latency
+
+**`media_dtmf_integration.rs`** - **Priority: MEDIUM**
+- **Real DTMF Detection and SIP Integration**
+  - Test AudioProcessor DTMF detection triggering SIP INFO methods
+  - Test DTMF tone generation and transmission via RTP
+  - Test RFC 4733 telephone-event payload integration with SIP sessions
+  - Test DTMF event correlation between media processing and SIP signaling
+
+- **Real DTMF Timing and Session Coordination**
+  - Test DTMF buffering and accurate timing during SIP sessions
+  - Test DTMF event sequencing and ordering with session events
+  - Test DTMF detection accuracy with various codec configurations
+  - Test DTMF transmission coordination with RTP stream management
+
+#### **Phase 14.3: Transport and RTP Integration** ⚠️ **HIGH**
+
+**`media_rtp_coordination.rs`** - **Priority: HIGH**
+- **Real RTP Session Setup/Teardown with SIP Dialogs**
+  - Test RTP session creation triggered by SIP session establishment
+  - Test SSRC coordination between media-core and RTP transport
+  - Test RTP packet routing through media processing pipeline
+  - Test RTP session cleanup on SIP session termination
+
+- **Real RTCP Integration with SIP Session Management**
+  - Test RTCP feedback integration with quality monitoring
+  - Test RTCP statistics affecting SIP session decisions
+  - Test RTCP-based quality reports influencing re-negotiations
+  - Test RTCP session coordination with SIP dialog lifecycle
+
+**`media_transport_adaptation.rs`** - **Priority: MEDIUM**
+- **Real Adaptive Bitrate Control Based on Network Conditions**
+  - Test codec bitrate adjustments based on network feedback
+  - Test real-time codec switching during active SIP sessions
+  - Test transport-wide congestion control affecting media parameters
+  - Test network condition reporting influencing SIP re-negotiation
+
+- **Real Media Stream Migration During Session Transfer**
+  - Test RTP stream handover during SIP session transfer
+  - Test media session migration with proper session coordination
+  - Test media continuity during SIP dialog state changes
+  - Test media resource reallocation during call transfers
+
+#### **Phase 14.4: Error Handling and Edge Cases** ⚠️ **HIGH**
+
+**`media_error_scenarios.rs`** - **Priority: HIGH**
+- **Real Media Engine Failure During Active SIP Sessions**
+  - Test MediaEngine failure recovery with SIP error responses
+  - Test codec initialization failures and proper SIP error codes
+  - Test media session recovery after temporary media failures
+  - Test graceful session degradation when media features unavailable
+
+- **Real Resource Exhaustion Scenarios**
+  - Test maximum concurrent media sessions with proper SIP rejections
+  - Test memory exhaustion handling with proper cleanup
+  - Test CPU resource limits affecting media processing and SIP responses
+  - Test port allocation failures and SIP error handling
+
+**`media_concurrency_stress.rs`** - **Priority: MEDIUM**
+- **Real High-Load Concurrent Session Testing**
+  - Test 100+ concurrent SIP sessions with real media processing
+  - Test session creation/destruction under high load with real codecs
+  - Test real codec transcoding performance with multiple concurrent streams
+  - Test memory usage and cleanup in long-running scenarios
+
+- **Real Thread Safety in Concurrent Media/SIP Operations**
+  - Test concurrent media operations during simultaneous SIP signaling
+  - Test thread safety of MediaEngine with concurrent session operations
+  - Test resource sharing between concurrent media sessions
+  - Test deadlock prevention in high-concurrency scenarios
+
+#### **Phase 14.5: Standards Compliance and Interoperability** ⚠️ **MEDIUM**
+
+**`media_sip_compliance.rs`** - **Priority: MEDIUM**
+- **RFC 3261 Compliance for Media-Related SIP Operations**
+  - Test RFC 3264 offer/answer model with real media-core capabilities
+  - Test SDP format compliance with media-core generated SDP
+  - Test timing requirements for real-time media processing in SIP context
+  - Test proper SIP response codes for media-related failures
+
+- **Real Media Format Compliance Testing**
+  - Test codec implementation compliance with ITU-T standards
+  - Test RTP payload format compliance with RFC specifications
+  - Test RTCP compliance with real media-core implementations
+  - Test SDP attribute compliance with media capabilities
+
+**`media_interoperability.rs`** - **Priority: LOW**
+- **Real Codec Interoperability Testing**
+  - Test compatibility with standard SIP client codec implementations
+  - Test various SDP formats and codec parameter handling
+  - Test graceful handling of unsupported media features with proper SIP responses
+  - Test backward compatibility with older codec implementations
+
+### 🛠️ **TEST INFRASTRUCTURE REQUIREMENTS**
+
+#### **Real Media-Core Test Utilities** (`tests/common/media_test_utils.rs`)
+- **Real MediaEngine Factory Functions**
+  - `create_test_media_engine()` - Real MediaEngine with test configuration
+  - `create_test_session_manager_with_media()` - SessionManager + MediaEngine integration
+  - `setup_real_codec_environment()` - Real codec registry with all supported codecs
+
+- **Real Audio Stream Generators**
+  - `generate_pcmu_audio_stream()` - Real G.711 μ-law encoded audio
+  - `generate_opus_audio_stream()` - Real Opus encoded audio with various bitrates
+  - `generate_dtmf_audio_stream()` - Real DTMF tones in various formats
+  - `create_multi_frequency_test_audio()` - Multiple frequency test signals
+
+- **Real SIP-Media Coordination Helpers**
+  - `coordinate_sip_session_with_media()` - End-to-end session setup with real media
+  - `verify_sdp_media_compatibility()` - Real SDP validation against media capabilities
+  - `test_codec_negotiation_sequence()` - Real codec selection process testing
+  - `validate_rtp_stream_setup()` - Real RTP session validation
+
+#### **Real Quality Validation Utilities**
+- **Real Quality Metric Validators**
+  - `validate_mos_score_calculation()` - Real MOS score validation
+  - `verify_jitter_measurement()` - Real jitter calculation validation
+  - `test_packet_loss_detection()` - Real packet loss monitoring
+  - `validate_quality_adaptation()` - Real quality adjustment testing
+
+- **Real Performance Measurement Tools**
+  - `measure_codec_performance()` - Real codec encode/decode timing
+  - `measure_media_session_latency()` - Real end-to-end latency measurement
+  - `monitor_memory_usage()` - Real memory usage tracking during tests
+  - `validate_thread_safety()` - Real concurrency testing utilities
+
+### 🎯 **SUCCESS CRITERIA**
+
+#### **Integration Success:**
+- [ ] ✅ All media integration test files compile successfully
+- [ ] ✅ MediaManager properly integrates with media-core
+- [ ] ✅ SIP sessions automatically set up/tear down media sessions
+- [ ] ✅ SDP negotiation works with real codec capabilities
+- [ ] ✅ Media events properly integrate with session event system
+
+#### **API Success:**
+- [ ] ✅ `SessionManager` media methods work with real media-core
+- [ ] ✅ `get_media_info()` returns real media session data
+- [ ] ✅ `update_media()` properly modifies media sessions
+- [ ] ✅ Session lifecycle automatically manages media lifecycle
+
+#### **Test Success:**
+- [ ] ✅ All `media_*.rs` tests compile and run
+- [ ] ✅ Integration tests use real MediaEngine components
+- [ ] ✅ Test utilities provide real media-core factories
+- [ ] ✅ Performance tests measure actual media processing
+
+#### **Architecture Success:**
+- [ ] ✅ Clean separation between SIP signaling and media processing
+- [ ] ✅ Event-driven media lifecycle management
+- [ ] ✅ Proper error handling and recovery mechanisms
+- [ ] ✅ Scalable media session management
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 14.1**: ~8 hours (Foundation - critical path)
+- **Phase 14.2**: ~6 hours (API integration)  
+- **Phase 14.3**: ~4 hours (Configuration)
+- **Phase 14.4**: ~3 hours (Test fixes)
+- **Phase 14.5**: ~6 hours (Advanced features)
+
+**Total Estimated Time**: ~27 hours for complete media-core integration
+
+### 🔄 **DEPENDENCIES**
+
+**Requires**:
+- ✅ **media-core Phase 1-3** - MediaEngine and core media processing
+- ✅ **Working `src-old/media/` code** - Proven media integration implementation
+- ✅ **Session event system** - Current session coordination infrastructure
+- ✅ **SDP handling** - Current SIP dialog capabilities
+
+**Enables**:
+- ✅ **Working media tests** - All `media_*.rs` integration tests
+- ✅ **Real session coordination** - SIP ↔ media lifecycle management
+- ✅ **Production-ready foundation** - Complete media integration
+- ✅ **Call-engine enhancement** - Rich media orchestration capabilities
+
+### 💡 **ARCHITECTURAL APPROACH**
+
+**Restore Proven Implementation**:
+```
+src-old/media/ (Working Code)
+├── mod.rs (604 lines)           → src/media/manager.rs (MediaManager)
+├── coordination.rs (267 lines)  → src/media/coordinator.rs (SessionMediaCoordinator)  
+├── config.rs (191 lines)       → src/media/config.rs (MediaConfigConverter)
+└── New additions:
+    ├── bridge.rs (Event integration)
+    └── types.rs (Modern type definitions)
+```
+
+**Integration Points**:
+```
+SessionManager → MediaManager → media-core
+       ↓              ↓
+SessionEvent ←→ MediaEvent (via bridge)
+       ↓              ↓
+SIP Dialog ←→ Media Session (via coordinator)
+```
+
+### 🚀 **NEXT ACTIONS**
+
+1. **Start Phase 14.1** - Create media module structure and port MediaManager
+2. **Focus on MediaManager first** - Core infrastructure before advanced features
+3. **Test incrementally** - Validate each component as it's integrated
+4. **Use proven patterns** - Adapt working code rather than building from scratch
+
+**Ready to restore comprehensive media-core integration!** 🎯
+
+---
+
 ## 🚨 PHASE 12.2: MOVE POLICY HANDLERS TO CALL-ENGINE ⚠️ **ARCHITECTURAL IMPROVEMENT**
 
 // ... existing content ...
