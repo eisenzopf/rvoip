@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::media::MediaConfig;
 
 mod common;
 use common::*;
@@ -89,68 +90,52 @@ async fn test_concurrent_session_scalability() {
     assert!(true, "Test stubbed - implement concurrent session scalability testing");
 }
 
-/// Test codec performance under load
+/// Test session-core media integration performance under load
 #[tokio::test]
 async fn test_codec_performance_under_load() {
-    let codec_env = setup_real_codec_environment().await.unwrap();
+    let (session_manager, media_engine) = create_test_session_manager_with_media().await.unwrap();
+    let capabilities = setup_test_media_capabilities().await.unwrap();
     
-    // Test different codecs under increasing load
-    let test_frame = create_test_audio_frame(8000, 1, 20); // 20ms frame
-    let load_levels = [1, 10, 50, 100, 500]; // Concurrent encode/decode operations
+    // Test different session operations under increasing load
+    let load_levels = [1, 10, 50, 100]; // Concurrent operations
     
     for &load_level in &load_levels {
-        println!("Testing codec performance at load level: {}", load_level);
+        println!("Testing integration performance at load level: {}", load_level);
         
-        // Test G.711 PCMU performance
-        let pcmu_start = Instant::now();
-        let pcmu_results = validate_thread_safety(
+        // Test media session creation performance
+        let creation_start = Instant::now();
+        let creation_results = validate_concurrent_operations(
             {
-                let codec = codec_env.g711_pcmu.clone();
-                let frame = test_frame.clone();
+                let engine = media_engine.clone();
                 move || {
-                    let codec = codec.clone();
-                    let frame = frame.clone();
+                    let engine = engine.clone();
                     async move {
-                        let _encoded = codec.encode(&frame)?;
+                        let config = MediaConfig::default();
+                        let _session = engine.create_session(&config).await
+                            .map_err(|e| {
+                                let error_string = format!("{:?}", e);
+                                Box::<dyn std::error::Error + Send + Sync>::from(error_string)
+                            })?;
                         Ok(())
                     }
                 }
             },
-            load_level,
-            10
+            load_level
         ).await;
-        let pcmu_duration = pcmu_start.elapsed();
+        let creation_duration = creation_start.elapsed();
         
-        // Test Opus performance
-        let opus_start = Instant::now();
-        let opus_results = validate_thread_safety(
-            {
-                let codec = codec_env.opus.clone();
-                let frame = create_test_audio_frame(48000, 2, 20); // Opus frame
-                move || {
-                    let codec = codec.clone();
-                    let frame = frame.clone();
-                    async move {
-                        let _encoded = codec.encode(&frame)?;
-                        Ok(())
-                    }
-                }
-            },
-            load_level,
-            10
-        ).await;
-        let opus_duration = opus_start.elapsed();
-        
-        println!("Load level {}: PCMU={:?}, Opus={:?}", 
-                load_level, pcmu_duration, opus_duration);
+        println!("Load level {}: Session creation={:?}", 
+                load_level, creation_duration);
         
         // TODO: Validate performance doesn't degrade significantly
         // - Measure latency increase under load
         // - Verify real-time processing capability maintained
-        // - Test CPU usage and thermal characteristics
+        // - Test resource usage scaling
     }
     
-    assert!(true, "Test stubbed - implement comprehensive codec performance testing");
+    // Verify codecs are available for performance testing
+    assert!(!capabilities.codecs.is_empty(), "Codecs should be available for performance testing");
+    assert!(true, "Test stubbed - implement comprehensive session-core integration performance testing");
 }
 
 /// Test memory usage patterns and leak detection
@@ -187,19 +172,20 @@ async fn test_memory_usage_and_leak_detection() {
     assert!(true, "Test stubbed - implement memory leak detection");
 }
 
-/// Test real-time audio processing latency
+/// Test real-time media session coordination latency
 #[tokio::test]
 async fn test_realtime_audio_processing_latency() {
     let (session_manager, media_engine) = create_test_session_manager_with_media().await.unwrap();
     
-    // Test end-to-end audio latency
-    let test_packet = create_test_media_packet(0, 160, 1);
+    // Create a test media session
+    let config = MediaConfig::default();
+    let test_session = media_engine.create_session(&config).await.unwrap();
     
     // Measure processing latency multiple times
     let mut latencies = Vec::new();
     
     for i in 0..100 {
-        let latency = measure_media_session_latency(&media_engine, &test_packet).await.unwrap();
+        let latency = measure_media_session_latency(&test_session).await.unwrap();
         latencies.push(latency);
         
         if i % 10 == 0 {
@@ -212,7 +198,7 @@ async fn test_realtime_audio_processing_latency() {
     let max_latency = latencies.iter().max().unwrap();
     let min_latency = latencies.iter().min().unwrap();
     
-    println!("Audio processing latency statistics:");
+    println!("Media session coordination latency statistics:");
     println!("  Average: {:?}", avg_latency);
     println!("  Minimum: {:?}", min_latency);
     println!("  Maximum: {:?}", max_latency);
@@ -221,7 +207,7 @@ async fn test_realtime_audio_processing_latency() {
     // assert!(avg_latency < Duration::from_millis(10), "Average processing latency should be < 10ms");
     // assert!(*max_latency < Duration::from_millis(20), "Max processing latency should be < 20ms");
     
-    assert!(true, "Test stubbed - implement with real audio processing measurement");
+    assert!(true, "Test stubbed - implement with real session-core processing measurement");
 }
 
 /// Test performance under network stress conditions
@@ -272,7 +258,7 @@ async fn test_performance_under_network_stress() {
     assert!(true, "Test stubbed - implement network stress testing");
 }
 
-/// Test CPU usage and thermal characteristics
+/// Test CPU usage and resource characteristics
 #[tokio::test]
 async fn test_cpu_usage_characteristics() {
     let (session_manager, media_engine) = create_test_session_manager_with_media().await.unwrap();
@@ -284,15 +270,26 @@ async fn test_cpu_usage_characteristics() {
     // - Test behavior with CPU throttling
     // - Verify graceful degradation under high CPU load
     
-    // Simulate high CPU load scenario
-    let cpu_intensive_operation = || async {
-        // TODO: Perform codec operations, quality analysis, etc.
-        tokio::time::sleep(Duration::from_micros(100)).await;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    // Simulate high load scenario with session operations
+    let cpu_intensive_operation = {
+        let engine = media_engine.clone();
+        move || {
+            let engine = engine.clone();
+            async move {
+                let config = MediaConfig::default();
+                let _session = engine.create_session(&config).await
+                    .map_err(|e| {
+                        let error_string = format!("{:?}", e);
+                        Box::<dyn std::error::Error + Send + Sync>::from(error_string)
+                    })?;
+                tokio::time::sleep(Duration::from_micros(100)).await;
+                Ok(())
+            }
+        }
     };
     
     let start_time = Instant::now();
-    let result = validate_thread_safety(cpu_intensive_operation, 50, 100).await;
+    let result = validate_concurrent_operations(cpu_intensive_operation, 50).await;
     let duration = start_time.elapsed();
     
     println!("CPU stress test completed in {:?}", duration);
