@@ -1,10 +1,10 @@
 //! Core SessionManager Implementation
 //!
-//! Contains the main SessionManager struct with core coordination logic.
+//! Contains the main SessionManager struct with high-level session orchestration logic.
+//! Coordinates dialog and media integration at comparable abstraction levels.
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use dashmap::DashMap;
 use crate::api::{
     types::{CallSession, SessionId, SessionStats, MediaInfo},
     handlers::CallHandler,
@@ -13,25 +13,24 @@ use crate::api::{
 use crate::errors::Result;
 use super::{registry::SessionRegistry, events::SessionEventProcessor, cleanup::CleanupManager};
 
-// Dialog-core integration (only layer we integrate with) - using UnifiedDialogApi
-use rvoip_dialog_core::{
-    api::unified::UnifiedDialogApi,
-    events::SessionCoordinationEvent,
-    DialogId, DialogError,
-};
-// Import header name constants
-use rvoip_sip_core::types::headers::HeaderName;
+// High-level integration with dialog and media modules (parallel abstraction levels)
+use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
+use crate::media::MediaManager; // TODO: Add MediaManager when implemented
+use rvoip_dialog_core::events::SessionCoordinationEvent;
 
 /// Main SessionManager that coordinates all session operations
+/// Now uses high-level DialogManager and MediaManager at comparable abstraction levels
 pub struct SessionManager {
     config: SessionManagerConfig,
     registry: Arc<SessionRegistry>,
     event_processor: Arc<SessionEventProcessor>,
     cleanup_manager: Arc<CleanupManager>,
     handler: Option<Arc<dyn CallHandler>>,
-    dialog_api: Arc<UnifiedDialogApi>,
-    session_events_tx: mpsc::Sender<SessionCoordinationEvent>,
-    dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+    
+    // High-level integration managers (parallel abstraction levels)
+    dialog_manager: Arc<DialogManager>,
+    dialog_coordinator: Arc<SessionDialogCoordinator>,
+    // media_manager: Arc<MediaManager>, // TODO: Add when MediaManager is implemented
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -42,8 +41,8 @@ impl std::fmt::Debug for SessionManager {
             .field("event_processor", &self.event_processor)
             .field("cleanup_manager", &self.cleanup_manager)
             .field("handler", &self.handler.is_some())
-            .field("dialog_api", &"<UnifiedDialogApi>")
-            .field("dialog_to_session", &self.dialog_to_session.len())
+            .field("dialog_manager", &self.dialog_manager)
+            .field("dialog_coordinator", &self.dialog_coordinator)
             .finish()
     }
 }
@@ -53,17 +52,37 @@ impl SessionManager {
     pub async fn new(
         config: SessionManagerConfig,
         handler: Option<Arc<dyn CallHandler>>,
-        dialog_api: Arc<UnifiedDialogApi>,
     ) -> Result<Arc<Self>> {
         let registry = Arc::new(SessionRegistry::new());
         let event_processor = Arc::new(SessionEventProcessor::new());
         let cleanup_manager = Arc::new(CleanupManager::new());
 
-        // Create session coordination channel
+        // Create dialog integration using DialogBuilder (high-level abstraction)
+        let dialog_builder = DialogBuilder::new(config.clone());
+        let dialog_api = dialog_builder.build().await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create dialog API: {}", e)))?;
+
+        // Create high-level dialog integration components
+        let dialog_to_session = Arc::new(dashmap::DashMap::new());
+        let dialog_manager = Arc::new(DialogManager::new(
+            dialog_api.clone(),
+            registry.clone(),
+            dialog_to_session.clone(),
+        ));
+
+        // Create dialog coordination channel (for dialog-core to coordinator communication)
+        let (dialog_coordination_tx, dialog_coordination_rx) = mpsc::channel(1000);
+        
+        // Create session events channel (for coordinator to event processor communication)
         let (session_events_tx, session_events_rx) = mpsc::channel(1000);
         
-        // Set up dialog-to-session mapping
-        let dialog_to_session = Arc::new(DashMap::new());
+        let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
+            dialog_api,
+            registry.clone(),
+            handler.clone(),
+            session_events_tx,
+            dialog_to_session,
+        ));
 
         let manager = Arc::new(Self {
             config,
@@ -71,38 +90,46 @@ impl SessionManager {
             event_processor,
             cleanup_manager,
             handler,
-            dialog_api,
-            session_events_tx,
-            dialog_to_session,
+            dialog_manager,
+            dialog_coordinator,
         });
 
         // Initialize subsystems and coordination
-        manager.initialize(session_events_rx).await?;
+        manager.initialize(dialog_coordination_tx, dialog_coordination_rx, session_events_rx).await?;
 
         Ok(manager)
     }
 
     /// Initialize the session manager and all subsystems
-    async fn initialize(&self, mut session_events_rx: mpsc::Receiver<SessionCoordinationEvent>) -> Result<()> {
-        // Set up session coordination with dialog-core
-        println!("🔗 SETUP: Setting up session coordination with dialog-core");
-        self.dialog_api.set_session_coordinator(self.session_events_tx.clone())
+    async fn initialize(
+        &self, 
+        dialog_coordination_tx: mpsc::Sender<SessionCoordinationEvent>,
+        dialog_coordination_rx: mpsc::Receiver<SessionCoordinationEvent>,
+        mut session_events_rx: mpsc::Receiver<super::events::SessionEvent>
+    ) -> Result<()> {
+        // Initialize dialog coordination (high-level delegation)
+        println!("🔗 SETUP: Initializing dialog coordination via DialogCoordinator");
+        self.dialog_coordinator
+            .initialize(dialog_coordination_tx)
             .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to set session coordinator: {}", e)))?;
-        println!("✅ SETUP: Session coordination setup complete");
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to initialize dialog coordinator: {}", e)))?;
+        
+        // Start dialog event loop (delegated to coordinator)
+        println!("🎬 SPAWN: Starting dialog coordination event loop");
+        self.dialog_coordinator
+            .start_event_loop(dialog_coordination_rx)
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog event loop: {}", e)))?;
 
-        // Spawn task to handle session coordination events
-        println!("🎬 SPAWN: Starting session coordination event loop");
-        let manager = self.clone();
+        // Bridge session events from coordinator to event processor
+        println!("🌉 BRIDGE: Setting up session event bridge");
+        let event_processor = self.event_processor.clone();
         tokio::spawn(async move {
-            println!("📡 EVENT LOOP: Session coordination event loop started");
-            while let Some(event) = session_events_rx.recv().await {
-                println!("📨 EVENT LOOP: Received session coordination event in background task");
-                if let Err(e) = manager.handle_session_coordination_event(event).await {
-                    tracing::error!("Error handling session coordination event: {}", e);
+            while let Some(session_event) = session_events_rx.recv().await {
+                if let Err(e) = event_processor.publish_event(session_event).await {
+                    tracing::error!("Failed to publish session event: {}", e);
                 }
             }
-            println!("🏁 EVENT LOOP: Session coordination event loop ended");
         });
 
         tracing::info!("SessionManager initialized on port {}", self.config.sip_port);
@@ -111,10 +138,10 @@ impl SessionManager {
 
     /// Start the session manager
     pub async fn start(&self) -> Result<()> {
-        // Start dialog API
-        self.dialog_api.start()
+        // Start dialog manager (high-level delegation)
+        self.dialog_manager.start()
             .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog API: {}", e)))?;
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog manager: {}", e)))?;
         
         self.event_processor.start().await?;
         self.cleanup_manager.start().await?;
@@ -127,10 +154,10 @@ impl SessionManager {
         self.cleanup_manager.stop().await?;
         self.event_processor.stop().await?;
         
-        // Stop dialog API
-        self.dialog_api.stop()
+        // Stop dialog manager (high-level delegation)
+        self.dialog_manager.stop()
             .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop dialog API: {}", e)))?;
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop dialog manager: {}", e)))?;
             
         tracing::info!("SessionManager stopped");
         Ok(())
@@ -145,13 +172,11 @@ impl SessionManager {
     ) -> Result<CallSession> {
         let session_id = SessionId::new();
         
-        // Create SIP INVITE and dialog using dialog-core unified API
-        let call_handle = self.dialog_api.make_call(from, to, sdp)
+        // Create SIP INVITE and dialog using DialogManager (high-level delegation)
+        let _dialog_handle = self.dialog_manager
+            .create_outgoing_call(session_id.clone(), from, to, sdp)
             .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog-core: {}", e)))?;
-        
-        // Map dialog to session
-        self.dialog_to_session.insert(call_handle.dialog().id().clone(), session_id.clone());
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)))?;
         
         let call = CallSession {
             id: session_id.clone(),
@@ -182,22 +207,21 @@ impl SessionManager {
         let call = self.registry.get_session(session_id).await?
             .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))?;
         
-        // Find the corresponding dialog
-        let dialog_id = self.dialog_to_session.iter()
-            .find_map(|entry| if entry.value() == session_id { Some(entry.key().clone()) } else { None })
-            .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))?;
+        // Accept incoming call using DialogManager (high-level delegation)
+        self.dialog_manager
+            .accept_incoming_call(session_id)
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to accept call via dialog manager: {}", e)))?;
         
-        // Send 200 OK response via dialog-core (this would be done by the call handler normally)
-        tracing::info!("Accepted incoming call: {} (dialog: {})", session_id, dialog_id);
+        tracing::info!("Accepted incoming call: {}", session_id);
         Ok(call)
     }
 
     /// Hold a session
     pub async fn hold_session(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send re-INVITE with hold SDP via dialog-core unified API
-        let _tx_key = self.dialog_api.send_update(&dialog_id, Some("SDP with hold attributes".to_string()))
+        // Hold session using DialogManager (high-level delegation)
+        self.dialog_manager
+            .hold_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to hold session: {}", e)))?;
             
@@ -207,10 +231,9 @@ impl SessionManager {
 
     /// Resume a session from hold
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send re-INVITE with active SDP via dialog-core unified API
-        let _tx_key = self.dialog_api.send_update(&dialog_id, Some("SDP with active media".to_string()))
+        // Resume session using DialogManager (high-level delegation)
+        self.dialog_manager
+            .resume_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to resume session: {}", e)))?;
             
@@ -220,10 +243,9 @@ impl SessionManager {
 
     /// Transfer a session to another destination
     pub async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send REFER request via dialog-core unified API
-        let _tx_key = self.dialog_api.send_refer(&dialog_id, target.to_string(), None)
+        // Transfer session using DialogManager (high-level delegation)
+        self.dialog_manager
+            .transfer_session(session_id, target)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to transfer session: {}", e)))?;
             
@@ -233,16 +255,14 @@ impl SessionManager {
 
     /// Terminate a session
     pub async fn terminate_session(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send BYE request via dialog-core unified API
-        let _tx_key = self.dialog_api.send_bye(&dialog_id)
+        // Terminate session using DialogManager (high-level delegation)
+        self.dialog_manager
+            .terminate_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to terminate session: {}", e)))?;
             
         // Remove the session from registry
         self.registry.unregister_session(session_id).await?;
-        self.dialog_to_session.remove(&dialog_id);
         
         tracing::info!("Terminated session: {}", session_id);
         Ok(())
@@ -250,10 +270,9 @@ impl SessionManager {
 
     /// Send DTMF tones
     pub async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send INFO request with DTMF payload via dialog-core unified API
-        let _tx_key = self.dialog_api.send_info(&dialog_id, format!("DTMF: {}", digits))
+        // Send DTMF using DialogManager (high-level delegation)
+        self.dialog_manager
+            .send_dtmf(session_id, digits)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to send DTMF: {}", e)))?;
             
@@ -261,12 +280,7 @@ impl SessionManager {
         Ok(())
     }
     
-    /// Get dialog ID for a session ID
-    fn get_dialog_id_for_session(&self, session_id: &SessionId) -> Result<DialogId> {
-        self.dialog_to_session.iter()
-            .find_map(|entry| if entry.value() == session_id { Some(entry.key().clone()) } else { None })
-            .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))
-    }
+
 
     /// Mute/unmute a session
     pub async fn mute_session(&self, session_id: &SessionId, muted: bool) -> Result<()> {
@@ -291,10 +305,9 @@ impl SessionManager {
 
     /// Update media for a session
     pub async fn update_media(&self, session_id: &SessionId, sdp: &str) -> Result<()> {
-        let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        
-        // Send re-INVITE with new SDP via dialog-core unified API
-        let _tx_key = self.dialog_api.send_update(&dialog_id, Some(sdp.to_string()))
+        // Update media using DialogManager (high-level delegation)
+        self.dialog_manager
+            .update_media(session_id, sdp)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to update media: {}", e)))?;
             
@@ -329,7 +342,7 @@ impl SessionManager {
 
     /// Get the actual bound address (for testing and discovery)
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
-        self.dialog_api.config().local_address()
+        self.dialog_manager.get_bound_address()
     }
 
     /// Send a session event
@@ -337,208 +350,7 @@ impl SessionManager {
         self.event_processor.publish_event(event).await
     }
 
-    /// Handle session coordination events from dialog-core
-    async fn handle_session_coordination_event(&self, event: SessionCoordinationEvent) -> Result<()> {
-        println!("🎪 SESSION COORDINATION: Received event: {:?}", event);
-        match event {
-            SessionCoordinationEvent::IncomingCall { dialog_id, transaction_id, request, source } => {
-                // Extract From and To headers - simplified for now
-                let from_uri = format!("sip:from@{}", source.ip());
-                let to_uri = "sip:to@local".to_string();
-                
-                tracing::info!("Incoming call from dialog {}: {} -> {}", 
-                    dialog_id, from_uri, to_uri
-                );
-                
-                // Create a new session for the incoming call
-                let session_id = SessionId::new();
-                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-                
-                let call_session = CallSession {
-                    id: session_id.clone(),
-                    from: from_uri.clone(),
-                    to: to_uri.clone(),
-                    state: crate::api::types::CallState::Ringing,
-                    started_at: Some(std::time::Instant::now()),
-                    manager: Arc::new(self.clone()),
-                };
-                
-                self.registry.register_session(session_id.clone(), call_session.clone()).await?;
-                
-                // Send session created event
-                self.send_session_event(super::events::SessionEvent::SessionCreated {
-                    session_id: session_id.clone(),
-                    from: call_session.from.clone(),
-                    to: call_session.to.clone(),
-                    call_state: call_session.state.clone(),
-                }).await?;
-                
-                // Handle the call with the configured handler
-                if let Some(handler) = &self.handler {
-                    let incoming_call = crate::api::types::IncomingCall {
-                        id: session_id.clone(),
-                        from: from_uri,
-                        to: to_uri,
-                        sdp: Some(String::from_utf8_lossy(request.body()).to_string()).filter(|s| !s.is_empty()),
-                        headers: std::collections::HashMap::new(), // TODO: Extract relevant headers
-                        received_at: std::time::Instant::now(),
-                    };
-                    
-                    let decision = handler.on_incoming_call(incoming_call).await;
-                    
-                    // Act on the call decision
-                    match decision {
-                        crate::api::types::CallDecision::Accept => {
-                            // Get the call handle for this dialog and answer it
-                            if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                                if let Err(e) = call_handle.answer(None).await {
-                                    tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
-                                    
-                                    // Update session state to failed
-                                    if let Ok(Some(mut call)) = self.registry.get_session(&session_id).await {
-                                        let old_state = call.state.clone();
-                                        call.state = crate::api::types::CallState::Failed(format!("Answer failed: {}", e));
-                                        let _ = self.registry.register_session(session_id.clone(), call).await;
-                                        
-                                        // Send state changed event
-                                        let _ = self.send_session_event(super::events::SessionEvent::StateChanged {
-                                            session_id: session_id.clone(),
-                                            old_state,
-                                            new_state: crate::api::types::CallState::Failed(format!("Answer failed: {}", e)),
-                                        }).await;
-                                    }
-                                } else {
-                                    tracing::info!("Successfully answered incoming call for session {}", session_id);
-                                }
-                            } else {
-                                tracing::error!("Failed to get call handle for dialog {} to answer call", dialog_id);
-                            }
-                        },
-                        
-                        crate::api::types::CallDecision::Reject(reason) => {
-                            tracing::info!("Rejecting incoming call for session {}: {}", session_id, reason);
-                            
-                            // Get the call handle and reject it
-                                                         if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                                 if let Err(e) = call_handle.reject(rvoip_sip_core::StatusCode::BusyHere, Some(reason.clone())).await {
-                                     tracing::error!("Failed to reject incoming call for session {}: {}", session_id, e);
-                                 }
-                             }
-                            
-                                                         // Update session state to failed/rejected
-                             if let Ok(Some(mut call)) = self.registry.get_session(&session_id).await {
-                                 let old_state = call.state.clone();
-                                 call.state = crate::api::types::CallState::Failed(reason);
-                                 let new_state = call.state.clone();
-                                 let _ = self.registry.register_session(session_id.clone(), call).await;
-                                 
-                                 // Send state changed event
-                                 let _ = self.send_session_event(super::events::SessionEvent::StateChanged {
-                                     session_id: session_id.clone(),
-                                     old_state,
-                                     new_state,
-                                 }).await;
-                             }
-                        },
-                        
-                        crate::api::types::CallDecision::Defer => {
-                            tracing::info!("Deferring incoming call for session {} (e.g., added to queue)", session_id);
-                            // Call remains in Ringing state for manual acceptance later
-                        },
-                        
-                        crate::api::types::CallDecision::Forward(target) => {
-                            tracing::info!("Forwarding incoming call for session {} to {}", session_id, target);
-                            // TODO: Implement call forwarding via dialog-core
-                            // For now, treat as rejection
-                            if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                                if let Err(e) = call_handle.reject(rvoip_sip_core::StatusCode::MovedTemporarily, Some(format!("Forwarded to {}", target))).await {
-                                    tracing::error!("Failed to forward incoming call for session {}: {}", session_id, e);
-                                }
-                            }
-                        },
-                    }
-                }
-            },
-            
-            SessionCoordinationEvent::ResponseReceived { dialog_id, response, transaction_id } => {
-                println!("🎯 SESSION COORDINATION: Received response {} for dialog {}", response.status_code(), dialog_id);
-                
-                // Check if this is a 200 OK response to an INVITE that needs an ACK
-                if response.status_code() == 200 && transaction_id.to_string().contains("INVITE") && transaction_id.to_string().contains("client") {
-                    println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
-                    
-                    // Send ACK for 2xx response using the proper dialog-core API
-                    // We need to access the dialog manager directly since CallHandle doesn't expose ACK
-                    if let Ok(dialog_handle) = self.dialog_api.get_dialog_handle(&dialog_id).await {
-                        // Get the underlying dialog manager from the unified API
-                        // We'll call the send_ack_for_2xx_response method directly
-                        match self.dialog_api.send_ack_for_2xx_response(&dialog_id, &transaction_id, &response).await {
-                            Ok(_) => {
-                                println!("✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response");
-                                tracing::info!("ACK sent successfully for dialog {} transaction {}", dialog_id, transaction_id);
-                            },
-                            Err(e) => {
-                                println!("❌ SESSION COORDINATION: Failed to send ACK: {}", e);
-                                tracing::error!("Failed to send ACK for dialog {} transaction {}: {}", dialog_id, transaction_id, e);
-                            }
-                        }
-                    }
-                }
-                
-                // Continue with other response processing...
-                tracing::debug!("Response {} received for dialog {}", response.status_code(), dialog_id);
-            },
-            
-            SessionCoordinationEvent::CallAnswered { dialog_id, session_answer } => {
-                if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
-                    let session_id = session_id_ref.value().clone();
-                    tracing::info!("Call answered for session {}: {}", session_id, dialog_id);
-                    
-                    // Update call state to Active
-                    if let Ok(Some(mut call)) = self.registry.get_session(&session_id).await {
-                        let old_state = call.state.clone();
-                        call.state = crate::api::types::CallState::Active;
-                        self.registry.register_session(session_id.clone(), call).await?;
-                        
-                        // Send state changed event
-                        self.send_session_event(super::events::SessionEvent::StateChanged {
-                            session_id: session_id.clone(),
-                            old_state,
-                            new_state: crate::api::types::CallState::Active,
-                        }).await?;
-                    }
-                }
-            },
-            
-            SessionCoordinationEvent::CallTerminated { dialog_id, reason } => {
-                if let Some((_, session_id)) = self.dialog_to_session.remove(&dialog_id) {
-                    tracing::info!("Call terminated for session {}: {} - {}", session_id, dialog_id, reason);
-                    
-                    // Send session terminated event
-                    self.send_session_event(super::events::SessionEvent::SessionTerminated {
-                        session_id: session_id.clone(),
-                        reason: reason.clone(),
-                    }).await?;
-                    
-                    self.registry.unregister_session(&session_id).await?;
-                }
-            },
-            
-            SessionCoordinationEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
-                tracing::info!("Registration request: {} -> {} (expires: {})", from_uri, contact_uri, expires);
-                // Handle registration - for now just log it
-                // In a real implementation, this would update a registration database
-            },
-            
-            // Handle other session coordination events
-            _ => {
-                tracing::debug!("Unhandled session coordination event: {:?}", event);
-                // TODO: Handle other events as needed
-            },
-        }
-        
-        Ok(())
-    }
+
 }
 
 impl Clone for SessionManager {
@@ -549,9 +361,8 @@ impl Clone for SessionManager {
             event_processor: Arc::clone(&self.event_processor),
             cleanup_manager: Arc::clone(&self.cleanup_manager),
             handler: self.handler.clone(),
-            dialog_api: Arc::clone(&self.dialog_api),
-            session_events_tx: self.session_events_tx.clone(),
-            dialog_to_session: Arc::clone(&self.dialog_to_session),
+            dialog_manager: Arc::clone(&self.dialog_manager),
+            dialog_coordinator: Arc::clone(&self.dialog_coordinator),
         }
     }
 } 

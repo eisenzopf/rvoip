@@ -1,14 +1,12 @@
 //! SessionManager Builder Pattern
 //!
 //! Provides a simple, fluent API for configuring and creating SessionManager instances.
+//! Dialog integration is now handled internally by SessionManager.
 
 use std::sync::Arc;
 use crate::errors::Result;
 use crate::manager::SessionManager;
 use crate::api::handlers::CallHandler;
-
-// Dialog-core integration - using UnifiedDialogApi
-use rvoip_dialog_core::{config::DialogManagerConfig, api::unified::UnifiedDialogApi};
 
 /// Builder for creating SessionManager instances with sensible defaults
 pub struct SessionManagerBuilder {
@@ -19,7 +17,6 @@ pub struct SessionManagerBuilder {
     media_port_end: Option<u16>,
     handler: Option<Arc<dyn CallHandler>>,
     p2p_mode: bool,
-    dialog_api: Option<Arc<UnifiedDialogApi>>,
 }
 
 impl std::fmt::Debug for SessionManagerBuilder {
@@ -32,7 +29,6 @@ impl std::fmt::Debug for SessionManagerBuilder {
             .field("media_port_end", &self.media_port_end)
             .field("handler", &self.handler.is_some())
             .field("p2p_mode", &self.p2p_mode)
-            .field("dialog_api", &self.dialog_api.is_some())
             .finish()
     }
 }
@@ -54,7 +50,6 @@ impl SessionManagerBuilder {
             media_port_end: None,
             handler: None,
             p2p_mode: false,
-            dialog_api: None,
         }
     }
 
@@ -89,11 +84,7 @@ impl SessionManagerBuilder {
         self
     }
 
-    /// Set a pre-configured dialog API (for advanced use cases)
-    pub fn with_dialog_api(mut self, api: Arc<UnifiedDialogApi>) -> Self {
-        self.dialog_api = Some(api);
-        self
-    }
+
 
     /// Enable peer-to-peer mode (no server required)
     pub fn p2p_mode(mut self) -> Self {
@@ -115,35 +106,8 @@ impl SessionManagerBuilder {
             p2p_mode: self.p2p_mode,
         };
 
-        // Create dialog API if not provided
-        let dialog_api = if let Some(api) = self.dialog_api {
-            api
-        } else {
-            // Create dialog configuration using the proper unified API
-            let bind_addr = format!("{}:{}", sip_bind_address, sip_port);
-            let socket_addr = bind_addr.parse().map_err(|e| {
-                crate::errors::SessionError::internal(&format!("Invalid bind address: {}", e))
-            })?;
-            
-            // Use hybrid mode to support both incoming and outgoing calls
-            let dialog_config = if let Some(ref from_uri) = self.from_uri {
-                DialogManagerConfig::hybrid(socket_addr)
-                    .with_from_uri(from_uri.clone())
-                    .build()
-            } else {
-                DialogManagerConfig::hybrid(socket_addr)
-                    .with_from_uri(format!("sip:user@{}", sip_bind_address))
-                    .build()
-            };
-            
-            // Use UnifiedDialogApi::create() which handles all dependency injection properly
-            let api = UnifiedDialogApi::create(dialog_config).await
-                .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create dialog API: {}", e)))?;
-            
-            Arc::new(api)
-        };
-
-        SessionManager::new(config, self.handler, dialog_api).await
+        // SessionManager now handles dialog integration internally (high-level abstraction)
+        SessionManager::new(config, self.handler).await
     }
 }
 
