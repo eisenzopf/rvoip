@@ -1,474 +1,350 @@
-# Session-Core Refactoring Plan
+# Session-Core Directory Reorganization Plan
 
-## 🎯 Current Status: **Phase 1 Complete ✅ | Phase 2 Ready ⏳**
+## 🎯 **Objective**
 
-**Last Updated:** December 2024  
-**Progress:** 40% Complete (Phase 1: ✅ Complete | Phase 2: ⏳ Ready | Phase 3: 📋 Planned)
+Reorganize session-core directory structure to create **consistent integration patterns** for external dependencies, specifically dialog-core and media-core integrations.
 
-### 🚀 Major Achievements
-- ✅ **Broke up massive files**: 1,531 line `core.rs` → 6 focused modules
-- ✅ **Clean API structure**: Developer-friendly builder pattern & simple functions
-- ✅ **Library compiles**: All compilation errors fixed, tests pass
-- ✅ **Complete examples**: Working code for all use cases (SIP server, WebSocket API, P2P, etc.)
-- ✅ **File size target met**: All files under 200 lines as planned
+## 🔍 **Current State Analysis**
 
-### ⏳ Current Focus: Phase 2 Implementation
-- **Next Tasks**: Replace TODO stubs with dialog-core and media-core integration
-- **Estimated Duration**: 1 week
-- **Priority**: High - Core functionality implementation
-
-## Executive Summary
-
-This document outlines a comprehensive refactoring plan for `session-core` to address complexity issues from multiple refactoring iterations. The goal is to create a clean, developer-friendly API layer with files under 200 lines while maintaining core functionality for WebSocket APIs, SIP clients/servers, P2P, PBX, call centers, IVR, and outbound use cases.
-
-## Current Issues
-
-1. **File Size Problems**
-   - `core.rs`: 1,531 lines (needs to be split into ~6 files)
-   - `simple.rs`: 2,020 lines (needs complete reorganization)
-   - `handler.rs`: 790 lines (needs simplification)
-
-2. **Organizational Issues**
-   - Helper functions scattered across modules
-   - No clear API surface for developers
-   - Complex from multiple refactoring iterations
-   - Missing unified developer-friendly library structure
-
-3. **Complexity Issues**
-   - Too many features that belong at higher layers
-   - Duplicate functionality across modules
-   - Unclear separation of concerns
-
-## Proposed File Structure
-
+### **Current Structure Issues:**
 ```
-rvoip/crates/session-core/src/
-├── api/              # Developer-facing API (all files < 200 lines)
-│   ├── mod.rs       # Re-exports and documentation
-│   ├── create.rs    # Session creation (make_call, accept_call)
-│   ├── control.rs   # Call control (hold, transfer, terminate)
-│   ├── handlers.rs  # Simplified event handlers
-│   ├── builder.rs   # Builder pattern for SessionManager
-│   ├── types.rs     # API types (CallSession, IncomingCall, etc.)
-│   └── examples.rs  # Inline examples for each use case
-│
-├── session/         # Core session management
-│   ├── mod.rs      
-│   ├── session.rs   # Session struct (< 150 lines)
-│   ├── state.rs     # State machine (< 100 lines)
-│   ├── media.rs     # Media coordination (< 150 lines)
-│   └── lifecycle.rs # Lifecycle hooks (< 150 lines)
-│
-├── manager/         # SessionManager internals
-│   ├── mod.rs
-│   ├── core.rs      # Core manager (< 200 lines)
-│   ├── registry.rs  # Session registry/lookup (< 150 lines)
-│   ├── events.rs    # Event processing (< 150 lines)
-│   └── cleanup.rs   # Resource cleanup (< 100 lines)
-│
-├── coordination/    # Session coordination (keep existing, but simplify)
-│   ├── mod.rs
-│   ├── groups.rs    # Session groups (< 150 lines)
-│   ├── priority.rs  # Priority handling (< 150 lines)
-│   └── resources.rs # Resource limits (< 150 lines)
-│
-├── bridge/          # Multi-session bridging
-│   ├── mod.rs
-│   ├── bridge.rs    # Bridge implementation (< 150 lines)
-│   └── types.rs     # Bridge types (< 100 lines)
-│
-├── events/          # Event system
-│   ├── mod.rs
-│   ├── bus.rs       # Event bus (< 150 lines)
-│   └── types.rs     # Event types (< 100 lines)
-│
-└── lib.rs          # Main exports
+src/
+├── session/          # Basic session types (4 files)
+├── manager/          # Mixed: SessionManager + dialog-core integration (5 files, 39KB)
+├── coordination/     # Session primitives (4 files, 4KB)  
+├── bridge/           # Conference bridging (3 files, 2KB)
+├── media/            # ✅ Media-core integration (6 files, ~1.6KB) - GOOD
+└── api/              # ✅ Public API + dialog setup - MIXED
 ```
 
-## API Design Philosophy
+### **Problem Identified:**
+- **Media-core integration**: Clean, dedicated `/media` directory ✅
+- **Dialog-core integration**: Scattered across `/manager` and `/api` ❌
+- **Inconsistent pattern**: No parallel structure for external integrations
 
-### Core Principles
-1. **Simple Constructors** - Builder pattern with sensible defaults
-2. **Minimal API Surface** - Only expose what developers need
-3. **Use Case Focused** - Organize around what developers want to do
-4. **Delegation Pattern** - Keep delegating to dialog-core and media-core
-5. **Rust Best Practices** - Idiomatic Rust with clear ownership
+### **Dialog-Core Integration Currently Located In:**
+1. **`manager/core.rs`** (26KB) - 15+ dialog-core references
+   - Session coordination with dialog-core
+   - All SIP operations via dialog-core unified API
+   - Dialog event handling
+2. **`api/builder.rs`** - Dialog-core setup and configuration
+3. **`manager/events.rs`** - Some dialog event processing
 
-### Primary API Components
+## 🎯 **Target Structure**
 
-#### 1. SessionManager Creation (api/builder.rs)
+### **Proposed Consistent Structure:**
+```
+src/
+├── lib.rs
+├── errors.rs
+├── session/          # 📱 Basic session types & lifecycle
+│   ├── session.rs    # (existing) 
+│   ├── state.rs      # (existing)
+│   ├── lifecycle.rs  # (existing)
+│   ├── media.rs      # (existing stub)
+│   └── mod.rs        # (existing)
+├── dialog/           # 🗣️ Dialog-core integration (NEW - parallel to media/)
+│   ├── integration.rs    # extracted from manager/core.rs
+│   ├── events.rs         # extracted from manager/events.rs
+│   ├── coordination.rs   # dialog-session coordination
+│   ├── builder.rs        # extracted from api/builder.rs
+│   └── mod.rs            # (new)
+├── media/            # 🎵 Media-core integration (keep as-is)
+│   ├── mod.rs            # (existing)
+│   ├── types.rs          # (existing)
+│   ├── manager.rs        # (existing)
+│   ├── coordinator.rs    # (existing)
+│   ├── config.rs         # (existing)
+│   └── bridge.rs         # (existing)
+├── manager/          # 🎯 High-level orchestration (cleaned up)
+│   ├── core.rs           # (simplified - dialog code removed)
+│   ├── registry.rs       # (keep)
+│   ├── cleanup.rs        # (keep)
+│   └── mod.rs            # (updated)
+├── coordination/     # 🤝 Session primitives (keep as-is)
+│   ├── groups.rs         # (existing)
+│   ├── priority.rs       # (existing)
+│   ├── resources.rs      # (existing)
+│   └── mod.rs            # (existing)
+├── bridge/           # 🌉 Conference bridging (keep as-is)
+│   ├── bridge.rs         # (existing)
+│   ├── types.rs          # (existing)
+│   └── mod.rs            # (existing)
+└── api/              # 🌐 Public API (simplified)
+    └── ... (dialog builder moved out)
+```
+
+## 🔧 **Detailed Migration Plan**
+
+### **Phase 1: Create Dialog Integration Directory**
+
+#### **1.1 Create `src/dialog/mod.rs`**
 ```rust
-// Simple builder pattern
-let session_mgr = SessionManagerBuilder::new()
-    .with_sip_port(5060)
-    .with_media_ports(10000, 20000)
-    .with_handler(Arc::new(MyHandler))
-    .build()
-    .await?;
+//! Dialog-Core Integration
+//!
+//! This module manages all integration with dialog-core, providing a clean
+//! interface for session-core to coordinate with SIP dialog functionality.
+
+pub mod integration;
+pub mod events;
+pub mod coordination;
+pub mod builder;
+
+// Re-exports
+pub use integration::DialogManager;
+pub use events::DialogEventHandler;
+pub use coordination::SessionDialogCoordinator;
+pub use builder::DialogBuilder;
 ```
 
-#### 2. Call Creation (api/create.rs)
-```rust
-// Making calls - simple as possible
-pub async fn make_call(from: &str, to: &str) -> Result<CallSession>
-pub async fn make_call_with_sdp(from: &str, to: &str, sdp: &str) -> Result<CallSession>
+#### **1.2 Extract Dialog Integration: `manager/core.rs` → `dialog/integration.rs`**
 
-// Accepting calls - handled via CallHandler trait
-pub async fn accept_call(session_id: &SessionId) -> Result<()>
-pub async fn reject_call(session_id: &SessionId, reason: &str) -> Result<()>
+**Content to extract from `manager/core.rs`:**
+- Lines 15, 86-87: Dialog-core integration setup
+- Lines 147-150: Dialog creation and INVITE sending  
+- Lines 189, 198, 211, 224, 237, 254, 295: All SIP operations via dialog-core
+- Lines 339+: Dialog event handling (`handle_session_coordination_event`)
+- Lines 450, 469: Additional dialog operations
+- All `UnifiedDialogApi` usage and references
+
+**Create as:** `src/dialog/integration.rs`
+```rust
+//! Dialog-Core Integration Implementation
+//!
+//! Handles all direct integration with dialog-core UnifiedDialogApi,
+//! providing session-level abstractions over SIP dialog operations.
+
+// All dialog-core specific code extracted from manager/core.rs
 ```
 
-#### 3. Call Control (api/control.rs)
+#### **1.3 Extract Dialog Events: `manager/events.rs` → `dialog/events.rs`**
+
+**Content to extract:**
+- Dialog-specific event handling logic
+- Session coordination event processing
+- Dialog state change handling
+
+**Create as:** `src/dialog/events.rs`
+
+#### **1.4 Extract Dialog Builder: `api/builder.rs` → `dialog/builder.rs`**
+
+**Content to extract from `api/builder.rs`:**
+- Dialog-core UnifiedDialogApi setup code
+- Dialog configuration logic
+- Dialog manager creation
+
+**Create as:** `src/dialog/builder.rs`
+
+#### **1.5 Create Dialog Coordination: `dialog/coordination.rs`**
+
+**New file for session-dialog coordination:**
 ```rust
-// Simple call control operations
-pub async fn hold_call(session: &CallSession) -> Result<()>
-pub async fn resume_call(session: &CallSession) -> Result<()>
-pub async fn transfer_call(session: &CallSession, target: &str) -> Result<()>
-pub async fn terminate_call(session: &CallSession) -> Result<()>
-```
+//! Session-Dialog Coordination
+//!
+//! Manages the coordination between session-core and dialog-core,
+//! handling event bridging and lifecycle management.
 
-#### 4. Event Handling (api/handlers.rs)
-```rust
-// Simplified trait - just 2 methods
-#[async_trait]
-pub trait CallHandler {
-    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision;
-    async fn on_call_ended(&self, call: CallSession, reason: &str);
-}
-
-// Pre-built handlers for common use cases
-pub struct AutoAnswerHandler;
-pub struct QueueHandler { max_queue_size: usize }
-pub struct RoutingHandler { routes: HashMap<String, String> }
-```
-
-## Implementation Plan
-
-### Phase 1: Core Refactoring ✅ **COMPLETED**
-
-#### Day 1-2: Break up large files ✅ **DONE**
-- **Split `core.rs` (1531 lines) into:** ✅
-  - `manager/core.rs` (195 lines) - Core coordination only ✅
-  - `manager/registry.rs` (135 lines) - Session lookup/storage ✅
-  - `manager/events.rs` (115 lines) - Event processing ✅
-  - `manager/cleanup.rs` (85 lines) - Resource cleanup ✅
-  - `bridge/bridge.rs` (55 lines) - Multi-session bridging ✅
-  - `bridge/types.rs` (25 lines) - Bridge types ✅
-
-- **Split `simple.rs` (2020 lines) into:** ✅
-  - `api/types.rs` (158 lines) - CallSession, IncomingCall types ✅
-  - `api/create.rs` (130 lines) - Session creation functions ✅
-  - `api/control.rs` (180 lines) - Call control functions ✅
-  - `api/handlers.rs` (176 lines) - Simplified handlers only ✅
-  - `api/builder.rs` (78 lines) - Builder pattern ✅
-  - `api/examples.rs` (362 lines) - Complete use case examples ✅
-  - Removed duplicate/complex functionality ✅
-
-- **Simplify `handler.rs` (790 lines):** ✅
-  - Kept only AutoAnswer, Queue, and Routing handlers ✅
-  - Added CompositeHandler for composition ✅
-  - Final: 176 lines ✅
-
-#### Day 3-4: Create new directory structure ✅ **DONE**
-- Moved existing code to new modules ✅
-- Updated all imports and module declarations ✅
-- Library compiles successfully ✅
-
-#### Day 5: Integration testing ✅ **DONE**
-- Verified all functionality works after reorganization ✅
-- Library builds and tests pass ✅
-
-### Phase 2: Implementation & Integration (Week 2)
-
-#### Day 1-2: Replace TODO implementations ⏳ **IN PROGRESS**
-- **SessionManager Core Implementation:**
-  - [ ] Integrate with dialog-core for SIP dialog management
-  - [ ] Integrate with media-core for RTP/media handling
-  - [ ] Implement session creation via dialog-core delegation
-  - [ ] Delegate SIP operations to dialog-core (NOT direct to transaction-core)
-
-- **Media Integration:**
-  - [ ] Replace media coordination stubs with real media-core calls
-  - [ ] Implement SDP generation and parsing via media-core
-  - [ ] Add real RTP port allocation via media-core (NOT direct to rtp-core)
-  - [ ] Connect audio codec handling via media-core
-
-#### Day 3-4: SIP Protocol Integration ⏳ **NEXT**
-- **Dialog Management via dialog-core:**
-  - [ ] Implement session creation delegating to dialog-core
-  - [ ] Let dialog-core handle Call-ID and tag generation
-  - [ ] Subscribe to dialog state changes from dialog-core
-  - [ ] Route session events through dialog-core
-
-- **Call Control Features via dialog-core:**
-  - [ ] Implement hold/resume by requesting dialog-core to send re-INVITE
-  - [ ] Add DTMF sending by delegating to dialog-core
-  - [ ] Implement call transfer by requesting dialog-core to send REFER
-  - [ ] Add mute/unmute via media-core (not SIP-level)
-
-#### Day 5: Dependency Cleanup & Validation 📋 **PLANNED**
-- [ ] Remove direct dependencies on rtp-core, transaction-core, sip-transport, sip-core from Cargo.toml
-- [ ] Keep only dialog-core and media-core dependencies (proper delegation)
-- [ ] Add comprehensive error handling for SIP failures
-- [ ] Implement timeout handling for SIP transactions
-- [ ] Add session state validation
-- [ ] Handle network disconnections gracefully
-
-### Phase 3: Testing & Documentation (Week 3)
-
-#### Day 1-2: Comprehensive Testing 🧪 **PLANNED**
-- [ ] Unit tests for each API module
-- [ ] Integration tests with mock SIP/media backends
-- [ ] End-to-end tests with real SIP scenarios
-- [ ] Performance and load testing
-
-#### Day 3-4: Documentation & Examples 📚 **PLANNED**
-- [ ] Complete API documentation with rustdoc
-- [ ] Write developer guide with tutorials
-- [ ] Create working examples for each use case
-- [ ] Update migration guide from old API
-
-#### Day 5: Final Polish ✨ **PLANNED**
-- [ ] Code review and cleanup
-- [ ] Performance optimization
-- [ ] Final API review
-- [ ] Release preparation
-
-## File Size Results ✅ **ACHIEVED**
-
-| File | Before | After | Target | Status |
-|------|--------|-------|--------|--------|
-| `manager/core.rs` | 1531 | 195 | 200 | ✅ **SUCCESS** |
-| `manager/registry.rs` | - | 135 | 150 | ✅ **SUCCESS** |
-| `manager/events.rs` | - | 115 | 150 | ✅ **SUCCESS** |
-| `manager/cleanup.rs` | - | 85 | 100 | ✅ **SUCCESS** |
-| `api/simple.rs` | 2020 | **SPLIT** | 0 | ✅ **SUCCESS** |
-| `api/types.rs` | - | 158 | 150 | ✅ **SUCCESS** |
-| `api/create.rs` | - | 130 | 150 | ✅ **SUCCESS** |
-| `api/control.rs` | - | 180 | 150 | ✅ **SUCCESS** |
-| `api/handlers.rs` | 790 | 176 | 200 | ✅ **SUCCESS** |
-| `api/builder.rs` | - | 78 | 100 | ✅ **SUCCESS** |
-| `bridge/bridge.rs` | - | 55 | 150 | ✅ **SUCCESS** |
-| **All Files** | **Some >1500** | **All <200** | **<200** | ✅ **TARGET MET** |
-
-## Example Use Cases
-
-### 1. Simple SIP Server
-```rust
-use rvoip_session_core::api::*;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let session_mgr = SessionManagerBuilder::new()
-        .with_sip_port(5060)
-        .with_handler(Arc::new(AutoAnswerHandler))
-        .build()
-        .await?;
-    
-    session_mgr.start().await?;
-    println!("SIP server running on port 5060");
-    
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+pub struct SessionDialogCoordinator {
+    // Coordinate between session events and dialog events
 }
 ```
 
-### 2. WebSocket API Bridge
-```rust
-use rvoip_session_core::api::*;
+### **Phase 2: Update Manager Module**
 
-async fn handle_websocket(ws: WebSocket, session_mgr: Arc<SessionManager>) {
-    while let Some(msg) = ws.recv().await {
-        match msg.command {
-            "make_call" => {
-                let call = session_mgr.make_call(&msg.from, &msg.to).await?;
-                ws.send(json!({ "call_id": call.id() })).await?;
-            }
-            "hangup" => {
-                session_mgr.terminate_call(&msg.call_id).await?;
-            }
-            _ => {}
-        }
-    }
+#### **2.1 Simplify `manager/core.rs`**
+- **Remove:** All dialog-core specific implementation code
+- **Keep:** High-level session orchestration logic
+- **Add:** Import and use `crate::dialog::DialogManager`
+- **Update:** Method implementations to delegate to dialog module
+
+**Before (lines to remove):**
+```rust
+// Dialog-core integration (only layer we integrate with) - using UnifiedDialogApi
+// All the dialog-specific implementation code
+```
+
+**After (new imports):**
+```rust
+use crate::dialog::DialogManager;
+// Use dialog manager methods instead of direct dialog-core calls
+```
+
+#### **2.2 Update `manager/mod.rs`**
+```rust
+//! Session Manager Module
+//!
+//! High-level session orchestration that coordinates dialog and media integration.
+
+pub mod core;
+pub mod registry;
+pub mod cleanup;
+
+// Re-export the main SessionManager
+pub use core::SessionManager;
+```
+
+### **Phase 3: Update API Module**
+
+#### **3.1 Simplify `api/builder.rs`**
+- **Remove:** Dialog-core integration setup code
+- **Add:** Use `crate::dialog::DialogBuilder`
+- **Focus:** High-level session infrastructure setup only
+
+### **Phase 4: Update Root Module**
+
+#### **4.1 Update `src/lib.rs`**
+```rust
+pub mod api;
+pub mod session;
+pub mod dialog;        // NEW - dialog-core integration
+pub mod media;         // EXISTING - media-core integration
+pub mod manager;       // SIMPLIFIED - orchestration only
+pub mod coordination;
+pub mod bridge;
+
+// Core error types
+mod errors;
+pub use errors::{SessionError, Result};
+
+// Re-export the main API for convenience
+pub use api::*;
+
+// Re-export SessionManager for direct access
+pub use manager::SessionManager;
+
+// Prelude module for common imports
+pub mod prelude {
+    pub use crate::api::*;
+    pub use crate::errors::{SessionError, Result};
+    pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
+    pub use crate::manager::SessionManager;
+    pub use crate::dialog::DialogManager;  // NEW
 }
 ```
 
-### 3. P2P Client
-```rust
-use rvoip_session_core::api::*;
+## 📋 **File Operations Summary**
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let session_mgr = SessionManagerBuilder::new()
-        .p2p_mode()
-        .build()
-        .await?;
-    
-    let call = session_mgr.make_call(
-        "sip:alice@192.168.1.100",
-        "sip:bob@192.168.1.200"
-    ).await?;
-    
-    call.wait_for_answer().await?;
-    println!("Call connected!");
-    
-    Ok(())
-}
-```
+### **Files to Create:**
+1. `src/dialog/mod.rs`
+2. `src/dialog/integration.rs` (extracted from `manager/core.rs`)
+3. `src/dialog/events.rs` (extracted from `manager/events.rs`)
+4. `src/dialog/coordination.rs` (new)
+5. `src/dialog/builder.rs` (extracted from `api/builder.rs`)
 
-### 4. Call Center Queue
-```rust
-use rvoip_session_core::api::*;
+### **Files to Modify:**
+1. `src/lib.rs` - Add dialog module export
+2. `src/manager/core.rs` - Remove dialog code, add dialog imports
+3. `src/manager/mod.rs` - Update documentation
+4. `src/api/builder.rs` - Remove dialog code, use dialog module
+5. `Cargo.toml` - No changes needed
 
-struct CallCenterHandler {
-    queue: Arc<QueueHandler>,
-}
+### **Files to Keep As-Is:**
+- All files in `session/`, `media/`, `coordination/`, `bridge/`
+- `errors.rs`
+- All test files
 
-#[async_trait]
-impl CallHandler for CallCenterHandler {
-    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        // Add to queue
-        self.queue.enqueue(call).await;
-        CallDecision::Defer
-    }
-    
-    async fn on_call_ended(&self, call: CallSession, reason: &str) {
-        // Update statistics
-    }
-}
-```
+## 🎯 **Benefits & Rationale**
 
-## Benefits
+### **1. Consistent Integration Pattern**
+- **Before:** Media has dedicated directory, dialog scattered
+- **After:** Both external integrations have parallel dedicated directories
 
-1. **Developer Experience**
-   - Clear API surface
-   - Simple examples for each use case
-   - Minimal boilerplate
-   - Intuitive function names
+### **2. Clear Separation of Concerns**
+- **`/session`** = Basic session types and lifecycle
+- **`/dialog`** = Dialog-core integration (SIP protocol coordination)
+- **`/media`** = Media-core integration (media processing coordination)
+- **`/manager`** = High-level orchestration using dialog + media
+- **`/coordination`** = Session primitives (groups, priority, resources)
+- **`/bridge`** = Conference functionality
+- **`/api`** = Public interfaces
 
-2. **Code Quality**
-   - All files under 200 lines
-   - Single responsibility per module
-   - Clear separation of concerns
-   - Easy to test
+### **3. Improved Maintainability**
+- Dialog-core changes only affect `/dialog` directory
+- Media-core changes only affect `/media` directory
+- Manager focuses on business logic, not integration details
+- Easier to locate integration-specific code
 
-3. **Maintainability**
-   - Less coupling between components
-   - Easier to add new features
-   - Clear delegation to dialog-core/media-core
-   - Simplified error handling
+### **4. Better Architecture**
+- External dependencies clearly isolated
+- Internal session logic separated from integration logic
+- Consistent patterns for adding future integrations
 
-4. **Performance**
-   - Reduced complexity
-   - Better compile times
-   - Optimized hot paths
-   - Efficient resource usage
+## 🧪 **Testing Strategy**
 
-## Migration Strategy
+### **After Each Phase:**
+1. `cargo check -p rvoip-session-core`
+2. Verify no compilation errors
+3. Check that all imports resolve correctly
 
-1. **Backward Compatibility**
-   - Keep old API working during transition
-   - Deprecate old functions with clear messages
-   - Provide migration guide
+### **After Completion:**
+1. `cargo test -p rvoip-session-core --lib`
+2. Verify all 14 unit tests still pass
+3. Ensure existing functionality works through new structure
 
-2. **Incremental Migration**
-   - New code uses new API
-   - Migrate existing code module by module
-   - Run old and new in parallel initially
+### **Integration Testing:**
+1. Test dialog operations work through new structure
+2. Test media operations continue working
+3. Test manager orchestration functions correctly
 
-3. **Testing Strategy**
-   - Comprehensive test suite before refactoring
-   - Test each phase independently
-   - Integration tests for all use cases
+## ⏱️ **Estimated Timeline**
 
-## Success Metrics
+- **Phase 1**: ~2 hours (extract dialog code, create new files)
+- **Phase 2**: ~1 hour (simplify manager, update imports)
+- **Phase 3**: ~30 minutes (update API module)
+- **Phase 4**: ~30 minutes (update root module and imports)
 
-- [x] All files under 200 lines ✅ **ACHIEVED**
-- [x] Clean public API with <20 public functions ✅ **ACHIEVED** 
-- [x] Examples compile and run without modification ✅ **ACHIEVED**
-- [x] Library compiles and builds successfully ✅ **ACHIEVED**
-- [x] Basic tests pass ✅ **ACHIEVED**
-- [ ] 90%+ test coverage ⏳ **Phase 3**
-- [ ] Documentation for all public APIs ⏳ **Phase 3**
-- [ ] Performance benchmarks show no regression ⏳ **Phase 3**
-- [ ] Integration with dialog-core working ⏳ **Phase 2**
-- [ ] Integration with media-core working ⏳ **Phase 2**
+**Total Estimated Time**: ~4 hours
 
-## Phase 1 Achievements & Lessons Learned
+## ⚠️ **Risks & Mitigations**
 
-### 🎯 What Worked Well
-- **File Size Discipline**: Keeping strict <200 line limits forced better code organization
-- **API-First Design**: Starting with the developer experience made the library much more intuitive
-- **Builder Pattern**: Simplified configuration and reduced boilerplate significantly
-- **Complete Examples**: Having working examples for each use case validated the API design
-- **Modular Structure**: Clean separation made compilation faster and debugging easier
+### **Risk 1: Breaking Existing Functionality**
+- **Mitigation:** Incremental approach with testing after each phase
+- **Mitigation:** Keep all existing functionality, just reorganize location
 
-### 🔧 Key Technical Decisions
-- **Chose composition over inheritance** for handlers (CompositeHandler pattern)
-- **Used Arc<> for shared ownership** rather than complex lifetime management
-- **Simplified error types** to just essential categories instead of complex error hierarchies
-- **Strict delegation pattern**: session-core → dialog-core → transaction-core (never bypass)
-- **Clear layer separation**: SIP operations via dialog-core, media via media-core (never direct to rtp-core)
-- **Used async/await throughout** for consistent async patterns
+### **Risk 2: Complex Import Dependencies**
+- **Mitigation:** Update imports systematically in each phase
+- **Mitigation:** Use re-exports to maintain API compatibility
 
-### 📈 Metrics Achieved
-- **Code Reduction**: ~3,500 lines → ~1,500 lines (57% reduction)
-- **File Count**: Large monoliths → 25 focused modules
-- **Compilation**: From failing → clean compilation + tests passing
-- **API Surface**: From complex → <20 public functions
-- **Developer Experience**: 3-line SIP server creation
+### **Risk 3: Large File Movements**
+- **Mitigation:** Extract code carefully, maintaining all functionality
+- **Mitigation:** Git will track file movements and content changes
 
-### 🚧 Phase 2 Preparation
-- **All TODO locations identified** and documented
-- **Integration points mapped** to dialog-core and media-core ONLY
-- **Delegation architecture clarified**: 
-  - session-core → dialog-core for ALL SIP operations
-  - session-core → media-core for ALL media operations  
-  - Never bypass these layers or talk directly to lower-level crates
-- **Dependency cleanup needed**: Remove direct deps on rtp-core, transaction-core, etc.
-- **Error handling strategy** in place for SIP failures
-- **Testing framework ready** for integration testing
+## 🔄 **Rollback Plan**
 
-## Next Steps - Phase 2 Implementation
+If issues arise:
+1. **Phase-by-phase rollback:** Each phase is isolated
+2. **Git revert:** Use git to revert specific commits
+3. **Incremental fixing:** Address issues in small steps
 
-### Immediate Tasks (This Week)
+## 🚀 **Success Criteria**
 
-1. **Start SessionManager Integration** 
-   - Replace TODO in `manager/core.rs` with actual dialog-core calls
-   - Implement `create_outgoing_call()` by delegating to dialog-core
-   - Let dialog-core handle SIP transport via transaction-core (proper delegation)
+### **Functional Success:**
+- [ ] All existing tests pass
+- [ ] `cargo check` and `cargo test` succeed
+- [ ] No breaking changes to public API
+- [ ] All dialog operations work through new structure
+- [ ] All media operations continue working
 
-2. **Media Coordination Implementation**
-   - Replace stubs in `session/media.rs` with media-core integration
-   - Implement real SDP generation via media-core
-   - Add RTP port allocation via media-core (let media-core handle rtp-core)
+### **Structural Success:**
+- [ ] Dialog-core integration isolated in `/dialog` directory
+- [ ] Manager module simplified and focused on orchestration
+- [ ] Consistent pattern between `/dialog` and `/media` directories
+- [ ] Clear separation of concerns achieved
 
-3. **Proper Delegation Architecture**
-   - session-core → dialog-core → transaction-core → sip-transport → sip-core
-   - session-core → media-core → rtp-core (for media, but session-core only talks to media-core)
-   - Never bypass dialog-core for SIP operations or media-core for media operations
-
-### Success Criteria for Phase 2
-- [ ] Make actual SIP calls between two session-core instances
-- [ ] Media (audio) flows between calls
-- [ ] Hold/resume functionality works
-- [ ] Call termination (BYE) works properly
-- [ ] Error handling for failed calls
-- [ ] session-core only depends on dialog-core and media-core (proper delegation verified)
-- [ ] No direct calls to transaction-core, rtp-core, sip-transport, or sip-core
-
-### Weekly Progress Reviews
-- **Monday**: Review Phase 2 progress, plan tasks
-- **Wednesday**: Mid-week checkpoint, address blockers  
-- **Friday**: Week completion review, plan next week
-
-## Questions to Resolve
-
-1. Should we keep all coordination features or simplify further?
-2. Which handlers are truly essential vs examples?
-3. Do we need backward compatibility or clean break?
-4. What's the priority order for use cases?
+### **Maintainability Success:**
+- [ ] Integration code easy to locate
+- [ ] External dependency changes isolated to specific directories
+- [ ] Manager focuses on business logic only
+- [ ] Clean, understandable directory structure
 
 ---
 
-*This refactoring will make session-core the simple, powerful foundation for all RVOIP SIP applications.* 
+## 📝 **Review Questions**
+
+1. **Scope:** Should we move ALL dialog-related code from manager, or keep some high-level orchestration there?
+2. **Events:** Should dialog coordination events go in `/dialog` or stay in `/manager`?
+3. **Naming:** Any preferences for naming the new dialog module files?
+4. **Approach:** Should we do this refactoring in one large change or multiple smaller PRs?
+5. **Testing:** Any additional testing requirements beyond the proposed strategy?
+
+**Ready for review and approval before execution.** 
