@@ -6,7 +6,7 @@ use crate::api::types::SessionId;
 use crate::errors::Result;
 
 /// Simple priority levels
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     Low = 1,
     Normal = 2,

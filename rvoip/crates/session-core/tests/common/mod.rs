@@ -26,6 +26,10 @@ pub use session_test_utils::*;
 pub mod api_test_utils;
 pub use api_test_utils::*;
 
+// Re-export coordination test utilities
+pub mod coordination_test_utils;
+pub use coordination_test_utils::*;
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -458,4 +462,5 @@ impl TestConfig {
 pub use bridge_test_utils::*;
 pub use media_test_utils::*;
 pub use manager_test_utils::*;
-pub use session_test_utils::*; 
+pub use session_test_utils::*;
+pub use coordination_test_utils::*; 

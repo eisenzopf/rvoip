@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 use serde::{Serialize, Deserialize};
+use uuid::Uuid;
 use crate::errors::Result;
 
 /// Unique identifier for a session
@@ -13,8 +14,8 @@ pub struct SessionId(pub String);
 
 impl SessionId {
     pub fn new() -> Self {
-        // Generate a unique session ID
-        let id = format!("sess_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        // Generate a truly unique session ID using UUID
+        let id = format!("sess_{}", Uuid::new_v4());
         Self(id)
     }
 

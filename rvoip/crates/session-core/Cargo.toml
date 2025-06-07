@@ -47,3 +47,4 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
+fastrand = "2.0"
