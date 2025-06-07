@@ -53,6 +53,101 @@ pub async fn make_call_with_sdp(
     session_manager.create_outgoing_call(from, to, Some(sdp.to_string())).await
 }
 
+/// Generate an SDP offer for making calls
+/// 
+/// This function creates a proper SDP offer with the system's supported codecs
+/// and capabilities. Use this instead of manually creating SDP.
+/// 
+/// # Arguments
+/// * `local_ip` - Local IP address for media
+/// * `local_port` - Local RTP port for media
+/// 
+/// # Returns
+/// SDP offer string ready to be used in `make_call_with_sdp`
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// # async fn example() -> rvoip_session_core::Result<()> {
+/// let sdp_offer = generate_sdp_offer("127.0.0.1", 10000)?;
+/// let session_mgr = SessionManagerBuilder::new().build().await?;
+/// let call = make_call_with_sdp(&session_mgr, "sip:alice@example.com", "sip:bob@example.com", &sdp_offer).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn generate_sdp_offer(local_ip: &str, local_port: u16) -> Result<String> {
+    use crate::media::config::MediaConfigConverter;
+    let converter = MediaConfigConverter::new();
+    converter.generate_sdp_offer(local_ip, local_port)
+        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
+}
+
+/// Generate an SDP answer in response to an offer
+/// 
+/// This function performs proper codec negotiation according to RFC 3264.
+/// It finds compatible codecs between the offer and local capabilities,
+/// and generates an appropriate answer.
+/// 
+/// # Arguments
+/// * `offer_sdp` - The incoming SDP offer to respond to
+/// * `local_ip` - Local IP address for media
+/// * `local_port` - Local RTP port for media
+/// 
+/// # Returns
+/// SDP answer string with negotiated codecs
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn handle_incoming_call(call: IncomingCall) -> CallDecision {
+///     if let Some(ref offer) = call.sdp {
+///         match generate_sdp_answer(offer, "127.0.0.1", 10001) {
+///             Ok(answer) => CallDecision::Accept(Some(answer)),
+///             Err(_) => CallDecision::Reject("Incompatible media"),
+///         }
+///     } else {
+///         CallDecision::Accept(None)
+///     }
+/// }
+/// ```
+pub fn generate_sdp_answer(offer_sdp: &str, local_ip: &str, local_port: u16) -> Result<String> {
+    use crate::media::config::MediaConfigConverter;
+    let converter = MediaConfigConverter::new();
+    converter.generate_sdp_answer(offer_sdp, local_ip, local_port)
+        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
+}
+
+/// Parse an SDP answer to extract negotiated media parameters
+/// 
+/// This function extracts the negotiated codec, remote IP, and remote port
+/// from an SDP answer after a call has been established.
+/// 
+/// # Arguments
+/// * `answer_sdp` - The SDP answer received from the remote party
+/// 
+/// # Returns
+/// Negotiated media configuration
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// # fn example(answer_sdp: &str) -> rvoip_session_core::Result<()> {
+/// let negotiated = parse_sdp_answer(answer_sdp)?;
+/// println!("Negotiated codec: {}", negotiated.codec.name);
+/// println!("Remote endpoint: {}:{}", negotiated.remote_ip, negotiated.remote_port);
+/// # Ok(())
+/// # }
+/// ```
+pub fn parse_sdp_answer(answer_sdp: &str) -> Result<crate::media::config::NegotiatedConfig> {
+    use crate::media::config::MediaConfigConverter;
+    let converter = MediaConfigConverter::new();
+    converter.parse_sdp_answer(answer_sdp)
+        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
+}
+
 /// Accept an incoming call
 /// 
 /// # Arguments
@@ -69,7 +164,7 @@ pub async fn make_call_with_sdp(
 /// #[async_trait::async_trait]
 /// impl CallHandler for MyHandler {
 ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-///         CallDecision::Accept
+///         CallDecision::Accept(None)
 ///     }
 ///     
 ///     async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}

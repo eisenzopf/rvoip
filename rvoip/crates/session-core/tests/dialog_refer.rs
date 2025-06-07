@@ -22,7 +22,7 @@ struct TransferTestHandler;
 #[async_trait::async_trait]
 impl CallHandler for TransferTestHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {

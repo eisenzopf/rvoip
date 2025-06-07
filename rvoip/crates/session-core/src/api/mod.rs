@@ -16,4 +16,8 @@ pub use builder::*;
 pub use create::*;
 pub use control::*;
 pub use handlers::*;
-pub use types::*; 
+pub use types::*;
+
+// Re-export core types that examples need
+pub use crate::manager::SessionManager;
+pub use crate::errors::{Result, SessionError}; 

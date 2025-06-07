@@ -286,7 +286,7 @@ impl IncomingCallNotification for BridgeCallHandler {
             }
         });
         
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
     
     async fn on_call_terminated_by_remote(

@@ -20,7 +20,7 @@ struct TestHandler;
 impl CallHandler for TestHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         println!("🔔 TEST HANDLER: Received incoming call {}", call.id);
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {

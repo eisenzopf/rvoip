@@ -30,7 +30,7 @@ pub struct SessionManager {
     // High-level integration managers (parallel abstraction levels)
     dialog_manager: Arc<DialogManager>,
     dialog_coordinator: Arc<SessionDialogCoordinator>,
-    // media_manager: Arc<MediaManager>, // TODO: Add when MediaManager is implemented
+    media_manager: Arc<MediaManager>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -43,6 +43,7 @@ impl std::fmt::Debug for SessionManager {
             .field("handler", &self.handler.is_some())
             .field("dialog_manager", &self.dialog_manager)
             .field("dialog_coordinator", &self.dialog_coordinator)
+            .field("media_manager", &self.media_manager)
             .finish()
     }
 }
@@ -84,6 +85,14 @@ impl SessionManager {
             dialog_to_session,
         ));
 
+        // Create media manager with proper configuration
+        let local_bind_addr = "127.0.0.1:0".parse().unwrap(); // Let MediaManager handle port allocation
+        let media_manager = Arc::new(crate::media::manager::MediaManager::with_port_range(
+            local_bind_addr,
+            config.media_port_start,
+            config.media_port_end,
+        ));
+
         let manager = Arc::new(Self {
             config,
             registry,
@@ -92,6 +101,7 @@ impl SessionManager {
             handler,
             dialog_manager,
             dialog_coordinator,
+            media_manager,
         });
 
         // Initialize subsystems and coordination
@@ -122,10 +132,92 @@ impl SessionManager {
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog event loop: {}", e)))?;
 
         // Bridge session events from coordinator to event processor
-        println!("🌉 BRIDGE: Setting up session event bridge");
+        println!("🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling");
         let event_processor = self.event_processor.clone();
+        let media_manager = self.media_manager.clone();
+        
+        // SDP storage for sessions (session_id -> (local_sdp, remote_sdp))
+        let sdp_storage = Arc::new(dashmap::DashMap::<SessionId, (Option<String>, Option<String>)>::new());
+        let sdp_storage_clone = sdp_storage.clone();
+        
         tokio::spawn(async move {
             while let Some(session_event) = session_events_rx.recv().await {
+                // Handle SDP events - store SDP for sessions
+                if let super::events::SessionEvent::SdpEvent { session_id, event_type, sdp } = &session_event {
+                    match event_type.as_str() {
+                        "local_sdp_offer" => {
+                            sdp_storage_clone.entry(session_id.clone())
+                                .or_insert((None, None))
+                                .0 = Some(sdp.clone());
+                            tracing::info!("📄 Stored local SDP offer for session {}", session_id);
+                        }
+                        "remote_sdp_answer" => {
+                            sdp_storage_clone.entry(session_id.clone())
+                                .or_insert((None, None))
+                                .1 = Some(sdp.clone());
+                            tracing::info!("📄 Stored remote SDP answer for session {}", session_id);
+                            
+                            // When we have remote SDP, update media session if it exists
+                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
+                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
+                                    tracing::error!("Failed to update media session with remote SDP: {}", e);
+                                } else {
+                                    tracing::info!("✅ Updated media session with remote SDP for {}", session_id);
+                                }
+                            }
+                        }
+                        "sdp_update" => {
+                            tracing::info!("📄 Processing SDP update for session {}", session_id);
+                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
+                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
+                                    tracing::error!("Failed to update media session with new SDP: {}", e);
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::debug!("Unknown SDP event type: {}", event_type);
+                        }
+                    }
+                }
+                
+                // Handle media auto-creation events
+                if let super::events::SessionEvent::MediaEvent { session_id, event } = &session_event {
+                    if event == "auto_create_media_session" {
+                        tracing::info!("Auto-creating media session for session: {}", session_id);
+                        if let Err(e) = media_manager.create_media_session(session_id).await {
+                            tracing::error!("Failed to auto-create media session for {}: {}", session_id, e);
+                        } else {
+                            tracing::info!("Successfully auto-created media session for {}", session_id);
+                            
+                            // Apply any stored SDP to the newly created media session
+                            if let Some(sdp_entry) = sdp_storage_clone.get(session_id) {
+                                let (local_sdp, remote_sdp) = sdp_entry.value();
+                                if let Some(remote_sdp) = remote_sdp {
+                                    if let Err(e) = media_manager.update_media_session(session_id, remote_sdp).await {
+                                        tracing::error!("Failed to apply stored remote SDP to new media session: {}", e);
+                                    } else {
+                                        tracing::info!("✅ Applied stored remote SDP to new media session for {}", session_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Also handle StateChanged events for media coordination
+                if let super::events::SessionEvent::StateChanged { session_id, new_state, .. } = &session_event {
+                    if matches!(new_state, crate::api::types::CallState::Terminated) {
+                        tracing::info!("Session {} terminated, cleaning up media session and SDP", session_id);
+                        if let Err(e) = media_manager.terminate_media_session(session_id).await {
+                            tracing::warn!("Failed to terminate media session for {}: {}", session_id, e);
+                        }
+                        
+                        // Clean up stored SDP
+                        sdp_storage_clone.remove(session_id);
+                    }
+                }
+                
+                // Forward to event processor for other handlers
                 if let Err(e) = event_processor.publish_event(session_event).await {
                     tracing::error!("Failed to publish session event: {}", e);
                 }
@@ -172,12 +264,7 @@ impl SessionManager {
     ) -> Result<CallSession> {
         let session_id = SessionId::new();
         
-        // Create SIP INVITE and dialog using DialogManager (high-level delegation)
-        let _dialog_handle = self.dialog_manager
-            .create_outgoing_call(session_id.clone(), from, to, sdp)
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)))?;
-        
+        // Create the call session first
         let call = CallSession {
             id: session_id.clone(),
             from: from.to_string(),
@@ -186,17 +273,31 @@ impl SessionManager {
             started_at: Some(std::time::Instant::now()),
         };
 
-        // Register the session
+        // Register the session BEFORE creating the dialog to ensure it exists
         self.registry.register_session(session_id.clone(), call.clone()).await?;
 
-        // Send session created event
+        // Store the local SDP for this session if provided
+        if let Some(ref local_sdp) = sdp {
+            self.send_session_event(super::events::SessionEvent::SdpEvent {
+                session_id: session_id.clone(),
+                event_type: "local_sdp_offer".to_string(),
+                sdp: local_sdp.clone(),
+            }).await?;
+        }
+
+        // Send session created event BEFORE dialog creation
         self.send_session_event(super::events::SessionEvent::SessionCreated {
             session_id: session_id.clone(),
             from: call.from.clone(),
             to: call.to.clone(),
             call_state: call.state.clone(),
         }).await?;
-
+        
+        // Create SIP INVITE and dialog using DialogManager (high-level delegation)
+        let _dialog_handle = self.dialog_manager
+            .create_outgoing_call(session_id.clone(), from, to, sdp)
+            .await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)))?;
         tracing::info!("Created outgoing call: {} -> {}", from, to);
         Ok(call)
     }
@@ -316,15 +417,32 @@ impl SessionManager {
 
     /// Get media information for a session
     pub async fn get_media_info(&self, session_id: &SessionId) -> Result<MediaInfo> {
-        // TODO: Delegate to media-core for actual media info
-        // This would get the current SDP, ports, codecs from media-core
-        Ok(MediaInfo {
-            local_sdp: None,
-            remote_sdp: None,
-            local_rtp_port: None,
-            remote_rtp_port: None,
-            codec: None,
-        })
+        // Verify session exists
+        let _session = self.registry.get_session(session_id).await?
+            .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))?;
+        
+        // Get media info from MediaManager
+        if let Some(media_session_info) = self.media_manager.get_media_info(session_id).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to get media info: {}", e)))? {
+            
+            // Convert MediaSessionInfo to MediaInfo
+            Ok(MediaInfo {
+                local_sdp: media_session_info.local_sdp,
+                remote_sdp: media_session_info.remote_sdp,
+                local_rtp_port: media_session_info.local_rtp_port,
+                remote_rtp_port: media_session_info.remote_rtp_port,
+                codec: media_session_info.codec,
+            })
+        } else {
+            // No media session exists yet (session might be in Ringing/Initiating state)
+            Ok(MediaInfo {
+                local_sdp: None,
+                remote_sdp: None,
+                local_rtp_port: None,
+                remote_rtp_port: None,
+                codec: None,
+            })
+        }
     }
 
     /// Update media for a session
@@ -379,6 +497,40 @@ impl SessionManager {
         self.event_processor.publish_event(event).await
     }
 
+    /// Create a media session (used by coordination logic)
+    pub async fn create_media_session(&self, session_id: &SessionId) -> Result<()> {
+        self.media_manager.create_media_session(session_id).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create media session: {}", e)))?;
+        Ok(())
+    }
+
+    /// Update media session with SDP (used by coordination logic)
+    pub async fn update_media_session(&self, session_id: &SessionId, sdp: &str) -> Result<()> {
+        self.media_manager.update_media_session(session_id, sdp).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to update media session: {}", e)))?;
+        Ok(())
+    }
+
+    /// Terminate media session (used by coordination logic)
+    pub async fn terminate_media_session(&self, session_id: &SessionId) -> Result<()> {
+        self.media_manager.terminate_media_session(session_id).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to terminate media session: {}", e)))?;
+        Ok(())
+    }
+
+    /// Generate SDP offer for a session (used by coordination logic)
+    pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {
+        self.media_manager.generate_sdp_offer(session_id).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to generate SDP offer: {}", e)))
+    }
+
+    /// Process SDP answer for a session (used by coordination logic)
+    pub async fn process_sdp_answer(&self, session_id: &SessionId, sdp: &str) -> Result<()> {
+        self.media_manager.process_sdp_answer(session_id, sdp).await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to process SDP answer: {}", e)))?;
+        Ok(())
+    }
+
 
 }
 
@@ -392,6 +544,7 @@ impl Clone for SessionManager {
             handler: self.handler.clone(),
             dialog_manager: Arc::clone(&self.dialog_manager),
             dialog_coordinator: Arc::clone(&self.dialog_coordinator),
+            media_manager: Arc::clone(&self.media_manager),
         }
     }
 } 

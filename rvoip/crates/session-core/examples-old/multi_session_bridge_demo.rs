@@ -251,7 +251,7 @@ impl IncomingCallNotification for ConferenceCallHandler {
             }
         });
         
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
     
     async fn on_call_terminated_by_remote(

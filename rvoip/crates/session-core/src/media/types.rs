@@ -157,11 +157,11 @@ impl From<MediaCoreSessionInfo> for MediaSessionInfo {
     fn from(core_info: MediaCoreSessionInfo) -> Self {
         Self {
             session_id: core_info.dialog_id,
-            local_sdp: None, // TODO: Extract from config if available
-            remote_sdp: None, // TODO: Extract from config if available 
+            local_sdp: None, // SDP should come from actual SDP generation, not hardcoded
+            remote_sdp: None, // SDP should come from actual negotiation, not hardcoded
             local_rtp_port: core_info.rtp_port,
             remote_rtp_port: core_info.config.remote_addr.map(|addr| addr.port()),
-            codec: core_info.config.preferred_codec,
+            codec: core_info.config.preferred_codec.or_else(|| Some("PCMU".to_string())),
             quality_metrics: None, // TODO: Convert from stats if available
         }
     }

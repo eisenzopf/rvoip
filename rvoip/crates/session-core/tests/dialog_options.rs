@@ -31,7 +31,7 @@ impl CapabilitiesTestHandler {
 impl CallHandler for CapabilitiesTestHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
         if self.accept_calls {
-            CallDecision::Accept
+            CallDecision::Accept(None)
         } else {
             CallDecision::Reject("Capabilities test - not accepting calls".to_string())
         }

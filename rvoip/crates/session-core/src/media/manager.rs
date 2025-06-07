@@ -168,26 +168,11 @@ impl MediaManager {
                 .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
         };
         
-        // Get session info from controller to get the allocated port
-        let media_session_info = self.controller.get_session_info(&dialog_id).await
-            .ok_or_else(|| MediaError::SessionNotFound { session_id: dialog_id.clone() })?;
-        
-        let rtp_port = media_session_info.rtp_port
-            .ok_or_else(|| MediaError::Configuration { message: "No RTP port allocated".to_string() })?;
-        
-        // Generate SDP with real allocated port
-        let mut sdp = String::new();
-        sdp.push_str("v=0\r\n");
-        sdp.push_str("o=rvoip 0 0 IN IP4 127.0.0.1\r\n");
-        sdp.push_str("s=Session\r\n");
-        sdp.push_str("c=IN IP4 127.0.0.1\r\n");
-        sdp.push_str("t=0 0\r\n");
-        sdp.push_str(&format!("m=audio {} RTP/AVP 0 8\r\n", rtp_port)); // PCMU and PCMA
-        sdp.push_str("a=rtpmap:0 PCMU/8000\r\n");
-        sdp.push_str("a=rtpmap:8 PCMA/8000\r\n");
-        
-        tracing::info!("✅ Generated SDP offer with real RTP port {} for session: {}", rtp_port, session_id);
-        Ok(sdp)
+        // Try to get SDP from MediaSessionController if it provides it
+        // For now, return error indicating SDP generation should come from SIP layer
+        Err(MediaError::Configuration { 
+            message: "SDP generation should be handled by SIP layer, not media layer".to_string() 
+        })
     }
     
     /// Helper method to parse remote address from SDP (simplified implementation)

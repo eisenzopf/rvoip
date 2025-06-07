@@ -25,9 +25,13 @@ use crate::Result;
 /// # }
 /// ```
 pub async fn hold_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    if !session.is_active() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot hold call in state: {:?}", session.state)
+            format!("Cannot hold call in state: {:?}", current_session.state)
         ));
     }
 
@@ -56,9 +60,13 @@ pub async fn hold_call(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # }
 /// ```
 pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    if !matches!(session.state, CallState::OnHold) {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !matches!(current_session.state, CallState::OnHold) {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot resume call not on hold: {:?}", session.state)
+            format!("Cannot resume call not on hold: {:?}", current_session.state)
         ));
     }
 
@@ -84,9 +92,13 @@ pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSe
 /// # }
 /// ```
 pub async fn transfer_call(session_manager: &Arc<SessionManager>, session: &CallSession, target: &str) -> Result<()> {
-    if !session.state.is_in_progress() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.state.is_in_progress() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot transfer call in state: {:?}", session.state)
+            format!("Cannot transfer call in state: {:?}", current_session.state)
         ));
     }
 
@@ -137,9 +149,13 @@ pub async fn terminate_call(session_manager: &Arc<SessionManager>, session: &Cal
 /// # }
 /// ```
 pub async fn send_dtmf(session_manager: &Arc<SessionManager>, session: &CallSession, digits: &str) -> Result<()> {
-    if !session.is_active() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot send DTMF on inactive call: {:?}", session.state)
+            format!("Cannot send DTMF on inactive call: {:?}", current_session.state)
         ));
     }
 
@@ -164,9 +180,13 @@ pub async fn send_dtmf(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # }
 /// ```
 pub async fn mute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    if !session.is_active() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot mute inactive call: {:?}", session.state)
+            format!("Cannot mute inactive call: {:?}", current_session.state)
         ));
     }
 
@@ -195,9 +215,13 @@ pub async fn mute_call(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # }
 /// ```
 pub async fn unmute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    if !session.is_active() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.is_active() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot unmute inactive call: {:?}", session.state)
+            format!("Cannot unmute inactive call: {:?}", current_session.state)
         ));
     }
 
@@ -235,9 +259,13 @@ pub async fn get_media_info(session_manager: &Arc<SessionManager>, session: &Cal
 /// # }
 /// ```
 pub async fn update_media(session_manager: &Arc<SessionManager>, session: &CallSession, new_sdp: &str) -> Result<()> {
-    if !session.state.is_in_progress() {
+    // Get the current session state from the manager to avoid stale state issues
+    let current_session = session_manager.find_session(&session.id).await?
+        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    
+    if !current_session.state.is_in_progress() {
         return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot update media for call in state: {:?}", session.state)
+            format!("Cannot update media for call in state: {:?}", current_session.state)
         ));
     }
 

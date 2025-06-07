@@ -622,7 +622,7 @@ impl TestCallHandler {
 impl CallHandler for TestCallHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
         if self.accept_calls {
-            CallDecision::Accept
+            CallDecision::Accept(None)
         } else {
             CallDecision::Reject("Test rejection".to_string())
         }

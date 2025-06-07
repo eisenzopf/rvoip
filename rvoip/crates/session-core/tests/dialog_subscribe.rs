@@ -43,7 +43,7 @@ impl CallHandler for SubscriptionTestHandler {
             HandlerBehavior::AcceptSelective => {
                 // Accept calls with specific patterns for testing
                 if call.from.contains("accepted") {
-                    CallDecision::Accept
+                    CallDecision::Accept(None)
                 } else {
                     CallDecision::Reject("Selective rejection".to_string())
                 }

@@ -45,6 +45,35 @@ pub enum SessionEvent {
         event: String,
     },
     
+    /// DTMF digits received
+    DtmfReceived {
+        session_id: SessionId,
+        digits: String,
+    },
+    
+    /// Session was held
+    SessionHeld {
+        session_id: SessionId,
+    },
+    
+    /// Session was resumed from hold
+    SessionResumed {
+        session_id: SessionId,
+    },
+    
+    /// Media update requested (e.g., re-INVITE with new SDP)
+    MediaUpdate {
+        session_id: SessionId,
+        offered_sdp: Option<String>,
+    },
+    
+    /// SDP event (offer, answer, or update)
+    SdpEvent {
+        session_id: SessionId,
+        event_type: String, // "local_sdp_offer", "remote_sdp_answer", "sdp_update", etc.
+        sdp: String,
+    },
+    
     /// Error event
     Error { 
         session_id: Option<SessionId>, 

@@ -206,7 +206,7 @@ pub mod call_center {
             
             if available {
                 // Agent is available, accept immediately
-                CallDecision::Accept
+                CallDecision::Accept(None)
             } else {
                 // No agent available, add to queue
                 if self.queue.queue_size() < 10 {
@@ -343,7 +343,7 @@ pub mod conference_bridge {
     impl CallHandler for ConferenceHandler {
         async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
             self.add_to_conference(call.id.clone()).await;
-            CallDecision::Accept
+            CallDecision::Accept(None)
         }
 
         async fn on_call_ended(&self, call: CallSession, reason: &str) {

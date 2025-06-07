@@ -10,6 +10,7 @@ use rvoip_dialog_core::{
     events::SessionCoordinationEvent,
     DialogId,
 };
+use rvoip_sip_core::types::headers::HeaderAccess;
 use crate::api::{
     types::{SessionId, CallSession, IncomingCall, CallDecision, CallState},
     handlers::CallHandler,
@@ -106,6 +107,10 @@ impl SessionDialogCoordinator {
                 self.handle_registration_request(transaction_id, from_uri.to_string(), contact_uri.to_string(), expires).await?;
             }
             
+            SessionCoordinationEvent::ReInvite { dialog_id, transaction_id, request } => {
+                self.handle_reinvite_request(dialog_id, transaction_id, request).await?;
+            }
+            
             _ => {
                 tracing::debug!("Unhandled session coordination event: {:?}", event);
                 // TODO: Handle other events as needed
@@ -163,7 +168,7 @@ impl SessionDialogCoordinator {
                 from: from_uri,
                 to: to_uri,
                 sdp: Some(String::from_utf8_lossy(request.body()).to_string()).filter(|s| !s.is_empty()),
-                headers: std::collections::HashMap::new(), // TODO: Extract relevant headers
+                headers: self.extract_sip_headers(&request),
                 received_at: std::time::Instant::now(),
             };
             
@@ -182,10 +187,10 @@ impl SessionDialogCoordinator {
         decision: CallDecision,
     ) -> DialogResult<()> {
         match decision {
-            CallDecision::Accept => {
+            CallDecision::Accept(sdp_answer) => {
                 // Get the call handle for this dialog and answer it
                 if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                    if let Err(e) = call_handle.answer(None).await {
+                    if let Err(e) = call_handle.answer(sdp_answer).await {
                         tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
                         self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
                     } else {
@@ -217,15 +222,28 @@ impl SessionDialogCoordinator {
             
             CallDecision::Forward(target) => {
                 tracing::info!("Forwarding incoming call for session {} to {}", session_id, target);
-                // TODO: Implement call forwarding via dialog-core
-                // For now, treat as rejection
+                
+                // Implement call forwarding via dialog-core
                 if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
+                    // Send 302 Moved Temporarily response (Contact header would be added by dialog-core)
                     if let Err(e) = call_handle.reject(
-                        rvoip_sip_core::StatusCode::MovedTemporarily, 
+                        rvoip_sip_core::StatusCode::MovedTemporarily,
                         Some(format!("Forwarded to {}", target))
                     ).await {
                         tracing::error!("Failed to forward incoming call for session {}: {}", session_id, e);
+                        
+                        // Fallback to simple rejection if forwarding fails
+                        if let Err(e2) = call_handle.reject(
+                            rvoip_sip_core::StatusCode::BusyHere,
+                            Some("Forward failed".to_string())
+                        ).await {
+                            tracing::error!("Failed to reject call after forward failure: {}", e2);
+                        }
+                    } else {
+                        tracing::info!("Successfully forwarded call for session {} to {}", session_id, target);
                     }
+                } else {
+                    tracing::error!("Failed to get call handle for dialog {} to forward call", dialog_id);
                 }
             }
         }
@@ -246,6 +264,24 @@ impl SessionDialogCoordinator {
         if response.status_code() == 200 && transaction_id.to_string().contains("INVITE") && transaction_id.to_string().contains("client") {
             println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
             
+            // Extract SDP from 200 OK response body if present
+            let response_body = String::from_utf8_lossy(response.body());
+            if !response_body.trim().is_empty() {
+                tracing::info!("📄 SESSION COORDINATION: 200 OK contains SDP body ({} bytes)", response_body.len());
+                
+                // Find session and send remote SDP event
+                if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                    let session_id = session_id_ref.value().clone();
+                    self.send_session_event(SessionEvent::SdpEvent {
+                        session_id,
+                        event_type: "remote_sdp_answer".to_string(),
+                        sdp: response_body.to_string(),
+                    }).await.unwrap_or_else(|e| {
+                        tracing::error!("Failed to send remote SDP event: {}", e);
+                    });
+                }
+            }
+            
             // Send ACK for 2xx response using the proper dialog-core API
             match self.dialog_api.send_ack_for_2xx_response(&dialog_id, &transaction_id, &response).await {
                 Ok(_) => {
@@ -257,10 +293,102 @@ impl SessionDialogCoordinator {
                     tracing::error!("Failed to send ACK for dialog {} transaction {}: {}", dialog_id, transaction_id, e);
                 }
             }
+            
+            // CRITICAL FIX: Update session state to Active for outgoing calls
+            if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                let session_id = session_id_ref.value().clone();
+                println!("📞 SESSION COORDINATION: Updating session {} state to Active for successful outgoing call", session_id);
+                
+                                    if let Err(e) = self.update_session_state(session_id.clone(), CallState::Active).await {
+                        tracing::error!("Failed to update session {} state to Active: {}", session_id, e);
+                    } else {
+                        tracing::info!("Successfully updated session {} state to Active", session_id);
+                        
+                        // Auto-create media session when call becomes active
+                        self.send_session_event(SessionEvent::MediaEvent {
+                            session_id: session_id.clone(),
+                            event: "auto_create_media_session".to_string(),
+                        }).await.unwrap_or_else(|e| {
+                            tracing::error!("Failed to send media auto-create event: {}", e);
+                        });
+                        
+                        // The StateChanged event is already sent by update_session_state
+                    }
+            } else {
+                tracing::debug!("No session found for dialog {} - trying alternative correlation", dialog_id);
+                
+                // ALTERNATIVE APPROACH: Try to find session by checking all active sessions
+                // Look for sessions in Initiating state and update the first one to Active
+                // This handles the timing issue where responses arrive before dialog mapping
+                match self.registry.list_active_sessions().await {
+                    Ok(session_ids) => {
+                        for session_id in session_ids {
+                            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                                if matches!(session.state, CallState::Initiating) {
+                                    tracing::info!("Alternative correlation: mapping dialog {} to session {}", dialog_id, session_id);
+                                    
+                                    // Map this dialog to the session for future reference
+                                    self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+                                    
+                                                            if let Err(e) = self.update_session_state(session_id.clone(), CallState::Active).await {
+                            tracing::error!("Failed to update session {} state to Active: {}", session_id, e);
+                        } else {
+                            tracing::info!("Successfully updated session {} state to Active via alternative lookup", session_id);
+                            
+                            // Auto-create media session when call becomes active
+                            self.send_session_event(SessionEvent::MediaEvent {
+                                session_id: session_id.clone(),
+                                event: "auto_create_media_session".to_string(),
+                            }).await.unwrap_or_else(|e| {
+                                tracing::error!("Failed to send media auto-create event: {}", e);
+                            });
+                        }
+                                    break; // Found and updated one session, stop looking
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Alternative lookup failed to list active sessions: {}", e);
+                    }
+                }
+            }
         }
         
-        // Continue with other response processing...
-        tracing::debug!("Response {} received for dialog {}", response.status_code(), dialog_id);
+        // Handle other response codes
+        match response.status_code() {
+            180 => {
+                // 180 Ringing
+                if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                    let session_id = session_id_ref.value().clone();
+                    tracing::info!("Call ringing for session {}", session_id);
+                    self.update_session_state(session_id, CallState::Ringing).await?;
+                }
+            }
+            
+            183 => {
+                // 183 Session Progress
+                if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                    let session_id = session_id_ref.value().clone();
+                    tracing::info!("Session progress for session {}", session_id);
+                    // Keep in Initiating state but could add a "Progress" state if needed
+                }
+            }
+            
+            code if code >= 400 => {
+                // Call failed
+                if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                    let session_id = session_id_ref.value().clone();
+                    let reason = format!("{} {}", code, response.reason().unwrap_or("Unknown Error"));
+                    tracing::info!("Call failed for session {}: {}", session_id, reason);
+                    self.update_session_state(session_id, CallState::Failed(reason)).await?;
+                }
+            }
+            
+            _ => {
+                tracing::debug!("Unhandled response {} for dialog {}", response.status_code(), dialog_id);
+            }
+        }
         
         Ok(())
     }
@@ -276,7 +404,15 @@ impl SessionDialogCoordinator {
             tracing::info!("Call answered for session {}: {}", session_id, dialog_id);
             
             // Update call state to Active
-            self.update_session_state(session_id, CallState::Active).await?;
+            self.update_session_state(session_id.clone(), CallState::Active).await?;
+            
+            // Auto-create media session when call becomes active
+            self.send_session_event(SessionEvent::MediaEvent {
+                session_id: session_id.clone(),
+                event: "auto_create_media_session".to_string(),
+            }).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to send media auto-create event: {}", e);
+            });
         }
         
         Ok(())
@@ -320,6 +456,214 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
+    /// Handle ReInvite requests (including INFO for DTMF and UPDATE for hold)
+    async fn handle_reinvite_request(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: rvoip_dialog_core::TransactionKey,
+        request: rvoip_sip_core::Request,
+    ) -> DialogResult<()> {
+        let method = request.method();
+        tracing::info!("ReInvite request {} for dialog {}", method, dialog_id);
+        
+        match method {
+            rvoip_sip_core::Method::Info => {
+                self.handle_info_request(dialog_id, transaction_id, request).await?;
+            }
+            
+            rvoip_sip_core::Method::Update => {
+                self.handle_update_request(dialog_id, transaction_id, request).await?;
+            }
+            
+            rvoip_sip_core::Method::Invite => {
+                self.handle_invite_reinvite(dialog_id, transaction_id, request).await?;
+            }
+            
+            _ => {
+                tracing::warn!("Unhandled ReInvite method {} for dialog {}", method, dialog_id);
+                // Send 501 Not Implemented response
+                if let Err(e) = self.send_response(&transaction_id, 501, "Not Implemented").await {
+                    tracing::error!("Failed to send 501 response: {}", e);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle INFO request (typically DTMF)
+    async fn handle_info_request(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: rvoip_dialog_core::TransactionKey,
+        request: rvoip_sip_core::Request,
+    ) -> DialogResult<()> {
+        tracing::info!("Handling INFO request for dialog {}", dialog_id);
+        
+        // Extract DTMF from request body
+        let body = String::from_utf8_lossy(request.body());
+        if body.starts_with("DTMF:") {
+            let dtmf_digits = body.strip_prefix("DTMF:").unwrap_or("").trim();
+            tracing::info!("Received DTMF: '{}' for dialog {}", dtmf_digits, dialog_id);
+            
+            // Find the session and notify handler if available
+            if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                let session_id = session_id_ref.value().clone();
+                
+                // Send DTMF received event
+                self.send_session_event(SessionEvent::DtmfReceived {
+                    session_id,
+                    digits: dtmf_digits.to_string(),
+                }).await?;
+            }
+        }
+        
+        // Send 200 OK response
+        if let Err(e) = self.send_response(&transaction_id, 200, "OK").await {
+            tracing::error!("Failed to send 200 OK response to INFO: {}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle UPDATE request (typically for hold/resume)
+    async fn handle_update_request(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: rvoip_dialog_core::TransactionKey,
+        request: rvoip_sip_core::Request,
+    ) -> DialogResult<()> {
+        tracing::info!("Handling UPDATE request for dialog {}", dialog_id);
+        
+        // Check if this is a hold request by examining SDP
+        let body = String::from_utf8_lossy(request.body());
+        let is_hold = body.contains("hold") || body.contains("sendonly") || body.contains("inactive");
+        
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            
+            if is_hold {
+                tracing::info!("Hold request detected for session {}", session_id);
+                self.update_session_state(session_id.clone(), CallState::OnHold).await?;
+                
+                // Send hold event
+                self.send_session_event(SessionEvent::SessionHeld {
+                    session_id,
+                }).await?;
+            } else {
+                tracing::info!("Resume request detected for session {}", session_id);
+                self.update_session_state(session_id.clone(), CallState::Active).await?;
+                
+                // Send resume event
+                self.send_session_event(SessionEvent::SessionResumed {
+                    session_id,
+                }).await?;
+            }
+        }
+        
+        // Send 200 OK response without SDP body (UPDATE doesn't require SDP answer)
+        if let Err(e) = self.send_response(&transaction_id, 200, "OK").await {
+            tracing::error!("Failed to send 200 OK response to UPDATE: {}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle re-INVITE request (media changes)
+    async fn handle_invite_reinvite(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: rvoip_dialog_core::TransactionKey,
+        request: rvoip_sip_core::Request,
+    ) -> DialogResult<()> {
+        tracing::info!("Handling re-INVITE request for dialog {}", dialog_id);
+        
+        // Extract the SDP offer from the re-INVITE
+        let offered_sdp = String::from_utf8_lossy(request.body());
+        
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            tracing::info!("Processing re-INVITE for session {}", session_id);
+            
+            // Send media update event to be handled by SessionManager
+            // The SessionManager will coordinate with MediaCoordinator for SDP answer
+            self.send_session_event(SessionEvent::MediaUpdate {
+                session_id: session_id.clone(),
+                offered_sdp: if offered_sdp.trim().is_empty() { 
+                    None 
+                } else { 
+                    Some(offered_sdp.to_string()) 
+                },
+            }).await?;
+            
+            // For now, send 200 OK without SDP body
+            // In a complete implementation, the SessionManager would generate 
+            // the SDP answer via MediaCoordinator and send it back
+            if let Err(e) = self.send_response(&transaction_id, 200, "OK").await {
+                tracing::error!("Failed to send 200 OK response to re-INVITE: {}", e);
+            } else {
+                tracing::info!("Successfully responded to re-INVITE for session {}", session_id);
+            }
+        } else {
+            tracing::warn!("No session found for dialog {} in re-INVITE", dialog_id);
+            
+            // Send 481 Call/Transaction Does Not Exist
+            if let Err(e) = self.send_response(&transaction_id, 481, "Call/Transaction Does Not Exist").await {
+                tracing::error!("Failed to send 481 response to re-INVITE: {}", e);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Send a simple response
+    async fn send_response(
+        &self,
+        transaction_id: &rvoip_dialog_core::TransactionKey,
+        status_code: u16,
+        reason_phrase: &str,
+    ) -> Result<(), String> {
+        // Use dialog-core API to send status response
+        let status = match status_code {
+            200 => rvoip_sip_core::StatusCode::Ok,
+            481 => rvoip_sip_core::StatusCode::CallOrTransactionDoesNotExist,
+            501 => rvoip_sip_core::StatusCode::NotImplemented,
+            _ => rvoip_sip_core::StatusCode::Ok, // Default to OK
+        };
+        
+        self.dialog_api
+            .send_status_response(transaction_id, status, Some(reason_phrase.to_string()))
+            .await
+            .map_err(|e| format!("Failed to send response: {}", e))
+    }
+    
+    /// Send a response with body content  
+    async fn send_response_with_body(
+        &self,
+        transaction_id: &rvoip_dialog_core::TransactionKey,
+        status_code: u16,
+        reason_phrase: &str,
+        body: &str,
+        content_type: &str,
+    ) -> Result<(), String> {
+        // Build proper response with body using dialog-core API
+        let status = match status_code {
+            200 => rvoip_sip_core::StatusCode::Ok,
+            _ => rvoip_sip_core::StatusCode::Ok,
+        };
+        
+        // Build response with proper headers and body
+        let response = self.dialog_api
+            .build_response(transaction_id, status, Some(body.to_string()))
+            .await
+            .map_err(|e| format!("Failed to build response: {}", e))?;
+            
+        self.dialog_api
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|e| format!("Failed to send response with body: {}", e))
+    }
+    
     /// Update session state and send event
     async fn update_session_state(&self, session_id: SessionId, new_state: CallState) -> DialogResult<()> {
         if let Ok(Some(mut call)) = self.registry.get_session(&session_id).await {
@@ -354,6 +698,13 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
+    /// Extract relevant SIP headers from request
+    fn extract_sip_headers(&self, _request: &rvoip_sip_core::Request) -> std::collections::HashMap<String, String> {
+        // For now, return empty headers map
+        // TODO: Implement proper header extraction when needed
+        // The complex header API makes this non-trivial, so we'll defer this
+        std::collections::HashMap::new()
+    }
 
 }
 

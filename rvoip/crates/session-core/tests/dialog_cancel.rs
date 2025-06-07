@@ -40,7 +40,7 @@ impl CancelTestHandler {
 impl CallHandler for CancelTestHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         // Accept calls to test cancellation
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {

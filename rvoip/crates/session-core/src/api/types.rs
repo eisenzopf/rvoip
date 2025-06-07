@@ -176,8 +176,8 @@ impl CallState {
 /// Decision on how to handle an incoming call
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallDecision {
-    /// Accept the call immediately
-    Accept,
+    /// Accept the call immediately, optionally with SDP answer
+    Accept(Option<String>),
     /// Reject the call with a reason
     Reject(String),
     /// Defer the decision (e.g., add to queue)
@@ -203,4 +203,6 @@ pub struct MediaInfo {
     pub local_rtp_port: Option<u16>,
     pub remote_rtp_port: Option<u16>,
     pub codec: Option<String>,
-} 
+}
+
+ 

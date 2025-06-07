@@ -105,7 +105,7 @@ impl CallHandler for EventTrackingHandler {
             let _ = tx.send(CallEvent::IncomingCall(call.id.clone()));
         }
         
-        CallDecision::Accept
+        CallDecision::Accept(None)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {

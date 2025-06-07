@@ -27,7 +27,7 @@ pub struct AutoAnswerHandler;
 #[async_trait]
 impl CallHandler for AutoAnswerHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
-        CallDecision::Accept
+        CallDecision::Accept(None) // Auto-accept without SDP answer
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
@@ -198,7 +198,7 @@ impl CallHandler for CompositeHandler {
             // OR if any handler explicitly defers (like queue handler), return that
             match decision {
                 CallDecision::Defer => return CallDecision::Defer,
-                CallDecision::Accept => return CallDecision::Accept,
+                CallDecision::Accept(sdp) => return CallDecision::Accept(sdp),
                 CallDecision::Reject(_) => return decision,
                 CallDecision::Forward(_) => return decision,
             }

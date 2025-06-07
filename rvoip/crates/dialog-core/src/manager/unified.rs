@@ -111,7 +111,8 @@ use tokio::sync::mpsc;
 use tracing::{info, debug, warn, error};
 
 use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri, TypedHeader};
+use rvoip_sip_core::types::content_length::ContentLength;
 
 use crate::config::DialogManagerConfig;
 use crate::dialog::{DialogId, Dialog, DialogState};
@@ -657,15 +658,36 @@ impl UnifiedDialogManager {
     ) -> ApiResult<Response> {
         debug!("Building response for transaction {} with status {}", transaction_id, status_code);
         
-        // TODO: Implement response building logic
-        // This would use the transaction context to build a proper response
-        // The body parameter will be used for SDP content, error details, etc.
-        let _body_size = body.as_ref().map(|b| b.len()).unwrap_or(0);
-        debug!("Response body size: {} bytes", _body_size);
+        // Create basic response with status code
+        let mut response = Response::new(status_code);
         
-        Err(ApiError::Internal { 
-            message: "Response building not yet implemented".to_string() 
-        })
+        // Add body if provided
+        if let Some(body_content) = body {
+            let body_bytes = body_content.as_bytes();
+            response = response.with_body(body_bytes.to_vec());
+            
+            // Set content length
+            response = response.with_header(TypedHeader::ContentLength(ContentLength::new(body_bytes.len() as u32)));
+            
+            // Set content type for SDP content
+            if body_content.trim_start().starts_with("v=") {
+                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
+                let content_type_value = ContentTypeValue {
+                    m_type: "application".to_string(),
+                    m_subtype: "sdp".to_string(),
+                    parameters: std::collections::HashMap::new(),
+                };
+                response = response.with_header(TypedHeader::ContentType(
+                    rvoip_sip_core::types::content_type::ContentType::new(content_type_value)
+                ));
+            }
+        } else {
+            // No body, set content length to 0
+            response = response.with_header(TypedHeader::ContentLength(ContentLength::new(0)));
+        }
+        
+        debug!("Successfully built response for transaction {}", transaction_id);
+        Ok(response)
     }
     
     /// Send a status response (convenience method)
