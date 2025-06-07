@@ -447,6 +447,10 @@ impl DialogManager {
                 Ok(()) // Most timer events don't require dialog-level action
             },
             
+            TransactionEvent::AckReceived { request, .. } => {
+                self.handle_ack_received_event(dialog_id, transaction_id, request).await
+            },
+            
             _ => {
                 debug!("Unhandled transaction event type for dialog {}: {:?}", dialog_id, event);
                 Ok(())
@@ -741,6 +745,36 @@ impl DialogManager {
         // because dialogs can have multiple transactions. Dialog termination is
         // handled by higher-level logic (session-core) or explicit BYE requests.
         
+        Ok(())
+    }
+    
+    /// Handle ACK received event (RFC 3261 compliant media start point for UAS)
+    async fn handle_ack_received_event(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+        request: rvoip_sip_core::Request,
+    ) -> DialogResult<()> {
+        info!("✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)", transaction_id, dialog_id);
+        
+        // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
+        let negotiated_sdp = if !request.body().is_empty() {
+            let sdp = String::from_utf8_lossy(request.body()).to_string();
+            debug!("ACK contains SDP body: {}", sdp);
+            Some(sdp)
+        } else {
+            debug!("ACK has no SDP body (normal for 2xx ACK)");
+            None
+        };
+        
+        // RFC 3261 COMPLIANT: Emit ACK received event for UAS side media creation
+        self.emit_session_coordination_event(SessionCoordinationEvent::AckReceived {
+            dialog_id: dialog_id.clone(),
+            transaction_id: transaction_id.clone(),
+            negotiated_sdp,
+        }).await;
+        
+        debug!("🚀 RFC 3261: Emitted AckReceived event for UAS side media creation");
         Ok(())
     }
 }

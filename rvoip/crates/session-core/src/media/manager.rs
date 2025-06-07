@@ -96,11 +96,17 @@ impl MediaManager {
                 .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
         };
         
-        // Parse SDP to extract remote address (simplified for now)
-        // TODO: Implement proper SDP parsing in MediaConfigConverter
-        if let Some(remote_addr) = self.parse_remote_address_from_sdp(sdp) {
-            // Update media configuration with remote address
-            let session_config = MediaConfig::default();
+        // Parse SDP to extract remote address and codec information
+        let remote_addr = self.parse_remote_address_from_sdp(sdp);
+        let codec = self.parse_codec_from_sdp(sdp);
+        
+        if let Some(remote_addr) = remote_addr {
+            // Create enhanced media configuration with remote address and codec
+            let mut session_config = MediaConfig::default();
+            if let Some(codec_name) = codec {
+                session_config.preferred_codecs = vec![codec_name];
+            }
+            
             let updated_config = convert_to_media_core_config(
                 &session_config,
                 self.local_bind_addr,
@@ -109,9 +115,13 @@ impl MediaManager {
             
             self.controller.update_media(dialog_id, updated_config).await
                 .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+                
+            tracing::info!("✅ Updated media session for SIP session: {} with remote: {} and codecs: {:?}", 
+                          session_id, remote_addr, session_config.preferred_codecs);
+        } else {
+            tracing::warn!("Could not parse SDP for session: {}, skipping media update", session_id);
         }
         
-        tracing::info!("✅ Updated media session for SIP session: {}", session_id);
         Ok(())
     }
     
@@ -165,39 +175,76 @@ impl MediaManager {
         let dialog_id = {
             let mapping = self.session_mapping.read().await;
             mapping.get(session_id).cloned()
-                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
         };
         
-        // Try to get SDP from MediaSessionController if it provides it
-        // For now, return error indicating SDP generation should come from SIP layer
-        Err(MediaError::Configuration { 
-            message: "SDP generation should be handled by SIP layer, not media layer".to_string() 
-        })
+        // If we have a media session, get its info for SDP generation
+        let media_info = if let Some(dialog_id) = dialog_id {
+            self.controller.get_session_info(&dialog_id).await
+        } else {
+            None
+        };
+        
+        // Generate SDP using MediaConfigConverter 
+        use crate::media::config::MediaConfigConverter;
+        let converter = MediaConfigConverter::new();
+        
+        let local_ip = self.local_bind_addr.ip().to_string();
+        let local_port = if let Some(info) = media_info {
+            info.rtp_port.unwrap_or(10000)
+        } else {
+            10000 // Default port if no media session exists yet
+        };
+        
+        let sdp = converter.generate_sdp_offer(&local_ip, local_port)
+            .map_err(|e| MediaError::Configuration { message: e.to_string() })?;
+        
+        tracing::info!("✅ Generated SDP offer for session: {} with port: {}", session_id, local_port);
+        Ok(sdp)
     }
     
-    /// Helper method to parse remote address from SDP (simplified implementation)
+    /// Helper method to parse remote address from SDP (improved implementation)
     fn parse_remote_address_from_sdp(&self, sdp: &str) -> Option<SocketAddr> {
-        // Simple SDP parsing to extract remote address and port
+        // Enhanced SDP parsing to extract remote address and port
         let mut remote_ip = None;
         let mut remote_port = None;
         
         for line in sdp.lines() {
             if line.starts_with("c=IN IP4 ") {
                 if let Some(ip_str) = line.strip_prefix("c=IN IP4 ") {
-                    remote_ip = ip_str.parse().ok();
+                    remote_ip = ip_str.trim().parse().ok();
                 }
             } else if line.starts_with("m=audio ") {
-                if let Some(port_str) = line.strip_prefix("m=audio ").and_then(|s| s.split_whitespace().next()) {
-                    remote_port = port_str.parse().ok();
+                // Parse m=audio line: "m=audio 10001 RTP/AVP 96"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    remote_port = parts[1].parse().ok();
                 }
             }
         }
         
         if let (Some(ip), Some(port)) = (remote_ip, remote_port) {
+            tracing::debug!("Parsed remote address from SDP: {}:{}", ip, port);
             Some(SocketAddr::new(ip, port))
         } else {
+            tracing::warn!("Could not parse remote address from SDP - ip: {:?}, port: {:?}", remote_ip, remote_port);
             None
         }
+    }
+    
+    /// Parse codec information from SDP
+    fn parse_codec_from_sdp(&self, sdp: &str) -> Option<String> {
+        for line in sdp.lines() {
+            if line.starts_with("a=rtpmap:") {
+                // Parse a=rtpmap:96 opus/48000/2 -> return "opus"
+                if let Some(codec_part) = line.split_whitespace().nth(1) {
+                    if let Some(codec_name) = codec_part.split('/').next() {
+                        tracing::debug!("Parsed codec from SDP: {}", codec_name);
+                        return Some(codec_name.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
     
     /// Process SDP answer and configure media session

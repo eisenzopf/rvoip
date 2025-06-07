@@ -135,6 +135,7 @@ impl SessionManager {
         println!("🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling");
         let event_processor = self.event_processor.clone();
         let media_manager = self.media_manager.clone();
+        let registry = self.registry.clone();
         
         // SDP storage for sessions (session_id -> (local_sdp, remote_sdp))
         let sdp_storage = Arc::new(dashmap::DashMap::<SessionId, (Option<String>, Option<String>)>::new());
@@ -180,26 +181,69 @@ impl SessionManager {
                     }
                 }
                 
-                // Handle media auto-creation events
+                // Handle RFC-compliant media creation events
                 if let super::events::SessionEvent::MediaEvent { session_id, event } = &session_event {
-                    if event == "auto_create_media_session" {
-                        tracing::info!("Auto-creating media session for session: {}", session_id);
-                        if let Err(e) = media_manager.create_media_session(session_id).await {
-                            tracing::error!("Failed to auto-create media session for {}: {}", session_id, e);
-                        } else {
-                            tracing::info!("Successfully auto-created media session for {}", session_id);
+                    match event.as_str() {
+                        "rfc_compliant_media_creation_uac" | "rfc_compliant_media_creation_uas" => {
+                            tracing::info!("🚀 RFC 3261: Creating media session after ACK for {}: {}", session_id, event);
                             
-                            // Apply any stored SDP to the newly created media session
-                            if let Some(sdp_entry) = sdp_storage_clone.get(session_id) {
-                                let (local_sdp, remote_sdp) = sdp_entry.value();
-                                if let Some(remote_sdp) = remote_sdp {
-                                    if let Err(e) = media_manager.update_media_session(session_id, remote_sdp).await {
-                                        tracing::error!("Failed to apply stored remote SDP to new media session: {}", e);
-                                    } else {
-                                        tracing::info!("✅ Applied stored remote SDP to new media session for {}", session_id);
+                            // Check if media session already exists to avoid duplicates
+                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
+                                tracing::warn!("Media session already exists for {}, skipping creation", session_id);
+                            } else {
+                                if let Err(e) = media_manager.create_media_session(session_id).await {
+                                    tracing::error!("Failed to create RFC-compliant media session for {}: {}", session_id, e);
+                                } else {
+                                                                    tracing::info!("✅ Successfully created RFC-compliant media session for {}", session_id);
+                                
+                                // Apply any stored SDP to the newly created media session
+                                if let Some(sdp_entry) = sdp_storage_clone.get(session_id) {
+                                    let (local_sdp, remote_sdp) = sdp_entry.value();
+                                    if let Some(remote_sdp) = remote_sdp {
+                                        if let Err(e) = media_manager.update_media_session(session_id, remote_sdp).await {
+                                            tracing::error!("Failed to apply stored remote SDP to new media session: {}", e);
+                                        } else {
+                                            tracing::info!("✅ Applied stored remote SDP to new media session for {}", session_id);
+                                        }
                                     }
                                 }
+                                
+                                // NOW transition session to Active - media is ready!
+                                // First, get the current session from registry
+                                if let Ok(Some(mut session)) = registry.get_session(session_id).await {
+                                    let old_state = session.state.clone();
+                                    session.state = crate::api::types::CallState::Active;
+                                    
+                                    // Update the session in the registry
+                                    if let Err(e) = registry.register_session(session_id.clone(), session).await {
+                                        tracing::error!("Failed to update session {} state to Active in registry: {}", session_id, e);
+                                    } else {
+                                        tracing::info!("🎉 Session {} transitioned to Active in registry - media ready and session fully established!", session_id);
+                                        
+                                        // Now publish the state change event
+                                        if let Err(e) = event_processor.publish_event(super::events::SessionEvent::StateChanged {
+                                            session_id: session_id.clone(),
+                                            old_state,
+                                            new_state: crate::api::types::CallState::Active,
+                                        }).await {
+                                            tracing::error!("Failed to publish state change event: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!("Failed to find session {} to update state to Active", session_id);
+                                }
+                                }
                             }
+                        }
+                        
+                        // Keep old event for backward compatibility but warn
+                        "auto_create_media_session" | "auto_create_media_session_with_sdp" => {
+                            tracing::warn!("⚠️ Using deprecated media creation event '{}' - should use RFC-compliant ACK-based creation", event);
+                            // Don't create media for deprecated events - let RFC-compliant flow handle it
+                        }
+                        
+                        _ => {
+                            tracing::debug!("Unknown media event: {}", event);
                         }
                     }
                 }

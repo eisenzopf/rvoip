@@ -111,6 +111,14 @@ impl SessionDialogCoordinator {
                 self.handle_reinvite_request(dialog_id, transaction_id, request).await?;
             }
             
+            SessionCoordinationEvent::AckSent { dialog_id, transaction_id, negotiated_sdp } => {
+                self.handle_ack_sent(dialog_id, transaction_id, negotiated_sdp).await?;
+            }
+            
+            SessionCoordinationEvent::AckReceived { dialog_id, transaction_id, negotiated_sdp } => {
+                self.handle_ack_received(dialog_id, transaction_id, negotiated_sdp).await?;
+            }
+            
             _ => {
                 tracing::debug!("Unhandled session coordination event: {:?}", event);
                 // TODO: Handle other events as needed
@@ -287,6 +295,19 @@ impl SessionDialogCoordinator {
                 Ok(_) => {
                     println!("✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response");
                     tracing::info!("ACK sent successfully for dialog {} transaction {}", dialog_id, transaction_id);
+                    
+                    // RFC 3261: Trigger UAC side media creation directly since ACK was sent
+                    let negotiated_sdp = if !response_body.trim().is_empty() {
+                        Some(response_body.to_string())
+                    } else {
+                        None
+                    };
+                    
+                    if let Err(e) = self.handle_ack_sent(dialog_id.clone(), transaction_id.clone(), negotiated_sdp).await {
+                        tracing::error!("Failed to handle ACK sent: {}", e);
+                    } else {
+                        tracing::info!("🚀 RFC 3261: Handled ACK sent for UAC side media creation");
+                    }
                 }
                 Err(e) => {
                     println!("❌ SESSION COORDINATION: Failed to send ACK: {}", e);
@@ -299,21 +320,8 @@ impl SessionDialogCoordinator {
                 let session_id = session_id_ref.value().clone();
                 println!("📞 SESSION COORDINATION: Updating session {} state to Active for successful outgoing call", session_id);
                 
-                                    if let Err(e) = self.update_session_state(session_id.clone(), CallState::Active).await {
-                        tracing::error!("Failed to update session {} state to Active: {}", session_id, e);
-                    } else {
-                        tracing::info!("Successfully updated session {} state to Active", session_id);
-                        
-                        // Auto-create media session when call becomes active
-                        self.send_session_event(SessionEvent::MediaEvent {
-                            session_id: session_id.clone(),
-                            event: "auto_create_media_session".to_string(),
-                        }).await.unwrap_or_else(|e| {
-                            tracing::error!("Failed to send media auto-create event: {}", e);
-                        });
-                        
-                        // The StateChanged event is already sent by update_session_state
-                    }
+                                                    // DON'T update to Active yet - wait for media creation after ACK!
+                tracing::info!("📞 200 OK received for session {} - keeping in Initiating state until media ready", session_id);
             } else {
                 tracing::debug!("No session found for dialog {} - trying alternative correlation", dialog_id);
                 
@@ -330,19 +338,8 @@ impl SessionDialogCoordinator {
                                     // Map this dialog to the session for future reference
                                     self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
                                     
-                                                            if let Err(e) = self.update_session_state(session_id.clone(), CallState::Active).await {
-                            tracing::error!("Failed to update session {} state to Active: {}", session_id, e);
-                        } else {
-                            tracing::info!("Successfully updated session {} state to Active via alternative lookup", session_id);
-                            
-                            // Auto-create media session when call becomes active
-                            self.send_session_event(SessionEvent::MediaEvent {
-                                session_id: session_id.clone(),
-                                event: "auto_create_media_session".to_string(),
-                            }).await.unwrap_or_else(|e| {
-                                tracing::error!("Failed to send media auto-create event: {}", e);
-                            });
-                        }
+                                                                                                    // DON'T update to Active yet - wait for media creation after ACK!
+                    tracing::info!("📞 200 OK received for session {} via alternative correlation - keeping in Initiating state until media ready", session_id);
                                     break; // Found and updated one session, stop looking
                                 }
                             }
@@ -393,26 +390,187 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
-    /// Handle call answered coordination event
+    /// Handle call answered coordination event (200 OK sent)
+    /// NOTE: This does NOT create media sessions - wait for ACK per RFC 3261
     async fn handle_call_answered(
         &self,
         dialog_id: DialogId,
-        _session_answer: String,
+        session_answer: String,
     ) -> DialogResult<()> {
         if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
             let session_id = session_id_ref.value().clone();
-            tracing::info!("Call answered for session {}: {}", session_id, dialog_id);
+            tracing::info!("Call answered for session {}: {} (awaiting ACK per RFC 3261)", session_id, dialog_id);
             
-            // Update call state to Active
-            self.update_session_state(session_id.clone(), CallState::Active).await?;
+            // Store the remote SDP answer
+            if !session_answer.trim().is_empty() {
+                self.send_session_event(SessionEvent::SdpEvent {
+                    session_id: session_id.clone(),
+                    event_type: "remote_sdp_answer".to_string(),
+                    sdp: session_answer.clone(),
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to send remote SDP event: {}", e);
+                });
+            }
             
-            // Auto-create media session when call becomes active
+            // DON'T update to Active yet - wait for media creation after ACK!
+            tracing::info!("📞 Call answered for session {} - keeping in Initiating state until media ready", session_id);
+            
+            // RFC 3261: Media should only start after ACK is received, not after 200 OK
+            tracing::info!("🚫 RFC 3261: NOT creating media session yet - waiting for ACK");
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle ACK sent coordination event (UAC side - RFC compliant media start)
+    async fn handle_ack_sent(
+        &self,
+        dialog_id: DialogId,
+        _transaction_id: rvoip_dialog_core::TransactionKey,
+        negotiated_sdp: Option<String>,
+    ) -> DialogResult<()> {
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            tracing::info!("✅ RFC 3261: ACK SENT for session {} - creating media session (UAC side)", session_id);
+            
+            // Store final negotiated SDP if provided
+            if let Some(ref sdp) = negotiated_sdp {
+                self.send_session_event(SessionEvent::SdpEvent {
+                    session_id: session_id.clone(),
+                    event_type: "final_negotiated_sdp".to_string(),
+                    sdp: sdp.clone(),
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to send final negotiated SDP event: {}", e);
+                });
+            }
+            
+            // RFC 3261 COMPLIANT: Create media session after ACK is sent (UAC side)
             self.send_session_event(SessionEvent::MediaEvent {
                 session_id: session_id.clone(),
-                event: "auto_create_media_session".to_string(),
+                event: "rfc_compliant_media_creation_uac".to_string(),
             }).await.unwrap_or_else(|e| {
-                tracing::error!("Failed to send media auto-create event: {}", e);
+                tracing::error!("Failed to send RFC compliant media create event: {}", e);
             });
+        } else {
+            tracing::debug!("🔍 ACK SENT: No direct session mapping found for dialog {} - using alternative correlation", dialog_id);
+            
+            // CRITICAL FIX: Handle media creation even with alternative correlation
+            // Look for the session that was established via alternative correlation
+            match self.registry.list_active_sessions().await {
+                Ok(session_ids) => {
+                    for session_id in session_ids {
+                        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                            if matches!(session.state, CallState::Initiating | CallState::Active) {
+                                tracing::info!("🔧 ACK SENT: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state);
+                                
+                                // Store final negotiated SDP if provided
+                                if let Some(ref sdp) = negotiated_sdp {
+                                    self.send_session_event(SessionEvent::SdpEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "final_negotiated_sdp".to_string(),
+                                        sdp: sdp.clone(),
+                                    }).await.unwrap_or_else(|e| {
+                                        tracing::error!("Failed to send final negotiated SDP event: {}", e);
+                                    });
+                                }
+                                
+                                // RFC 3261 COMPLIANT: Create media session after ACK is sent (UAC side)
+                                self.send_session_event(SessionEvent::MediaEvent {
+                                    session_id: session_id.clone(),
+                                    event: "rfc_compliant_media_creation_uac".to_string(),
+                                }).await.unwrap_or_else(|e| {
+                                    tracing::error!("Failed to send RFC compliant media create event: {}", e);
+                                });
+                                
+                                // Also map this dialog for future reference
+                                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+                                
+                                break; // Only create media for one session (first Active one found)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to find session for ACK sent alternative correlation: {}", e);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle ACK received coordination event (UAS side - RFC compliant media start)
+    async fn handle_ack_received(
+        &self,
+        dialog_id: DialogId,
+        _transaction_id: rvoip_dialog_core::TransactionKey,
+        negotiated_sdp: Option<String>,
+    ) -> DialogResult<()> {
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            tracing::info!("✅ RFC 3261: ACK RECEIVED for session {} - creating media session (UAS side)", session_id);
+            
+            // Store final negotiated SDP if provided
+            if let Some(ref sdp) = negotiated_sdp {
+                self.send_session_event(SessionEvent::SdpEvent {
+                    session_id: session_id.clone(),
+                    event_type: "final_negotiated_sdp".to_string(),
+                    sdp: sdp.clone(),
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to send final negotiated SDP event: {}", e);
+                });
+            }
+            
+            // RFC 3261 COMPLIANT: Create media session after ACK is received (UAS side)
+            self.send_session_event(SessionEvent::MediaEvent {
+                session_id: session_id.clone(),
+                event: "rfc_compliant_media_creation_uas".to_string(),
+            }).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to send RFC compliant media create event: {}", e);
+            });
+        } else {
+            tracing::debug!("🔍 ACK RECEIVED: No direct session mapping found for dialog {} - using alternative correlation", dialog_id);
+            
+            // CRITICAL FIX: Handle media creation even with alternative correlation  
+            // Look for the session that was established via alternative correlation
+            match self.registry.list_active_sessions().await {
+                Ok(session_ids) => {
+                                         for session_id in session_ids {
+                         if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                             if matches!(session.state, CallState::Initiating | CallState::Active) {
+                                 tracing::info!("🔧 ACK RECEIVED: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state);
+                                
+                                // Store final negotiated SDP if provided
+                                if let Some(ref sdp) = negotiated_sdp {
+                                    self.send_session_event(SessionEvent::SdpEvent {
+                                        session_id: session_id.clone(),
+                                        event_type: "final_negotiated_sdp".to_string(),
+                                        sdp: sdp.clone(),
+                                    }).await.unwrap_or_else(|e| {
+                                        tracing::error!("Failed to send final negotiated SDP event: {}", e);
+                                    });
+                                }
+                                
+                                // RFC 3261 COMPLIANT: Create media session after ACK is received (UAS side)
+                                self.send_session_event(SessionEvent::MediaEvent {
+                                    session_id: session_id.clone(),
+                                    event: "rfc_compliant_media_creation_uas".to_string(),
+                                }).await.unwrap_or_else(|e| {
+                                    tracing::error!("Failed to send RFC compliant media create event: {}", e);
+                                });
+                                
+                                // Also map this dialog for future reference
+                                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+                                
+                                break; // Only create media for one session (first Active one found)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to find session for ACK received alternative correlation: {}", e);
+                }
+            }
         }
         
         Ok(())

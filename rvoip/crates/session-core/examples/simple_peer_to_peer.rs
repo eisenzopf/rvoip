@@ -196,7 +196,10 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
         return Ok(());
     }
 
-    // Get real media info to verify SDP negotiation
+    // With RFC compliance fixes, when state is Active, media is guaranteed ready!
+    info!("✅ Call established with RFC-compliant timing - media ready when Active!");
+
+    // Get real media info to verify SDP negotiation (now should have data!)
     if let Ok(media_info) = get_media_info(&alice_manager, &call).await {
         info!("📊 Alice media info: local_port={:?}, remote_port={:?}, codec={:?}", 
               media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);

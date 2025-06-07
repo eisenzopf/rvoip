@@ -21,7 +21,7 @@
 use std::net::SocketAddr;
 use tracing::{debug, info};
 
-use rvoip_sip_core::Request;
+use rvoip_sip_core::{Request, Method};
 use rvoip_transaction_core::TransactionKey;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
@@ -134,7 +134,7 @@ impl DialogManager {
     
     /// Process ACK within a dialog (related to INVITE processing)
     pub async fn process_ack_in_dialog(&self, request: Request, dialog_id: DialogId) -> DialogResult<()> {
-        debug!("Processing ACK for dialog {}", dialog_id);
+        info!("✅ RFC 3261: ACK received for dialog {} - time to start media (UAS side)", dialog_id);
         
         // Update dialog state if in Early state
         {
@@ -151,14 +151,25 @@ impl DialogManager {
             dialog.update_remote_sequence(&request)?;
         }
         
-        // Send session coordination event
-        let event = SessionCoordinationEvent::CallAnswered {
+        // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
+        let negotiated_sdp = if !request.body().is_empty() {
+            let sdp = String::from_utf8_lossy(request.body()).to_string();
+            debug!("ACK contains SDP body: {}", sdp);
+            Some(sdp)
+        } else {
+            debug!("ACK has no SDP body (normal for 2xx ACK)");
+            None
+        };
+        
+        // RFC 3261 COMPLIANT: Send AckReceived event for UAS side media creation  
+        let event = SessionCoordinationEvent::AckReceived {
             dialog_id: dialog_id.clone(),
-            session_answer: self.extract_body_string(&request),
+            transaction_id: TransactionKey::new(format!("ack-{}", dialog_id), Method::Ack, false), // Dummy transaction ID for ACK
+            negotiated_sdp,
         };
         
         self.notify_session_layer(event).await?;
-        debug!("ACK processed for dialog {}", dialog_id);
+        debug!("🚀 RFC 3261: Emitted AckReceived event for UAS side media creation");
         Ok(())
     }
     

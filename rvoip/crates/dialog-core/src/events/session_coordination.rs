@@ -163,4 +163,28 @@ pub enum SessionCoordinationEvent {
         /// Source address of the OPTIONS
         source: SocketAddr,
     },
+    
+    /// ACK sent for 2xx response (UAC side - RFC compliant media start point)
+    AckSent {
+        /// Dialog ID that sent the ACK
+        dialog_id: DialogId,
+        
+        /// Transaction ID for the ACK
+        transaction_id: TransactionKey,
+        
+        /// Final negotiated SDP if available
+        negotiated_sdp: Option<String>,
+    },
+    
+    /// ACK received for 2xx response (UAS side - RFC compliant media start point)  
+    AckReceived {
+        /// Dialog ID that received the ACK
+        dialog_id: DialogId,
+        
+        /// Transaction ID for the ACK
+        transaction_id: TransactionKey,
+        
+        /// Final negotiated SDP if available
+        negotiated_sdp: Option<String>,
+    },
 } 
