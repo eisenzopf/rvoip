@@ -48,3 +48,4 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
 fastrand = "2.0"
+clap = { version = "4.0", features = ["derive"] }
