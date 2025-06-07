@@ -280,7 +280,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_bridge_creation() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::new(local_addr));
         let coordinator = Arc::new(SessionMediaCoordinator::new(media_manager));
         let bridge = MediaBridge::new(coordinator);
         
@@ -295,7 +296,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_session_event_handling() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::with_port_range(local_addr, 10000, 20000));
         let coordinator = Arc::new(SessionMediaCoordinator::new(media_manager));
         let bridge = MediaBridge::new(coordinator);
         
@@ -316,13 +318,20 @@ mod tests {
     
     #[tokio::test]
     async fn test_sdp_operations() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::with_port_range(local_addr, 10000, 20000));
         let coordinator = Arc::new(SessionMediaCoordinator::new(media_manager));
         let bridge = MediaBridge::new(coordinator);
         
         bridge.start().await;
         
         let session_id = SessionId::new();
+        
+        // First create a media session for this SIP session
+        let event = SessionEventBridge::SessionCreated { 
+            session_id: session_id.clone() 
+        };
+        let _result = bridge.handle_session_event(event).await.unwrap();
         
         // Test SDP offer generation
         let sdp_result = bridge.generate_sdp_offer(&session_id).await;
@@ -334,7 +343,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_bridge_builder() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::new(local_addr));
         let coordinator = Arc::new(SessionMediaCoordinator::new(media_manager));
         
         let bridge = MediaBridgeBuilder::new()

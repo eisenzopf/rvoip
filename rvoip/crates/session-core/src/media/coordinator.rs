@@ -264,7 +264,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_coordinator_creation() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::new(local_addr));
         let coordinator = SessionMediaCoordinator::new(media_manager);
         
         let mappings = coordinator.get_active_mappings().await;
@@ -273,7 +274,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_session_lifecycle() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::with_port_range(local_addr, 10000, 20000));
         let coordinator = SessionMediaCoordinator::new(media_manager);
         let session_id = SessionId::new();
         
@@ -296,9 +298,13 @@ mod tests {
     
     #[tokio::test]
     async fn test_sdp_operations() {
-        let media_manager = Arc::new(MediaManager::with_mock_engine());
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let media_manager = Arc::new(MediaManager::with_port_range(local_addr, 10000, 20000));
         let coordinator = SessionMediaCoordinator::new(media_manager);
         let session_id = SessionId::new();
+        
+        // First create a media session
+        let _result = coordinator.on_session_created(&session_id).await.unwrap();
         
         // Test SDP offer generation
         let sdp_result = coordinator.generate_sdp_offer(&session_id).await;

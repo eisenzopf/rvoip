@@ -1,82 +1,117 @@
 //! Media Manager for Session-Core
 //!
-//! Main interface for media operations, adapted from the proven working implementation
-//! in src-old/media/mod.rs. This manager coordinates between SIP sessions and media-core.
+//! Main interface for media operations, using real MediaSessionController from media-core.
+//! This manager coordinates between SIP sessions and media-core components.
 
 use crate::api::types::SessionId;
 use crate::errors::Result;
 use super::types::*;
 use super::MediaError;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
-/// Main media manager for session-core
-/// 
-/// This will be adapted from the working MediaManager in src-old/media/mod.rs (line 280-517)
-/// to integrate with the current session-core architecture.
+/// Main media manager for session-core using real media-core components
 pub struct MediaManager {
-    /// Media engine implementation (real media-core or mock for testing)
-    engine: Arc<dyn MediaEngine>,
+    /// Real MediaSessionController from media-core
+    controller: Arc<MediaSessionController>,
     
-    /// Active media sessions
-    sessions: MediaSessionStorage,
+    /// Session ID mapping (SIP SessionId -> Media DialogId)
+    session_mapping: Arc<tokio::sync::RwLock<HashMap<SessionId, DialogId>>>,
     
-    /// Media configuration
-    config: MediaConfig,
+    /// Default local bind address for media sessions
+    local_bind_addr: SocketAddr,
 }
 
 impl MediaManager {
-    /// Create a new MediaManager with the specified engine
-    pub fn new(engine: Arc<dyn MediaEngine>, config: MediaConfig) -> Self {
+    /// Create a new MediaManager with real MediaSessionController
+    pub fn new(local_bind_addr: SocketAddr) -> Self {
         Self {
-            engine,
-            sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            config,
+            controller: Arc::new(MediaSessionController::new()),
+            session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            local_bind_addr,
         }
     }
     
-    /// Create a MediaManager with mock engine for testing
-    pub fn with_mock_engine() -> Self {
-        Self::new(
-            Arc::new(MockMediaEngine::new()),
-            MediaConfig::default()
-        )
+    /// Create a MediaManager with custom port range
+    pub fn with_port_range(local_bind_addr: SocketAddr, base_port: u16, max_port: u16) -> Self {
+        Self {
+            controller: Arc::new(MediaSessionController::with_port_range(base_port, max_port)),
+            session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            local_bind_addr,
+        }
     }
     
-    /// Get supported media capabilities
-    pub fn get_capabilities(&self) -> MediaCapabilities {
-        self.engine.get_capabilities()
+    /// Get the underlying MediaSessionController
+    pub fn controller(&self) -> Arc<MediaSessionController> {
+        self.controller.clone()
     }
     
-    /// Create a new media session for a SIP session
-    /// 
-    /// This method will be expanded with the logic from src-old/media/mod.rs
-    /// to handle real media-core integration.
+    /// Create a new media session for a SIP session using real MediaSessionController
     pub async fn create_media_session(&self, session_id: &SessionId) -> super::MediaResult<MediaSessionInfo> {
         tracing::debug!("Creating media session for SIP session: {}", session_id);
         
-        // TODO: Adapt from src-old/media/mod.rs MediaManager implementation
-        let media_session = self.engine.create_session(&self.config).await
-            .map_err(|e| MediaError::MediaEngine { source: e })?;
+        // Create dialog ID for media session (use session ID as base)
+        let dialog_id = format!("media-{}", session_id);
         
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(media_session.session_id.clone(), media_session.clone());
+        // Create media configuration using conversion helper
+        let session_config = MediaConfig::default();
+        let media_config = convert_to_media_core_config(
+            &session_config,
+            self.local_bind_addr,
+            None, // Will be set later when remote SDP is processed
+        );
         
-        tracing::info!("Created media session: {} for SIP session: {}", 
-                      media_session.session_id, session_id);
+        // Start media session using real MediaSessionController
+        self.controller.start_media(dialog_id.clone(), media_config).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
         
-        Ok(media_session)
+        // Get session info from controller
+        let media_session_info = self.controller.get_session_info(&dialog_id).await
+            .ok_or_else(|| MediaError::SessionNotFound { session_id: dialog_id.clone() })?;
+        
+        // Store session mapping
+        {
+            let mut mapping = self.session_mapping.write().await;
+            mapping.insert(session_id.clone(), dialog_id.clone());
+        }
+        
+        // Convert to our MediaSessionInfo type
+        let session_info = MediaSessionInfo::from(media_session_info);
+        
+        tracing::info!("✅ Created media session: {} for SIP session: {} with real MediaSessionController", 
+                      dialog_id, session_id);
+        
+        Ok(session_info)
     }
     
     /// Update a media session with new SDP (for re-INVITE, etc.)
     pub async fn update_media_session(&self, session_id: &SessionId, sdp: &str) -> super::MediaResult<()> {
         tracing::debug!("Updating media session for SIP session: {}", session_id);
         
-        // TODO: Find media session by SIP session mapping
-        // TODO: Adapt from src-old/media/mod.rs update logic
+        // Find dialog ID for this session
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
         
-        // For now, just log - will be implemented in Phase 14.2
-        tracing::warn!("Media session update not yet implemented - will be added in Phase 14.2");
+        // Parse SDP to extract remote address (simplified for now)
+        // TODO: Implement proper SDP parsing in MediaConfigConverter
+        if let Some(remote_addr) = self.parse_remote_address_from_sdp(sdp) {
+            // Update media configuration with remote address
+            let session_config = MediaConfig::default();
+            let updated_config = convert_to_media_core_config(
+                &session_config,
+                self.local_bind_addr,
+                Some(remote_addr),
+            );
+            
+            self.controller.update_media(dialog_id, updated_config).await
+                .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        }
+        
+        tracing::info!("✅ Updated media session for SIP session: {}", session_id);
         Ok(())
     }
     
@@ -84,11 +119,18 @@ impl MediaManager {
     pub async fn terminate_media_session(&self, session_id: &SessionId) -> super::MediaResult<()> {
         tracing::debug!("Terminating media session for SIP session: {}", session_id);
         
-        // TODO: Find media session by SIP session mapping
-        // TODO: Adapt from src-old/media/mod.rs termination logic
+        // Find dialog ID for this session
+        let dialog_id = {
+            let mut mapping = self.session_mapping.write().await;
+            mapping.remove(session_id)
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
         
-        // For now, just log - will be implemented in Phase 14.2
-        tracing::warn!("Media session termination not yet implemented - will be added in Phase 14.2");
+        // Stop media session using real MediaSessionController
+        self.controller.stop_media(dialog_id.clone()).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Terminated media session: {} for SIP session: {}", dialog_id, session_id);
         Ok(())
     }
     
@@ -96,81 +138,161 @@ impl MediaManager {
     pub async fn get_media_info(&self, session_id: &SessionId) -> super::MediaResult<Option<MediaSessionInfo>> {
         tracing::debug!("Getting media info for SIP session: {}", session_id);
         
-        // TODO: Find media session by SIP session mapping
-        // TODO: Adapt from src-old/media/mod.rs info retrieval logic
+        // Find dialog ID for this session
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+        };
         
-        // For now, return empty - will be implemented in Phase 14.2
-        Ok(None)
+        if let Some(dialog_id) = dialog_id {
+            // Get session info from controller
+            if let Some(media_session_info) = self.controller.get_session_info(&dialog_id).await {
+                let session_info = MediaSessionInfo::from(media_session_info);
+                Ok(Some(session_info))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
     }
     
-    /// Generate SDP offer for a session
-    /// 
-    /// This will use the MediaConfigConverter (to be adapted from src-old/media/config.rs)
-    /// to convert media capabilities into SDP format.
+    /// Generate SDP offer for a session using real media session information
     pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> super::MediaResult<String> {
         tracing::debug!("Generating SDP offer for session: {}", session_id);
         
-        // TODO: Implement with MediaConfigConverter from src-old/media/config.rs
-        // For now, return basic SDP
-        let capabilities = self.engine.get_capabilities();
-        let mut sdp = String::new();
+        // Find dialog ID for this session
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
         
+        // Get session info from controller to get the allocated port
+        let media_session_info = self.controller.get_session_info(&dialog_id).await
+            .ok_or_else(|| MediaError::SessionNotFound { session_id: dialog_id.clone() })?;
+        
+        let rtp_port = media_session_info.rtp_port
+            .ok_or_else(|| MediaError::Configuration { message: "No RTP port allocated".to_string() })?;
+        
+        // Generate SDP with real allocated port
+        let mut sdp = String::new();
         sdp.push_str("v=0\r\n");
         sdp.push_str("o=rvoip 0 0 IN IP4 127.0.0.1\r\n");
         sdp.push_str("s=Session\r\n");
         sdp.push_str("c=IN IP4 127.0.0.1\r\n");
         sdp.push_str("t=0 0\r\n");
-        sdp.push_str(&format!("m=audio {} RTP/AVP", capabilities.port_range.0));
+        sdp.push_str(&format!("m=audio {} RTP/AVP 0 8\r\n", rtp_port)); // PCMU and PCMA
+        sdp.push_str("a=rtpmap:0 PCMU/8000\r\n");
+        sdp.push_str("a=rtpmap:8 PCMA/8000\r\n");
         
-        for codec in &capabilities.codecs {
-            sdp.push_str(&format!(" {}", codec.payload_type));
-        }
-        sdp.push_str("\r\n");
-        
-        for codec in &capabilities.codecs {
-            sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", 
-                                codec.payload_type, codec.name, codec.sample_rate));
-        }
-        
+        tracing::info!("✅ Generated SDP offer with real RTP port {} for session: {}", rtp_port, session_id);
         Ok(sdp)
+    }
+    
+    /// Helper method to parse remote address from SDP (simplified implementation)
+    fn parse_remote_address_from_sdp(&self, sdp: &str) -> Option<SocketAddr> {
+        // Simple SDP parsing to extract remote address and port
+        let mut remote_ip = None;
+        let mut remote_port = None;
+        
+        for line in sdp.lines() {
+            if line.starts_with("c=IN IP4 ") {
+                if let Some(ip_str) = line.strip_prefix("c=IN IP4 ") {
+                    remote_ip = ip_str.parse().ok();
+                }
+            } else if line.starts_with("m=audio ") {
+                if let Some(port_str) = line.strip_prefix("m=audio ").and_then(|s| s.split_whitespace().next()) {
+                    remote_port = port_str.parse().ok();
+                }
+            }
+        }
+        
+        if let (Some(ip), Some(port)) = (remote_ip, remote_port) {
+            Some(SocketAddr::new(ip, port))
+        } else {
+            None
+        }
     }
     
     /// Process SDP answer and configure media session
     pub async fn process_sdp_answer(&self, session_id: &SessionId, sdp: &str) -> super::MediaResult<()> {
         tracing::debug!("Processing SDP answer for session: {}", session_id);
         
-        // TODO: Implement with MediaConfigConverter from src-old/media/config.rs
-        // TODO: Update media session with negotiated parameters
+        // Parse remote address from SDP and update media session
+        if let Some(remote_addr) = self.parse_remote_address_from_sdp(sdp) {
+            self.update_media_session(session_id, sdp).await?;
+            tracing::info!("✅ Processed SDP answer and updated remote address to: {}", remote_addr);
+        } else {
+            tracing::warn!("Could not parse remote address from SDP answer");
+        }
         
-        tracing::warn!("SDP answer processing not yet implemented - will be added in Phase 14.3");
         Ok(())
     }
     
     /// List all active media sessions
     pub async fn list_active_sessions(&self) -> Vec<MediaSessionInfo> {
-        let sessions = self.sessions.read().await;
-        sessions.values().cloned().collect()
+        let mut sessions = Vec::new();
+        let mapping = self.session_mapping.read().await;
+        
+        for dialog_id in mapping.values() {
+            if let Some(media_session_info) = self.controller.get_session_info(dialog_id).await {
+                sessions.push(MediaSessionInfo::from(media_session_info));
+            }
+        }
+        
+        sessions
     }
     
-    /// Get current configuration
-    pub fn get_config(&self) -> &MediaConfig {
-        &self.config
+    /// Get the local bind address
+    pub fn get_local_bind_addr(&self) -> SocketAddr {
+        self.local_bind_addr
+    }
+    
+    /// Start audio transmission for a session
+    pub async fn start_audio_transmission(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.start_audio_transmission(&dialog_id).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Started audio transmission for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Stop audio transmission for a session
+    pub async fn stop_audio_transmission(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.stop_audio_transmission(&dialog_id).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Stopped audio transmission for session: {}", session_id);
+        Ok(())
     }
 }
 
 impl std::fmt::Debug for MediaManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaManager")
-            .field("config", &self.config)
-            .field("sessions_count", &"<async>")
+            .field("local_bind_addr", &self.local_bind_addr)
+            .field("session_mapping_count", &"<async>")
             .finish_non_exhaustive()
     }
 }
 
 /// Builder for MediaManager configuration
 pub struct MediaManagerBuilder {
-    engine: Option<Arc<dyn MediaEngine>>,
-    config: Option<MediaConfig>,
+    local_bind_addr: Option<SocketAddr>,
+    port_range: Option<(u16, u16)>,
 }
 
 impl MediaManagerBuilder {
@@ -179,45 +301,46 @@ impl MediaManagerBuilder {
         Self::default()
     }
     
-    /// Set the media engine
-    pub fn with_engine(mut self, engine: Arc<dyn MediaEngine>) -> Self {
-        self.engine = Some(engine);
+    /// Set the local bind address for media sessions
+    pub fn with_local_bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.local_bind_addr = Some(addr);
         self
     }
     
-    /// Set the media configuration
-    pub fn with_config(mut self, config: MediaConfig) -> Self {
-        self.config = Some(config);
-        self
-    }
-    
-    /// Use mock engine for testing
-    pub fn with_mock_engine(mut self) -> Self {
-        self.engine = Some(Arc::new(MockMediaEngine::new()));
+    /// Set custom port range for RTP sessions
+    pub fn with_port_range(mut self, base_port: u16, max_port: u16) -> Self {
+        self.port_range = Some((base_port, max_port));
         self
     }
     
     /// Build the MediaManager
     pub fn build(self) -> MediaManager {
-        let engine = self.engine.unwrap_or_else(|| Arc::new(MockMediaEngine::new()));
-        let config = self.config.unwrap_or_default();
+        let local_bind_addr = self.local_bind_addr
+            .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
         
-        MediaManager::new(engine, config)
+        if let Some((base_port, max_port)) = self.port_range {
+            MediaManager::with_port_range(local_bind_addr, base_port, max_port)
+        } else {
+            MediaManager::new(local_bind_addr)
+        }
     }
 }
 
 impl std::fmt::Debug for MediaManagerBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaManagerBuilder")
-            .field("engine", &self.engine.is_some())
-            .field("config", &self.config)
+            .field("local_bind_addr", &self.local_bind_addr)
+            .field("port_range", &self.port_range)
             .finish()
     }
 }
 
 impl Default for MediaManagerBuilder {
     fn default() -> Self {
-        Self::new()
+        Self {
+            local_bind_addr: None,
+            port_range: None,
+        }
     }
 }
 
@@ -227,16 +350,16 @@ mod tests {
     
     #[tokio::test]
     async fn test_media_manager_creation() {
-        let manager = MediaManager::with_mock_engine();
-        let capabilities = manager.get_capabilities();
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let manager = MediaManager::new(local_addr);
         
-        assert!(capabilities.codecs.len() >= 2);
-        assert_eq!(capabilities.port_range, (10000, 20000));
+        assert_eq!(manager.get_local_bind_addr(), local_addr);
     }
     
     #[tokio::test]
     async fn test_media_session_creation() {
-        let manager = MediaManager::with_mock_engine();
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let manager = MediaManager::with_port_range(local_addr, 10000, 20000);
         let session_id = SessionId::new();
         
         let result = manager.create_media_session(&session_id).await;
@@ -244,19 +367,49 @@ mod tests {
         
         let media_session = result.unwrap();
         assert!(!media_session.session_id.is_empty());
-        assert_eq!(media_session.local_rtp_port, Some(10000));
+        assert!(media_session.local_rtp_port.is_some());
+        
+        // Verify session is tracked
+        let sessions = manager.list_active_sessions().await;
+        assert_eq!(sessions.len(), 1);
     }
     
     #[tokio::test]
     async fn test_sdp_generation() {
-        let manager = MediaManager::with_mock_engine();
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let manager = MediaManager::with_port_range(local_addr, 10000, 20000);
         let session_id = SessionId::new();
         
+        // First create a media session
+        let _media_session = manager.create_media_session(&session_id).await.unwrap();
+        
+        // Then generate SDP
         let sdp = manager.generate_sdp_offer(&session_id).await;
         assert!(sdp.is_ok());
         
         let sdp_content = sdp.unwrap();
         assert!(sdp_content.contains("m=audio"));
-        assert!(sdp_content.contains("a=rtpmap"));
+        assert!(sdp_content.contains("a=rtpmap:0 PCMU/8000"));
+        assert!(sdp_content.contains("a=rtpmap:8 PCMA/8000"));
+        
+        // Verify SDP contains allocated port
+        assert!(sdp_content.contains("1000")); // Should contain port from 10000-20000 range
+    }
+    
+    #[tokio::test]
+    async fn test_media_session_termination() {
+        let local_addr = "127.0.0.1:8000".parse().unwrap();
+        let manager = MediaManager::with_port_range(local_addr, 10000, 20000);
+        let session_id = SessionId::new();
+        
+        // Create and then terminate session
+        let _media_session = manager.create_media_session(&session_id).await.unwrap();
+        assert_eq!(manager.list_active_sessions().await.len(), 1);
+        
+        let result = manager.terminate_media_session(&session_id).await;
+        assert!(result.is_ok());
+        
+        // Verify session is removed
+        assert_eq!(manager.list_active_sessions().await.len(), 0);
     }
 } 

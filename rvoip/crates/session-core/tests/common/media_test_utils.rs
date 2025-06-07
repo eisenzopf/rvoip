@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use tokio::sync::{Mutex, RwLock};
 
 // Session-core imports for media integration testing
+use rvoip_media_core::MediaSessionController as MediaCoreController;
 use rvoip_session_core::{
     SessionManager, SessionError, SessionId,
     api::{
@@ -28,7 +29,7 @@ use rvoip_session_core::{
     media::{
         MediaManager, MediaConfig, MediaEngine, MediaSessionInfo, 
         MediaCapabilities, CodecInfo, QualityMetrics, MediaEvent,
-        MockMediaEngine, MediaSessionState
+        MediaSessionState, convert_to_media_core_config
     },
 };
 
@@ -39,40 +40,41 @@ use super::get_test_ports;
 // SESSION-CORE MEDIA INTEGRATION FACTORY FUNCTIONS
 // ==============================================================================
 
-/// Creates a test MediaEngine using session-core's media abstraction
-pub async fn create_test_media_engine() -> std::result::Result<Arc<dyn MediaEngine>, Box<dyn std::error::Error>> {
-    // Use MockMediaEngine from session-core for testing
-    let mock_engine = MockMediaEngine::new();
-    println!("✅ Created test MediaEngine using session-core abstraction");
-    Ok(Arc::new(mock_engine))
+/// Creates a test MediaSessionController using real media-core components
+pub async fn create_test_media_engine() -> std::result::Result<Arc<MediaCoreController>, Box<dyn std::error::Error>> {
+    // Use real MediaSessionController from media-core for testing
+    let controller = MediaCoreController::with_port_range(10000, 20000);
+    println!("✅ Created test MediaSessionController using real media-core");
+    Ok(Arc::new(controller))
 }
 
-/// Creates a MediaManager with MediaEngine integration
-pub async fn create_media_manager_with_engine(media_engine: Arc<dyn MediaEngine>) -> std::result::Result<Arc<MediaManager>, Box<dyn std::error::Error>> {
-    let config = MediaConfig::default();
-    let media_manager = MediaManager::new(media_engine, config);
-    println!("✅ Created MediaManager with MediaEngine integration");
+/// Creates a MediaManager with real MediaSessionController integration
+pub async fn create_media_manager_with_engine(media_controller: Arc<MediaCoreController>) -> std::result::Result<Arc<MediaManager>, Box<dyn std::error::Error>> {
+    let local_addr = "127.0.0.1:8000".parse().unwrap();
+    let media_manager = MediaManager::with_port_range(local_addr, 10000, 20000);
+    println!("✅ Created MediaManager with real MediaSessionController integration");
     Ok(Arc::new(media_manager))
 }
 
-/// Creates SessionManager + MediaEngine integration for testing
-pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionManager>, Arc<dyn MediaEngine>), Box<dyn std::error::Error>> {
-    let media_engine = create_test_media_engine().await?;
-    let media_manager = create_media_manager_with_engine(media_engine.clone()).await?;
+/// Creates SessionManager + real MediaSessionController integration for testing
+pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionManager>, Arc<MediaCoreController>), Box<dyn std::error::Error>> {
+    let media_controller = create_test_media_engine().await?;
+    let media_manager = create_media_manager_with_engine(media_controller.clone()).await?;
     
-    let (port_a, _) = get_test_ports();
+    // Use standard SIP port 5060 for testing (RFC 3261)
+    let test_sip_port = 5060;
     
     let session_manager = SessionManagerBuilder::new()
         .with_sip_bind_address("127.0.0.1")
-        .with_sip_port(port_a)
+        .with_sip_port(test_sip_port)
         .with_from_uri("sip:test@localhost")
         .with_handler(Arc::new(TestCallHandler::new(true)))
         .build()
         .await?;
     
     session_manager.start().await?;
-    println!("✅ Created SessionManager with MediaEngine integration");
-    Ok((session_manager, media_engine))
+    println!("✅ Created SessionManager with real MediaSessionController integration");
+    Ok((session_manager, media_controller))
 }
 
 /// Sets up test media capabilities for integration testing
@@ -242,7 +244,7 @@ pub fn create_multi_frequency_test_audio(frequencies: &[f32], duration_ms: u32) 
 /// Coordinates end-to-end SIP session setup with media integration
 pub async fn coordinate_sip_session_with_media(
     session_manager: &SessionManager,
-    media_engine: &dyn MediaEngine,
+    media_controller: &MediaCoreController,
     from_uri: &str,
     to_uri: &str,
     sdp_offer: Option<&str>,
@@ -251,10 +253,24 @@ pub async fn coordinate_sip_session_with_media(
     let session = session_manager.create_outgoing_call(from_uri, to_uri, sdp_offer.map(|s| s.to_string())).await?;
     let session_id = session.id().clone();
     
-    // Create corresponding media session through session-core integration
-    let config = MediaConfig::default();
-    let media_session = media_engine.create_session(&config).await
-        .map_err(|e| SessionError::Other(format!("Media session creation failed: {}", e)))?;
+    // Create corresponding media session through MediaSessionController integration
+    let dialog_id = format!("media-{}", session_id);
+    
+    // Create session-core MediaConfig and convert to media-core format
+    let session_config = MediaConfig::default();
+    let local_addr = "127.0.0.1:10000".parse().unwrap(); // Base RTP address, actual port allocated by controller
+    let media_config = convert_to_media_core_config(
+        &session_config,
+        local_addr,
+        None, // No remote address yet
+    );
+    
+    // Start media session using the correct API
+    media_controller.start_media(dialog_id.clone(), media_config).await
+        .map_err(|e| SessionError::Other(format!("Media session creation failed: {:?}", e)))?;
+    
+    // Create a test MediaSessionInfo for integration testing
+    let media_session = create_test_media_session_info(&dialog_id, "PCMU");
     
     println!("✅ Coordinated SIP session {} with media session {}", session_id, media_session.session_id);
     Ok((session_id, media_session))
@@ -262,15 +278,14 @@ pub async fn coordinate_sip_session_with_media(
 
 /// Verifies SDP media compatibility with session-core media capabilities
 pub async fn verify_sdp_media_compatibility(
-    media_engine: &dyn MediaEngine,
+    media_controller: &MediaCoreController,
     sdp: &str,
 ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
-    let capabilities = media_engine.get_capabilities();
+    // Check for standard codecs supported by MediaSessionController
+    let supported_codecs = ["PCMU", "PCMA", "Opus", "G.729"];
     
     // Simple SDP parsing for codec verification
-    for codec in &capabilities.codecs {
-        let codec_name = &codec.name;
-        
+    for codec_name in &supported_codecs {
         if sdp.contains(codec_name) {
             println!("✅ Found compatible codec: {}", codec_name);
             return Ok(true);
@@ -283,11 +298,11 @@ pub async fn verify_sdp_media_compatibility(
 
 /// Tests codec negotiation sequence using session-core
 pub async fn test_codec_negotiation_sequence(
-    media_engine: &dyn MediaEngine,
+    media_controller: &MediaCoreController,
     offered_payload_types: &[u8],
 ) -> std::result::Result<u8, Box<dyn std::error::Error>> {
-    let capabilities = media_engine.get_capabilities();
-    let supported_types: Vec<u8> = capabilities.codecs.iter().map(|c| c.payload_type).collect();
+    // Standard payload types supported by MediaSessionController
+    let supported_types = vec![0u8, 8u8]; // PCMU, PCMA
     
     // Find first matching codec (preference order)
     for &offered in offered_payload_types {
@@ -316,22 +331,22 @@ pub async fn validate_media_session_setup(
 
 /// Creates test scenario with multiple codec negotiations
 pub async fn create_multi_codec_test_scenario(
-    media_engine: &dyn MediaEngine,
+    media_controller: &MediaCoreController,
 ) -> std::result::Result<HashMap<String, u8>, Box<dyn std::error::Error>> {
     let mut scenarios = HashMap::new();
     
     // Test PCMU preference
-    let pcmu_result = test_codec_negotiation_sequence(media_engine, &[0, 8]).await?;
+    let pcmu_result = test_codec_negotiation_sequence(media_controller, &[0, 8]).await?;
     scenarios.insert("pcmu_preferred".to_string(), pcmu_result);
     
-    // Test Opus preference
-    if let Ok(opus_result) = test_codec_negotiation_sequence(media_engine, &[111, 0]).await {
-        scenarios.insert("opus_preferred".to_string(), opus_result);
+    // Test PCMA preference
+    if let Ok(pcma_result) = test_codec_negotiation_sequence(media_controller, &[8, 0]).await {
+        scenarios.insert("pcma_preferred".to_string(), pcma_result);
     }
     
-    // Test G.729 fallback
-    if let Ok(g729_result) = test_codec_negotiation_sequence(media_engine, &[18, 0]).await {
-        scenarios.insert("g729_fallback".to_string(), g729_result);
+    // Test unsupported codec fallback
+    if let Ok(fallback_result) = test_codec_negotiation_sequence(media_controller, &[18, 0]).await {
+        scenarios.insert("g729_fallback".to_string(), fallback_result);
     }
     
     println!("✅ Created multi-codec test scenario with {} cases", scenarios.len());

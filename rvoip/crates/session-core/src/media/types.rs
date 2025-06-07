@@ -1,19 +1,46 @@
 //! Media Types for Session-Core Integration
 //!
 //! Modern type definitions adapted to the new session-core architecture,
-//! providing clean interfaces between SIP signaling and media processing.
+//! providing clean interfaces between SIP signaling and media-core processing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Session identifier for media coordination
-pub type MediaSessionId = String;
+// Import real media-core types with aliases to avoid conflicts
+pub use rvoip_media_core::{
+    MediaEngine,
+    MediaEngineConfig,
+    EngineCapabilities,
+    MediaSessionParams,
+    MediaSessionHandle,
+    MediaSession,
+    MediaSessionConfig,
+    SessionEvent as MediaCoreSessionEvent,
+    Error as MediaCoreError,
+    Result as MediaCoreResult,
+    relay::{
+        MediaSessionController,
+        MediaConfig as MediaCoreConfig,
+        MediaSessionStatus as MediaCoreSessionStatus,
+        MediaSessionInfo as MediaCoreSessionInfo,
+        MediaSessionEvent as ControllerEvent,
+        DialogId,
+        G711PcmuCodec,
+        G711PcmaCodec,
+    },
+};
+
+// Use media-core state enum directly
+pub use rvoip_media_core::MediaSessionState;
+
+/// Session identifier for media coordination (mapped to DialogId)
+pub type MediaSessionId = DialogId;
 
 /// RTP port number
 pub type RtpPort = u16;
 
-/// Media session information
+/// Media session information (wrapper around media-core types)
 #[derive(Debug, Clone)]
 pub struct MediaSessionInfo {
     pub session_id: MediaSessionId,
@@ -65,7 +92,7 @@ pub struct CodecInfo {
     pub channels: u8,
 }
 
-/// Media configuration for session setup
+/// Session-core specific media configuration (wrapper)
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
     pub preferred_codecs: Vec<String>,
@@ -119,123 +146,37 @@ pub enum MediaEvent {
     },
 }
 
-/// Media session state
-#[derive(Debug, Clone, PartialEq)]
-pub enum MediaSessionState {
-    /// Session is being created
-    Creating,
-    /// Session is active and processing media
-    Active,
-    /// Session is on hold (media paused)
-    OnHold,
-    /// Session is being terminated
-    Terminating,
-    /// Session has been terminated
-    Terminated,
-}
-
 /// Storage for active media sessions
 pub type MediaSessionStorage = Arc<RwLock<HashMap<MediaSessionId, MediaSessionInfo>>>;
 
-/// Trait for media engines that can be integrated with session-core
-#[async_trait::async_trait]
-pub trait MediaEngine: Send + Sync {
-    /// Get supported media capabilities
-    fn get_capabilities(&self) -> MediaCapabilities;
-    
-    /// Create a new media session
-    async fn create_session(&self, config: &MediaConfig) -> Result<MediaSessionInfo, Box<dyn std::error::Error + Send + Sync>>;
-    
-    /// Update an existing media session with new SDP
-    async fn update_session(&self, session_id: &MediaSessionId, sdp: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    
-    /// Terminate a media session
-    async fn terminate_session(&self, session_id: &MediaSessionId) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    
-    /// Get current session information
-    async fn get_session_info(&self, session_id: &MediaSessionId) -> Result<Option<MediaSessionInfo>, Box<dyn std::error::Error + Send + Sync>>;
-}
+/// Real MediaSessionController adapter - this is our primary media integration
+pub type SessionCoreMediaEngine = MediaSessionController;
 
-/// Mock media engine for testing and compilation
-#[derive(Debug)]
-pub struct MockMediaEngine {
-    capabilities: MediaCapabilities,
-    sessions: MediaSessionStorage,
-}
-
-impl MockMediaEngine {
-    pub fn new() -> Self {
+/// Conversion between session-core MediaSessionInfo and media-core MediaSessionInfo
+impl From<MediaCoreSessionInfo> for MediaSessionInfo {
+    fn from(core_info: MediaCoreSessionInfo) -> Self {
         Self {
-            capabilities: MediaCapabilities {
-                codecs: vec![
-                    CodecInfo {
-                        name: "PCMU".to_string(),
-                        payload_type: 0,
-                        sample_rate: 8000,
-                        channels: 1,
-                    },
-                    CodecInfo {
-                        name: "PCMA".to_string(),
-                        payload_type: 8,
-                        sample_rate: 8000,
-                        channels: 1,
-                    },
-                ],
-                max_sessions: 100,
-                port_range: (10000, 20000),
-            },
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_id: core_info.dialog_id,
+            local_sdp: None, // TODO: Extract from config if available
+            remote_sdp: None, // TODO: Extract from config if available 
+            local_rtp_port: core_info.rtp_port,
+            remote_rtp_port: core_info.config.remote_addr.map(|addr| addr.port()),
+            codec: core_info.config.preferred_codec,
+            quality_metrics: None, // TODO: Convert from stats if available
         }
     }
 }
 
-#[async_trait::async_trait]
-impl MediaEngine for MockMediaEngine {
-    fn get_capabilities(&self) -> MediaCapabilities {
-        self.capabilities.clone()
-    }
-    
-    async fn create_session(&self, config: &MediaConfig) -> Result<MediaSessionInfo, Box<dyn std::error::Error + Send + Sync>> {
-        let session_id = format!("mock-session-{}", uuid::Uuid::new_v4());
-        let info = MediaSessionInfo {
-            session_id: session_id.clone(),
-            local_sdp: None,
-            remote_sdp: None,
-            local_rtp_port: Some(10000),
-            remote_rtp_port: None,
-            codec: config.preferred_codecs.first().cloned(),
-            quality_metrics: None,
-        };
-        
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(session_id.clone(), info.clone());
-        
-        Ok(info)
-    }
-    
-    async fn update_session(&self, session_id: &MediaSessionId, _sdp: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let sessions = self.sessions.read().await;
-        if sessions.contains_key(session_id) {
-            Ok(())
-        } else {
-            Err("Session not found".into())
-        }
-    }
-    
-    async fn terminate_session(&self, session_id: &MediaSessionId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(session_id);
-        Ok(())
-    }
-    
-    async fn get_session_info(&self, session_id: &MediaSessionId) -> Result<Option<MediaSessionInfo>, Box<dyn std::error::Error + Send + Sync>> {
-        let sessions = self.sessions.read().await;
-        Ok(sessions.get(session_id).cloned())
-    }
-}
-
-impl Default for MockMediaEngine {
-    fn default() -> Self {
-        Self::new()
+/// Helper function to convert session-core MediaConfig to media-core MediaConfig
+pub fn convert_to_media_core_config(
+    config: &MediaConfig,
+    local_addr: std::net::SocketAddr,
+    remote_addr: Option<std::net::SocketAddr>,
+) -> MediaCoreConfig {
+    MediaCoreConfig {
+        local_addr,
+        remote_addr,
+        preferred_codec: config.preferred_codecs.first().cloned(),
+        parameters: HashMap::new(),
     }
 } 
