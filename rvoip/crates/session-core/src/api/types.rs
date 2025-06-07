@@ -111,13 +111,19 @@ pub struct IncomingCall {
 
 impl IncomingCall {
     /// Accept the incoming call
+    /// Note: Use accept_call() function with SessionManager parameter instead
     pub async fn accept(&self) -> Result<CallSession> {
-        crate::api::create::accept_call(&self.id).await
+        Err(crate::errors::SessionError::Other(
+            "Use accept_call(session_manager, &session_id) function instead".to_string()
+        ))
     }
 
     /// Reject the incoming call with a reason
+    /// Note: Use reject_call() function with SessionManager parameter instead
     pub async fn reject(&self, reason: &str) -> Result<()> {
-        crate::api::create::reject_call(&self.id, reason).await
+        Err(crate::errors::SessionError::Other(
+            "Use reject_call(session_manager, &session_id, reason) function instead".to_string()
+        ))
     }
 
     /// Get caller information

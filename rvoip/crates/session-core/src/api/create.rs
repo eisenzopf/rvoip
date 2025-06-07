@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use crate::api::types::{CallSession, SessionId, IncomingCall, CallState};
 use crate::manager::SessionManager;
-use crate::errors::Result;
+use crate::Result;
 
 /// Make an outgoing call to the specified destination
 /// 
@@ -17,6 +17,7 @@ use crate::errors::Result;
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use rvoip_session_core::Result;
 /// 
 /// # async fn example() -> Result<()> {
 /// let session_mgr = SessionManagerBuilder::new().build().await?;
@@ -55,52 +56,52 @@ pub async fn make_call_with_sdp(
 /// Accept an incoming call
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session_id` - The ID of the incoming call session
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
 /// 
+/// #[derive(Debug)]
 /// struct MyHandler;
 /// 
 /// #[async_trait::async_trait]
 /// impl CallHandler for MyHandler {
 ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-///         // Accept the call
-///         match accept_call(&call.id).await {
-///             Ok(_) => CallDecision::Accept,
-///             Err(_) => CallDecision::Reject("Failed to accept".to_string()),
-///         }
+///         CallDecision::Accept
 ///     }
 ///     
 ///     async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
 /// }
 /// ```
-pub async fn accept_call(session_id: &SessionId) -> Result<CallSession> {
-    // TODO: Get the SessionManager from context or registry
-    // For now, this is a placeholder implementation
-    todo!("accept_call implementation - need SessionManager context")
+pub async fn accept_call(session_manager: &Arc<SessionManager>, session_id: &SessionId) -> Result<CallSession> {
+    session_manager.accept_incoming_call(session_id).await
 }
 
 /// Reject an incoming call with a specific reason
 /// 
 /// # Arguments
+/// * `session_manager` - The SessionManager instance
 /// * `session_id` - The ID of the incoming call session
 /// * `reason` - The reason for rejecting the call
 /// 
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
-/// # async fn example(call: IncomingCall) -> Result<()> {
-/// reject_call(&call.id, "Busy").await?;
+/// # async fn example(session_manager: &Arc<SessionManager>, call: IncomingCall) -> Result<()> {
+/// reject_call(session_manager, &call.id, "Busy").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn reject_call(session_id: &SessionId, reason: &str) -> Result<()> {
-    // TODO: Get the SessionManager from context or registry
-    // For now, this is a placeholder implementation
-    todo!("reject_call implementation - need SessionManager context")
+pub async fn reject_call(session_manager: &Arc<SessionManager>, session_id: &SessionId, reason: &str) -> Result<()> {
+    // Terminate the session to reject the call
+    session_manager.terminate_session(session_id).await?;
+    tracing::info!("Rejected call {} with reason: {}", session_id, reason);
+    Ok(())
 }
 
 /// Create an incoming call object from SIP INVITE request

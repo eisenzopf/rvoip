@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use crate::api::types::{CallSession, CallState};
 use crate::manager::SessionManager;
-use crate::errors::Result;
+use crate::Result;
 
 /// Put a call on hold
 /// 
@@ -16,6 +16,8 @@ use crate::errors::Result;
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// hold_call(&manager, &call).await?;
@@ -41,6 +43,8 @@ pub async fn hold_call(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// // First hold the call
@@ -71,6 +75,8 @@ pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSe
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// transfer_call(&manager, &call, "sip:transferee@example.com").await?;
@@ -96,6 +102,8 @@ pub async fn transfer_call(session_manager: &Arc<SessionManager>, session: &Call
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// terminate_call(&manager, &call).await?;
@@ -120,6 +128,8 @@ pub async fn terminate_call(session_manager: &Arc<SessionManager>, session: &Cal
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// send_dtmf(&manager, &call, "123").await?;
@@ -145,6 +155,8 @@ pub async fn send_dtmf(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// mute_call(&manager, &call).await?;
@@ -170,6 +182,8 @@ pub async fn mute_call(session_manager: &Arc<SessionManager>, session: &CallSess
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
 /// // First mute
@@ -212,6 +226,8 @@ pub async fn get_media_info(session_manager: &Arc<SessionManager>, session: &Cal
 /// # Example
 /// ```rust
 /// use rvoip_session_core::api::*;
+/// use std::sync::Arc;
+/// use rvoip_session_core::{SessionManager, Result};
 /// 
 /// # async fn example(manager: Arc<SessionManager>, call: CallSession, sdp: String) -> Result<()> {
 /// update_media(&manager, &call, &sdp).await?;

@@ -190,16 +190,22 @@ impl Default for CompositeHandler {
 #[async_trait]
 impl CallHandler for CompositeHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        // Try each handler in sequence until one doesn't defer
+        // Try each handler in sequence
         for handler in &self.handlers {
             let decision = handler.on_incoming_call(call.clone()).await;
-            if !matches!(decision, CallDecision::Defer) {
-                return decision;
+            
+            // Return the decision from the first handler that doesn't defer
+            // OR if any handler explicitly defers (like queue handler), return that
+            match decision {
+                CallDecision::Defer => return CallDecision::Defer,
+                CallDecision::Accept => return CallDecision::Accept,
+                CallDecision::Reject(_) => return decision,
+                CallDecision::Forward(_) => return decision,
             }
         }
         
-        // If all handlers deferred, reject the call
-        CallDecision::Reject("No handler accepted the call".to_string())
+        // If no handlers, reject the call
+        CallDecision::Reject("No handlers configured".to_string())
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {

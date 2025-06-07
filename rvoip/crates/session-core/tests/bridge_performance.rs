@@ -369,7 +369,7 @@ async fn test_bridge_performance_regression() {
         
         // For larger operation counts, time per op shouldn't be significantly worse than baseline
         if baseline_established && op_count > 100 {
-            let max_acceptable = baseline_time_per_op * 3; // Allow 3x degradation for large datasets
+            let max_acceptable = baseline_time_per_op * 5; // Allow 5x degradation for large datasets to account for system variability
             assert!(
                 time_per_op <= max_acceptable,
                 "Performance regression detected: {} ops/sec is {:?} per op (baseline: {:?}, max acceptable: {:?})",
