@@ -98,13 +98,21 @@ impl SessionRegistry {
 
     /// Mark a session as failed
     pub async fn mark_session_failed(&self, session_id: &SessionId) -> Result<()> {
+        // Acquire both locks to do atomic operation and avoid deadlock
+        let mut sessions = self.sessions.write().await;
         let mut stats = self.stats.write().await;
+        
+        // Increment failed count
         stats.failed_sessions += 1;
         
-        // Also remove from active sessions
-        self.unregister_session(session_id).await?;
+        // Remove from active sessions if it exists
+        if sessions.remove(session_id).is_some() {
+            stats.total_terminated += 1;
+            tracing::warn!("Marked session as failed and removed: {}", session_id);
+        } else {
+            tracing::warn!("Marked unknown session as failed: {}", session_id);
+        }
         
-        tracing::warn!("Marked session as failed: {}", session_id);
         Ok(())
     }
 

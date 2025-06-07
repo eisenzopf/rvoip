@@ -14,6 +14,10 @@ pub use media_test_utils::*;
 pub mod bridge_test_utils;
 pub use bridge_test_utils::*;
 
+// Re-export manager test utilities
+pub mod manager_test_utils;
+pub use manager_test_utils::*;
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicU16, Ordering};
