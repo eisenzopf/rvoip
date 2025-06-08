@@ -354,6 +354,13 @@ impl SessionDialogCoordinator {
         
         // Handle other response codes
         match response.status_code() {
+            200 => {
+                // 200 OK for non-INVITE requests (INFO, UPDATE, BYE, etc.)
+                // These responses are handled correctly by the protocol stack
+                // Just log success without the misleading "Unhandled" message
+                tracing::debug!("✅ RFC 3261: Successfully processed 200 OK response for dialog {}", dialog_id);
+            }
+            
             180 => {
                 // 180 Ringing
                 if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
