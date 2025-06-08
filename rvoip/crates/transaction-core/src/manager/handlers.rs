@@ -868,13 +868,14 @@ impl TransactionManager {
         Ok(())
     }
     
-    /// Handle an ACK request with special processing required by RFC 3261.
+    /// Handle an ACK request with RFC 3261 compliant dialog-based matching.
     ///
     /// ACK is a special method in SIP:
-    /// - ACK for non-2xx responses is part of the INVITE transaction
-    /// - ACK for 2xx responses is a separate end-to-end transaction
+    /// - ACK for non-2xx responses is part of the INVITE transaction (same branch)
+    /// - ACK for 2xx responses is a separate end-to-end transaction (different branch)
     ///
-    /// This method handles both cases according to RFC 3261 Section 17.1.1.3.
+    /// This method uses dialog-based matching (Call-ID, From tag, To tag) as required
+    /// by RFC 3261 Section 17.1.1.3 for proper 2xx ACK handling.
     ///
     /// # Arguments
     /// * `request` - The ACK request
@@ -883,34 +884,77 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or error depending on ACK processing
     async fn handle_ack_request(&self, request: Request, source: SocketAddr) -> Result<()> {
-        // Check if this ACK matches an INVITE server transaction
+        debug!("Processing ACK request with dialog-based matching");
+        
+        // First try direct branch-based matching for non-2xx ACKs
         if let Some(key) = crate::utils::transaction_key_from_message(&Message::Request(request.clone())) {
-            // Create a key for the INVITE transaction this ACK might belong to
-            // ACK has its own branch parameter but the To and From tags should match
-            // the INVITE transaction
             let invite_key = key.with_method(Method::Invite);
             
-            // Check for an INVITE server transaction
             let server_txs = self.server_transactions.lock().await;
             if let Some(transaction) = server_txs.get(&invite_key) {
-                if transaction.state() == TransactionState::Confirmed {
-                    // This is an ACK for a 2xx response, which is end-to-end
-                    // and doesn't have its own transaction
-                    self.events_tx.send(crate::TransactionEvent::AckRequest {
-                        transaction_id: invite_key,
-                        request,
-                        source,
-                    }).await.ok();
-                    
-                    return Ok(());
-                } else {
+                if transaction.state() != TransactionState::Confirmed {
                     // This is an ACK for a non-2xx response, process it in the transaction
                     let tx = transaction.clone();
                     drop(server_txs);
                     
+                    debug!("Processing ACK for non-2xx response in transaction {}", invite_key);
                     return tx.process_request(request).await;
                 }
             }
+            drop(server_txs);
+        }
+        
+        // RFC 3261 Section 17.1.1.3: For 2xx responses, ACK has different branch
+        // Use dialog-based matching (Call-ID, From tag, To tag)
+        let server_txs = self.server_transactions.lock().await;
+        
+        let matching_tx = server_txs.iter()
+            .filter(|(key, _tx)| {
+                // Only look at INVITE server transactions
+                key.method() == &Method::Invite && key.is_server()
+            })
+            .find_map(|(key, tx)| {
+                // Try to match based on dialog identifiers
+                if let (Some(req_call_id), Some(ack_call_id)) = (tx.original_request_call_id(), request.call_id()) {
+                    if req_call_id == ack_call_id.value() {
+                        // Found potential match by Call-ID, now check From/To tags
+                        if let (Some(req_from), Some(ack_from)) = (tx.original_request_from_tag(), request.from_tag()) {
+                            if req_from == ack_from {
+                                // If To tag exists in both, it should match
+                                let to_matches = match (tx.original_request_to_tag(), request.to_tag()) {
+                                    (Some(req_to), Some(ack_to)) => req_to == ack_to,
+                                    // In early dialogs, original request might not have To tag
+                                    _ => true
+                                };
+                                
+                                if to_matches {
+                                    debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
+                                    return Some(tx.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            });
+        
+        if let Some(tx) = matching_tx {
+            let tx_id = tx.id().clone();
+            drop(server_txs);
+            
+            debug!("Found ACK for 2xx response using dialog-based matching: {}", tx_id);
+            
+            // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
+            // Instead, emit AckReceived event for dialog-core to handle
+            self.events_tx.send(crate::TransactionEvent::AckReceived {
+                transaction_id: tx_id,
+                request,
+            }).await
+                .map_err(|e| Error::Other(format!("Failed to emit AckReceived event: {}", e)))?;
+                
+            debug!("Emitted AckReceived event for dialog-core to handle 2xx ACK");
+            return Ok(());
+        } else {
             drop(server_txs);
         }
         

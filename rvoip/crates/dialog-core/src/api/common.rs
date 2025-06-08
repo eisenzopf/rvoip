@@ -576,11 +576,13 @@ impl CallHandle {
             use rvoip_transaction_core::utils::response_builders;
             
             // Use the dialog-aware response builder that adds To tags
+            // Get the actual local address from the dialog handle
+            let local_addr = self.dialog_handle.dialog_manager.local_address();
             let mut response = response_builders::create_ok_response_with_dialog_info(
                 &original_request,
                 "server",                    // contact_user
-                "127.0.0.1",                // contact_host - TODO: use actual local address
-                Some(5060)                  // contact_port - TODO: use actual local port
+                &local_addr.ip().to_string(), // contact_host - use actual local IP
+                Some(local_addr.port())      // contact_port - use actual local port
             );
             
             // Add SDP body if provided

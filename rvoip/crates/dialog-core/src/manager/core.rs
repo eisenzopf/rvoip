@@ -142,10 +142,27 @@ impl DialogManager {
                                     error!("Failed to process transaction event for dialog {}: {}", dialog_id, e);
                                 }
                             } else {
-                                // Event for transaction not associated with any dialog
-                                // Check if this is a new incoming INVITE that should create a dialog
-                                if let Err(e) = self.handle_unassociated_transaction_event(&transaction_id, event).await {
-                                    error!("Failed to handle unassociated transaction event {}: {}", transaction_id, e);
+                                // No dialog found using transaction-to-dialog mapping
+                                
+                                // Special handling for AckReceived events: use dialog-based matching
+                                if let TransactionEvent::AckReceived { request, .. } = &event {
+                                    // Find dialog using Call-ID, From tag, To tag from the ACK request
+                                    if let Some(dialog_id) = self.find_dialog_for_request(request).await {
+                                        if let Err(e) = self.process_transaction_event(&transaction_id, &dialog_id, event).await {
+                                            error!("Failed to process AckReceived event for dialog {}: {}", dialog_id, e);
+                                        }
+                                    } else {
+                                        // Still treat as unassociated event
+                                        if let Err(e) = self.handle_unassociated_transaction_event(&transaction_id, event).await {
+                                            error!("Failed to handle unassociated AckReceived event {}: {}", transaction_id, e);
+                                        }
+                                    }
+                                } else {
+                                    // Event for transaction not associated with any dialog
+                                    // Check if this is a new incoming INVITE that should create a dialog
+                                    if let Err(e) = self.handle_unassociated_transaction_event(&transaction_id, event).await {
+                                        error!("Failed to handle unassociated transaction event {}: {}", transaction_id, e);
+                                    }
                                 }
                             }
                         },
@@ -309,16 +326,11 @@ impl DialogManager {
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
-            println!("🚀 DIALOG-CORE: About to send session coordination event: {:?}", event);
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
-                println!("❌ DIALOG-CORE: Failed to send session coordination event: {}", e);
             } else {
                 debug!("Emitted session coordination event: {:?}", event);
-                println!("✅ DIALOG-CORE: Successfully sent session coordination event");
             }
-        } else {
-            println!("⚠️ DIALOG-CORE: No session coordinator set, dropping event: {:?}", event);
         }
     }
     
@@ -657,8 +669,16 @@ impl DialogManager {
     
     pub async fn send_ack_for_2xx_response(&self, dialog_id: &DialogId, original_invite_tx_id: &TransactionKey, response: &Response) -> DialogResult<()> {
         debug!("Sending ACK for 2xx response for dialog {}", dialog_id);
-        let _ack_request = self.create_ack_for_2xx_response(original_invite_tx_id, response).await?;
-        // The transaction-core helper should handle sending the ACK
+        
+        // Use transaction-core's send_ack_for_2xx method to actually send the ACK
+        self.transaction_manager
+            .send_ack_for_2xx(original_invite_tx_id, response)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to send ACK for 2xx response: {}", e),
+            })?;
+        
+        debug!("Successfully sent ACK for 2xx response for dialog {}", dialog_id);
         Ok(())
     }
     
