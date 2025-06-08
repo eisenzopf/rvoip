@@ -711,6 +711,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         data: &Arc<ServerTransactionData>,
         message: Message,
         current_state: TransactionState,
+        timer_handles: &mut ServerInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
         

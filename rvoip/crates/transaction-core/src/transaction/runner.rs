@@ -195,10 +195,11 @@ where
                 }
             }
             InternalTransactionCommand::ProcessMessage(message) => {
-                match logic.process_message(&data, message, current_state).await {
+                debug!(id=%tx_id_clone, "Received ProcessMessage command with {:?}", message);
+                match logic.process_message(&data, message, current_state, &mut timer_handles).await {
                     Ok(Some(next_state)) => {
                         if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(next_state)).await {
-                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
+                             error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }

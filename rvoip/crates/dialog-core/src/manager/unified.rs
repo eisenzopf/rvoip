@@ -656,38 +656,40 @@ impl UnifiedDialogManager {
         status_code: StatusCode,
         body: Option<String>
     ) -> ApiResult<Response> {
-        debug!("Building response for transaction {} with status {}", transaction_id, status_code);
+        debug!("Building response for transaction {} with status {}", status_code, transaction_id);
         
-        // Create basic response with status code
-        let mut response = Response::new(status_code);
+        // Get the original request from the transaction manager to copy required headers
+        let original_request = self.core.transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal { 
+                message: format!("Failed to get original request: {}", e) 
+            })?
+            .ok_or_else(|| ApiError::Internal { 
+                message: "No original request found for transaction".to_string() 
+            })?;
+        
+        // Use the proper response builder to create response with all required headers
+        let mut response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &original_request,
+            status_code,
+            None // No custom reason phrase
+        );
         
         // Add body if provided
         if let Some(body_content) = body {
-            let body_bytes = body_content.as_bytes();
-            response = response.with_body(body_bytes.to_vec());
-            
-            // Set content length
-            response = response.with_header(TypedHeader::ContentLength(ContentLength::new(body_bytes.len() as u32)));
+            response = response.body(body_content.as_bytes().to_vec());
             
             // Set content type for SDP content
             if body_content.trim_start().starts_with("v=") {
-                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                let content_type_value = ContentTypeValue {
-                    m_type: "application".to_string(),
-                    m_subtype: "sdp".to_string(),
-                    parameters: std::collections::HashMap::new(),
-                };
-                response = response.with_header(TypedHeader::ContentType(
-                    rvoip_sip_core::types::content_type::ContentType::new(content_type_value)
-                ));
+                response = response.content_type("application/sdp");
             }
-        } else {
-            // No body, set content length to 0
-            response = response.with_header(TypedHeader::ContentLength(ContentLength::new(0)));
         }
         
-        debug!("Successfully built response for transaction {}", transaction_id);
-        Ok(response)
+        let built_response = response.build();
+        
+        debug!("Successfully built response for transaction {} using proper RFC 3261 compliant headers", transaction_id);
+        Ok(built_response)
     }
     
     /// Send a status response (convenience method)

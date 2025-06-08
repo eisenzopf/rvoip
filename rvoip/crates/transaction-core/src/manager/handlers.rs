@@ -773,8 +773,19 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or error depending on response processing
     async fn handle_response(&self, response: Response, source: SocketAddr) -> Result<()> {
+        // Debug logging for response processing
+        debug!("🔍 RESPONSE HANDLER: Processing response {} from {}", response.status(), source);
+        
         // Try to find a matching client transaction
         if let Some(key) = crate::utils::transaction_key_from_message(&Message::Response(response.clone())) {
+            debug!(id=%key, "🔍 RESPONSE HANDLER: Generated transaction key from response");
+            
+            // Debug the current client transactions
+            let client_txs_guard = self.client_transactions.lock().await;
+            let client_keys: Vec<String> = client_txs_guard.keys().map(|k| k.to_string()).collect();
+            debug!("🔍 RESPONSE HANDLER: Current client transactions: {:?}", client_keys);
+            drop(client_txs_guard);
+            
             debug!(id=%key, "Found matching transaction for response");
             
             // Check that the key is for a client transaction (not is_server)
@@ -790,6 +801,7 @@ impl TransactionManager {
             let mut processed = false;
             
             if client_txs_guard.contains_key(&key) {
+                debug!("🔍 RESPONSE HANDLER: Found matching client transaction, processing response");
                 let transaction = client_txs_guard.remove(&key).unwrap();
                 
                 // Drop the lock so we can do async operations
@@ -799,6 +811,7 @@ impl TransactionManager {
                 if let Err(e) = transaction.process_response(response.clone()).await {
                     warn!(id=%key, error=%e, "Error processing response");
                 } else {
+                    debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
                 
@@ -807,6 +820,7 @@ impl TransactionManager {
                 client_txs_guard.insert(key.clone(), transaction);
                 drop(client_txs_guard);
             } else {
+                debug!("🔍 RESPONSE HANDLER: No matching client transaction found for key {}", key);
                 drop(client_txs_guard);
             }
             
@@ -852,6 +866,8 @@ impl TransactionManager {
             }
             
             return Ok(());
+        } else {
+            debug!("🔍 RESPONSE HANDLER: Could not generate transaction key from response");
         }
         
         // No transaction match
