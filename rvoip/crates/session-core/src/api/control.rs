@@ -64,13 +64,39 @@ pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSe
     let current_session = session_manager.find_session(&session.id).await?
         .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
     
-    if !matches!(current_session.state, CallState::OnHold) {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot resume call not on hold: {:?}", current_session.state)
-        ));
+    match current_session.state {
+        CallState::OnHold => {
+            // Normal case: resume from hold
+            session_manager.resume_session(&session.id).await
+        }
+        CallState::Active => {
+            // UX improvement: Allow no-op resume for active calls
+            // This is user-friendly since the desired outcome (active call) is already achieved
+            tracing::debug!("Resume called on already active call {}, treating as no-op", session.id);
+            Ok(())
+        }
+        _ => {
+            // Provide clear, helpful error message with context
+            let state_name = match current_session.state {
+                CallState::Initiating => "initiating (call setup in progress)",
+                CallState::Ringing => "ringing (waiting for answer)",
+                CallState::Transferring => "being transferred",
+                CallState::Terminating => "being terminated", 
+                CallState::Terminated => "terminated (call ended)",
+                CallState::Cancelled => "cancelled",
+                CallState::Failed(_) => "failed",
+                _ => "unknown state" // This shouldn't happen
+            };
+            
+            Err(crate::errors::SessionError::InvalidState(
+                format!(
+                    "Cannot resume call that is currently {}. Resume is only available for calls on hold. \
+                    Tip: Use hold_call() first to put an active call on hold, then resume_call() to resume it.",
+                    state_name
+                )
+            ))
+        }
     }
-
-    session_manager.resume_session(&session.id).await
 }
 
 /// Transfer a call to another destination
