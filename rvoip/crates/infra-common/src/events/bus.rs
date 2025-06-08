@@ -1,12 +1,12 @@
 use crate::events::types::{Event, EventFilter, EventHandler, EventType, EventPriority, EventError, EventResult, StaticEvent};
 use crate::events::subscriber::{Subscriber, SubscriberHandle};
-use crate::events::registry::{TypeRegistry, TypedBroadcastSender, TypedBroadcastReceiver, GlobalTypeRegistry};
+use crate::events::registry::{TypeRegistry, TypedBroadcastReceiver, GlobalTypeRegistry};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, Mutex};
 use tokio::time::timeout;
 use dashmap::DashMap;
-use async_trait::async_trait;
+
 
 /// Configuration for the event bus
 #[derive(Debug, Clone)]

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use crate::events::types::{Event, EventResult, EventError, EventFilter};
+use crate::events::types::{Event, EventResult, EventFilter};
 use async_trait::async_trait;
 
 /// Core trait representing an event system.

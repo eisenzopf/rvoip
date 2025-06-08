@@ -1,12 +1,12 @@
-use crate::events::types::{Event, EventType, StaticEvent};
+use crate::events::types::{Event, StaticEvent};
 use std::any::Any;
 use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
-use once_cell::sync::OnceCell;
+
 use std::fmt::Debug;
 use std::any::TypeId;
-use std::sync::RwLock;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing;
 

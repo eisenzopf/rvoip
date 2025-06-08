@@ -111,8 +111,7 @@ use tokio::sync::mpsc;
 use tracing::{info, debug, warn, error};
 
 use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri, TypedHeader};
-use rvoip_sip_core::types::content_length::ContentLength;
+use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
 
 use crate::config::DialogManagerConfig;
 use crate::dialog::{DialogId, Dialog, DialogState};

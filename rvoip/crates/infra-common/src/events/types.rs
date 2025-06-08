@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::any::Any;
 use async_trait::async_trait;
-use std::time::Duration;
+
 use serde::{Serialize, Deserialize};
 
 /// Represents a type of event
