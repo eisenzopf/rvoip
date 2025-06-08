@@ -314,6 +314,16 @@ impl SessionCoordinator {
                     .map_err(|e| SessionError::internal(&format!("Failed to process SDP update: {}", e)))?;
             }
             
+            "final_negotiated_sdp" => {
+                tracing::info!("✅ RFC 3261: Processing final negotiated SDP for session {} after ACK exchange", session_id);
+                // Apply final negotiated SDP to media session - this is the RFC 3261 compliant 
+                // point where we have the complete SDP negotiation after ACK exchange
+                self.media_coordinator.process_sdp_answer(&session_id, &sdp).await
+                    .map_err(|e| SessionError::internal(&format!("Failed to process final negotiated SDP: {}", e)))?;
+                
+                tracing::debug!("Final negotiated SDP applied to media session {}", session_id);
+            }
+            
             _ => {
                 tracing::warn!("Unknown SDP event type '{}' for session {}", event_type, session_id);
             }

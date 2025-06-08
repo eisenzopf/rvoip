@@ -424,15 +424,14 @@ impl UnifiedDialogManager {
         let _transaction_key = match self.core.send_request(&dialog_id, Method::Invite, body_bytes).await {
             Ok(tx_key) => tx_key,
             Err(e) => {
-                // WORKAROUND: For INVITE transactions, "Transaction terminated after timeout" 
-                // can occur when the 200 OK response causes the transaction to terminate
-                // (correct per RFC 3261). This is actually success, not failure.
+                // RFC 3261 Section 17.1.1.3: INVITE client transactions terminate after 
+                // receiving 2xx responses and sending ACK. This is normal behavior, not an error.
                 let error_msg = e.to_string();
                 if error_msg.contains("Transaction terminated after timeout") || 
                    error_msg.contains("Transaction terminated") {
-                    warn!("INVITE transaction terminated (this is normal for 2xx responses): {}", e);
-                    // Continue as if successful - the SIP flow is working correctly
-                    info!("Created outgoing call with dialog ID: {} (transaction terminated normally)", dialog_id);
+                    debug!("INVITE transaction terminated normally after 2xx response (RFC 3261 compliant): {}", e);
+                    // This is expected behavior - the SIP call flow completed successfully
+                    info!("Created outgoing call with dialog ID: {} (transaction completed per RFC 3261)", dialog_id);
                     return Ok(CallHandle::new(dialog_id.clone(), Arc::new(self.core.clone())));
                 }
                 

@@ -175,6 +175,24 @@ impl SessionManager {
                                 }
                             }
                         }
+                        "final_negotiated_sdp" => {
+                            tracing::info!("📄 ✅ RFC 3261: Processing final negotiated SDP for session {} after ACK exchange", session_id);
+                            // Store final negotiated SDP (this represents the complete SDP after ACK)
+                            sdp_storage_clone.entry(session_id.clone())
+                                .or_insert((None, None))
+                                .1 = Some(sdp.clone());
+                            
+                            // Update media session if it exists with the final negotiated SDP
+                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
+                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
+                                    tracing::error!("Failed to update media session with final negotiated SDP: {}", e);
+                                } else {
+                                    tracing::info!("✅ Applied final negotiated SDP to media session for {}", session_id);
+                                }
+                            } else {
+                                tracing::debug!("Media session not yet created for {}, final SDP stored for later application", session_id);
+                            }
+                        }
                         _ => {
                             tracing::debug!("Unknown SDP event type: {}", event_type);
                         }
