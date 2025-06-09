@@ -22,6 +22,7 @@ members = [
     "examples/sip-test-client",
     "examples/sip-client-demo",
     "examples/sip-parser-demo",
+    "crates/session-core/examples/sipp_tests",
 ]
 
 # Silence all Rust warnings

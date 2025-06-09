@@ -1,0 +1,183 @@
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/sip_test_server --port 5062 --mode auto-answer --auto-shutdown 20 --log-level info`
+[2m2025-06-09T02:41:15.989679Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m278:[0m 🧪 SIP Test Server starting...
+[2m2025-06-09T02:41:15.989778Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m279:[0m 🔧 Configuration:
+[2m2025-06-09T02:41:15.989792Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m280:[0m   📡 Port: 5062
+[2m2025-06-09T02:41:15.989803Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m281:[0m   🎯 Mode: AutoAnswer
+[2m2025-06-09T02:41:15.989814Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m282:[0m   📊 Metrics: true
+[2m2025-06-09T02:41:15.989824Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m168:[0m 🚀 Starting SIP Test Server on port 5062
+[2m2025-06-09T02:41:15.990259Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m805:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-09T02:41:15.990789Z[0m [32m INFO[0m ThreadId(01) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m48:[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-06-09T02:41:15.991551Z[0m [32m INFO[0m ThreadId(01) [2mcrates/transaction-core/src/transport/mod.rs[0m[2m:[0m[2m247:[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-06-09T02:41:15.992180Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m294:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-09T02:41:15.992217Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m252:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5062
+[2m2025-06-09T02:41:15.992254Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m100:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5062
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-09T02:41:15.992488Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m289:[0m SessionManager initialized on port 5062
+[2m2025-06-09T02:41:15.992489Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m128:[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-06-09T02:41:15.992497Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m289:[0m ⏰ Auto-shutdown enabled: 20 seconds
+[2m2025-06-09T02:41:15.992517Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m197:[0m 🚀 Starting SIP Test Server session manager...
+[2m2025-06-09T02:41:15.992523Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m336:[0m Starting UnifiedDialogApi
+[2m2025-06-09T02:41:15.992528Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m294:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-09T02:41:15.992533Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m399:[0m DialogManager starting
+[2m2025-06-09T02:41:15.992538Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m407:[0m DialogManager started successfully
+[2m2025-06-09T02:41:15.992542Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m310:[0m Hybrid mode active - from_uri: Some("sip:test@127.0.0.1:5062"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-09T02:41:15.992547Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m315:[0m UnifiedDialogManager started successfully
+[2m2025-06-09T02:41:15.992556Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/events.rs[0m[2m:[0m[2m141:[0m Session event processor started
+[2m2025-06-09T02:41:15.992584Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/cleanup.rs[0m[2m:[0m[2m54:[0m Cleanup manager started
+[2m2025-06-09T02:41:15.992602Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m302:[0m SessionManager started
+[2m2025-06-09T02:41:15.992607Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m202:[0m ✅ SIP Test Server ready and listening on port 5062
+[2m2025-06-09T02:41:15.992612Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m203:[0m 📋 Response mode: AutoAnswer
+[2m2025-06-09T02:41:15.992616Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m204:[0m 🔄 Waiting for incoming calls from SIPp...
+[2m2025-06-09T02:41:15.992621Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m205:[0m 📡 Real SIP server now active - SIPp can connect!
+[2m2025-06-09T02:41:19.713169Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m231:[0m 📡 Received SIGTERM signal
+[2m2025-06-09T02:41:19.713195Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m210:[0m 🛑 SIP Test Server shutting down
+[2m2025-06-09T02:41:19.713219Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m250:[0m 📊 Final Statistics:
+[2m2025-06-09T02:41:19.713226Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m251:[0m   ⏱️  Uptime: 3.72 seconds
+[2m2025-06-09T02:41:19.713233Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m252:[0m   📞 Total calls: 0
+[2m2025-06-09T02:41:19.713247Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m253:[0m   ✅ Successful calls: 0
+[2m2025-06-09T02:41:19.713252Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m254:[0m   ❌ Failed calls: 0
+[2m2025-06-09T02:41:19.713256Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m255:[0m   🔄 Active calls: 0
+[2m2025-06-09T02:41:19.713261Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m256:[0m   📈 Success rate: 0.0%
+[2m2025-06-09T02:41:19.713271Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m298:[0m 👋 SIP Test Server shutdown complete

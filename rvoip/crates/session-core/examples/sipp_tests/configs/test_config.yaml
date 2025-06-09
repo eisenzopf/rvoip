@@ -1,0 +1,50 @@
+session_core:
+  server:
+    binary_path: "target/debug/sip_test_server"
+    sip_port: 5062
+    rtp_port_range: "10000-20000"
+    auto_answer: true
+    log_level: "info"
+    response_mode: AutoAnswer
+  client:
+    binary_path: "target/debug/sip_test_client"
+    local_port: 5061
+    default_target: "127.0.0.1:5060"
+    max_concurrent_calls: 100
+    call_rate: 1.0
+
+sipp:
+  binary_path: "sipp"
+  scenarios_dir: "./scenarios"
+  audio_dir: "./audio"
+  default_rate: 1
+  max_concurrent: 100
+  timeout: 30
+  trace_msg: true
+  trace_screen: false
+
+capture:
+  interface: "lo0"  # macOS loopback interface
+  output_dir: "./captures"
+  filter: "port 5060 or port 5061 or port 5062"
+  enabled: true
+
+audio:
+  codecs:
+    - "PCMU"
+    - "PCMA"
+    - "opus"
+  sample_rates:
+    - 8000
+    - 16000
+    - 48000
+  test_duration: 10
+  quality_threshold: 95.0
+
+reporting:
+  output_dir: "./reports"
+  formats:
+    - Html
+    - Junit
+    - Json
+  include_pcap: true 

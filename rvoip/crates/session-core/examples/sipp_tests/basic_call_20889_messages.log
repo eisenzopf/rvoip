@@ -1,0 +1,168 @@
+----------------------------------------------- 2025-06-08 19:59:31.656222
+UDP message sent (590 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-1-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20889SIPpTag001
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 1-20889@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-08 19:59:31.865587
+UDP message received [124] bytes :
+
+SIP/2.0 100 Trying
+Call-ID: 1-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-1-0
+
+
+-----------------------------------------------
+Unexpected UDP message received:
+
+SIP/2.0 100 Trying
+Call-ID: 1-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-1-0
+
+
+----------------------------------------------- 2025-06-08 19:59:31.865714
+UDP message sent (208 bytes):
+
+CANCEL  SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-1-0
+Call-ID: 1-20889@127.0.0.1
+CSeq: 1 CANCEL
+Max-Forwards: 70
+Contact: <sip:sipp@127.0.0.1:5061;transport=UDP>
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-08 19:59:32.656340
+UDP message sent (590 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-2-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20889SIPpTag002
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 2-20889@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6004 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-08 19:59:32.861894
+UDP message received [124] bytes :
+
+SIP/2.0 100 Trying
+Call-ID: 2-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-2-0
+
+
+-----------------------------------------------
+Unexpected UDP message received:
+
+SIP/2.0 100 Trying
+Call-ID: 2-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-2-0
+
+
+----------------------------------------------- 2025-06-08 19:59:32.862059
+UDP message sent (208 bytes):
+
+CANCEL  SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-2-0
+Call-ID: 2-20889@127.0.0.1
+CSeq: 1 CANCEL
+Max-Forwards: 70
+Contact: <sip:sipp@127.0.0.1:5061;transport=UDP>
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-08 19:59:33.657462
+UDP message sent (590 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-3-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20889SIPpTag003
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 3-20889@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6008 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-08 19:59:33.870428
+UDP message received [124] bytes :
+
+SIP/2.0 100 Trying
+Call-ID: 3-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-3-0
+
+
+-----------------------------------------------
+Unexpected UDP message received:
+
+SIP/2.0 100 Trying
+Call-ID: 3-20889@127.0.0.1
+CSeq: 1 INVITE
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-3-0
+
+
+----------------------------------------------- 2025-06-08 19:59:33.870623
+UDP message sent (208 bytes):
+
+CANCEL  SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20889-3-0
+Call-ID: 3-20889@127.0.0.1
+CSeq: 1 CANCEL
+Max-Forwards: 70
+Contact: <sip:sipp@127.0.0.1:5061;transport=UDP>
+Content-Length: 0
+
+

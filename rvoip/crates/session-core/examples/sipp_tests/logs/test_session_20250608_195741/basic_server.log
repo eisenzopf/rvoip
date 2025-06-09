@@ -1,0 +1,281 @@
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
+warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/sip_test_server --port 5062 --mode auto-answer --log-level info`
+[2m2025-06-09T02:57:46.885720Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m278:[0m 🧪 SIP Test Server starting...
+[2m2025-06-09T02:57:46.885774Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m279:[0m 🔧 Configuration:
+[2m2025-06-09T02:57:46.885780Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m280:[0m   📡 Port: 5062
+[2m2025-06-09T02:57:46.885785Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m281:[0m   🎯 Mode: AutoAnswer
+[2m2025-06-09T02:57:46.885790Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m282:[0m   📊 Metrics: true
+[2m2025-06-09T02:57:46.885798Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m168:[0m 🚀 Starting SIP Test Server on port 5062
+[2m2025-06-09T02:57:46.886018Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m805:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-09T02:57:46.886295Z[0m [32m INFO[0m ThreadId(01) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m48:[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-06-09T02:57:46.886676Z[0m [32m INFO[0m ThreadId(01) [2mcrates/transaction-core/src/transport/mod.rs[0m[2m:[0m[2m247:[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-06-09T02:57:46.886996Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m294:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-09T02:57:46.887021Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m252:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5062
+[2m2025-06-09T02:57:46.887059Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m100:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5062
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-09T02:57:46.887268Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m289:[0m SessionManager initialized on port 5062
+[2m2025-06-09T02:57:46.887283Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m128:[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-06-09T02:57:46.887299Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m197:[0m 🚀 Starting SIP Test Server session manager...
+[2m2025-06-09T02:57:46.887308Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m336:[0m Starting UnifiedDialogApi
+[2m2025-06-09T02:57:46.887314Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m294:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-09T02:57:46.887320Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m399:[0m DialogManager starting
+[2m2025-06-09T02:57:46.887325Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m407:[0m DialogManager started successfully
+[2m2025-06-09T02:57:46.887331Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m310:[0m Hybrid mode active - from_uri: Some("sip:test@127.0.0.1:5062"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-09T02:57:46.887337Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m315:[0m UnifiedDialogManager started successfully
+[2m2025-06-09T02:57:46.887346Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/events.rs[0m[2m:[0m[2m141:[0m Session event processor started
+[2m2025-06-09T02:57:46.887372Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/cleanup.rs[0m[2m:[0m[2m54:[0m Cleanup manager started
+[2m2025-06-09T02:57:46.887391Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m302:[0m SessionManager started
+[2m2025-06-09T02:57:46.887397Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m202:[0m ✅ SIP Test Server ready and listening on port 5062
+[2m2025-06-09T02:57:46.887403Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m203:[0m 📋 Response mode: AutoAnswer
+[2m2025-06-09T02:57:46.887409Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m204:[0m 🔄 Waiting for incoming calls from SIPp...
+[2m2025-06-09T02:57:46.887414Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m205:[0m 📡 Real SIP server now active - SIPp can connect!
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-1-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20210SIPpTag001\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 1-20210@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 30, 32, 31, 30, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [83, 73, 80, 112, 32, 84, 101, 115, 116, 32, 60, 115, 105, 112, 58, 115, 105, 112, 112, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 49, 62, 59, 116, 97, 103, 61, 50, 48, 50, 49, 48, 83, 73, 80, 112, 84, 97, 103, 48, 48, 49], code: Tag })
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [84, 101, 115, 116, 32, 85, 115, 101, 114, 32, 60, 115, 105, 112, 58, 116, 101, 115, 116, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 50, 62], code: Tag })
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-09T02:57:51.867317Z[0m [32m INFO[0m ThreadId(02) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-20210-1-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+[2m2025-06-09T02:57:51.867755Z[0m [31mERROR[0m ThreadId(02) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m164:[0m Failed to handle unassociated transaction event Key(z9hG4bK-20210-1-0:INVITE:server): SIP protocol error: INVITE missing From header
+Transaction loop starting for Key(z9hG4bK-20210-1-0:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-20210-1-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+Received command: Timer("100") for transaction Key(z9hG4bK-20210-1-0:INVITE:server)
+[2m2025-06-09T02:57:52.069568Z[0m [32m INFO[0m ThreadId(15) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 208 bytes
+Input as string: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-1-0\r\nCall-ID: 1-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 31, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE ERROR ===
+Error at offset: 0
+Error code: Tag
+Remaining input: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-1-0\r\nCall-ID: 1-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Remaining input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 31, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+==================
+[2m2025-06-09T02:57:52.072265Z[0m [33m WARN[0m ThreadId(15) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m120:[0m Error parsing SIP message: Parse error: Failed to parse message near offset 0: Tag
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-2-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20210SIPpTag002\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 2-20210@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6004 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 32, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 30, 32, 31, 30, 53, 49, 50, 70, 54, 61, 67, 30, 30, 32, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 34, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [83, 73, 80, 112, 32, 84, 101, 115, 116, 32, 60, 115, 105, 112, 58, 115, 105, 112, 112, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 49, 62, 59, 116, 97, 103, 61, 50, 48, 50, 49, 48, 83, 73, 80, 112, 84, 97, 103, 48, 48, 50], code: Tag })
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [84, 101, 115, 116, 32, 85, 115, 101, 114, 32, 60, 115, 105, 112, 58, 116, 101, 115, 116, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 50, 62], code: Tag })
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-09T02:57:52.864939Z[0m [32m INFO[0m ThreadId(15) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-20210-2-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+Transaction loop starting for Key(z9hG4bK-20210-2-0:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-20210-2-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+[2m2025-06-09T02:57:52.865108Z[0m [31mERROR[0m ThreadId(15) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m164:[0m Failed to handle unassociated transaction event Key(z9hG4bK-20210-2-0:INVITE:server): SIP protocol error: INVITE missing From header
+Received command: Timer("100") for transaction Key(z9hG4bK-20210-2-0:INVITE:server)
+[2m2025-06-09T02:57:53.067387Z[0m [32m INFO[0m ThreadId(14) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 208 bytes
+Input as string: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-2-0\r\nCall-ID: 2-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 32, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE ERROR ===
+Error at offset: 0
+Error code: Tag
+Remaining input: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-2-0\r\nCall-ID: 2-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Remaining input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 32, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+==================
+[2m2025-06-09T02:57:53.070860Z[0m [33m WARN[0m ThreadId(14) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m120:[0m Error parsing SIP message: Parse error: Failed to parse message near offset 0: Tag
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-3-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=20210SIPpTag003\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 3-20210@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6008 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 33, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 30, 32, 31, 30, 53, 49, 50, 70, 54, 61, 67, 30, 30, 33, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 38, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [83, 73, 80, 112, 32, 84, 101, 115, 116, 32, 60, 115, 105, 112, 58, 115, 105, 112, 112, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 49, 62, 59, 116, 97, 103, 61, 50, 48, 50, 49, 48, 83, 73, 80, 112, 84, 97, 103, 48, 48, 51], code: Tag })
+Warning: Header parsing error (skipping): Parse error: Nom parsing error: Error(Error { input: [84, 101, 115, 116, 32, 85, 115, 101, 114, 32, 60, 115, 105, 112, 58, 116, 101, 115, 116, 64, 49, 50, 55, 46, 48, 46, 48, 46, 49, 58, 53, 48, 54, 50, 62], code: Tag })
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-09T02:57:53.864428Z[0m [32m INFO[0m ThreadId(14) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-20210-3-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+Transaction loop starting for Key(z9hG4bK-20210-3-0:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-20210-3-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+[2m2025-06-09T02:57:53.864617Z[0m [31mERROR[0m ThreadId(14) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m164:[0m Failed to handle unassociated transaction event Key(z9hG4bK-20210-3-0:INVITE:server): SIP protocol error: INVITE missing From header
+Received command: Timer("100") for transaction Key(z9hG4bK-20210-3-0:INVITE:server)
+[2m2025-06-09T02:57:54.066118Z[0m [32m INFO[0m ThreadId(15) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+=== PARSING SIP MESSAGE ===
+Input length: 208 bytes
+Input as string: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-3-0\r\nCall-ID: 3-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 33, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE ERROR ===
+Error at offset: 0
+Error code: Tag
+Remaining input: "CANCEL  SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-20210-3-0\r\nCall-ID: 3-20210@127.0.0.1\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContact: <sip:sipp@127.0.0.1:5061;transport=UDP>\r\nContent-Length: 0\r\n\r\n"
+Remaining input as hex: [43, 41, 4e, 43, 45, 4c, 20, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 30, 32, 31, 30, 2d, 33, 2d, 30, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 30, 32, 31, 30, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 43, 41, 4e, 43, 45, 4c, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 74, 72, 61, 6e, 73, 70, 6f, 72, 74, 3d, 55, 44, 50, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+==================
+[2m2025-06-09T02:57:54.067681Z[0m [33m WARN[0m ThreadId(15) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m120:[0m Error parsing SIP message: Parse error: Failed to parse message near offset 0: Tag
+[2m2025-06-09T02:57:54.122820Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m231:[0m 📡 Received SIGTERM signal
+[2m2025-06-09T02:57:54.122854Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m210:[0m 🛑 SIP Test Server shutting down
+[2m2025-06-09T02:57:54.122883Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m250:[0m 📊 Final Statistics:
+[2m2025-06-09T02:57:54.122891Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m251:[0m   ⏱️  Uptime: 7.24 seconds
+[2m2025-06-09T02:57:54.122899Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m252:[0m   📞 Total calls: 0
+[2m2025-06-09T02:57:54.122904Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m253:[0m   ✅ Successful calls: 0
+[2m2025-06-09T02:57:54.122910Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m254:[0m   ❌ Failed calls: 0
+[2m2025-06-09T02:57:54.122914Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m255:[0m   🔄 Active calls: 0
+[2m2025-06-09T02:57:54.122919Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m256:[0m   📈 Success rate: 0.0%
+[2m2025-06-09T02:57:54.122927Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m298:[0m 👋 SIP Test Server shutdown complete

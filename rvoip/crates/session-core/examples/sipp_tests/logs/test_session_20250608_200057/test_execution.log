@@ -1,0 +1,46 @@
+# Session-Core SIPp Test Suite Execution Log
+# Started: Sun Jun  8 20:00:57 PDT 2025
+# Mode: basic
+# Session: 20250608_200057
+
+2025-06-08 20:00:57 INFO: 📁 Test session directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_200057
+2025-06-08 20:00:57 INFO: 📋 Test mode: basic
+2025-06-08 20:00:57 INFO: ⏰ Test session: 20250608_200057
+2025-06-08 20:00:57 INFO: 🔨 Building test applications...
+2025-06-08 20:00:57 SUCCESS: ✅ Built sip_test_server
+2025-06-08 20:00:57 INFO: 📝 sip_bridge_server not yet implemented (will use sip_test_server for bridge tests)
+2025-06-08 20:00:57 SUCCESS: ✅ Test environment ready
+2025-06-08 20:00:57 HEADER: Generating Audio Test Files
+2025-06-08 20:00:57 INFO: 🎵 Generating test audio files with different frequencies...
+2025-06-08 20:00:57 INFO: Using sox for audio generation
+2025-06-08 20:00:57 SUCCESS: ✅ Generated Client A audio (440Hz)
+2025-06-08 20:00:57 SUCCESS: ✅ Generated Client B audio (880Hz)
+2025-06-08 20:00:57 SUCCESS: ✅ Generated Client C audio (1320Hz)
+2025-06-08 20:00:57 INFO: 📁 Generated audio files:
+2025-06-08 20:00:57 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:00 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-08 20:00:57 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:00 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_b_880hz.wav
+2025-06-08 20:00:57 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:00 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_c_1320hz.wav
+2025-06-08 20:00:57 HEADER: Basic SIP Tests
+2025-06-08 20:00:57 INFO: 📡 Starting packet capture for basic_tests...
+2025-06-08 20:00:57 SUCCESS: ✅ Packet capture started (PID: 21416)
+2025-06-08 20:00:57 INFO: 📄 Capture file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/captures/basic_tests_20250608_200057.pcap
+2025-06-08 20:00:57 INFO: 📄 Capture log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_200057/basic_tests_capture.log
+2025-06-08 20:00:59 INFO: 🚀 Starting basic server on port 5062...
+2025-06-08 20:00:59 INFO: 🔨 Starting: cargo run --bin sip_test_server --port 5062 --mode auto-answer (script-controlled)
+2025-06-08 20:00:59 INFO: 📄 Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_200057/basic_server.log
+2025-06-08 20:00:59 INFO: ⏳ Waiting for server to bind to port 5062...
+2025-06-08 20:01:01 SUCCESS: ✅ basic server ready (PID: 21461, Port: 5062)
+2025-06-08 20:01:01 INFO: 🎯 Server confirmed ready via log message
+2025-06-08 20:01:04 TEST_START: Basic Call Flow
+2025-06-08 20:01:04 INFO: 🧪 Running SIPp test: basic_call
+2025-06-08 20:01:04 INFO: 📄 Scenario: basic_call
+2025-06-08 20:01:04 INFO: 🎯 Target: 127.0.0.1:5062
+2025-06-08 20:01:04 INFO: 📊 Rate: 1 calls/sec, Max: 3 calls
+2025-06-08 20:01:04 INFO: 🎵 Using audio file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-08 20:01:07 ERROR: ❌ SIPp test failed (exit code: 1)
+2025-06-08 20:01:07 ERROR: 📄 Check SIPp log for details: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_200057/basic_call_sipp.log
+2025-06-08 20:01:07 TEST_RESULT: Basic Call Flow = FAIL
+2025-06-08 20:01:07 INFO: 🧹 Cleaning up active processes...
+2025-06-08 20:01:07 INFO: 🛑 Stopping test_server server (PID: 21461)...
+2025-06-08 20:01:08 SUCCESS: ✅ test_server server stopped
+2025-06-08 20:01:08 SUCCESS: ✅ Process cleanup completed
