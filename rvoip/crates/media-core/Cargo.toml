@@ -42,6 +42,16 @@ uuid = { version = "1.0", features = ["v4"] }
 bytemuck = "1.0"
 num_cpus = "1.0"
 
+# Advanced signal processing
+rustfft = "6.1"
+num-complex = "0.4"
+apodize = "1.0"              # Windowing functions
+biquad = "0.4"               # Digital filters
+
+# Performance optimization  
+rayon = "1.7"                # Parallel processing
+ringbuf = "0.3"              # Lock-free ring buffers
+
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
@@ -54,6 +64,8 @@ g722 = []
 # g729 = ["dep:g729"]  # Commented out due to missing dependency
 opus = ["dep:opus"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency
+
+
 
 [dev-dependencies]
 tokio-test = "0.4"
