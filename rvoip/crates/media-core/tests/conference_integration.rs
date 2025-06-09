@@ -13,9 +13,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
+use serial_test::serial;
 
 /// Test basic conference setup and teardown
 #[tokio::test]
+#[serial]
 async fn test_conference_setup_teardown() {
     let config = ConferenceMixingConfig {
         max_participants: 3,
@@ -31,7 +33,7 @@ async fn test_conference_setup_teardown() {
         overflow_protection: true,
     };
     
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller with conference mixing");
     
@@ -49,9 +51,10 @@ async fn test_conference_setup_teardown() {
 
 /// Test adding and removing participants from conference
 #[tokio::test]
+#[serial]
 async fn test_participant_management() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     
@@ -94,13 +97,14 @@ async fn test_participant_management() {
 
 /// Test conference capacity limits
 #[tokio::test]
+#[serial]
 async fn test_conference_capacity_limits() {
     let config = ConferenceMixingConfig {
         max_participants: 2, // Small limit for testing
         ..ConferenceMixingConfig::default()
     };
     
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     
@@ -137,6 +141,7 @@ async fn test_conference_capacity_limits() {
 
 /// Test conference audio processing
 #[tokio::test]
+#[serial]
 async fn test_conference_audio_processing() {
     let config = ConferenceMixingConfig {
         max_participants: 3,
@@ -147,7 +152,7 @@ async fn test_conference_audio_processing() {
         ..ConferenceMixingConfig::default()
     };
     
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     
@@ -202,9 +207,10 @@ async fn test_conference_audio_processing() {
 
 /// Test conference event monitoring
 #[tokio::test]
+#[serial]
 async fn test_conference_events() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     
@@ -214,11 +220,33 @@ async fn test_conference_events() {
     
     let mut events = event_receiver.unwrap();
     
-    // Spawn task to collect events
+    // Prepare media session first
+    let dialog_id = "dialog_test".to_string();
+    let media_config = create_test_media_config();
+    
+    controller.start_media(DialogId::new(dialog_id.clone()), media_config).await
+        .expect("Failed to start media session");
+    
+    // Spawn task to collect events AND perform operations
+    let dialog_id_for_task = dialog_id.clone();
+    let controller_for_task = controller;
     let event_collector = tokio::spawn(async move {
         let mut collected_events = Vec::new();
         
-        // Collect events for a short time
+        // Perform operations within the collector task
+        controller_for_task.add_to_conference(&dialog_id_for_task).await
+            .expect("Failed to add to conference");
+        
+        // Give some time for event to be sent
+        sleep(Duration::from_millis(100)).await;
+        
+        controller_for_task.remove_from_conference(&dialog_id_for_task).await
+            .expect("Failed to remove from conference");
+        
+        // Give some time for event to be sent
+        sleep(Duration::from_millis(100)).await;
+        
+        // Now collect events with a timeout
         let collection_timeout = timeout(Duration::from_millis(500), async {
             while let Some(event) = events.recv().await {
                 collected_events.push(event);
@@ -231,25 +259,6 @@ async fn test_conference_events() {
         let _ = collection_timeout.await;
         collected_events
     });
-    
-    // Perform operations that should generate events
-    let dialog_id = "dialog_test".to_string();
-    let media_config = create_test_media_config();
-    
-    controller.start_media(DialogId::new(dialog_id.clone()), media_config).await
-        .expect("Failed to start media session");
-    
-    controller.add_to_conference(&dialog_id).await
-        .expect("Failed to add to conference");
-    
-    // Small delay to allow event processing
-    sleep(Duration::from_millis(50)).await;
-    
-    controller.remove_from_conference(&dialog_id).await
-        .expect("Failed to remove from conference");
-    
-    // Small delay to allow event processing
-    sleep(Duration::from_millis(50)).await;
     
     // Collect and verify events
     let collected_events = event_collector.await.expect("Event collector failed");
@@ -267,9 +276,10 @@ async fn test_conference_events() {
 
 /// Test error handling for invalid operations
 #[tokio::test]
+#[serial]
 async fn test_error_handling() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     
@@ -293,13 +303,14 @@ async fn test_error_handling() {
 
 /// Test cleanup of inactive participants
 #[tokio::test]
+#[serial]
 async fn test_participant_cleanup() {
     let config = ConferenceMixingConfig {
         max_participants: 5,
         ..ConferenceMixingConfig::default()
     };
     
-    let controller = MediaSessionController::with_conference_mixing(10000, 20000, config)
+    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
         .await
         .expect("Failed to create controller");
     

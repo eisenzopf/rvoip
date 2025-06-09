@@ -282,7 +282,7 @@ impl AudioStreamManager {
             }
             
             // Skip non-talking participants if VAD is enabled
-            if self.config.enable_voice_activity_detection && !managed_stream.stream_info.is_talking {
+            if self.config.enable_voice_activity_detection && !managed_stream.stream_info.is_effectively_talking() {
                 continue;
             }
             

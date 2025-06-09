@@ -55,4 +55,6 @@ g722 = []
 opus = ["dep:opus"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency
 
-[dev-dependencies] 
+[dev-dependencies]
+tokio-test = "0.4"
+serial_test = "3.0" 

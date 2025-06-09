@@ -170,33 +170,33 @@ impl AudioMixer {
         // Get synchronized frames from all participants
         let participant_frames = self.stream_manager.get_synchronized_frames()?;
         
-        if participant_frames.len() < 2 {
-            // Need at least 2 participants for mixing
-            return Ok(HashMap::new());
-        }
-        
         let mut mixed_outputs = HashMap::new();
         
-        // For each participant, create a mix of all OTHER participants
-        for (target_participant, _) in &participant_frames {
-            let mixed_frame = self.create_mixed_frame_for_participant(
-                target_participant,
-                &participant_frames,
-            )?;
-            
-            if let Some(frame) = mixed_frame {
-                mixed_outputs.insert(target_participant.clone(), frame);
+        if participant_frames.len() >= 2 {
+            // We have enough frames for actual mixing
+            // For each participant, create a mix of all OTHER participants
+            for (target_participant, _) in &participant_frames {
+                let mixed_frame = self.create_mixed_frame_for_participant(
+                    target_participant,
+                    &participant_frames,
+                )?;
+                
+                if let Some(frame) = mixed_frame {
+                    mixed_outputs.insert(target_participant.clone(), frame);
+                }
             }
         }
         
-        // Update statistics
+        // Always update statistics (even for attempted mixes)
         self.update_mixing_stats(start_time, participant_frames.len(), &mixed_outputs).await?;
         
-        // Cache outputs
-        let mut cache = self.output_cache.lock().await;
-        cache.clear();
-        for (participant_id, frame) in &mixed_outputs {
-            cache.insert(participant_id.clone(), Arc::new(frame.clone()));
+        // Cache outputs (if any)
+        if !mixed_outputs.is_empty() {
+            let mut cache = self.output_cache.lock().await;
+            cache.clear();
+            for (participant_id, frame) in &mixed_outputs {
+                cache.insert(participant_id.clone(), Arc::new(frame.clone()));
+            }
         }
         
         Ok(mixed_outputs)
@@ -238,9 +238,12 @@ impl AudioMixer {
     ) -> ConferenceResult<()> {
         let mixing_latency = start_time.elapsed().as_micros() as u64;
         
+        // Get actual active participant count (not just frame count)
+        let actual_active_count = self.stream_manager.get_active_participants()?.len();
+        
         let mut stats = self.stats.lock().await; {
             stats.total_mixes += 1;
-            stats.active_participants = participant_count;
+            stats.active_participants = actual_active_count; // Use actual count, not frame count
             stats.avg_mixing_latency_us = 
                 (stats.avg_mixing_latency_us + mixing_latency) / 2;
             
@@ -310,6 +313,14 @@ impl AudioMixer {
                 let _ = sender.send(event);
             }
         }
+    }
+    
+    /// Flush pending events (ensure they are delivered)
+    /// This is primarily for testing to ensure events are processed synchronously
+    pub async fn flush_events(&self) {
+        // Add sufficient delay for async event processing in tests
+        // This ensures events are delivered through the channel before continuing
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }
 

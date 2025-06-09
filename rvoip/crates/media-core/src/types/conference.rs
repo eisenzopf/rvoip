@@ -43,6 +43,7 @@ pub struct AudioStream {
     pub samples_per_frame: u32,
     
     /// Stream health and timing
+    pub creation_time: Instant,
     pub last_frame_time: Option<Instant>,
     pub frames_received: u64,
     pub frames_dropped: u64,
@@ -61,6 +62,7 @@ impl AudioStream {
             sample_rate,
             channels,
             samples_per_frame: (sample_rate / 50) as u32, // 20ms frames by default
+            creation_time: Instant::now(),
             last_frame_time: None,
             frames_received: 0,
             frames_dropped: 0,
@@ -82,12 +84,38 @@ impl AudioStream {
     }
     
     /// Check if the stream is healthy (recently active)
+    /// New streams are considered healthy for a grace period before health checks apply
     pub fn is_healthy(&self, timeout: Duration) -> bool {
+        // Grace period for newly created streams (30 seconds)
+        const GRACE_PERIOD: Duration = Duration::from_secs(30);
+        
+        // If stream was created recently, consider it healthy regardless of activity
+        if self.creation_time.elapsed() < GRACE_PERIOD {
+            return true;
+        }
+        
+        // After grace period, check for recent activity
         if let Some(last_time) = self.last_frame_time {
             last_time.elapsed() < timeout
         } else {
+            // No activity after grace period - not healthy
             false
         }
+    }
+    
+    /// Check if the participant should be considered as talking
+    /// New streams are considered talking during grace period, then VAD takes over
+    pub fn is_effectively_talking(&self) -> bool {
+        // Grace period for newly created streams (30 seconds)
+        const GRACE_PERIOD: Duration = Duration::from_secs(30);
+        
+        // If stream was created recently, consider it talking regardless of VAD
+        if self.creation_time.elapsed() < GRACE_PERIOD {
+            return true;
+        }
+        
+        // After grace period, use actual VAD result
+        self.is_talking
     }
     
     /// Get the packet loss rate for this stream

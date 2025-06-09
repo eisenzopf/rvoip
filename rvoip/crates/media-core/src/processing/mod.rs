@@ -9,5 +9,12 @@ pub mod format;
 
 // Re-export main processing types
 pub use pipeline::{ProcessingPipeline, ProcessingConfig};
-pub use audio::{AudioProcessor, AudioProcessingConfig, VoiceActivityDetector, AutomaticGainControl, AcousticEchoCanceller};
+pub use audio::{
+    AudioProcessor, AudioProcessingConfig, AudioProcessingResult,
+    VoiceActivityDetector, VadConfig, VadResult,
+    AutomaticGainControl, AgcConfig, AgcResult,
+    AcousticEchoCanceller, AecConfig, AecResult,
+    AudioStreamManager, AudioStreamConfig,
+    AudioMixer,
+};
 pub use format::{FormatConverter, ConversionParams}; 
