@@ -32,6 +32,10 @@ pub enum Error {
     #[error("Buffer error: {0}")]
     Buffer(#[from] BufferError),
     
+    /// Conference mixing errors
+    #[error("Conference error: {0}")]
+    Conference(#[from] crate::types::conference::ConferenceError),
+    
     /// Integration errors with other crates
     #[error("Integration error: {0}")]
     Integration(#[from] IntegrationError),

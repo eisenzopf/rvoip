@@ -25,8 +25,8 @@ pub use controller::{
     MediaSessionStatus,
     MediaSessionInfo,
     MediaSessionEvent,
-    DialogId,
 };
+pub use crate::types::DialogId;
 
 /// Simple G.711 PCMU codec implementation
 #[derive(Debug, Clone)]

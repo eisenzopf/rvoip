@@ -7,6 +7,12 @@ use std::fmt;
 use std::time::{Duration, Instant};
 use bytes::Bytes;
 
+// Include specialized type modules
+pub mod conference;
+
+// Re-export conference types
+pub use conference::*;
+
 /// Unique identifier for a SIP dialog (from session-core)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DialogId(String);

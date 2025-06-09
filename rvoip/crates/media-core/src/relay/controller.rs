@@ -20,6 +20,15 @@ use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 
+use crate::types::{AudioFrame, MediaPacket, DialogId, MediaSessionId, payload_types};
+use crate::types::conference::{
+    ParticipantId, AudioStream, ConferenceMixingConfig, ConferenceMixingStats,
+    ConferenceError, ConferenceResult, ConferenceMixingEvent, MixingQuality
+};
+use crate::processing::audio::{AudioMixer, AudioStreamManager};
+use crate::quality::QualityMonitor;
+use bytes::Bytes;
+
 /// Audio generator for creating test tones and audio streams
 pub struct AudioGenerator {
     /// Sample rate (Hz)
@@ -169,9 +178,6 @@ impl AudioTransmitter {
     }
 }
 
-/// Represents a SIP Dialog ID (from session-core)
-pub type DialogId = String;
-
 /// Media configuration for a session
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
@@ -186,7 +192,7 @@ pub struct MediaConfig {
 }
 
 /// Media session status
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MediaSessionStatus {
     /// Session is being created
     Creating,
@@ -238,11 +244,11 @@ struct RtpSessionWrapper {
 impl Default for MediaSessionInfo {
     fn default() -> Self {
         Self {
-            dialog_id: String::new(),
+            dialog_id: DialogId::new(""),
             relay_session_ids: None,
             status: MediaSessionStatus::Creating,
             config: MediaConfig {
-                local_addr: "127.0.0.1:0".parse().unwrap(),
+                local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
                 remote_addr: None,
                 preferred_codec: None,
                 parameters: HashMap::new(),
@@ -279,7 +285,7 @@ pub enum MediaSessionEvent {
     },
 }
 
-/// Media Session Controller for managing media sessions
+/// Media Session Controller for managing media sessions and conference audio mixing
 pub struct MediaSessionController {
     /// Underlying media relay (optional)
     relay: Option<Arc<MediaRelay>>,
@@ -293,6 +299,16 @@ pub struct MediaSessionController {
     event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
     /// Event receiver (taken by the user)
     event_rx: RwLock<Option<mpsc::UnboundedReceiver<MediaSessionEvent>>>,
+    /// Audio mixer for conference calls (Phase 5.2 addition)
+    audio_mixer: Option<Arc<AudioMixer>>,
+    /// Conference mixing configuration
+    conference_config: ConferenceMixingConfig,
+    /// Conference event sender
+    conference_event_tx: mpsc::UnboundedSender<ConferenceMixingEvent>,
+    /// Conference event receiver
+    conference_event_rx: RwLock<Option<mpsc::UnboundedReceiver<ConferenceMixingEvent>>>,
+    /// Quality monitor for conference sessions
+    quality_monitor: Option<Arc<QualityMonitor>>,
 }
 
 /// Simple port allocator for RTP sessions
@@ -334,11 +350,11 @@ impl PortAllocator {
         self.allocated.retain(|_, &mut p| p != port);
     }
     
-    fn assign_port(&mut self, dialog_id: &str, port: u16) {
-        self.allocated.insert(dialog_id.to_string(), port);
+    fn assign_port(&mut self, dialog_id: &DialogId, port: u16) {
+        self.allocated.insert(dialog_id.clone(), port);
     }
     
-    fn get_port(&self, dialog_id: &str) -> Option<u16> {
+    fn get_port(&self, dialog_id: &DialogId) -> Option<u16> {
         self.allocated.get(dialog_id).copied()
     }
 }
@@ -347,6 +363,7 @@ impl MediaSessionController {
     /// Create a new media session controller
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
         
         Self {
             relay: None,
@@ -355,12 +372,18 @@ impl MediaSessionController {
             port_allocator: RwLock::new(PortAllocator::new(10000, 20000)),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
+            audio_mixer: None,
+            conference_config: ConferenceMixingConfig::default(),
+            conference_event_tx,
+            conference_event_rx: RwLock::new(Some(conference_event_rx)),
+            quality_monitor: None,
         }
     }
     
     /// Create a new media session controller with custom port range
     pub fn with_port_range(base_port: u16, max_port: u16) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
         
         Self {
             relay: None,
@@ -369,7 +392,42 @@ impl MediaSessionController {
             port_allocator: RwLock::new(PortAllocator::new(base_port, max_port)),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
+            audio_mixer: None,
+            conference_config: ConferenceMixingConfig::default(),
+            conference_event_tx,
+            conference_event_rx: RwLock::new(Some(conference_event_rx)),
+            quality_monitor: None,
         }
+    }
+    
+    /// Create a new media session controller with conference audio mixing enabled
+    pub async fn with_conference_mixing(
+        base_port: u16, 
+        max_port: u16, 
+        conference_config: ConferenceMixingConfig
+    ) -> Result<Self> {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
+        
+        // Create audio mixer with the provided configuration
+        let audio_mixer = Arc::new(AudioMixer::new(conference_config.clone()).await?);
+        
+        // Set up conference event forwarding
+        audio_mixer.set_event_sender(conference_event_tx.clone()).await;
+        
+        Ok(Self {
+            relay: None,
+            sessions: RwLock::new(HashMap::new()),
+            rtp_sessions: RwLock::new(HashMap::new()),
+            port_allocator: RwLock::new(PortAllocator::new(base_port, max_port)),
+            event_tx,
+            event_rx: RwLock::new(Some(event_rx)),
+            audio_mixer: Some(audio_mixer),
+            conference_config,
+            conference_event_tx,
+            conference_event_rx: RwLock::new(Some(conference_event_rx)),
+            quality_monitor: None,
+        })
     }
     
     /// Start a media session for a dialog
@@ -459,20 +517,20 @@ impl MediaSessionController {
     }
     
     /// Stop media session for a dialog
-    pub async fn stop_media(&self, dialog_id: String) -> Result<()> {
+    pub async fn stop_media(&self, dialog_id: &DialogId) -> Result<()> {
         info!("Stopping media session for dialog: {}", dialog_id);
 
         // Remove session and get info for cleanup
         let session_info = {
             let mut sessions = self.sessions.write().await;
-            sessions.remove(&dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.clone()))?
+            sessions.remove(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?
         };
         
         // Stop and remove RTP session
         {
             let mut rtp_sessions = self.rtp_sessions.write().await;
-            if let Some(rtp_wrapper) = rtp_sessions.remove(&dialog_id) {
+            if let Some(rtp_wrapper) = rtp_sessions.remove(dialog_id) {
                 // Close the RTP session
                 let mut rtp_session = rtp_wrapper.session.lock().await;
                 rtp_session.close().await;
@@ -508,7 +566,7 @@ impl MediaSessionController {
         
         let mut sessions = self.sessions.write().await;
         let session_info = sessions.get_mut(&dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.clone()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         // Update configuration
         let old_remote = session_info.config.remote_addr;
@@ -535,9 +593,11 @@ impl MediaSessionController {
         // Verify both sessions exist and get their configs
         let (session_a_config, session_b_config) = {
             let sessions = self.sessions.read().await;
-            let session_a = sessions.get(&dialog_a)
+            let dialog_a_id = DialogId::new(dialog_a.clone());
+            let dialog_b_id = DialogId::new(dialog_b.clone());
+            let session_a = sessions.get(&dialog_a_id)
                 .ok_or_else(|| Error::session_not_found(dialog_a.clone()))?;
-            let session_b = sessions.get(&dialog_b)
+            let session_b = sessions.get(&dialog_b_id)
                 .ok_or_else(|| Error::session_not_found(dialog_b.clone()))?;
             (session_a.config.clone(), session_b.config.clone())
         };
@@ -562,11 +622,13 @@ impl MediaSessionController {
         // Update session infos with relay session IDs
         {
             let mut sessions = self.sessions.write().await;
-            if let Some(session_a_info) = sessions.get_mut(&dialog_a) {
+            let dialog_a_id = DialogId::new(dialog_a.clone());
+            let dialog_b_id = DialogId::new(dialog_b.clone());
+            if let Some(session_a_info) = sessions.get_mut(&dialog_a_id) {
                 session_a_info.relay_session_ids = Some((relay_session_a.clone(), relay_session_b.clone()));
                 session_a_info.status = MediaSessionStatus::Active;
             }
-            if let Some(session_b_info) = sessions.get_mut(&dialog_b) {
+            if let Some(session_b_info) = sessions.get_mut(&dialog_b_id) {
                 session_b_info.relay_session_ids = Some((relay_session_b, relay_session_a));
                 session_b_info.status = MediaSessionStatus::Active;
             }
@@ -577,7 +639,7 @@ impl MediaSessionController {
     }
     
     /// Get session information for a dialog
-    pub async fn get_session_info(&self, dialog_id: &str) -> Option<MediaSessionInfo> {
+    pub async fn get_session_info(&self, dialog_id: &DialogId) -> Option<MediaSessionInfo> {
         let sessions = self.sessions.read().await;
         sessions.get(dialog_id).cloned()
     }
@@ -600,15 +662,15 @@ impl MediaSessionController {
     }
     
     /// Get RTP session for a dialog (for packet transmission)
-    pub async fn get_rtp_session(&self, dialog_id: &str) -> Option<Arc<tokio::sync::Mutex<RtpSession>>> {
+    pub async fn get_rtp_session(&self, dialog_id: &DialogId) -> Option<Arc<tokio::sync::Mutex<RtpSession>>> {
         let rtp_sessions = self.rtp_sessions.read().await;
         rtp_sessions.get(dialog_id).map(|wrapper| wrapper.session.clone())
     }
     
     /// Send RTP packet for a dialog
-    pub async fn send_rtp_packet(&self, dialog_id: &str, payload: Vec<u8>, timestamp: u32) -> Result<()> {
+    pub async fn send_rtp_packet(&self, dialog_id: &DialogId, payload: Vec<u8>, timestamp: u32) -> Result<()> {
         let rtp_session = self.get_rtp_session(dialog_id).await
-            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         let mut session = rtp_session.lock().await;
         session.send_packet(timestamp, bytes::Bytes::from(payload), false).await
@@ -619,9 +681,9 @@ impl MediaSessionController {
     }
     
     /// Update remote address for RTP session
-    pub async fn update_rtp_remote_addr(&self, dialog_id: &str, remote_addr: SocketAddr) -> Result<()> {
+    pub async fn update_rtp_remote_addr(&self, dialog_id: &DialogId, remote_addr: SocketAddr) -> Result<()> {
         let rtp_session = self.get_rtp_session(dialog_id).await
-            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         let mut session = rtp_session.lock().await;
         session.set_remote_addr(remote_addr);
@@ -639,7 +701,7 @@ impl MediaSessionController {
     }
     
     /// Get RTP session statistics
-    pub async fn get_rtp_stats(&self, dialog_id: &str) -> Option<String> {
+    pub async fn get_rtp_stats(&self, dialog_id: &DialogId) -> Option<String> {
         let rtp_session = self.get_rtp_session(dialog_id).await?;
         let session = rtp_session.lock().await;
         
@@ -651,12 +713,12 @@ impl MediaSessionController {
     }
     
     /// Start audio transmission for a dialog
-    pub async fn start_audio_transmission(&self, dialog_id: &str) -> Result<()> {
+    pub async fn start_audio_transmission(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🎵 Starting audio transmission for dialog: {}", dialog_id);
         
         let mut rtp_sessions = self.rtp_sessions.write().await;
         let wrapper = rtp_sessions.get_mut(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         if wrapper.transmission_enabled {
             return Ok(()); // Already started
@@ -674,12 +736,12 @@ impl MediaSessionController {
     }
     
     /// Stop audio transmission for a dialog
-    pub async fn stop_audio_transmission(&self, dialog_id: &str) -> Result<()> {
+    pub async fn stop_audio_transmission(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🛑 Stopping audio transmission for dialog: {}", dialog_id);
         
         let mut rtp_sessions = self.rtp_sessions.write().await;
         let wrapper = rtp_sessions.get_mut(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         if let Some(transmitter) = &wrapper.audio_transmitter {
             transmitter.stop().await;
@@ -693,7 +755,7 @@ impl MediaSessionController {
     }
     
     /// Check if audio transmission is active for a dialog
-    pub async fn is_audio_transmission_active(&self, dialog_id: &str) -> bool {
+    pub async fn is_audio_transmission_active(&self, dialog_id: &DialogId) -> bool {
         let rtp_sessions = self.rtp_sessions.read().await;
         if let Some(wrapper) = rtp_sessions.get(dialog_id) {
             if let Some(transmitter) = &wrapper.audio_transmitter {
@@ -704,7 +766,7 @@ impl MediaSessionController {
     }
     
     /// Set remote address and start audio transmission (called when call is established)
-    pub async fn establish_media_flow(&self, dialog_id: &str, remote_addr: SocketAddr) -> Result<()> {
+    pub async fn establish_media_flow(&self, dialog_id: &DialogId, remote_addr: SocketAddr) -> Result<()> {
         info!("🔗 Establishing media flow for dialog: {} -> {}", dialog_id, remote_addr);
         
         // Update remote address
@@ -718,7 +780,7 @@ impl MediaSessionController {
     }
     
     /// Terminate media flow (called when call ends)
-    pub async fn terminate_media_flow(&self, dialog_id: &str) -> Result<()> {
+    pub async fn terminate_media_flow(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🛑 Terminating media flow for dialog: {}", dialog_id);
         
         // Stop audio transmission
@@ -726,6 +788,171 @@ impl MediaSessionController {
         
         info!("✅ Media flow terminated for dialog: {}", dialog_id);
         Ok(())
+    }
+    
+    // ===== CONFERENCE AUDIO MIXING METHODS (Phase 5.2) =====
+    
+    /// Enable conference audio mixing with the given configuration
+    pub async fn enable_conference_mixing(&mut self, config: ConferenceMixingConfig) -> Result<()> {
+        info!("🎙️ Enabling conference audio mixing");
+        
+        if self.audio_mixer.is_some() {
+            return Err(Error::config("Conference mixing already enabled"));
+        }
+        
+        // Create audio mixer
+        let audio_mixer = Arc::new(AudioMixer::new(config.clone()).await
+            .map_err(|e| Error::config(format!("Failed to create audio mixer: {}", e)))?);
+        
+        // Set up event forwarding
+        audio_mixer.set_event_sender(self.conference_event_tx.clone()).await;
+        
+        self.audio_mixer = Some(audio_mixer);
+        self.conference_config = config;
+        
+        info!("✅ Conference audio mixing enabled");
+        Ok(())
+    }
+    
+    /// Disable conference audio mixing
+    pub async fn disable_conference_mixing(&mut self) -> Result<()> {
+        info!("🔇 Disabling conference audio mixing");
+        
+        if let Some(mixer) = &self.audio_mixer {
+            // Clean up all participants
+            let participants = mixer.get_active_participants().await
+                .map_err(|e| Error::config(format!("Failed to get participants: {}", e)))?;
+            
+            for participant_id in participants {
+                let _ = mixer.remove_audio_stream(&participant_id).await;
+            }
+        }
+        
+        self.audio_mixer = None;
+        
+        info!("✅ Conference audio mixing disabled");
+        Ok(())
+    }
+    
+    /// Add a dialog to the conference (participant joins)
+    pub async fn add_to_conference(&self, dialog_id: &str) -> Result<()> {
+        info!("🎤 Adding dialog {} to conference", dialog_id);
+        
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        // Convert to DialogId for session lookup
+        let dialog_id_typed = DialogId::new(dialog_id);
+        
+        // Check if session exists
+        let session_info = self.get_session_info(&dialog_id_typed).await
+            .ok_or_else(|| Error::session_not_found(dialog_id.to_string()))?;
+        
+        if session_info.status != MediaSessionStatus::Active {
+            return Err(Error::config(format!(
+                "Cannot add inactive session to conference: {}", dialog_id
+            )));
+        }
+        
+        // Create audio stream for this participant
+        let participant_id = ParticipantId::new(dialog_id);
+        let audio_stream = AudioStream::new(
+            participant_id.clone(),
+            self.conference_config.output_sample_rate,
+            self.conference_config.output_channels,
+        );
+        
+        // Add to mixer
+        mixer.add_audio_stream(participant_id, audio_stream).await
+            .map_err(|e| Error::config(format!("Failed to add to conference: {}", e)))?;
+        
+        info!("✅ Added dialog {} to conference", dialog_id);
+        Ok(())
+    }
+    
+    /// Remove a dialog from the conference (participant leaves)
+    pub async fn remove_from_conference(&self, dialog_id: &str) -> Result<()> {
+        info!("👋 Removing dialog {} from conference", dialog_id);
+        
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        let participant_id = ParticipantId::new(dialog_id);
+        
+        // Remove from mixer
+        mixer.remove_audio_stream(&participant_id).await
+            .map_err(|e| Error::config(format!("Failed to remove from conference: {}", e)))?;
+        
+        info!("✅ Removed dialog {} from conference", dialog_id);
+        Ok(())
+    }
+    
+    /// Process incoming audio for conference mixing
+    pub async fn process_conference_audio(&self, dialog_id: &str, audio_frame: AudioFrame) -> Result<()> {
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        let participant_id = ParticipantId::new(dialog_id);
+        
+        // Process audio through mixer
+        mixer.process_audio_frame(&participant_id, audio_frame).await
+            .map_err(|e| Error::config(format!("Failed to process conference audio: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    /// Get mixed audio for a specific participant (everyone except themselves)
+    pub async fn get_conference_mixed_audio(&self, dialog_id: &str) -> Result<Option<AudioFrame>> {
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        let participant_id = ParticipantId::new(dialog_id);
+        
+        // Get mixed audio from mixer
+        mixer.get_mixed_audio(&participant_id).await
+            .map_err(|e| Error::config(format!("Failed to get mixed audio: {}", e)))
+    }
+    
+    /// Get list of conference participants
+    pub async fn get_conference_participants(&self) -> Result<Vec<String>> {
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        let participants = mixer.get_active_participants().await
+            .map_err(|e| Error::config(format!("Failed to get participants: {}", e)))?;
+        
+        Ok(participants.into_iter().map(|p| p.0).collect())
+    }
+    
+    /// Get conference mixing statistics
+    pub async fn get_conference_stats(&self) -> Result<ConferenceMixingStats> {
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        mixer.get_mixing_stats().await
+            .map_err(|e| Error::config(format!("Failed to get conference stats: {}", e)))
+    }
+    
+    /// Get conference event receiver (can only be called once)
+    pub async fn take_conference_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<ConferenceMixingEvent>> {
+        let mut event_rx = self.conference_event_rx.write().await;
+        event_rx.take()
+    }
+    
+    /// Check if conference mixing is enabled
+    pub fn is_conference_mixing_enabled(&self) -> bool {
+        self.audio_mixer.is_some()
+    }
+    
+    /// Clean up inactive conference participants
+    pub async fn cleanup_conference_participants(&self) -> Result<Vec<String>> {
+        let mixer = self.audio_mixer.as_ref()
+            .ok_or_else(|| Error::config("Conference mixing not enabled"))?;
+        
+        let removed = mixer.cleanup_inactive_participants().await
+            .map_err(|e| Error::config(format!("Failed to cleanup participants: {}", e)))?;
+        
+        Ok(removed.into_iter().map(|p| p.0).collect())
     }
 }
 
@@ -752,19 +979,19 @@ mod tests {
         };
         
         // Start session
-        let result = controller.start_media("dialog1".to_string(), config).await;
+        let result = controller.start_media(DialogId::new("dialog1"), config).await;
         assert!(result.is_ok());
         
         // Check session exists
-        let session_info = controller.get_session_info("dialog1").await;
+        let session_info = controller.get_session_info(&DialogId::new("dialog1")).await;
         assert!(session_info.is_some());
         
         // Stop session
-        let result = controller.stop_media("dialog1".to_string()).await;
+        let result = controller.stop_media(&DialogId::new("dialog1")).await;
         assert!(result.is_ok());
         
         // Check session is removed
-        let session_info = controller.get_session_info("dialog1").await;
+        let session_info = controller.get_session_info(&DialogId::new("dialog1")).await;
         assert!(session_info.is_none());
     }
     
@@ -787,16 +1014,16 @@ mod tests {
         };
         
         // Start both sessions
-        controller.start_media("dialog_a".to_string(), config_a).await.unwrap();
-        controller.start_media("dialog_b".to_string(), config_b).await.unwrap();
+        controller.start_media(DialogId::new("dialog_a"), config_a).await.unwrap();
+        controller.start_media(DialogId::new("dialog_b"), config_b).await.unwrap();
         
         // Create relay
         let result = controller.create_relay("dialog_a".to_string(), "dialog_b".to_string()).await;
         assert!(result.is_ok());
         
         // Check that both sessions now have relay session IDs
-        let session_a = controller.get_session_info("dialog_a").await.unwrap();
-        let session_b = controller.get_session_info("dialog_b").await.unwrap();
+        let session_a = controller.get_session_info(&DialogId::new("dialog_a")).await.unwrap();
+        let session_b = controller.get_session_info(&DialogId::new("dialog_b")).await.unwrap();
         
         assert!(session_a.relay_session_ids.is_some());
         assert!(session_b.relay_session_ids.is_some());

@@ -234,6 +234,13 @@ pub mod prelude {
         ConversionParams,
     };
     
+    // Conference audio mixing components (Phase 5)
+    pub use crate::processing::audio::{
+        AudioMixer,
+        AudioStreamManager,
+        AudioStreamConfig,
+    };
+    
     // Quality monitoring components
     pub use crate::quality::{
         QualityMonitor,
@@ -281,6 +288,19 @@ pub mod prelude {
     
     // Payload type constants for convenience
     pub use crate::types::payload_types;
+    
+    // Conference types
+    pub use crate::types::conference::{
+        ParticipantId,
+        AudioStream,
+        ConferenceMixingConfig,
+        MixingQuality,
+        MixedAudioOutput,
+        ConferenceMixingStats,
+        ConferenceError,
+        ConferenceMixingEvent,
+        ConferenceResult,
+    };
     
     // Legacy types (temporary)
     pub use crate::codec::{Codec, CodecRegistry};
