@@ -1,0 +1,62 @@
+# Session-Core SIPp Test Suite Execution Log
+# Started: Sun Jun  8 20:42:36 PDT 2025
+# Mode: stress
+# Session: 20250608_204236
+
+2025-06-08 20:42:36 INFO: 📁 Test session directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_204236
+2025-06-08 20:42:36 INFO: 📋 Test mode: stress
+2025-06-08 20:42:36 INFO: ⏰ Test session: 20250608_204236
+2025-06-08 20:42:36 INFO: 🔨 Building test applications...
+2025-06-08 20:42:36 SUCCESS: ✅ Built sip_test_server
+2025-06-08 20:42:36 INFO: 📝 sip_bridge_server not yet implemented (will use sip_test_server for bridge tests)
+2025-06-08 20:42:36 SUCCESS: ✅ Test environment ready
+2025-06-08 20:42:36 HEADER: Generating Audio Test Files
+2025-06-08 20:42:36 INFO: 🎵 Generating test audio files with different frequencies...
+2025-06-08 20:42:36 INFO: Using sox for audio generation
+2025-06-08 20:42:37 SUCCESS: ✅ Generated Client A audio (440Hz)
+2025-06-08 20:42:37 SUCCESS: ✅ Generated Client B audio (880Hz)
+2025-06-08 20:42:37 SUCCESS: ✅ Generated Client C audio (1320Hz)
+2025-06-08 20:42:37 INFO: 📁 Generated audio files:
+2025-06-08 20:42:37 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:42 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-08 20:42:37 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:42 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_b_880hz.wav
+2025-06-08 20:42:37 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:42 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_c_1320hz.wav
+2025-06-08 20:42:37 HEADER: Stress Tests
+2025-06-08 20:42:37 INFO: ⚡ Testing high-volume call processing...
+2025-06-08 20:42:37 INFO: ⏱️ Duration: 30s
+2025-06-08 20:42:37 INFO: 📡 Starting packet capture for stress_tests...
+2025-06-08 20:42:37 SUCCESS: ✅ Packet capture started (PID: 35827)
+2025-06-08 20:42:37 INFO: 📄 Capture file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/captures/stress_tests_20250608_204236.pcap
+2025-06-08 20:42:37 INFO: 📄 Capture log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_204236/stress_tests_capture.log
+2025-06-08 20:42:39 INFO: 🚀 Starting stress server on port 5062...
+2025-06-08 20:42:39 INFO: 🔨 Starting: cargo run --bin sip_test_server --port 5062 --mode auto-answer (script-controlled)
+2025-06-08 20:42:39 INFO: 📄 Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_204236/stress_server.log
+2025-06-08 20:42:39 INFO: ⏳ Waiting for server to bind to port 5062...
+2025-06-08 20:42:40 SUCCESS: ✅ stress server ready (PID: 35876, Port: 5062)
+2025-06-08 20:42:40 INFO: 🎯 Server confirmed ready via log message
+2025-06-08 20:42:43 TEST_START: Concurrent Calls Stress Test
+2025-06-08 20:42:43 INFO: 🧪 Running SIPp test: stress_concurrent
+2025-06-08 20:42:43 INFO: 📄 Scenario: basic_call
+2025-06-08 20:42:43 INFO: 🎯 Target: 127.0.0.1:5062
+2025-06-08 20:42:43 INFO: 📊 Rate: 2 calls/sec, Max: 10 calls
+2025-06-08 20:42:43 INFO: 🎵 Using audio file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-08 20:42:53 SUCCESS: ✅ SIPp test completed successfully
+2025-06-08 20:42:53 INFO: 📄 SIPp log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_204236/stress_concurrent_sipp.log
+2025-06-08 20:42:53 INFO: 📊 SIPp stats: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/stress_concurrent_20250608_204236.csv
+2025-06-08 20:42:53 TEST_RESULT: Concurrent Calls Stress Test = PASS
+2025-06-08 20:42:53 INFO: 🛑 Stopping stress server (PID: 35876)...
+2025-06-08 20:42:54 SUCCESS: ✅ stress server stopped
+2025-06-08 20:42:54 INFO: 📊 Stress Tests: 1/1 passed
+2025-06-08 20:42:54 HEADER: Analyzing Test Results
+2025-06-08 20:42:54 INFO: 📊 Analyzing logs, packet captures, and statistics...
+2025-06-08 20:42:54 INFO: 📄 Log files analyzed:        5
+2025-06-08 20:42:54 INFO: 📡 Packet captures analyzed:        1
+2025-06-08 20:42:54 INFO: 🔍 Running packet analysis with tshark...
+2025-06-08 20:42:54 INFO:   📄 Analyzing stress_tests_20250608_204236.pcap...
+2025-06-08 20:42:54 INFO:   ✅ Analysis saved: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/stress_tests_20250608_204236_analysis.txt
+2025-06-08 20:42:54 SUCCESS: ✅ Result analysis completed
+2025-06-08 20:42:54 HEADER: Generating Final Report
+2025-06-08 20:42:54 INFO: 📄 Generating comprehensive HTML report...
+2025-06-08 20:42:54 SUCCESS: ✅ Report generated: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/test_summary_20250608_204236.html
+2025-06-08 20:42:54 INFO: 🌐 Open report: open /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/test_summary_20250608_204236.html
+2025-06-08 20:42:54 INFO: 🧹 Cleaning up active processes...
+2025-06-08 20:42:55 SUCCESS: ✅ Process cleanup completed

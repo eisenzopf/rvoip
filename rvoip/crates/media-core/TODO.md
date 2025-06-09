@@ -450,216 +450,100 @@ pub trait RtpSessionCoordinator {
   - **NEED**: SIP call flow testing
   - **NEED**: Real network testing
 
-### **📋 DETAILED INTEGRATION TESTING PLAN**
+### **Phase 5: Multi-Party Conference Audio Mixing** ❌ **NOT STARTED** (0/2 tasks done)
 
-#### **🔗 RTP-Core Integration Tests** (Priority: CRITICAL)
+#### **GOAL: Pure Audio Mixing Engine for Conference Calls**
 
-Based on analysis of rtp-core's API structure, we need these specific integration tests:
+**Context**: Current media-core only handles 1:1 sessions via MediaSessionController. For multi-party conference functionality, we need a pure audio mixing engine that can take N audio streams and produce N mixed outputs.
 
-1. **Basic RTP Transport Integration**
-   ```rust
-   // Test: media-core ↔ rtp-core basic packet flow
-   - MediaTransportClient creation and configuration
-   - MediaFrame encoding/decoding with our codec system
-   - RtpBridge packet routing verification
-   - Payload format compatibility (G.711, G.729, Opus)
-   ```
+**Scope**: Media-core provides ONLY the audio processing infrastructure. Session-core will orchestrate the SIP sessions and use these audio tools.
 
-2. **Advanced RTP Features Integration**  
-   ```rust
-   // Test: Advanced rtp-core features with media-core
-   - SRTP encryption with our media sessions
-   - DTLS handshake integration
-   - RTCP feedback integration with QualityMonitor
-   - Adaptive jitter buffer coordination
-   - Transport-wide congestion control feedback
-   ```
+**Architecture**: Build audio mixing capabilities that session-core can use for conference coordination.
 
-3. **Multi-Codec RTP Testing**
-   ```rust
-   // Test: Codec transcoding over RTP
-   - Real-time G.711 ↔ G.729 ↔ Opus transcoding over RTP
-   - Dynamic payload type negotiation
-   - Codec switching during active calls
-   - RTP timestamp mapping across different codecs
-   ```
+#### **Phase 5.1: Core Audio Mixing Engine** ❌ **NOT STARTED** (0/4 tasks done)
+- [ ] **Pure Audio Mixing Infrastructure** (`src/processing/audio/mixer.rs`)
+  ```rust
+  pub struct AudioMixer {
+      participants: HashMap<ParticipantId, AudioStream>,
+      mixed_output: HashMap<ParticipantId, AudioFrame>, // Each participant gets different mix
+      buffer_pool: ObjectPool<AudioFrame>,
+      sample_rate: u32,
+      channels: u8,
+  }
+  
+  impl AudioMixer {
+      // Core mixing: Take N audio streams, produce N-1 mixed outputs 
+      // (each participant hears everyone except themselves)
+      pub fn mix_participants(&mut self, inputs: &[AudioFrame]) -> HashMap<ParticipantId, AudioFrame>;
+      
+      // Dynamic participant management (audio-only)
+      pub fn add_audio_stream(&mut self, id: ParticipantId, stream: AudioStream) -> Result<()>;
+      pub fn remove_audio_stream(&mut self, id: &ParticipantId) -> Result<()>;
+      
+      // Real-time audio processing
+      pub fn process_audio_frame(&mut self, participant_id: &ParticipantId, frame: AudioFrame) -> Result<()>;
+      pub fn get_mixed_audio(&mut self, participant_id: &ParticipantId) -> Option<AudioFrame>;
+  }
+  ```
 
-4. **RTP Session Management**
-   ```rust
-   // Test: Session lifecycle with rtp-core
-   - MediaSession creation triggering RTP session setup
-   - SSRC coordination and conflict resolution
-   - Multiple concurrent RTP sessions
-   - Session cleanup and resource management
-   ```
+- [ ] **Audio Stream Management** (`src/processing/audio/stream.rs`)
+  - [ ] `AudioStream` type for participant audio handling
+  - [ ] Stream synchronization and timing alignment
+  - [ ] Audio format conversion for mixed participant streams
+  - [ ] Stream health monitoring and dropout detection
 
-#### **📞 Session-Core Integration Tests** (Priority: CRITICAL)
+- [ ] **Mixing Algorithms Implementation**
+  - [ ] Basic additive mixing with overflow protection
+  - [ ] Advanced mixing with automatic gain control
+  - [ ] Voice activity detection for selective mixing
+  - [ ] Noise reduction for conference environments
 
-Based on analysis of session-core's API, we need these specific integration tests:
+- [ ] **Performance Optimization for Real-Time Mixing**
+  - [ ] SIMD optimizations for multi-stream audio mixing
+  - [ ] Lock-free audio buffer management
+  - [ ] Zero-copy audio frame routing between participants
+  - [ ] Memory pool management for conference audio frames
 
-1. **SIP Dialog ↔ Media Session Integration**
-   ```rust
-   // Test: SIP dialog lifecycle with media sessions
-   - INVITE → MediaSession creation via SessionBridge
-   - SDP negotiation using our codec capabilities
-   - Media session state tracking with SIP dialog state
-   - BYE → MediaSession cleanup coordination
-   ```
+#### **Phase 5.2: Audio Mixing Integration with MediaSessionController** ❌ **NOT STARTED** (0/3 tasks done)
+- [ ] **AudioMixer Integration with Existing Components**
+  - [ ] Integrate `AudioMixer` with `MediaSessionController` for multi-party audio
+  - [ ] Audio capability discovery - report mixing capabilities to session-core
+  - [ ] Resource allocation for audio mixing (memory, CPU) vs. individual sessions
+  - [ ] Audio mixing aware media session lifecycle management
 
-2. **Codec Negotiation Integration**
-   ```rust  
-   // Test: Real SDP codec negotiation
-   - MediaCapabilities generation from our codec registry
-   - Codec parameter negotiation (bitrate, frame size)
-   - Fallback codec selection (Opus → G.711 → G.729)
-   - Codec re-negotiation during calls (re-INVITE)
-   ```
+- [ ] **Quality Monitoring for Mixed Audio**
+  - [ ] Extend `QualityMonitor` for multi-party audio quality assessment
+  - [ ] Per-participant audio quality metrics in mixed streams
+  - [ ] Mixed audio quality degradation detection
+  - [ ] Audio quality metrics for session-core consumption
 
-3. **Call Flow Integration**
-   ```rust
-   // Test: Complete SIP call flows
-   - Outgoing call: session-core → media-core → rtp-core
-   - Incoming call: rtp-core → media-core → session-core  
-   - Call hold/resume with media session pause/resume
-   - Call transfer with media session handover
-   ```
+- [ ] **Codec Support for Audio Mixing**
+  - [ ] Codec transcoding for mixed-codec participants (G.711 + Opus + G.729)
+  - [ ] Real-time format conversion for audio mixing
+  - [ ] Codec parameter optimization for mixed audio environments
+  - [ ] Multi-format audio mixing and distribution
 
-4. **Media-Enhanced SIP Features**
-   ```rust
-   // Test: SIP features enhanced by media-core
-   - Quality adaptation affecting SIP re-negotiation
-   - DTMF detection integration with SIP INFO
-   - Media quality metrics affecting call routing
-   - Voice activity detection for SIP optimization
-   ```
+### **🎯 Audio Mixing Success Criteria**
 
-#### **🔄 End-to-End Integration Tests** (Priority: HIGH)
+#### **Phase 5 Completion Criteria** 
+- [ ] ✅ **Pure Audio Mixing**: AudioMixer successfully mixes audio from 3+ participants
+- [ ] ✅ **Real-Time Performance**: Audio mixing maintains <5ms latency per participant
+- [ ] ✅ **Dynamic Audio Streams**: Audio streams can be added/removed seamlessly
+- [ ] ✅ **Audio Quality**: Mixed audio maintains high quality (>4.0 MOS score)
+- [ ] ✅ **Resource Efficiency**: Audio mixing uses <5% additional CPU per participant
+- [ ] ✅ **MediaSessionController Integration**: AudioMixer works with existing media infrastructure
 
-1. **Complete Call Scenario Testing**
-   ```rust
-   // Test: Full VoIP call simulation
-   - SIP client A calls SIP client B through server
-   - Different codecs on each end (transcoding test)
-   - Media quality monitoring throughout call
-   - Graceful call termination
-   ```
+#### **Audio Processing Focus**
+- [ ] ✅ **Audio Engineering Only**: No session management, SIP coordination, or business logic
+- [ ] ✅ **Tool for Session-Core**: Provides audio mixing capabilities that session-core orchestrates
+- [ ] ✅ **Performance Optimized**: Real-time audio processing suitable for production use
+- [ ] ✅ **Format Flexible**: Supports mixed-codec scenarios with format conversion
 
-2. **Multi-Party Call Testing**
-   ```rust
-   // Test: Conference call scenarios
-   - Multiple concurrent MediaSessions
-   - Audio mixing requirements (future)
-   - Resource scaling verification
-   - Session isolation verification
-   ```
-
-3. **Network Condition Testing**
-   ```rust
-   // Test: Real network conditions
-   - Packet loss simulation with PLC
-   - Jitter simulation with adaptive buffering
-   - Bandwidth constraints with quality adaptation
-   - Network handoff scenarios
-   ```
-
-4. **Load Testing**
-   ```rust
-   // Test: Production load scenarios
-   - 100+ concurrent sessions
-   - High transcoding load (mixed codecs)
-   - Memory usage under sustained load
-   - CPU usage with multiple processing pipelines
-   ```
-
-#### **🧪 Specific Test Implementation Steps**
-
-**STEP 1: RTP-Core Integration Setup (Week 1)**
-```rust
-// File: tests/integration_rtp_core.rs
-- Set up MediaTransportClient with media-core MediaSession
-- Test basic audio frame → RTP packet → audio frame flow  
-- Verify codec payload format compatibility
-- Test RtpBridge event routing
-```
-
-**STEP 2: Session-Core Integration Setup (Week 1)**
-```rust  
-// File: tests/integration_session_core.rs
-- Set up SessionManager with media-core integration
-- Test SIP INVITE → MediaSession creation flow
-- Test codec negotiation with real SDP
-- Test SessionBridge event coordination
-```
-
-**STEP 3: End-to-End Call Testing (Week 2)**
-```rust
-// File: tests/integration_e2e.rs  
-- Create mock SIP clients using session-core
-- Establish complete call with media-core processing
-- Test codec transcoding in real call scenario
-- Verify quality monitoring integration
-```
-
-**STEP 4: Performance Integration Testing (Week 2)**
-```rust
-// File: tests/integration_performance.rs
-- Test concurrent sessions with rtp-core/session-core
-- Verify real-time performance under integration load
-- Test memory/CPU usage in integrated scenarios
-- Benchmark transcoding performance in full stack
-```
-
-#### **✅ Integration Test Success Criteria**
-
-**RTP-Core Integration:**
-- ✅ MediaTransportClient successfully sends/receives MediaFrames
-- ✅ All 4 codecs work correctly over RTP transport
-- ✅ SRTP encryption/decryption works with media sessions
-- ✅ Quality monitoring integrates with RTCP feedback
-
-**Session-Core Integration:**  
-- ✅ SIP dialogs correctly create/destroy MediaSessions
-- ✅ Codec negotiation selects optimal codec from our registry
-- ✅ Real SDP offer/answer works with our capabilities
-- ✅ Call state changes properly coordinate with media state
-
-**End-to-End:**
-- ✅ Complete SIP calls with high-quality audio
-- ✅ Codec transcoding works in production call scenarios  
-- ✅ Quality adaptation affects both media and SIP layers
-- ✅ Performance targets met under realistic load
-
-**Performance Targets:**
-- ✅ 100+ concurrent integrated sessions
-- ✅ <1ms transcoding latency including RTP/SIP overhead
-- ✅ <50MB memory usage for 100 sessions
-- ✅ 99.9% media session reliability
-
-### **🆕 NEW TASKS IDENTIFIED**
-
-#### **Codec Frame Size Comparison** (Technical Reference)
-Our current codec implementations use the following frame characteristics:
-
-| **Codec** | **Frame Size** | **Sample Rate** | **Channels** | **Bitrate** | **Payload Type** |
-|-----------|----------------|-----------------|--------------|-------------|------------------|
-| **G.711 PCMU** | 10ms (80 samples) | 8 kHz | Mono | 64 kbps | 0 |
-| **G.711 PCMA** | 10ms (80 samples) | 8 kHz | Mono | 64 kbps | 8 |
-| **G.729** | 10ms (80 samples) | 8 kHz | Mono | 8 kbps | 18 |
-| **Opus** | 20ms (960 samples @ 48kHz) | 48 kHz | Stereo | Variable | 111 |
-
-**Note**: For transcoding compatibility, G.711 codecs use 10ms frames (instead of the typical 20ms) to align with G.729's standard frame size.
-
-#### **Critical Missing Components:**
-*All critical Phase 1-3 components are now complete!*
-
-#### **Enhancement Opportunities:**
-1. **Zero-Copy Media Pipeline** - **HIGH PRIORITY** for production performance
-   - Eliminate buffer copies in audio processing pipeline (AEC, AGC, VAD)
-   - Implement `Arc<AudioFrame>` shared ownership throughout codec system
-   - Zero-copy integration with rtp-core packet handling
-2. **Noise Suppression** (`processing/audio/ns.rs`) - listed in architecture but not implemented
-3. **Packet Loss Concealment** (`processing/audio/plc.rs`) - listed but not implemented  
-4. **DTMF Detection** (`processing/audio/dtmf_detector.rs`) - listed but not implemented
+#### **Integration with Session-Core**
+- [ ] ✅ **Clean API**: Session-core can use AudioMixer without understanding audio internals
+- [ ] ✅ **Event Reporting**: Audio quality and status events for session-core consumption
+- [ ] ✅ **Resource Reporting**: Audio processing capabilities and limits for session planning
+- [ ] ✅ **No Session Logic**: AudioMixer focuses purely on audio, session-core handles SIP coordination
 
 ---
 
@@ -711,7 +595,7 @@ Our current codec implementations use the following frame characteristics:
    - Create `tests/integration_session_core.rs`
    - Test SessionManager ↔ MediaSession lifecycle
    - Test real SDP codec negotiation with our capabilities
-   - Test SessionBridge dialog coordination
+   - Test SessionBridge event coordination
 
 3. **Integration Infrastructure Setup**
    - Set up integration test framework with rtp-core and session-core deps

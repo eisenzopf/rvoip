@@ -2024,3 +2024,249 @@ SIP Dialog ←→ Media Session (via coordinator)
 ## 🚨 PHASE 12.2: MOVE POLICY HANDLERS TO CALL-ENGINE ⚠️ **ARCHITECTURAL IMPROVEMENT**
 
 // ... existing content ...
+
+---
+
+## 🚀 PHASE 15: CONFERENCE SESSION COORDINATION ❌ **NOT STARTED** (0/4 tasks done)
+
+### 🎯 **GOAL: Multi-Party Conference Session Orchestration Using Session-Core Primitives**
+
+**Context**: Media-core Phase 5 provides `AudioMixer` for pure audio processing. Session-core needs to orchestrate multiple SIP dialogs into conferences, coordinate SIP signaling, and use media-core's AudioMixer for the actual audio processing.
+
+**Philosophy**: Session-core coordinates multiple SIP sessions into conference structures using basic primitives (groups, events, priorities). Media-core handles audio mixing. Clean separation: session-core = SIP orchestration, media-core = audio processing.
+
+**Architecture**: Build conference coordination on top of existing session management primitives, using AudioMixer from media-core as an audio processing tool.
+
+#### **Phase 15.1: Conference Controller Infrastructure** ❌ **NOT STARTED** (0/4 tasks done)
+- [ ] **Conference Session Orchestrator** (`src/conference/controller.rs`)
+  ```rust
+  use rvoip_media_core::processing::audio::AudioMixer;
+  
+  pub struct ConferenceController {
+      conferences: HashMap<ConferenceId, ConferenceRoom>,
+      audio_mixer: AudioMixer, // Tool from media-core
+      session_manager: Arc<SessionManager>, // Use existing session management
+      event_coordinator: ConferenceEventCoordinator,
+  }
+  
+  impl ConferenceController {
+      // Conference room management (pure SIP session orchestration)
+      pub async fn create_conference(&self, room_id: ConferenceId, config: ConferenceConfig) -> Result<()>;
+      pub async fn destroy_conference(&self, room_id: &ConferenceId) -> Result<()>;
+      
+      // SIP session participant management
+      pub async fn add_participant(&self, room_id: &ConferenceId, dialog_id: DialogId) -> Result<()>;
+      pub async fn remove_participant(&self, room_id: &ConferenceId, dialog_id: &DialogId) -> Result<()>;
+      
+      // SIP signaling coordination for conferences
+      pub async fn coordinate_conference_sdp(&self, room_id: &ConferenceId) -> Result<()>;
+      pub async fn handle_conference_re_invite(&self, room_id: &ConferenceId, dialog_id: &DialogId) -> Result<()>;
+  }
+  ```
+
+- [ ] **Conference Room Management** (`src/conference/room.rs`)
+  ```rust
+  pub struct ConferenceRoom {
+      pub id: ConferenceId,
+      pub participants: HashMap<DialogId, ParticipantInfo>, // SIP dialog tracking
+      pub max_participants: usize,
+      pub created_at: Instant,
+      pub conference_state: ConferenceState, // Session state, not audio state
+      pub sip_configuration: ConferenceSipConfig,
+  }
+  
+  pub enum ConferenceState {
+      Creating,         // Setting up SIP dialogs
+      Active,          // All SIP dialogs established  
+      Terminating,     // Tearing down SIP dialogs
+      Terminated,      // All SIP dialogs closed
+  }
+  
+  pub struct ParticipantInfo {
+      pub dialog_id: DialogId,
+      pub sip_address: SipUri,
+      pub joined_at: Instant,
+      pub media_capabilities: MediaCapabilities, // For SDP negotiation
+      pub participant_state: ParticipantState,
+  }
+  ```
+
+- [ ] **Conference SIP Signaling Coordination**
+  - [ ] Conference SDP generation and negotiation for multi-party calls
+  - [ ] SIP INVITE/BYE coordination for conference participants
+  - [ ] Conference-specific SIP headers and routing
+  - [ ] SIP re-INVITE handling for dynamic participant changes
+
+- [ ] **Conference Event System** (`src/conference/events.rs`) 
+  - [ ] Conference lifecycle events (SIP session coordination events)
+  - [ ] Participant SIP session events (INVITE received, dialog established, BYE sent)
+  - [ ] Conference SIP signaling status events
+  - [ ] Integration with existing session-core event system using EventPriority
+
+#### **Phase 15.2: Conference Participant Coordination** ❌ **NOT STARTED** (0/4 tasks done)
+- [ ] **SIP Dialog Group Management**
+  - [ ] Group multiple SIP dialogs into conference structures
+  - [ ] Conference participant addition/removal via SIP signaling
+  - [ ] SIP dialog state synchronization across conference participants
+  - [ ] Conference-wide SIP dialog lifecycle management
+
+- [ ] **Conference SDP Coordination**
+  - [ ] Multi-party SDP offer/answer coordination  
+  - [ ] Codec negotiation across conference participants
+  - [ ] Media capability coordination for mixed-codec conferences
+  - [ ] Conference media address and port coordination
+
+- [ ] **Dynamic Participant Management**
+  - [ ] Late-joining participant SIP integration
+  - [ ] Participant departure handling (SIP BYE processing)
+  - [ ] Conference capacity management and overflow handling
+  - [ ] Participant authentication and authorization for conference access
+
+- [ ] **Media-Core Integration for Conference Audio**
+  - [ ] Use AudioMixer from media-core for actual audio processing
+  - [ ] Coordinate SIP media sessions with AudioMixer audio streams
+  - [ ] Map SIP dialog IDs to AudioMixer participant IDs
+  - [ ] Handle audio mixer events and status in SIP context
+
+#### **Phase 15.3: Conference Types and Configuration** ❌ **NOT STARTED** (0/3 tasks done)
+- [ ] **Core Conference Types** (`src/conference/types.rs`)
+  ```rust
+  pub type ConferenceId = String;
+  
+  pub struct ConferenceConfig {
+      pub max_participants: usize,
+      pub require_authentication: bool,
+      pub allow_late_join: bool,
+      pub conference_sip_domain: String,
+      pub media_config: ConferenceMediaConfig, // SIP media configuration, not audio processing
+  }
+  
+  pub struct ConferenceMediaConfig {
+      pub preferred_codecs: Vec<CodecType>,
+      pub allow_transcoding: bool,
+      pub media_relay_mode: MediaRelayMode,
+      pub rtp_port_range: (u16, u16),
+  }
+  
+  pub enum MediaRelayMode {
+      DirectPeerToPeer,    // Participants connect directly
+      ServerRelayed,       // Audio goes through server (uses AudioMixer)
+      Hybrid,             // Mixed mode based on participant capabilities
+  }
+  ```
+
+- [ ] **Conference Error Types** (`src/conference/errors.rs`)
+  - [ ] `ConferenceError` enum for conference SIP coordination failures
+  - [ ] `ParticipantError` for SIP participant management issues  
+  - [ ] `ConferenceSipError` for SIP signaling failures in conference context
+  - [ ] Error recovery strategies for conference SIP operations
+
+- [ ] **Conference SIP Integration Types**
+  - [ ] `ConferenceSipHeaders` for conference-specific SIP headers
+  - [ ] `ConferenceRoutingInfo` for SIP routing decisions
+  - [ ] `ConferenceDialogGroup` for managing related SIP dialogs
+  - [ ] `ConferenceMediaNegotiation` for SDP coordination across participants
+
+#### **Phase 15.4: Integration with Session-Core Primitives** ❌ **NOT STARTED** (0/3 tasks done)
+- [ ] **EventPriority System Integration**
+  - [ ] Conference events use existing EventPriority system (CRITICAL, HIGH, NORMAL, LOW)
+  - [ ] Conference SIP events integrated with session event coordination
+  - [ ] Priority-based conference event processing using existing infrastructure
+  - [ ] Conference event routing through existing EventCoordinator
+
+- [ ] **SessionManager Integration**
+  - [ ] ConferenceController uses existing SessionManager for individual SIP dialogs
+  - [ ] Conference sessions tracked as grouped sessions in session management
+  - [ ] Conference-aware session lifecycle management
+  - [ ] Existing session state machine extended for conference scenarios
+
+- [ ] **Group Coordination Using Basic Primitives**
+  - [ ] Conference rooms implemented as SessionGroups using existing group coordination
+  - [ ] Conference participant management using existing session tracking
+  - [ ] Conference state management using existing state coordination primitives
+  - [ ] Conference cleanup using existing resource management patterns
+
+### **🎯 Conference Session Coordination Success Criteria**
+
+#### **Phase 15 Completion Criteria** 
+- [ ] ✅ **SIP Session Orchestration**: ConferenceController successfully coordinates 3+ SIP dialogs
+- [ ] ✅ **Conference SDP Negotiation**: Multi-party SDP offer/answer works correctly
+- [ ] ✅ **Dynamic Participant Management**: Participants can join/leave conferences via SIP signaling
+- [ ] ✅ **Media-Core Integration**: Session-core successfully uses AudioMixer from media-core
+- [ ] ✅ **Event Coordination**: Conference events integrate with existing session-core event system
+- [ ] ✅ **Session Management Integration**: Conferences use existing SessionManager infrastructure
+
+#### **Session Coordination Focus**
+- [ ] ✅ **SIP Orchestration Only**: No audio processing logic, purely SIP session coordination
+- [ ] ✅ **Uses Media-Core Tools**: AudioMixer used as tool, not reimplemented
+- [ ] ✅ **Built on Existing Primitives**: Uses EventPriority, SessionManager, group coordination
+- [ ] ✅ **Clean Architecture**: Clear separation between SIP coordination and audio processing
+
+#### **Integration Architecture**
+- [ ] ✅ **Layered Design**: Session-core coordinates SIP, media-core processes audio
+- [ ] ✅ **Event-Driven**: Conference coordination driven by SIP events and session state changes
+- [ ] ✅ **Scalable**: Conference architecture scales with existing session management infrastructure
+- [ ] ✅ **Maintainable**: Conference features built on proven session-core primitives
+
+### 📊 **ESTIMATED TIMELINE**
+
+- **Phase 15.1**: ~6 hours (Conference session coordinator foundation)
+- **Phase 15.2**: ~8 hours (Media bridge conference extensions)
+- **Phase 15.3**: ~4 hours (Conference types and integration)
+- **Phase 15.4**: ~4 hours (Call-engine API)
+
+**Total Estimated Time**: ~22 hours
+
+### 🔄 **DEPENDENCIES**
+
+**Requires**:
+- ✅ **Phase 12 Complete**: Basic session primitives (groups, events, priorities, resources)
+- ✅ **Phase 14 Complete**: Real media-core integration via MediaSessionController
+- ⏳ **Media-Core Phase 5**: ConferenceController and AudioMixer implementation
+- ✅ **Existing Architecture**: Session-Dialog-Media coordination working
+
+**Enables**:
+- ✅ **Multi-Party Calls**: Real conference calling functionality
+- ✅ **Call-Engine Enhancement**: Advanced conference business logic capabilities
+- ✅ **Scalable Architecture**: Foundation for enterprise conference features
+- ✅ **Production Conferences**: Real-world conference call deployments
+
+### 💡 **ARCHITECTURAL BENEFITS**
+
+**Session-Core Benefits**:
+- ✅ **Proper Scope**: Conference session coordination, not business logic
+- ✅ **Primitive Reuse**: Builds on existing BasicSessionGroup, BasicEventBus, etc.
+- ✅ **Clean Integration**: Works with media-core conference capabilities
+- ✅ **Call-Engine Ready**: Provides infrastructure for call-engine orchestration
+
+**Call-Engine Benefits**:
+- ✅ **Complete Conference Control**: Business logic and policies using session-core infrastructure
+- ✅ **Flexible Orchestration**: Can implement sophisticated conference features
+- ✅ **Scalable Foundation**: Session-core handles technical details, call-engine focuses on business
+- ✅ **Enterprise Features**: Foundation for advanced call center conferencing
+
+### 🚀 **INTEGRATION FLOW**
+
+**End-to-End Conference Flow**:
+1. **Call-Engine**: Decides to create conference based on business logic
+2. **Session-Core**: Creates conference using BasicSessionGroup + ConferenceSessionCoordinator
+3. **Media-Core**: Sets up AudioMixer and ConferenceController for real audio mixing
+4. **Session-Core**: Coordinates SIP sessions, generates conference SDP, manages participant lifecycle
+5. **Media-Core**: Handles real-time audio mixing and RTP distribution
+6. **Call-Engine**: Monitors conference state and makes business decisions (add/remove participants, etc.)
+
+**Perfect Separation**:
+- **Call-Engine**: Business policies and orchestration
+- **Session-Core**: SIP session coordination and infrastructure
+- **Media-Core**: Real-time audio mixing and RTP handling
+
+### 🔄 **NEXT ACTIONS**
+
+1. **Wait for Media-Core Phase 5** - ConferenceController and AudioMixer implementation
+2. **Start Phase 15.1** - Conference session coordinator using existing primitives
+3. **Test Integration** - Verify session-core + media-core conference coordination
+4. **Call-Engine Integration** - Provide clean APIs for call-engine conference orchestration
+
+---
+
+## 📊 UPDATED PROGRESS TRACKING

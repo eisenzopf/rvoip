@@ -1,0 +1,41 @@
+# Session-Core SIPp Test Suite Execution Log
+# Started: Sun Jun  8 20:54:48 PDT 2025
+# Mode: conference
+# Session: 20250608_205448
+
+2025-06-08 20:54:48 INFO: 📁 Test session directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_205448
+2025-06-08 20:54:48 INFO: 📋 Test mode: conference
+2025-06-08 20:54:48 INFO: ⏰ Test session: 20250608_205448
+2025-06-08 20:54:48 INFO: 🔨 Building test applications...
+2025-06-08 20:54:48 SUCCESS: ✅ Built sip_test_server
+2025-06-08 20:54:48 INFO: 📝 sip_bridge_server not yet implemented (will use sip_test_server for bridge tests)
+2025-06-08 20:54:48 SUCCESS: ✅ Test environment ready
+2025-06-08 20:54:48 HEADER: Generating Audio Test Files
+2025-06-08 20:54:48 INFO: 🎵 Generating test audio files with different frequencies...
+2025-06-08 20:54:48 INFO: Using sox for audio generation
+2025-06-08 20:54:48 SUCCESS: ✅ Generated Client A audio (440Hz)
+2025-06-08 20:54:48 SUCCESS: ✅ Generated Client B audio (880Hz)
+2025-06-08 20:54:48 SUCCESS: ✅ Generated Client C audio (1320Hz)
+2025-06-08 20:54:48 INFO: 📁 Generated audio files:
+2025-06-08 20:54:48 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:54 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-08 20:54:48 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:54 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_b_880hz.wav
+2025-06-08 20:54:48 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun  8 20:54 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_c_1320hz.wav
+2025-06-08 20:54:48 HEADER: Conference Tests (3+ Party)
+2025-06-08 20:54:48 INFO: 🎪 Testing multi-party conference functionality...
+2025-06-08 20:54:48 INFO: ⏱️ Duration: 25s
+2025-06-08 20:54:48 INFO: 🎯 Phase 3: Advanced Conference Testing Implementation
+2025-06-08 20:54:48 ERROR: ❌ Conference server binary not found. Building...
+2025-06-08 20:54:48 SUCCESS: ✅ Conference server built successfully
+2025-06-08 20:54:48 INFO: 📡 Starting packet capture for conference_tests...
+2025-06-08 20:54:48 SUCCESS: ✅ Packet capture started (PID: 40369)
+2025-06-08 20:54:48 INFO: 📄 Capture file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/captures/conference_tests_20250608_205448.pcap
+2025-06-08 20:54:48 INFO: 📄 Capture log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250608_205448/conference_tests_capture.log
+2025-06-08 20:54:50 TEST_START: Conference Server Startup
+2025-06-08 20:54:50 INFO: 🎪 Starting conference server on port 5064...
+2025-06-08 20:54:52 ERROR: ❌ Conference server process died (PID: 40412)
+2025-06-08 20:54:52 TEST_RESULT: Conference Server Startup = FAIL
+2025-06-08 20:54:52 ERROR: ❌ Conference server failed to start
+2025-06-08 20:54:52 INFO: 📊 Conference Tests: 0/1 passed
+2025-06-08 20:54:52 WARNING: ⚠️ Some conference tests failed (0/1 passed)
+2025-06-08 20:54:52 INFO: 🧹 Cleaning up active processes...
+2025-06-08 20:54:52 SUCCESS: ✅ Process cleanup completed
