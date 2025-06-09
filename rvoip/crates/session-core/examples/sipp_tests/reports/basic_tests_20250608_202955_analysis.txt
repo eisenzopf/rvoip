@@ -1,0 +1,26 @@
+# Packet Capture Analysis: basic_tests_20250608_202955.pcap
+# Generated: Sun Jun  8 20:30:16 PDT 2025
+
+## Basic Statistics
+
+=============================
+| IO Statistics             |
+|                           |
+| Duration: 2.    68 secs   |
+| Interval: 1 secs          |
+|                           |
+| Col 1: Frames and bytes   |
+|---------------------------|
+|          |1               |
+| Interval | Frames | Bytes |
+|---------------------------|
+|  0 <> 1  |      4 |  2232 |
+|  1 <> 2  |      2 |   988 |
+|  2 <> Dur|      1 |   622 |
+=============================
+Basic stats not available
+
+## UDP Flow Summary
+   5 127.0.0.1	127.0.0.1	5061	5062
+   2 127.0.0.1	127.0.0.1	5062	5061
+UDP flow analysis not available
