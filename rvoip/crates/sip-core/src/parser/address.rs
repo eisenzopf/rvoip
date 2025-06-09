@@ -3,7 +3,8 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
-    combinator::{map, map_res, opt},
+    combinator::{map, map_res, opt, recognize},
+    multi::many1,
     sequence::{delimited, pair, terminated},
     IResult,
 };
@@ -26,14 +27,17 @@ use crate::error::Error; // For unquote error
 use crate::types::uri::Scheme;
 use crate::types::param::Param;
 
-// display-name = *(token LWS)/ quoted-string
-// Simplified: Parses either a single token or an unquoted string.
+// display-name = *(token LWS) / quoted-string
+// RFC 3261 compliant: Parses either quoted strings or multiple tokens with whitespace.
 fn display_name(input: &[u8]) -> ParseResult<String> {
     alt((
         // Quoted string path (handles unquoting)
         map_res(quoted_string, |bytes| unquote_string(bytes)),
-        // Single token path
-        map_res(token, |bytes| str::from_utf8(bytes).map(String::from))
+        // RFC 3261 compliant: handle multiple tokens with whitespace
+        map_res(
+            recognize(many1(terminated(token, opt(lws)))),
+            |bytes| str::from_utf8(bytes).map(|s| s.trim().to_string())
+        )
     ))(input)
 }
 
@@ -122,6 +126,28 @@ mod tests {
         let (rem, name) = display_name(b"\"\\\"Agent\\\" Smith\"").unwrap();
         assert!(rem.is_empty());
         assert_eq!(name, "\"Agent\" Smith");
+    }
+
+    #[test]
+    fn test_display_name_multiple_tokens() {
+        // Test the specific SIPp case that was failing
+        let (rem, name) = display_name(b"SIPp Test").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(name, "SIPp Test");
+        
+        // Test other multi-token cases
+        let (rem, name) = display_name(b"Test User").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(name, "Test User");
+        
+        let (rem, name) = display_name(b"Sales Department").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(name, "Sales Department");
+        
+        // Test with trailing whitespace
+        let (rem, name) = display_name(b"Customer Support ").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(name, "Customer Support");
     }
 
     #[test]
@@ -362,5 +388,29 @@ mod tests {
         assert_eq!(addr5.display_name, None);
         assert_eq!(addr5.uri.scheme, Scheme::Sip);
         assert_eq!(addr5.uri.user.as_deref(), Some("dave"));
+    }
+    
+    // Test the specific SIPp header format that was causing failures
+    #[test]
+    fn test_sipp_header_format() {
+        // Test the exact From header format that SIPp sends
+        let input1 = b"SIPp Test <sip:sipp@127.0.0.1:5061>".as_slice();
+        let (rem1, addr1) = name_addr_or_addr_spec(input1).unwrap();
+        assert!(rem1.is_empty());
+        assert_eq!(addr1.display_name, Some("SIPp Test".to_string()));
+        assert_eq!(addr1.uri.scheme, Scheme::Sip);
+        assert_eq!(addr1.uri.user.as_deref(), Some("sipp"));
+        assert_eq!(addr1.uri.host.to_string(), "127.0.0.1");
+        assert_eq!(addr1.uri.port, Some(5061));
+        
+        // Test the exact To header format that SIPp sends
+        let input2 = b"Test User <sip:test@127.0.0.1:5062>".as_slice();
+        let (rem2, addr2) = name_addr_or_addr_spec(input2).unwrap();
+        assert!(rem2.is_empty());
+        assert_eq!(addr2.display_name, Some("Test User".to_string()));
+        assert_eq!(addr2.uri.scheme, Scheme::Sip);
+        assert_eq!(addr2.uri.user.as_deref(), Some("test"));
+        assert_eq!(addr2.uri.host.to_string(), "127.0.0.1");
+        assert_eq!(addr2.uri.port, Some(5062));
     }
 } 
