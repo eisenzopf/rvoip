@@ -87,6 +87,16 @@ pub struct AdvancedAcousticEchoCanceller {
     erle_tracker: ERLETracker,
 }
 
+impl std::fmt::Debug for AdvancedAcousticEchoCanceller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdvancedAcousticEchoCanceller")
+            .field("config", &self.config)
+            .field("num_partitions", &self.adaptive_filters.len())
+            .field("fft_size", &self.config.fft_size)
+            .finish()
+    }
+}
+
 impl AdvancedAcousticEchoCanceller {
     /// Create new advanced AEC processor
     pub fn new(config: AdvancedAecConfig) -> Result<Self> {

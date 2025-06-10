@@ -3272,6 +3272,7 @@ dependencies = [
  "clap",
  "num-complex",
  "num_cpus",
+ "once_cell",
  "opus",
  "rand",
  "rayon",

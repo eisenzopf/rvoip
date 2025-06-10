@@ -36,14 +36,16 @@ pub struct AdvancedAgcConfig {
 impl Default for AdvancedAgcConfig {
     fn default() -> Self {
         Self {
-            num_bands: 3,
-            crossover_frequencies: vec![300.0, 3000.0], // Low, Mid, High
+            // Use single-band processing by default to avoid biquad filterbank issues
+            // Multi-band can be enabled explicitly when the filterbank issue is resolved
+            num_bands: 1,
+            crossover_frequencies: vec![], // No crossovers for single band
             target_lufs: -23.0,  // EBU R128 broadcast standard
             lookahead_ms: 8.0,   // 8ms look-ahead
-            attack_times_ms: vec![5.0, 10.0, 15.0],    // Faster for high freq
-            release_times_ms: vec![200.0, 150.0, 100.0], // Slower for low freq
-            compression_ratios: vec![3.0, 4.0, 2.0],    // More compression for mid
-            max_gains_db: vec![12.0, 15.0, 10.0],       // Conservative limits
+            attack_times_ms: vec![10.0],    // Single band attack time
+            release_times_ms: vec![150.0],  // Single band release time
+            compression_ratios: vec![3.0],  // Single band compression ratio
+            max_gains_db: vec![12.0],       // Single band gain limit
             perceptual_weighting: true,
             gate_threshold: -70.0, // Below this is considered silence
         }
@@ -86,6 +88,16 @@ pub struct AdvancedAutomaticGainControl {
     // Performance tracking
     sample_rate: f32,
     frame_count: u64,
+}
+
+impl std::fmt::Debug for AdvancedAutomaticGainControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdvancedAutomaticGainControl")
+            .field("config", &self.config)
+            .field("sample_rate", &self.sample_rate)
+            .field("frame_count", &self.frame_count)
+            .finish()
+    }
 }
 
 impl AdvancedAutomaticGainControl {

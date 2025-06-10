@@ -116,6 +116,18 @@ pub struct AdvancedVoiceActivityDetector {
     sample_rate: f32,
 }
 
+impl std::fmt::Debug for AdvancedVoiceActivityDetector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdvancedVoiceActivityDetector")
+            .field("config", &self.config)
+            .field("sample_rate", &self.sample_rate)
+            .field("frame_count", &self.frame_count)
+            .field("noise_energy", &self.noise_energy)
+            .field("smoothed_energy", &self.smoothed_energy)
+            .finish()
+    }
+}
+
 impl AdvancedVoiceActivityDetector {
     /// Create new advanced VAD
     pub fn new(config: AdvancedVadConfig, sample_rate: f32) -> Result<Self> {

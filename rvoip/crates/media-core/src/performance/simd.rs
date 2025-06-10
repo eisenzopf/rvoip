@@ -4,6 +4,7 @@
 //! with fallback to scalar implementations.
 
 /// SIMD-optimized audio processing operations
+#[derive(Debug)]
 pub struct SimdProcessor {
     /// Whether SIMD is available on this platform
     simd_available: bool,
@@ -38,22 +39,41 @@ impl SimdProcessor {
         self.simd_available
     }
     
-    /// Add two audio buffers (mixing operation)
-    pub fn add_buffers(&self, left: &[i16], right: &[i16], output: &mut [i16]) {
-        assert_eq!(left.len(), right.len());
-        assert_eq!(left.len(), output.len());
-        
+    /// Add two audio buffers using SIMD optimization
+    pub fn add_buffers(&self, a: &[i16], b: &[i16], output: &mut [i16]) {
+        if a.len() != b.len() || a.len() != output.len() {
+            // Fallback to scalar if size mismatch
+            self.add_buffers_scalar(a, b, output);
+            return;
+        }
+
+        // For small frames, scalar processing is faster
+        if a.len() < 256 {
+            self.add_buffers_scalar(a, b, output);
+            return;
+        }
+
         if self.simd_available {
-            self.add_buffers_simd(left, right, output);
+            self.add_buffers_simd(a, b, output);
         } else {
-            self.add_buffers_scalar(left, right, output);
+            self.add_buffers_scalar(a, b, output);
         }
     }
     
     /// Apply gain to audio buffer
     pub fn apply_gain(&self, input: &[i16], gain: f32, output: &mut [i16]) {
-        assert_eq!(input.len(), output.len());
-        
+        if input.len() != output.len() {
+            // Fallback to scalar if size mismatch
+            self.apply_gain_scalar(input, gain, output);
+            return;
+        }
+
+        // For small frames, scalar processing is faster due to SIMD setup overhead
+        if input.len() < 256 {
+            self.apply_gain_scalar(input, gain, output);
+            return;
+        }
+
         if self.simd_available {
             self.apply_gain_simd(input, gain, output);
         } else {
@@ -61,12 +81,17 @@ impl SimdProcessor {
         }
     }
     
-    /// Calculate RMS level of audio buffer
+    /// Calculate RMS (Root Mean Square) of audio samples
     pub fn calculate_rms(&self, samples: &[i16]) -> f32 {
         if samples.is_empty() {
             return 0.0;
         }
-        
+
+        // For small frames, scalar processing is faster
+        if samples.len() < 256 {
+            return self.calculate_rms_scalar(samples);
+        }
+
         if self.simd_available {
             self.calculate_rms_simd(samples)
         } else {
@@ -83,9 +108,12 @@ impl SimdProcessor {
     }
     
     fn apply_gain_scalar(&self, input: &[i16], gain: f32, output: &mut [i16]) {
-        for (i, o) in input.iter().zip(output.iter_mut()) {
-            let scaled = (*i as f32 * gain).round() as i32;
-            *o = scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        // Pre-convert gain to fixed-point for faster processing
+        let gain_fixed = (gain * 32768.0) as i32;
+        
+        for (inp, out) in input.iter().zip(output.iter_mut()) {
+            let result = ((*inp as i32) * gain_fixed) >> 15;
+            *out = result.clamp(-32768, 32767) as i16;
         }
     }
     

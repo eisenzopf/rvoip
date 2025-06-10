@@ -316,6 +316,25 @@ pub mod prelude {
     pub use crate::performance::metrics::{PerformanceMetrics, BenchmarkResults};
     pub use crate::performance::simd::SimdProcessor;
     
+    // Advanced v2 processor components (Phase 1.3)
+    pub use crate::processing::audio::{
+        AdvancedVoiceActivityDetector, 
+        AdvancedVadConfig, 
+        AdvancedVadResult,
+        AdvancedAutomaticGainControl, 
+        AdvancedAgcConfig, 
+        AdvancedAgcResult,
+        AdvancedAcousticEchoCanceller, 
+        AdvancedAecConfig, 
+        AdvancedAecResult,
+    };
+    
+    // Session controller advanced processing (Phase 1.3)
+    pub use crate::relay::controller::{
+        AdvancedProcessorSet,
+        AdvancedProcessorConfig,
+    };
+    
     // Legacy types (temporary)
     pub use crate::codec::{Codec, CodecRegistry};
 } 

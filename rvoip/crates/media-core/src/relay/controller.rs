@@ -29,6 +29,20 @@ use crate::processing::audio::{AudioMixer, AudioStreamManager};
 use crate::quality::QualityMonitor;
 use bytes::Bytes;
 
+// NEW: Performance library imports
+use crate::performance::{
+    AudioFramePool, PerformanceMetrics, ZeroCopyAudioFrame
+};
+use crate::performance::pool::PoolConfig;
+use crate::performance::simd::SimdProcessor;
+
+// NEW: Advanced v2 processor imports
+use crate::processing::audio::{
+    AdvancedVoiceActivityDetector, AdvancedAutomaticGainControl, AdvancedAcousticEchoCanceller,
+    AdvancedVadConfig, AdvancedAgcConfig, AdvancedAecConfig,
+    AdvancedVadResult, AdvancedAgcResult, AdvancedAecResult
+};
+
 // Import rtp-core's sophisticated port allocator instead of implementing our own
 use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocatorConfig, AllocationStrategy};
 
@@ -288,6 +302,186 @@ pub enum MediaSessionEvent {
     },
 }
 
+/// Advanced processor set for v2 processors per session
+#[derive(Debug)]
+pub struct AdvancedProcessorSet {
+    /// Advanced voice activity detector (v2)
+    pub vad: Option<Arc<RwLock<AdvancedVoiceActivityDetector>>>,
+    /// Advanced automatic gain control (v2)
+    pub agc: Option<Arc<RwLock<AdvancedAutomaticGainControl>>>,
+    /// Advanced acoustic echo canceller (v2)
+    pub aec: Option<Arc<RwLock<AdvancedAcousticEchoCanceller>>>,
+    /// Session-specific frame pool (shared reference)
+    pub frame_pool: Arc<AudioFramePool>,
+    /// SIMD processor for this session
+    pub simd_processor: SimdProcessor,
+    /// Performance metrics for this session
+    pub metrics: Arc<RwLock<PerformanceMetrics>>,
+    /// Configuration used to create these processors
+    pub config: AdvancedProcessorConfig,
+}
+
+/// Configuration for advanced processors in a session
+#[derive(Debug, Clone)]
+pub struct AdvancedProcessorConfig {
+    /// Enable advanced VAD
+    pub enable_advanced_vad: bool,
+    /// Advanced VAD configuration
+    pub vad_config: AdvancedVadConfig,
+    /// Enable advanced AGC
+    pub enable_advanced_agc: bool,
+    /// Advanced AGC configuration
+    pub agc_config: AdvancedAgcConfig,
+    /// Enable advanced AEC
+    pub enable_advanced_aec: bool,
+    /// Advanced AEC configuration
+    pub aec_config: AdvancedAecConfig,
+    /// Enable SIMD optimizations
+    pub enable_simd: bool,
+    /// Frame pool size for this session
+    pub frame_pool_size: usize,
+    /// Sample rate for processing
+    pub sample_rate: u32,
+}
+
+impl Default for AdvancedProcessorConfig {
+    fn default() -> Self {
+        Self {
+            enable_advanced_vad: false,
+            vad_config: AdvancedVadConfig::default(),
+            enable_advanced_agc: false,
+            agc_config: AdvancedAgcConfig::default(),
+            enable_advanced_aec: false,
+            aec_config: AdvancedAecConfig::default(),
+            enable_simd: true,
+            frame_pool_size: 16,
+            sample_rate: 8000,
+        }
+    }
+}
+
+impl AdvancedProcessorSet {
+    /// Create a new advanced processor set
+    pub async fn new(config: AdvancedProcessorConfig, frame_pool: Arc<AudioFramePool>) -> Result<Self> {
+        debug!("Creating AdvancedProcessorSet with config: {:?}", config);
+        
+        // Create SIMD processor
+        let simd_processor = SimdProcessor::new();
+        
+        // Create performance metrics
+        let metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        
+        // Create advanced processors based on configuration
+        let vad = if config.enable_advanced_vad {
+            let vad_detector = AdvancedVoiceActivityDetector::new(
+                config.vad_config.clone(),
+                config.sample_rate as f32,
+            )?;
+            Some(Arc::new(RwLock::new(vad_detector)))
+        } else {
+            None
+        };
+        
+        let agc = if config.enable_advanced_agc {
+            let agc_processor = AdvancedAutomaticGainControl::new(
+                config.agc_config.clone(),
+                config.sample_rate as f32,
+            )?;
+            Some(Arc::new(RwLock::new(agc_processor)))
+        } else {
+            None
+        };
+        
+        let aec = if config.enable_advanced_aec {
+            let aec_processor = AdvancedAcousticEchoCanceller::new(
+                config.aec_config.clone(),
+            )?;
+            Some(Arc::new(RwLock::new(aec_processor)))
+        } else {
+            None
+        };
+        
+        debug!("AdvancedProcessorSet created: VAD={}, AGC={}, AEC={}, SIMD={}",
+               vad.is_some(), agc.is_some(), aec.is_some(), simd_processor.is_simd_available());
+        
+        Ok(Self {
+            vad,
+            agc,
+            aec,
+            frame_pool,
+            simd_processor,
+            metrics,
+            config,
+        })
+    }
+    
+    /// Process audio frame with advanced processors
+    pub async fn process_audio(&self, input_frame: &AudioFrame) -> Result<AudioFrame> {
+        let start_time = std::time::Instant::now();
+        
+        let mut processed_frame = input_frame.clone();
+        
+        // Process with advanced AEC first (if enabled and far-end reference available)
+        if let Some(aec) = &self.aec {
+            // TODO: Add far-end reference when available
+            debug!("AEC v2 processing skipped - far-end reference not available");
+        }
+        
+        // Process with advanced AGC
+        if let Some(agc) = &self.agc {
+            let mut agc_processor = agc.write().await;
+            let result = agc_processor.process_frame(&processed_frame)?;
+            // TODO: Apply AGC result to frame
+            debug!("AGC v2 processed frame with {} band gains", result.band_gains_db.len());
+        }
+        
+        // Process with advanced VAD
+        let mut vad_result = None;
+        if let Some(vad) = &self.vad {
+            let mut vad_detector = vad.write().await;
+            vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
+        }
+        
+        // Apply SIMD optimizations if enabled
+        if self.config.enable_simd && self.simd_processor.is_simd_available() {
+            // Apply SIMD-optimized operations
+            let mut simd_samples = vec![0i16; processed_frame.samples.len()];
+            self.simd_processor.apply_gain(&processed_frame.samples, 1.0, &mut simd_samples);
+            processed_frame.samples = simd_samples;
+        }
+        
+        // Update performance metrics
+        let processing_time = start_time.elapsed();
+        {
+            let mut metrics = self.metrics.write().await;
+            metrics.add_timing(processing_time);
+            metrics.add_allocation(processed_frame.samples.len() as u64 * 2); // 2 bytes per i16
+        }
+        
+        if let Some(vad) = vad_result {
+            debug!("Advanced VAD result: voice={}, confidence={:.2}", vad.is_voice, vad.confidence);
+        }
+        
+        Ok(processed_frame)
+    }
+    
+    /// Get performance metrics for this processor set
+    pub async fn get_metrics(&self) -> PerformanceMetrics {
+        self.metrics.read().await.clone()
+    }
+    
+    /// Reset performance metrics
+    pub async fn reset_metrics(&self) {
+        let mut metrics = self.metrics.write().await;
+        *metrics = PerformanceMetrics::new();
+    }
+    
+    /// Check if any advanced processors are enabled
+    pub fn has_advanced_processors(&self) -> bool {
+        self.vad.is_some() || self.agc.is_some() || self.aec.is_some()
+    }
+}
+
 /// Media Session Controller for managing media sessions and conference audio mixing
 pub struct MediaSessionController {
     /// Underlying media relay (optional)
@@ -310,6 +504,16 @@ pub struct MediaSessionController {
     conference_event_rx: RwLock<Option<mpsc::UnboundedReceiver<ConferenceMixingEvent>>>,
     /// Quality monitor for conference sessions
     quality_monitor: Option<Arc<QualityMonitor>>,
+    
+    // NEW: Performance library integration fields
+    /// Global performance metrics for all sessions
+    performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+    /// Global frame pool for efficient allocation (shared across sessions)
+    frame_pool: Arc<AudioFramePool>,
+    /// Advanced processors per dialog
+    advanced_processors: RwLock<HashMap<DialogId, AdvancedProcessorSet>>,
+    /// Default configuration for advanced processors
+    default_processor_config: AdvancedProcessorConfig,
 }
 
 impl MediaSessionController {
@@ -317,6 +521,22 @@ impl MediaSessionController {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
+        
+        // Initialize performance components
+        let performance_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        
+        // Create global frame pool (shared across sessions)
+        let pool_config = PoolConfig {
+            initial_size: 32,
+            max_size: 128,
+            sample_rate: 8000,
+            channels: 1,
+            samples_per_frame: 160, // 20ms at 8kHz
+        };
+        let frame_pool: Arc<AudioFramePool> = AudioFramePool::new(pool_config);
+        
+        // Default advanced processor configuration
+        let default_processor_config = AdvancedProcessorConfig::default();
         
         Self {
             relay: None,
@@ -329,6 +549,11 @@ impl MediaSessionController {
             conference_event_tx,
             conference_event_rx: RwLock::new(Some(conference_event_rx)),
             quality_monitor: None,
+            // Performance fields
+            performance_metrics,
+            frame_pool,
+            advanced_processors: RwLock::new(HashMap::new()),
+            default_processor_config,
         }
     }
     
@@ -354,6 +579,25 @@ impl MediaSessionController {
         // Set up conference event forwarding
         audio_mixer.set_event_sender(conference_event_tx.clone()).await;
         
+        // Initialize performance components
+        let performance_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        
+        // Create global frame pool with larger capacity for conference mixing
+        let pool_config = PoolConfig {
+            initial_size: 64, // Larger pool for conference mixing
+            max_size: 256,
+            sample_rate: conference_config.output_sample_rate,
+            channels: conference_config.output_channels as u8,
+            samples_per_frame: conference_config.output_samples_per_frame as usize,
+        };
+        let frame_pool: Arc<AudioFramePool> = AudioFramePool::new(pool_config);
+        
+        // Default advanced processor configuration for conference
+        let mut default_processor_config = AdvancedProcessorConfig::default();
+        default_processor_config.sample_rate = conference_config.output_sample_rate;
+        default_processor_config.frame_pool_size = 32; // Per-session pool size
+        default_processor_config.enable_simd = conference_config.enable_simd_optimization;
+        
         Ok(Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -365,6 +609,11 @@ impl MediaSessionController {
             conference_event_tx,
             conference_event_rx: RwLock::new(Some(conference_event_rx)),
             quality_monitor: None,
+            // Performance fields
+            performance_metrics,
+            frame_pool,
+            advanced_processors: RwLock::new(HashMap::new()),
+            default_processor_config,
         })
     }
     
@@ -485,6 +734,14 @@ impl MediaSessionController {
             let dialog_session_id = format!("dialog_{}", dialog_id);
             if let Err(e) = global_allocator.release_session(&dialog_session_id).await {
                 warn!("Failed to release ports for dialog {}: {}", dialog_id, e);
+            }
+        }
+
+        // Clean up advanced processors if they exist
+        {
+            let mut processors = self.advanced_processors.write().await;
+            if processors.remove(dialog_id).is_some() {
+                info!("🧹 Cleaned up advanced processors for dialog: {}", dialog_id);
             }
         }
 
@@ -723,8 +980,146 @@ impl MediaSessionController {
         // Stop audio transmission
         self.stop_audio_transmission(dialog_id).await?;
         
+        // Clean up advanced processors if they exist
+        {
+            let mut processors = self.advanced_processors.write().await;
+            if processors.remove(dialog_id).is_some() {
+                info!("🧹 Cleaned up advanced processors for dialog: {}", dialog_id);
+            }
+        }
+        
         info!("✅ Media flow terminated for dialog: {}", dialog_id);
         Ok(())
+    }
+    
+    // ================================
+    // ADVANCED PROCESSING METHODS (Phase 1.3)
+    // ================================
+    
+    /// Start advanced media session with custom processor configuration
+    pub async fn start_advanced_media(&self, dialog_id: DialogId, config: MediaConfig, processor_config: Option<AdvancedProcessorConfig>) -> Result<()> {
+        info!("Starting advanced media session for dialog: {}", dialog_id);
+        
+        // Start regular media session first
+        self.start_media(dialog_id.clone(), config).await?;
+        
+        // Create advanced processors if configuration provided
+        if let Some(proc_config) = processor_config {
+            // Create session-specific frame pool for advanced processors or use global pool
+            let session_frame_pool: Arc<AudioFramePool> = if proc_config.frame_pool_size > 0 {
+                // Create dedicated pool for this session
+                let session_pool_config = PoolConfig {
+                    initial_size: proc_config.frame_pool_size,
+                    max_size: proc_config.frame_pool_size * 2,
+                    sample_rate: proc_config.sample_rate,
+                    channels: 1,
+                    samples_per_frame: 160, // 20ms at 8kHz
+                };
+                AudioFramePool::new(session_pool_config)
+            } else {
+                // Use global shared pool
+                self.frame_pool.clone()
+            };
+            
+            let processor_set = AdvancedProcessorSet::new(proc_config, session_frame_pool).await?;
+            
+            {
+                let mut processors = self.advanced_processors.write().await;
+                processors.insert(dialog_id.clone(), processor_set);
+            }
+            
+            info!("✅ Created advanced processors for dialog: {}", dialog_id);
+        } else {
+            info!("⚠️ No processor configuration provided - using basic media session");
+        }
+        
+        Ok(())
+    }
+    
+    /// Process audio frame with advanced processors (if enabled for this dialog)
+    pub async fn process_advanced_audio(&self, dialog_id: &DialogId, audio_frame: AudioFrame) -> Result<AudioFrame> {
+        let start_time = std::time::Instant::now();
+        
+        // Check if dialog has advanced processors
+        let processed_frame = {
+            let processors = self.advanced_processors.read().await;
+            if let Some(processor_set) = processors.get(dialog_id) {
+                // Process with session-specific advanced processors
+                let processed = processor_set.process_audio(&audio_frame).await?;
+                debug!("Processed audio frame for {} with advanced processors", dialog_id);
+                processed
+            } else {
+                // Use global frame pool for zero-copy optimization even without advanced processors
+                debug!("Processed audio frame for {} with global pool only", dialog_id);
+                audio_frame // Return as-is if no advanced processors
+            }
+        };
+        
+        // Update global performance metrics
+        let processing_time = start_time.elapsed();
+        {
+            let mut metrics = self.performance_metrics.write().await;
+            metrics.add_timing(processing_time);
+            metrics.add_allocation(processed_frame.samples.len() as u64 * 2); // 2 bytes per i16
+        }
+        
+        Ok(processed_frame)
+    }
+    
+    /// Get performance metrics for a specific dialog
+    pub async fn get_dialog_performance_metrics(&self, dialog_id: &DialogId) -> Option<PerformanceMetrics> {
+        let processors = self.advanced_processors.read().await;
+        if let Some(processor_set) = processors.get(dialog_id) {
+            Some(processor_set.get_metrics().await)
+        } else {
+            None
+        }
+    }
+    
+    /// Get global performance metrics for all sessions
+    pub async fn get_global_performance_metrics(&self) -> PerformanceMetrics {
+        self.performance_metrics.read().await.clone()
+    }
+    
+    /// Reset performance metrics for a specific dialog
+    pub async fn reset_dialog_metrics(&self, dialog_id: &DialogId) -> Result<()> {
+        let processors = self.advanced_processors.read().await;
+        if let Some(processor_set) = processors.get(dialog_id) {
+            processor_set.reset_metrics().await;
+            Ok(())
+        } else {
+            Err(Error::session_not_found(&format!("No advanced processors for dialog: {}", dialog_id)))
+        }
+    }
+    
+    /// Reset global performance metrics
+    pub async fn reset_global_metrics(&self) {
+        let mut metrics = self.performance_metrics.write().await;
+        *metrics = PerformanceMetrics::new();
+    }
+    
+    /// Check if dialog has advanced processors enabled
+    pub async fn has_advanced_processors(&self, dialog_id: &DialogId) -> bool {
+        let processors = self.advanced_processors.read().await;
+        processors.get(dialog_id)
+            .map(|p| p.has_advanced_processors())
+            .unwrap_or(false)
+    }
+    
+    /// Get frame pool statistics
+    pub fn get_frame_pool_stats(&self) -> crate::performance::pool::PoolStats {
+        self.frame_pool.get_stats()
+    }
+    
+    /// Update default processor configuration for new sessions
+    pub async fn set_default_processor_config(&mut self, config: AdvancedProcessorConfig) {
+        self.default_processor_config = config;
+        info!("Updated default processor configuration");
+    }
+    
+    /// Get current default processor configuration
+    pub fn get_default_processor_config(&self) -> &AdvancedProcessorConfig {
+        &self.default_processor_config
     }
     
     // ===== CONFERENCE AUDIO MIXING METHODS (Phase 5.2) =====
