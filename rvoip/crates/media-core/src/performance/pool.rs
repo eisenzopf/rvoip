@@ -117,6 +117,7 @@ pub struct PoolStats {
 }
 
 /// Object pool for zero-copy audio frames
+#[derive(Debug)]
 pub struct AudioFramePool {
     config: PoolConfig,
     pool: Mutex<VecDeque<ZeroCopyAudioFrame>>,
