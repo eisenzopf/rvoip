@@ -48,6 +48,7 @@ pub mod processing;  // New processing pipeline module
 pub mod quality;     // New quality monitoring module
 pub mod integration; // New integration module
 pub mod buffer;      // New buffer module
+pub mod performance; // New performance optimization module
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -308,6 +309,12 @@ pub mod prelude {
         ConferenceMixingEvent,
         ConferenceResult,
     };
+    
+    // Performance optimization components
+    pub use crate::performance::zero_copy::{ZeroCopyAudioFrame, SharedAudioBuffer};
+    pub use crate::performance::pool::{AudioFramePool, PooledAudioFrame, PoolConfig};
+    pub use crate::performance::metrics::{PerformanceMetrics, BenchmarkResults};
+    pub use crate::performance::simd::SimdProcessor;
     
     // Legacy types (temporary)
     pub use crate::codec::{Codec, CodecRegistry};
