@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::media::DialogId;
 use uuid::Uuid;
 
 mod common;
@@ -20,7 +21,7 @@ async fn test_realtime_quality_metrics_collection() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session with quality monitoring enabled
-    let dialog_id = format!("quality-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("quality-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -64,7 +65,7 @@ async fn test_realtime_quality_metrics_collection() {
     }
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real packet loss detection and measurement
@@ -73,7 +74,7 @@ async fn test_packet_loss_detection() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for packet loss testing
-    let dialog_id = format!("loss-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("loss-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -124,7 +125,7 @@ async fn test_packet_loss_detection() {
      }
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real jitter measurement and buffer adjustment
@@ -133,7 +134,7 @@ async fn test_jitter_measurement_and_adaptation() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for jitter testing
-    let dialog_id = format!("jitter-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("jitter-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -189,7 +190,7 @@ async fn test_jitter_measurement_and_adaptation() {
     }
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real MOS score calculation with various quality conditions
@@ -198,7 +199,7 @@ async fn test_mos_score_calculation() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for MOS testing
-    let dialog_id = format!("mos-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("mos-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -247,7 +248,7 @@ async fn test_mos_score_calculation() {
     assert!(poor_mos <= 1.5, "Poor conditions should yield low MOS (Bad range)"); // Realistic MOS for severe conditions
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real quality-based adaptive behavior  
@@ -256,7 +257,7 @@ async fn test_quality_based_adaptation() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for adaptation testing
-    let dialog_id = format!("adaptation-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("adaptation-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["Opus".to_string(), "PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -308,7 +309,7 @@ async fn test_quality_based_adaptation() {
     }
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real quality reporting mechanisms
@@ -317,7 +318,7 @@ async fn test_quality_reporting_to_sip() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for quality reporting testing
-    let dialog_id = format!("reporting-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("reporting-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -380,7 +381,7 @@ async fn test_quality_reporting_to_sip() {
            "Quality trend should be properly categorized");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real quality monitoring with multiple concurrent sessions
@@ -401,7 +402,7 @@ async fn test_concurrent_quality_monitoring() {
     
     // Start all sessions concurrently
     for (session_name, packet_loss, jitter, delay, port) in &concurrent_sessions {
-        let dialog_id = format!("{}-{}", session_name, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("{}-{}", session_name, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -456,7 +457,7 @@ async fn test_concurrent_quality_monitoring() {
     
     // Clean up all sessions
     for (dialog_id, _, session_name) in active_sessions {
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
         println!("Cleaned up session: {}", session_name);
     }
 }
@@ -489,7 +490,7 @@ async fn test_quality_based_codec_switching() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for codec switching testing
-    let dialog_id = format!("codec-switch-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("codec-switch-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["Opus".to_string(), "PCMU".to_string(), "PCMA".to_string()],
         port_range: Some((10000, 20000)),
@@ -563,7 +564,7 @@ async fn test_quality_based_codec_switching() {
     }
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real quality alerting and threshold management
@@ -572,7 +573,7 @@ async fn test_quality_alerting_system() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create real media session for alerting system testing
-    let dialog_id = format!("alerting-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("alerting-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -664,5 +665,5 @@ async fn test_quality_alerting_system() {
            "Alert system should have reasonable cooldown period");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 } 

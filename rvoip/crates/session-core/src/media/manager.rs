@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 // Import RTP types from media-core for zero-copy processing
 use rvoip_rtp_core::RtpPacket;
 use rvoip_media_core::performance::pool::PoolStats;
+use crate::manager::events::SessionEventProcessor;
 
 /// Main media manager for session-core using real media-core components
 pub struct MediaManager {
@@ -28,6 +29,9 @@ pub struct MediaManager {
     
     /// Zero-copy processing configuration per session
     zero_copy_config: Arc<tokio::sync::RwLock<HashMap<SessionId, ZeroCopyConfig>>>,
+    
+    /// Event processor for RTP processing events
+    event_processor: Arc<SessionEventProcessor>,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -51,41 +55,62 @@ impl Default for ZeroCopyConfig {
     }
 }
 
-/// RTP processing performance metrics
-#[derive(Debug, Clone)]
-pub struct RtpProcessingMetrics {
-    pub zero_copy_packets_processed: u64,
-    pub traditional_packets_processed: u64,
-    pub fallback_events: u64,
-    pub average_processing_time_zero_copy: f64, // microseconds
-    pub average_processing_time_traditional: f64, // microseconds
-    pub allocation_reduction_percentage: f32,
-}
+// Import RtpProcessingMetrics from types module
+use super::types::{RtpProcessingMetrics, RtpProcessingType, RtpProcessingMode, RtpBufferPoolStats};
 
 impl MediaManager {
     /// Create a new MediaManager with real MediaSessionController
     pub fn new(local_bind_addr: SocketAddr) -> Self {
+        let event_processor = Arc::new(SessionEventProcessor::new());
+        
         Self {
             controller: Arc::new(MediaSessionController::new()),
             session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             local_bind_addr,
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            event_processor,
         }
     }
     
     /// Create a MediaManager with custom port range
     pub fn with_port_range(local_bind_addr: SocketAddr, base_port: u16, max_port: u16) -> Self {
+        let event_processor = Arc::new(SessionEventProcessor::new());
+        
         Self {
             controller: Arc::new(MediaSessionController::with_port_range(base_port, max_port)),
             session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             local_bind_addr,
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            event_processor,
         }
     }
     
     /// Get the underlying MediaSessionController
     pub fn controller(&self) -> Arc<MediaSessionController> {
         self.controller.clone()
+    }
+    
+    /// Get the event processor for RTP events
+    pub fn event_processor(&self) -> Arc<SessionEventProcessor> {
+        self.event_processor.clone()
+    }
+    
+    /// Start the MediaManager and its event processor
+    pub async fn start(&self) -> super::MediaResult<()> {
+        self.event_processor.start().await
+            .map_err(|e| MediaError::internal(&format!("Failed to start event processor: {}", e)))?;
+        
+        tracing::info!("✅ MediaManager started with event processing enabled");
+        Ok(())
+    }
+    
+    /// Stop the MediaManager and its event processor
+    pub async fn stop(&self) -> super::MediaResult<()> {
+        self.event_processor.stop().await
+            .map_err(|e| MediaError::internal(&format!("Failed to stop event processor: {}", e)))?;
+        
+        tracing::info!("✅ MediaManager stopped");
+        Ok(())
     }
     
     /// Process RTP packet with zero-copy optimization
@@ -117,14 +142,53 @@ impl MediaManager {
                 if config.monitoring_enabled {
                     tracing::debug!("✅ Zero-copy RTP processing completed for session {} in {:?}", 
                                   session_id, processing_duration);
+                    
+                    // Publish RTP packet processed event
+                    let metrics = RtpProcessingMetrics {
+                        zero_copy_packets_processed: 1,
+                        traditional_packets_processed: 0,
+                        fallback_events: 0,
+                        average_processing_time_zero_copy: processing_duration.as_micros() as f64,
+                        average_processing_time_traditional: 0.0,
+                        allocation_reduction_percentage: 95.0, // Expected reduction
+                    };
+                    
+                    if let Err(e) = self.event_processor.publish_rtp_packet_processed(
+                        session_id.clone(), 
+                        RtpProcessingType::ZeroCopy, 
+                        metrics
+                    ).await {
+                        tracing::warn!("Failed to publish RTP packet processed event: {}", e);
+                    }
                 }
                 Ok(processed_packet)
             }
             Err(e) if config.fallback_enabled => {
                 tracing::info!("🔄 Falling back to traditional RTP processing for session {}", session_id);
+                
+                // Publish RTP processing error event with fallback
+                if let Err(publish_err) = self.event_processor.publish_rtp_processing_error(
+                    session_id.clone(),
+                    format!("Zero-copy processing failed: {}", e),
+                    true,
+                ).await {
+                    tracing::warn!("Failed to publish RTP processing error event: {}", publish_err);
+                }
+                
                 self.process_rtp_packet_traditional(session_id, packet).await
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Publish RTP processing error event without fallback
+                if let Err(publish_err) = self.event_processor.publish_rtp_processing_error(
+                    session_id.clone(),
+                    format!("Zero-copy processing failed: {}", e),
+                    false,
+                ).await {
+                    tracing::warn!("Failed to publish RTP processing error event: {}", publish_err);
+                }
+                
+                Err(e)
+            }
         }
     }
     
@@ -142,10 +206,39 @@ impl MediaManager {
             Ok(processed_packet) => {
                 tracing::debug!("✅ Traditional RTP processing completed for session {} in {:?}", 
                               session_id, processing_duration);
+                
+                // Publish RTP packet processed event for traditional processing
+                let metrics = RtpProcessingMetrics {
+                    zero_copy_packets_processed: 0,
+                    traditional_packets_processed: 1,
+                    fallback_events: 0,
+                    average_processing_time_zero_copy: 0.0,
+                    average_processing_time_traditional: processing_duration.as_micros() as f64,
+                    allocation_reduction_percentage: 0.0, // No reduction for traditional processing
+                };
+                
+                if let Err(e) = self.event_processor.publish_rtp_packet_processed(
+                    session_id.clone(), 
+                    RtpProcessingType::Traditional, 
+                    metrics
+                ).await {
+                    tracing::warn!("Failed to publish RTP packet processed event: {}", e);
+                }
+                
                 Ok(processed_packet)
             }
             Err(e) => {
                 tracing::error!("❌ Traditional RTP processing failed for session {}: {}", session_id, e);
+                
+                // Publish RTP processing error event for traditional processing failure
+                if let Err(publish_err) = self.event_processor.publish_rtp_processing_error(
+                    session_id.clone(),
+                    format!("Traditional processing failed: {}", e),
+                    false, // No fallback from traditional processing
+                ).await {
+                    tracing::warn!("Failed to publish RTP processing error event: {}", publish_err);
+                }
+                
                 Err(e)
             }
         }
@@ -156,13 +249,55 @@ impl MediaManager {
         self.controller.get_rtp_buffer_pool_stats()
     }
     
+    /// Publish RTP buffer pool statistics update event
+    pub async fn publish_rtp_buffer_pool_update(&self) -> super::MediaResult<()> {
+        let pool_stats = self.get_rtp_buffer_pool_stats();
+        let rtp_stats = RtpBufferPoolStats::from(pool_stats);
+        
+        if let Err(e) = self.event_processor.publish_rtp_buffer_pool_update(rtp_stats).await {
+            tracing::warn!("Failed to publish RTP buffer pool update event: {}", e);
+            return Err(MediaError::internal(&format!("Failed to publish buffer pool update: {}", e)));
+        }
+        
+        Ok(())
+    }
+    
     /// Enable/disable zero-copy processing for a session
     pub async fn set_zero_copy_processing(&self, session_id: &SessionId, enabled: bool) -> super::MediaResult<()> {
         tracing::info!("Setting zero-copy processing for session {} to: {}", session_id, enabled);
         
-        let mut configs = self.zero_copy_config.write().await;
-        let config = configs.entry(session_id.clone()).or_default();
-        config.enabled = enabled;
+        let old_mode = {
+            let configs = self.zero_copy_config.read().await;
+            let current_config = configs.get(session_id).cloned().unwrap_or_default();
+            if current_config.enabled {
+                RtpProcessingMode::ZeroCopyPreferred
+            } else {
+                RtpProcessingMode::TraditionalOnly
+            }
+        };
+        
+        {
+            let mut configs = self.zero_copy_config.write().await;
+            let config = configs.entry(session_id.clone()).or_default();
+            config.enabled = enabled;
+        }
+        
+        let new_mode = if enabled {
+            RtpProcessingMode::ZeroCopyPreferred
+        } else {
+            RtpProcessingMode::TraditionalOnly
+        };
+        
+        // Publish RTP processing mode changed event if mode actually changed
+        if std::mem::discriminant(&old_mode) != std::mem::discriminant(&new_mode) {
+            if let Err(e) = self.event_processor.publish_rtp_processing_mode_changed(
+                session_id.clone(),
+                old_mode,
+                new_mode,
+            ).await {
+                tracing::warn!("Failed to publish RTP processing mode changed event: {}", e);
+            }
+        }
         
         tracing::debug!("✅ Zero-copy processing configuration updated for session {}", session_id);
         Ok(())
@@ -595,8 +730,10 @@ mod tests {
         assert!(sdp_content.contains("a=rtpmap:0 PCMU/8000"));
         assert!(sdp_content.contains("a=rtpmap:8 PCMA/8000"));
         
-        // Verify SDP contains allocated port
-        assert!(sdp_content.contains("1000")); // Should contain port from 10000-20000 range
+        // Verify SDP contains the allocated port from the media session
+        let media_info = manager.get_media_info(&session_id).await.unwrap().unwrap();
+        let allocated_port = media_info.local_rtp_port.unwrap();
+        assert!(sdp_content.contains(&allocated_port.to_string())); // Should contain the actual allocated port
     }
     
     #[tokio::test]

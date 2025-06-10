@@ -72,8 +72,8 @@ async fn test_call_establishment_between_managers() {
     assert_eq!(call.from, expected_from);
     assert_eq!(call.to, expected_to);
     
-    // Check that session exists
-    verify_session_exists(&manager_a, call.id(), Some(&CallState::Initiating)).await.unwrap();
+    // Check that session exists (should be Active after INVITE/200OK/ACK)
+    verify_session_exists(&manager_a, call.id(), Some(&CallState::Active)).await.unwrap();
     
     // Verify callee received the call
     if let Some(_callee_id) = callee_session_id {

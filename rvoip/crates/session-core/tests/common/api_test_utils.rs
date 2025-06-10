@@ -123,7 +123,7 @@ impl ApiBuilderTestHelper {
 
     /// Create a test SessionManagerBuilder with common test settings
     pub fn create_test_builder(&self) -> SessionManagerBuilder {
-        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         SessionManagerBuilder::new()
             .with_sip_port(0) // Use random port for testing
@@ -135,7 +135,7 @@ impl ApiBuilderTestHelper {
 
     /// Create a P2P test builder
     pub fn create_p2p_builder(&self) -> SessionManagerBuilder {
-        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         SessionManagerBuilder::new()
             .with_sip_port(0)
@@ -166,7 +166,7 @@ impl ApiBuilderTestHelper {
                 .with_sip_bind_address("127.0.0.1")
                 .with_from_uri("sip:user@example.com")
                 .with_media_ports(10000, 20000)
-                .with_handler(Arc::new(TestCallHandler::new(CallDecision::Accept)))
+                .with_handler(Arc::new(TestCallHandler::new(CallDecision::Accept(None))))
                 .p2p_mode(),
         ]
     }
@@ -307,7 +307,7 @@ impl ApiTypesTestHelper {
     /// Get all possible call decisions for testing
     pub fn get_all_call_decisions(&self) -> Vec<CallDecision> {
         vec![
-            CallDecision::Accept,
+            CallDecision::Accept(None),
             CallDecision::Reject("Test rejection".to_string()),
             CallDecision::Defer,
             CallDecision::Forward("sip:forward@example.com".to_string()),

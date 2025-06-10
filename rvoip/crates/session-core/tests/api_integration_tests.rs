@@ -55,7 +55,7 @@ async fn test_complete_api_workflow() {
         let helper = ApiTypesTestHelper::new();
         
         // 1. Create a handler for incoming calls
-        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         // 2. Build a session manager configuration
         let builder = SessionManagerBuilder::new()
@@ -71,7 +71,7 @@ async fn test_complete_api_workflow() {
         // 4. Process calls through handler
         for call in &incoming_calls {
             let decision = handler.on_incoming_call(call.clone()).await;
-            assert!(matches!(decision, CallDecision::Accept));
+            assert!(matches!(decision, CallDecision::Accept(_)));
         }
         
         // 5. Verify handler tracked all events
@@ -144,7 +144,7 @@ async fn test_api_handler_integration() {
             
             // Test auto handler
             let auto_decision = auto_handler.on_incoming_call(call.clone()).await;
-            assert!(matches!(auto_decision, CallDecision::Accept));
+            assert!(matches!(auto_decision, CallDecision::Accept(_)));
             
             // Test routing handler
             let routing_decision = routing_handler.on_incoming_call(call.clone()).await;
@@ -185,7 +185,7 @@ async fn test_api_builder_and_types_integration() {
             Arc::new(AutoAnswerHandler::default()) as Arc<dyn CallHandler>,
             Arc::new(QueueHandler::new(10)) as Arc<dyn CallHandler>,
             Arc::new(RoutingHandler::new()) as Arc<dyn CallHandler>,
-            Arc::new(TestCallHandler::new(CallDecision::Accept)) as Arc<dyn CallHandler>,
+            Arc::new(TestCallHandler::new(CallDecision::Accept(None))) as Arc<dyn CallHandler>,
         ];
         
         for (i, handler) in handlers.into_iter().enumerate() {
@@ -207,10 +207,10 @@ async fn test_api_builder_and_types_integration() {
             
             // Different handlers should return different decisions
             match i {
-                0 => assert!(matches!(decision, CallDecision::Accept)), // AutoAnswer
+                0 => assert!(matches!(decision, CallDecision::Accept(_))), // AutoAnswer
                 1 => assert!(matches!(decision, CallDecision::Defer)), // Queue
                 2 => assert!(matches!(decision, CallDecision::Reject(_))), // Routing (no routes)
-                3 => assert!(matches!(decision, CallDecision::Accept)), // Test handler
+                3 => assert!(matches!(decision, CallDecision::Accept(_))), // Test handler
                 _ => unreachable!(),
             }
         }
@@ -371,7 +371,7 @@ async fn test_api_performance_integration() {
             ));
             
             // Create handler
-            handlers.push(Arc::new(TestCallHandler::new(CallDecision::Accept)));
+            handlers.push(Arc::new(TestCallHandler::new(CallDecision::Accept(None))));
             
             // Create builder
             builders.push(
@@ -399,7 +399,7 @@ async fn test_api_performance_integration() {
         
         for (i, handler) in handlers.iter().enumerate() {
             let decision = handler.on_incoming_call(incoming_calls[i].clone()).await;
-            assert!(matches!(decision, CallDecision::Accept));
+            assert!(matches!(decision, CallDecision::Accept(_)));
         }
         
         let handler_duration = handler_start.elapsed();
@@ -445,7 +445,7 @@ async fn test_api_concurrent_integration() {
                     std::collections::HashMap::new(),
                 );
                 
-                let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+                let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
                 
                 let builder = SessionManagerBuilder::new()
                     .with_sip_port(5060 + i as u16)
@@ -453,7 +453,7 @@ async fn test_api_concurrent_integration() {
                 
                 // Process a call through the handler
                 let decision = handler.on_incoming_call(incoming_call.clone()).await;
-                assert!(matches!(decision, CallDecision::Accept));
+                assert!(matches!(decision, CallDecision::Accept(_)));
                 
                 // Return data for verification
                 (session_id, call_session, incoming_call, handler, builder)

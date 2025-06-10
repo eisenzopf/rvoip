@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use rvoip_session_core::{SessionManager, SessionError};
 use rvoip_session_core::media::MediaConfig;
+use rvoip_session_core::media::DialogId;
 use uuid::Uuid;
 
 mod common;
@@ -24,7 +25,7 @@ async fn test_session_establishment_latency() {
     
     // Measure real media session establishment time multiple times
     for i in 0..10 {
-        let dialog_id = format!("latency-test-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("latency-test-{}-{}", i, Uuid::new_v4()));
         let session_config = MediaConfig::default();
         let local_addr = format!("127.0.0.1:{}", 12000 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -45,7 +46,7 @@ async fn test_session_establishment_latency() {
         assert_eq!(session_info.dialog_id, dialog_id);
         
         // Clean up
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
         
         println!("Media session {} establishment time: {:?}", i, establishment_time);
     }
@@ -81,7 +82,7 @@ async fn test_concurrent_session_scalability() {
         
         // Create concurrent media sessions
         for i in 0..session_count {
-            let dialog_id = format!("concurrent-{}-{}-{}", session_count, i, Uuid::new_v4());
+            let dialog_id = DialogId::new(&format!("concurrent-{}-{}-{}", session_count, i, Uuid::new_v4()));
             let session_config = MediaConfig::default();
             let local_addr = format!("127.0.0.1:{}", 13000 + i * 4).parse().unwrap();
             let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -106,7 +107,7 @@ async fn test_concurrent_session_scalability() {
         // Measure cleanup time
         let cleanup_start = Instant::now();
         for session_id in session_ids {
-            media_engine.stop_media(session_id).await.unwrap();
+            media_engine.stop_media(&session_id).await.unwrap();
         }
         let cleanup_time = cleanup_start.elapsed();
         
@@ -144,7 +145,7 @@ async fn test_codec_performance_under_load() {
                     let engine = engine.clone();
                     async move {
                         // Create a test dialog ID and media config
-                        let dialog_id = format!("test-{}", Uuid::new_v4());
+                        let dialog_id = DialogId::new(&format!("test-{}", Uuid::new_v4()));
                         let session_config = MediaConfig::default();
                         let local_addr = "127.0.0.1:10000".parse().unwrap();
                         let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -160,7 +161,7 @@ async fn test_codec_performance_under_load() {
                                 Box::<dyn std::error::Error + Send + Sync>::from(error_string)
                             })?;
                         
-                        engine.stop_media(dialog_id).await
+                        engine.stop_media(&dialog_id).await
                             .map_err(|e| {
                                 let error_string = format!("{:?}", e);
                                 Box::<dyn std::error::Error + Send + Sync>::from(error_string)
@@ -203,7 +204,7 @@ async fn test_memory_usage_and_leak_detection() {
         // Create multiple media sessions
         let mut session_ids = Vec::new();
         for i in 0..3 { // 3 sessions per cycle
-            let dialog_id = format!("memory-test-{}-{}-{}", cycle, i, Uuid::new_v4());
+            let dialog_id = DialogId::new(&format!("memory-test-{}-{}-{}", cycle, i, Uuid::new_v4()));
             let session_config = MediaConfig::default();
             let local_addr = format!("127.0.0.1:{}", 15000 + cycle * 20 + i * 4).parse().unwrap();
             let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -220,7 +221,7 @@ async fn test_memory_usage_and_leak_detection() {
         
         // Clean up all sessions
         for session_id in session_ids {
-            media_engine.stop_media(session_id).await.unwrap();
+            media_engine.stop_media(&session_id).await.unwrap();
         }
         
         // Allow some time for cleanup
@@ -251,7 +252,7 @@ async fn test_realtime_audio_processing_latency() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create a test media session using proper API
-    let dialog_id = format!("latency-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("latency-test-{}", Uuid::new_v4()));
     let session_config = MediaConfig::default();
     let local_addr = "127.0.0.1:14000".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -294,7 +295,7 @@ async fn test_realtime_audio_processing_latency() {
     assert!(*max_latency < Duration::from_millis(100), "Max processing latency should be < 100ms, got {:?}", max_latency);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real media performance under network stress conditions
@@ -321,7 +322,7 @@ async fn test_performance_under_network_stress() {
         println!("Testing performance under {} network conditions", condition.name);
         
         // Create media session for each network condition
-        let dialog_id = format!("network-stress-{}-{}", condition.name, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("network-stress-{}-{}", condition.name, Uuid::new_v4()));
         let session_config = MediaConfig::default();
         let local_addr = format!("127.0.0.1:{}", 16000 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -354,7 +355,7 @@ async fn test_performance_under_network_stress() {
                "Establishment should complete within 2s even under {} conditions", condition.name);
         
         // Clean up
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
     }
 }
 
@@ -374,7 +375,7 @@ async fn test_cpu_usage_characteristics() {
         
         // Create multiple sessions to test CPU load
         for i in 0..session_count {
-            let dialog_id = format!("cpu-test-{}-{}-{}", session_count, i, Uuid::new_v4());
+            let dialog_id = DialogId::new(&format!("cpu-test-{}-{}-{}", session_count, i, Uuid::new_v4()));
             let session_config = MediaConfig::default();
             let local_addr = format!("127.0.0.1:{}", 18000 + i * 4).parse().unwrap();
             let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -395,7 +396,7 @@ async fn test_cpu_usage_characteristics() {
         // Clean up all sessions
         let cleanup_start = Instant::now();
         for session_id in session_ids {
-            media_engine.stop_media(session_id).await.unwrap();
+            media_engine.stop_media(&session_id).await.unwrap();
         }
         let cleanup_time = cleanup_start.elapsed();
         
@@ -455,7 +456,7 @@ async fn test_performance_monitoring_overhead() {
     // Baseline test - simple media session operations
     let baseline_start = Instant::now();
     for i in 0..operation_count {
-        let dialog_id = format!("baseline-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("baseline-{}-{}", i, Uuid::new_v4()));
         let session_config = MediaConfig::default();
         let local_addr = format!("127.0.0.1:{}", 19000 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
@@ -465,14 +466,14 @@ async fn test_performance_monitoring_overhead() {
         );
         
         media_engine.start_media(dialog_id.clone(), media_config).await.unwrap();
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
     }
     let baseline_duration = baseline_start.elapsed();
     
     // Test with monitoring-like operations (getting session info)
     let monitored_start = Instant::now();
     for i in 0..operation_count {
-        let dialog_id = format!("monitored-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("monitored-{}-{}", i, Uuid::new_v4()));
         let session_config = MediaConfig {
             quality_monitoring: true, // Enable monitoring
             ..MediaConfig::default()
@@ -489,7 +490,7 @@ async fn test_performance_monitoring_overhead() {
         // Simulate monitoring overhead by getting session info
         let _session_info = media_engine.get_session_info(&dialog_id).await.unwrap();
         
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
     }
     let monitored_duration = monitored_start.elapsed();
     

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
-use rvoip_session_core::{SessionManager, SessionError, api::types::CallState};
+use rvoip_session_core::{SessionManager, SessionError, api::types::CallState, api::types::SessionId};
+use rvoip_session_core::media::DialogId;
 
 mod common;
 use common::*;
@@ -21,7 +22,7 @@ async fn test_media_session_created_on_sip_establishment() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Test media session creation (simulating SIP session establishment)
-    let dialog_id = format!("sip-establish-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("sip-establish-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -47,7 +48,7 @@ async fn test_media_session_created_on_sip_establishment() {
              dialog_id, session_info.rtp_port);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test that real media sessions are properly destroyed with cleanup
@@ -56,7 +57,7 @@ async fn test_media_session_destroyed_on_sip_termination() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create media session (simulating SIP call establishment)
-    let dialog_id = format!("sip-terminate-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("sip-terminate-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -79,7 +80,7 @@ async fn test_media_session_destroyed_on_sip_termination() {
     println!("✅ Media session established: {}", dialog_id);
     
     // Terminate media session (simulating SIP BYE processing)
-    media_engine.stop_media(dialog_id.clone()).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     println!("✅ Media session terminated: {}", dialog_id);
     
     // Verify session is destroyed (should fail to get session info)
@@ -94,7 +95,7 @@ async fn test_media_session_state_synchronization() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Test media session state transitions (simulating SIP state changes)
-    let dialog_id = format!("state-sync-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("state-sync-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -119,7 +120,7 @@ async fn test_media_session_state_synchronization() {
     println!("✅ State: Active -> Media ready (RTP port: {:?})", session_info.rtp_port);
     
     // State 3: Terminating (clean shutdown)
-    media_engine.stop_media(dialog_id.clone()).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     println!("✅ State: Terminating -> Media session cleaned up");
     
     // Verify state consistency
@@ -139,7 +140,7 @@ async fn test_concurrent_media_session_lifecycle() {
     
     // Create multiple media sessions concurrently
     for i in 0..session_count {
-        let dialog_id = format!("concurrent-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("concurrent-{}-{}", i, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -172,7 +173,7 @@ async fn test_concurrent_media_session_lifecycle() {
     for (order, &index) in termination_order.iter().enumerate() {
         if index < session_ids.len() {
             let dialog_id = &session_ids[index];
-            media_engine.stop_media(dialog_id.clone()).await.unwrap();
+            media_engine.stop_media(&dialog_id).await.unwrap();
             println!("✅ Session {} terminated in order {}: {}", index, order, dialog_id);
         }
     }
@@ -192,7 +193,7 @@ async fn test_media_session_reinvite_handling() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Establish initial media session (simulating initial SIP INVITE)
-    let dialog_id = format!("reinvite-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("reinvite-{}", Uuid::new_v4()));
     let initial_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -226,7 +227,7 @@ async fn test_media_session_reinvite_handling() {
     );
     
     // Stop and restart with updated configuration (simulating re-INVITE processing)
-    media_engine.stop_media(dialog_id.clone()).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     media_engine.start_media(dialog_id.clone(), updated_media_config).await.unwrap();
     
     let updated_session = media_engine.get_session_info(&dialog_id).await.unwrap();
@@ -242,7 +243,7 @@ async fn test_media_session_reinvite_handling() {
     assert_eq!(verification_session.dialog_id, dialog_id, "Session should remain functional");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     println!("✅ Re-INVITE handling validated - media continuity maintained");
 }
 
@@ -259,7 +260,7 @@ async fn test_media_session_cleanup_on_abnormal_termination() {
     ];
     
     for (scenario_name, port) in scenarios {
-        let dialog_id = format!("abnormal-{}-{}", scenario_name, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("abnormal-{}-{}", scenario_name, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -284,17 +285,17 @@ async fn test_media_session_cleanup_on_abnormal_termination() {
             "timeout_scenario" => {
                 // Simulate timeout - force stop after brief delay
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                media_engine.stop_media(dialog_id.clone()).await.unwrap();
+                media_engine.stop_media(&dialog_id).await.unwrap();
                 println!("✅ {} - Simulated timeout cleanup", scenario_name);
             },
             "network_failure" => {
                 // Simulate network failure - immediate stop
-                media_engine.stop_media(dialog_id.clone()).await.unwrap();
+                media_engine.stop_media(&dialog_id).await.unwrap();
                 println!("✅ {} - Simulated network failure cleanup", scenario_name);
             },
             "crash_simulation" => {
                 // Simulate process crash recovery - force cleanup
-                media_engine.stop_media(dialog_id.clone()).await.unwrap();
+                media_engine.stop_media(&dialog_id).await.unwrap();
                 println!("✅ {} - Simulated crash recovery cleanup", scenario_name);
             },
             _ => unreachable!(),
@@ -315,7 +316,7 @@ async fn test_media_session_early_media_support() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Test early media scenario (simulating SIP 183 Session Progress)
-    let dialog_id = format!("early-media-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("early-media-{}", Uuid::new_v4()));
     
     // Phase 1: Early media setup (simulating 183 Session Progress with SDP)
     let early_config = rvoip_session_core::media::MediaConfig {
@@ -356,7 +357,7 @@ async fn test_media_session_early_media_support() {
     );
     
     // Stop early media and start full media session (simulating call answer)
-    media_engine.stop_media(dialog_id.clone()).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     media_engine.start_media(dialog_id.clone(), full_media_config).await.unwrap();
     
     let full_session = media_engine.get_session_info(&dialog_id).await.unwrap();
@@ -368,7 +369,7 @@ async fn test_media_session_early_media_support() {
     println!("✅ Early media transition successful - no interruption in media path");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     println!("✅ Early media support validated - smooth transition to full media");
 }
 
@@ -385,7 +386,7 @@ async fn test_media_session_resource_management() {
     
     // Phase 1: Create sessions up to reasonable limits
     for i in 0..max_sessions {
-        let dialog_id = format!("resource-test-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("resource-test-{}-{}", i, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -430,7 +431,7 @@ async fn test_media_session_resource_management() {
     for i in 0..cleanup_count {
         if i < active_sessions.len() {
             let dialog_id = &active_sessions[i];
-            media_engine.stop_media(dialog_id.clone()).await.unwrap();
+            media_engine.stop_media(&dialog_id).await.unwrap();
             println!("✅ Cleaned up session {}: {}", i, dialog_id);
         }
     }
@@ -447,7 +448,7 @@ async fn test_media_session_resource_management() {
     // Phase 4: Test resource reuse by creating new sessions
     let reuse_count = 2;
     for i in 0..reuse_count {
-        let dialog_id = format!("reuse-test-{}-{}", i, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("reuse-test-{}-{}", i, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -474,7 +475,7 @@ async fn test_media_session_resource_management() {
     
     // Clean up all remaining sessions
     for dialog_id in &active_sessions[cleanup_count..] {
-        let _ = media_engine.stop_media(dialog_id.clone()).await;
+        let _ = media_engine.stop_media(&dialog_id).await;
     }
     
     println!("✅ Resource management validation complete - proper allocation, cleanup, and reuse");

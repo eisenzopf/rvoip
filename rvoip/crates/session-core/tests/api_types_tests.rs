@@ -261,7 +261,7 @@ async fn test_call_decision_types() {
         assert_eq!(decisions.len(), 4);
         
         // Verify each decision type
-        let accept_found = decisions.iter().any(|d| matches!(d, CallDecision::Accept));
+        let accept_found = decisions.iter().any(|d| matches!(d, CallDecision::Accept(_)));
         let reject_found = decisions.iter().any(|d| matches!(d, CallDecision::Reject(_)));
         let defer_found = decisions.iter().any(|d| matches!(d, CallDecision::Defer));
         let forward_found = decisions.iter().any(|d| matches!(d, CallDecision::Forward(_)));
@@ -272,10 +272,11 @@ async fn test_call_decision_types() {
         assert!(forward_found, "Forward decision not found");
         
         // Test specific decision values
-        for decision in decisions {
+        let mut accept_count = 0;
+        for decision in &decisions {
             match decision {
-                CallDecision::Accept => {
-                    // No additional data to verify
+                CallDecision::Accept(_) => {
+                    accept_count += 1;
                 }
                 CallDecision::Reject(reason) => {
                     assert!(!reason.is_empty(), "Reject reason should not be empty");

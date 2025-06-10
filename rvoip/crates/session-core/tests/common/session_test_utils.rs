@@ -99,7 +99,7 @@ impl SessionImplTestHelper {
     pub async fn update_session_state(&self, session_id: &SessionId, new_state: CallState) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
-            session.update_state(new_state)?;
+            session.update_call_state(new_state)?;
             Ok(())
         } else {
             Err(SessionError::session_not_found(&session_id.to_string()))
@@ -109,7 +109,7 @@ impl SessionImplTestHelper {
     pub async fn verify_session_state(&self, session_id: &SessionId, expected_state: CallState) {
         let session = self.get_session(session_id).await
             .expect(&format!("Session {} should exist", session_id));
-        assert_eq!(session.state, expected_state, 
+        assert_eq!(*session.state(), expected_state, 
                   "Session {} state mismatch", session_id);
     }
 
@@ -486,7 +486,7 @@ impl SessionIntegrationHelper {
             .ok_or_else(|| SessionError::session_not_found(&session_id.to_string()))?;
         
         // Validate transition
-        self.state_helper.validate_transition(current_session.state.clone(), new_state.clone()).await?;
+        self.state_helper.validate_transition(current_session.state().clone(), new_state.clone()).await?;
         
         // Perform transition
         self.session_helper.update_session_state(session_id, new_state).await?;

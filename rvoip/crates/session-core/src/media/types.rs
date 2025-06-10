@@ -198,7 +198,7 @@ impl Default for ZeroCopyConfig {
 }
 
 /// RTP processing performance metrics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RtpProcessingMetrics {
     pub zero_copy_packets_processed: u64,
     pub traditional_packets_processed: u64,
@@ -209,7 +209,7 @@ pub struct RtpProcessingMetrics {
 }
 
 /// RTP processing types for events
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RtpProcessingType {
     ZeroCopy,
     Traditional,
@@ -217,7 +217,7 @@ pub enum RtpProcessingType {
 }
 
 /// RTP processing modes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RtpProcessingMode {
     ZeroCopyPreferred,
     TraditionalOnly,
@@ -225,7 +225,7 @@ pub enum RtpProcessingMode {
 }
 
 /// RTP buffer pool statistics wrapper
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RtpBufferPoolStats {
     pub total_buffers: usize,
     pub available_buffers: usize,

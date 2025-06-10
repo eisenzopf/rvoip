@@ -106,6 +106,23 @@ impl SessionCoordinator {
             SessionEvent::Error { session_id, error } => {
                 self.handle_error_event(session_id, error).await?;
             }
+            
+            // NEW: RTP Processing Events (Phase 16.2)
+            SessionEvent::RtpPacketProcessed { session_id, processing_type, performance_metrics } => {
+                self.handle_rtp_packet_processed(session_id, processing_type, performance_metrics).await?;
+            }
+            
+            SessionEvent::RtpProcessingModeChanged { session_id, old_mode, new_mode } => {
+                self.handle_rtp_processing_mode_changed(session_id, old_mode, new_mode).await?;
+            }
+            
+            SessionEvent::RtpProcessingError { session_id, error, fallback_applied } => {
+                self.handle_rtp_processing_error(session_id, error, fallback_applied).await?;
+            }
+            
+            SessionEvent::RtpBufferPoolUpdate { stats } => {
+                self.handle_rtp_buffer_pool_update(stats).await?;
+            }
         }
         
         Ok(())
@@ -382,6 +399,128 @@ impl SessionCoordinator {
     pub async fn process_sdp_answer(&self, session_id: &SessionId, sdp: &str) -> Result<(), SessionError> {
         self.media_coordinator.process_sdp_answer(session_id, sdp).await
             .map_err(|e| SessionError::internal(&format!("Failed to process SDP answer: {}", e)))
+    }
+    
+    // ========== NEW: RTP Processing Event Handlers (Phase 16.2) ==========
+    
+    /// Handle RTP packet processed event
+    async fn handle_rtp_packet_processed(
+        &self,
+        session_id: SessionId,
+        processing_type: crate::media::types::RtpProcessingType,
+        performance_metrics: crate::media::types::RtpProcessingMetrics,
+    ) -> Result<(), SessionError> {
+        tracing::debug!(
+            "RTP packet processed for session {}: {:?} - zero_copy: {}, traditional: {}, fallbacks: {}",
+            session_id,
+            processing_type,
+            performance_metrics.zero_copy_packets_processed,
+            performance_metrics.traditional_packets_processed,
+            performance_metrics.fallback_events
+        );
+        
+        // Log performance improvements
+        if performance_metrics.allocation_reduction_percentage > 0.0 {
+            tracing::debug!(
+                "RTP processing efficiency for session {}: {}% allocation reduction",
+                session_id,
+                performance_metrics.allocation_reduction_percentage
+            );
+        }
+        
+        // Could trigger media coordination actions based on performance metrics
+        // For example, adjust media session parameters based on processing efficiency
+        
+        Ok(())
+    }
+    
+    /// Handle RTP processing mode changed event
+    async fn handle_rtp_processing_mode_changed(
+        &self,
+        session_id: SessionId,
+        old_mode: crate::media::types::RtpProcessingMode,
+        new_mode: crate::media::types::RtpProcessingMode,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "RTP processing mode changed for session {}: {:?} → {:?}",
+            session_id, old_mode, new_mode
+        );
+        
+        // Notify media coordinator about processing mode change
+        // This could affect how media sessions are managed
+        match new_mode {
+            crate::media::types::RtpProcessingMode::ZeroCopyPreferred => {
+                tracing::debug!("Session {} now using zero-copy RTP processing", session_id);
+            }
+            crate::media::types::RtpProcessingMode::TraditionalOnly => {
+                tracing::debug!("Session {} using traditional RTP processing", session_id);
+            }
+            crate::media::types::RtpProcessingMode::Adaptive => {
+                tracing::debug!("Session {} using adaptive RTP processing", session_id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle RTP processing error event
+    async fn handle_rtp_processing_error(
+        &self,
+        session_id: SessionId,
+        error: String,
+        fallback_applied: bool,
+    ) -> Result<(), SessionError> {
+        if fallback_applied {
+            tracing::warn!(
+                "RTP processing error for session {} (fallback applied): {}",
+                session_id, error
+            );
+            
+            // Fallback was applied, continue with degraded performance
+            // Could notify monitoring systems about the degradation
+        } else {
+            tracing::error!(
+                "Critical RTP processing error for session {} (no fallback): {}",
+                session_id, error
+            );
+            
+            // No fallback available - this is a serious issue
+            // Consider terminating the media session to prevent further issues
+            tracing::warn!("Considering media session termination for session {} due to critical RTP error", session_id);
+            
+            // TODO: Implement policy for handling critical RTP processing failures
+            // For now, we'll just log the error and continue
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle RTP buffer pool update event
+    async fn handle_rtp_buffer_pool_update(
+        &self,
+        stats: crate::media::types::RtpBufferPoolStats,
+    ) -> Result<(), SessionError> {
+        tracing::debug!(
+            "RTP buffer pool update: {}/{} buffers in use ({}% efficiency)",
+            stats.in_use_buffers,
+            stats.total_buffers,
+            stats.efficiency_percentage
+        );
+        
+        // Monitor buffer pool health and efficiency
+        if stats.efficiency_percentage < 50.0 {
+            tracing::warn!(
+                "Low RTP buffer pool efficiency: {}% - consider tuning pool size",
+                stats.efficiency_percentage
+            );
+        }
+        
+        if stats.available_buffers == 0 {
+            tracing::warn!("RTP buffer pool exhausted - all {} buffers in use", stats.total_buffers);
+            // Could trigger automatic pool expansion or session throttling
+        }
+        
+        Ok(())
     }
 }
 

@@ -17,7 +17,7 @@ pub mod bridge;
 pub mod types;
 
 // Re-exports for convenience
-pub use manager::{MediaManager, ZeroCopyConfig, RtpProcessingMetrics};
+pub use manager::{MediaManager, ZeroCopyConfig};
 pub use coordinator::SessionMediaCoordinator;
 pub use config::MediaConfigConverter;
 pub use bridge::MediaBridge;
@@ -59,6 +59,13 @@ pub enum MediaError {
     
     #[error("RTP processing fallback failed: {message}")]
     RtpProcessingFallback { message: String },
+}
+
+impl MediaError {
+    /// Create an internal error with a custom message
+    pub fn internal(message: &str) -> Self {
+        Self::Configuration { message: message.to_string() }
+    }
 }
 
 impl From<MediaError> for crate::errors::SessionError {

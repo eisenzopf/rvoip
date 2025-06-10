@@ -38,7 +38,7 @@ impl SubscriptionTestHandler {
 impl CallHandler for SubscriptionTestHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         match self.behavior {
-            HandlerBehavior::AcceptAll => CallDecision::Accept,
+            HandlerBehavior::AcceptAll => CallDecision::Accept(None),
             HandlerBehavior::RejectAll => CallDecision::Reject("Test rejection".to_string()),
             HandlerBehavior::AcceptSelective => {
                 // Accept calls with specific patterns for testing

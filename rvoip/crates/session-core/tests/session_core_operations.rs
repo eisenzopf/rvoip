@@ -22,8 +22,8 @@ async fn test_session_creation() {
         let session = SessionImpl::new(session_id.clone());
         
         // Verify initial state
-        assert_eq!(session.id, session_id);
-        assert_eq!(session.state, CallState::Initiating);
+        assert_eq!(session.call_session.id, session_id);
+        assert_eq!(*session.state(), CallState::Initiating);
         
         println!("Completed test_session_creation");
     }).await;
@@ -316,13 +316,13 @@ async fn test_session_edge_cases() {
         // Test with empty session ID (should still work)
         let empty_session_id = SessionId("".to_string());
         let session = SessionImpl::new(empty_session_id.clone());
-        assert_eq!(session.id, empty_session_id);
+        assert_eq!(session.call_session.id, empty_session_id);
         
         // Test with very long session ID
         let long_id = "a".repeat(1000);
         let long_session_id = SessionId(long_id);
         let session = SessionImpl::new(long_session_id.clone());
-        assert_eq!(session.id, long_session_id);
+        assert_eq!(session.call_session.id, long_session_id);
         
         // Test rapid state changes
         let session_id = helper.create_test_session().await;
@@ -356,7 +356,7 @@ async fn test_session_helper_functionality() {
         // Test session retrieval
         let retrieved_session = helper.get_session(&active_session).await;
         assert!(retrieved_session.is_some());
-        assert_eq!(retrieved_session.unwrap().state, CallState::Active);
+        assert_eq!(*retrieved_session.unwrap().state(), CallState::Active);
         
         // Test session count tracking
         assert_eq!(helper.session_count().await, 2);

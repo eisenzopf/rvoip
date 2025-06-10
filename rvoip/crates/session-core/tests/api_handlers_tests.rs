@@ -22,7 +22,7 @@ async fn test_auto_answer_handler() {
         
         for call in calls {
             let decision = handler.on_incoming_call(call.clone()).await;
-            assert!(matches!(decision, CallDecision::Accept));
+            assert!(matches!(decision, CallDecision::Accept(_)));
         }
         
         // Test call ended event
@@ -185,7 +185,7 @@ async fn test_test_call_handler() {
     let result = time::timeout(Duration::from_secs(5), async {
         println!("Starting test_test_call_handler");
         
-        let handler = TestCallHandler::new(CallDecision::Accept);
+        let handler = TestCallHandler::new(CallDecision::Accept(None));
         let helper = ApiTypesTestHelper::new();
         
         // Test initial state
@@ -196,7 +196,7 @@ async fn test_test_call_handler() {
         let calls = helper.create_test_incoming_calls(3);
         for call in &calls {
             let decision = handler.on_incoming_call(call.clone()).await;
-            assert!(matches!(decision, CallDecision::Accept));
+            assert!(matches!(decision, CallDecision::Accept(_)));
         }
         
         assert_eq!(handler.incoming_call_count(), 3);
@@ -240,7 +240,7 @@ async fn test_handler_with_different_decisions() {
             let result_decision = handler.on_incoming_call(call).await;
             
             match (&decision, &result_decision) {
-                (CallDecision::Accept, CallDecision::Accept) => {},
+                (CallDecision::Accept(_), CallDecision::Accept(_)) => {},
                 (CallDecision::Defer, CallDecision::Defer) => {},
                 (CallDecision::Reject(reason1), CallDecision::Reject(reason2)) => {
                     assert_eq!(reason1, reason2);
@@ -311,7 +311,7 @@ async fn test_handlers_with_edge_cases() {
         
         let auto_handler = AutoAnswerHandler::default();
         let decision = auto_handler.on_incoming_call(empty_call.clone()).await;
-        assert!(matches!(decision, CallDecision::Accept));
+        assert!(matches!(decision, CallDecision::Accept(_)));
         
         // Test with unicode data
         let unicode_call = IncomingCall {
@@ -372,7 +372,7 @@ async fn test_handlers_performance() {
             };
             
             let decision = auto_handler.on_incoming_call(call).await;
-            assert!(matches!(decision, CallDecision::Accept));
+            assert!(matches!(decision, CallDecision::Accept(_)));
         }
         
         let auto_duration = start.elapsed();

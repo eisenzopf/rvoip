@@ -70,8 +70,8 @@ async fn test_basic_bye_termination() {
     let (call, _callee_session_id) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
     let session_id = call.id().clone();
     
-    // Verify session exists before termination
-    verify_session_exists(&manager_a, &session_id, Some(&CallState::Initiating)).await.unwrap();
+    // Verify session exists before termination (should be Active after INVITE/200OK/ACK)
+    verify_session_exists(&manager_a, &session_id, Some(&CallState::Active)).await.unwrap();
     
     // Terminate with BYE
     let terminate_result = manager_a.terminate_session(&session_id).await;
@@ -325,8 +325,8 @@ async fn test_bye_session_state_transitions() {
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
     let session_id = call.id().clone();
     
-    // Verify initial state
-    verify_session_exists(&manager_a, &session_id, Some(&CallState::Initiating)).await.unwrap();
+    // Verify initial state (should be Active after INVITE/200OK/ACK)
+    verify_session_exists(&manager_a, &session_id, Some(&CallState::Active)).await.unwrap();
     
     // Terminate session
     let terminate_result = manager_a.terminate_session(&session_id).await;

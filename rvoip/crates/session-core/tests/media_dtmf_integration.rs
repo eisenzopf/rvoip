@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use rvoip_session_core::{SessionManager, SessionError, api::types::SessionId};
+use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::media::DialogId;
 use uuid::Uuid;
 
 mod common;
@@ -33,7 +34,7 @@ async fn test_dtmf_generation_sip_info_coordination() {
     }
     
     // Test media session with DTMF support
-    let dialog_id = format!("dtmf-test-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-test-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -56,7 +57,7 @@ async fn test_dtmf_generation_sip_info_coordination() {
     assert!(session_info.rtp_port.is_some(), "RTP port should be allocated for DTMF session");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test real in-band DTMF detection from audio
@@ -82,7 +83,7 @@ async fn test_inband_dtmf_detection() {
     assert_eq!(combined_audio.len(), 5 * (1600 + 400), "Combined audio should be 5 digits * (200ms + 50ms) * 8kHz");
     
     // Test with media session that could analyze DTMF
-    let dialog_id = format!("dtmf-detect-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-detect-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -103,7 +104,7 @@ async fn test_inband_dtmf_detection() {
     assert_eq!(session_info.dialog_id, dialog_id);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test RFC2833 DTMF event capability setup  
@@ -112,7 +113,7 @@ async fn test_rfc2833_dtmf_events() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Test media session with RFC2833 capability
-    let dialog_id = format!("rfc2833-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("rfc2833-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()], // PCMU with RFC2833 events
         port_range: Some((10000, 20000)),
@@ -135,7 +136,7 @@ async fn test_rfc2833_dtmf_events() {
     assert!(session_info.rtp_port.is_some(), "RTP port should be allocated for RFC2833");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test DTMF method negotiation preferences
@@ -150,7 +151,7 @@ async fn test_dtmf_method_negotiation() {
     ];
     
     for (scenario_name, dtmf_support) in dtmf_scenarios {
-        let dialog_id = format!("dtmf-method-{}-{}", scenario_name, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("dtmf-method-{}-{}", scenario_name, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -172,7 +173,7 @@ async fn test_dtmf_method_negotiation() {
         assert_eq!(session_info.dialog_id, dialog_id);
         
         // Clean up
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
     }
 }
 
@@ -199,7 +200,7 @@ async fn test_dtmf_sequence_handling() {
     assert_eq!(sequence_audio.len(), 3 * (800 + 400), "Rapid sequence should have proper timing");
     
     // Test with media session
-    let dialog_id = format!("dtmf-seq-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-seq-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -218,7 +219,7 @@ async fn test_dtmf_sequence_handling() {
     assert_eq!(session_info.dialog_id, dialog_id);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test DTMF during codec changes
@@ -226,7 +227,7 @@ async fn test_dtmf_sequence_handling() {
 async fn test_dtmf_during_codec_changes() {
     let media_engine = create_test_media_engine().await.unwrap();
     
-    let dialog_id = format!("dtmf-codec-change-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-codec-change-{}", Uuid::new_v4()));
     
     // Start with PCMU + DTMF
     let initial_config = rvoip_session_core::media::MediaConfig {
@@ -252,7 +253,7 @@ async fn test_dtmf_during_codec_changes() {
     assert!(!pre_change_dtmf.is_empty(), "Pre-change DTMF should be generated");
     
     // Stop and restart with different codec (simulating re-INVITE)
-    media_engine.stop_media(dialog_id.clone()).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
     
     let new_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMA".to_string()], // Change to PCMA
@@ -276,7 +277,7 @@ async fn test_dtmf_during_codec_changes() {
     assert!(!post_change_dtmf.is_empty(), "Post-change DTMF should be generated");
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test DTMF echo cancellation considerations
@@ -285,8 +286,8 @@ async fn test_dtmf_echo_cancellation() {
     let media_engine = create_test_media_engine().await.unwrap();
     
     // Create bidirectional media sessions for echo testing
-    let local_session_id = format!("dtmf-local-{}", Uuid::new_v4());
-    let remote_session_id = format!("dtmf-remote-{}", Uuid::new_v4());
+    let local_session_id = DialogId::new(&format!("dtmf-local-{}", Uuid::new_v4()));
+    let remote_session_id = DialogId::new(&format!("dtmf-remote-{}", Uuid::new_v4()));
     
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
@@ -324,8 +325,8 @@ async fn test_dtmf_echo_cancellation() {
     assert_eq!(remote_info.dialog_id, remote_session_id);
     
     // Clean up both sessions
-    media_engine.stop_media(local_session_id).await.unwrap();
-    media_engine.stop_media(remote_session_id).await.unwrap();
+    media_engine.stop_media(&local_session_id).await.unwrap();
+    media_engine.stop_media(&remote_session_id).await.unwrap();
 }
 
 /// Test DTMF network resilience with packet simulation
@@ -341,7 +342,7 @@ async fn test_dtmf_network_resilience() {
     ];
     
     for (scenario, codec) in network_scenarios {
-        let dialog_id = format!("dtmf-net-{}-{}", scenario, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("dtmf-net-{}-{}", scenario, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec![codec.to_string()],
             port_range: Some((10000, 20000)),
@@ -367,7 +368,7 @@ async fn test_dtmf_network_resilience() {
         assert_eq!(session_info.dialog_id, dialog_id);
         
         // Clean up
-        media_engine.stop_media(dialog_id).await.unwrap();
+        media_engine.stop_media(&dialog_id).await.unwrap();
     }
 }
 
@@ -396,7 +397,7 @@ async fn test_dtmf_detection_accuracy() {
     assert!(non_dtmf_max > 1000, "Non-DTMF should have good amplitude");
     
     // Test media session with detection capabilities
-    let dialog_id = format!("dtmf-accuracy-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-accuracy-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -415,7 +416,7 @@ async fn test_dtmf_detection_accuracy() {
     assert_eq!(session_info.dialog_id, dialog_id);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test DTMF volume and amplitude control
@@ -446,7 +447,7 @@ async fn test_dtmf_volume_control() {
     }
     
     // Test media session with volume control capabilities
-    let dialog_id = format!("dtmf-volume-{}", Uuid::new_v4());
+    let dialog_id = DialogId::new(&format!("dtmf-volume-{}", Uuid::new_v4()));
     let session_config = rvoip_session_core::media::MediaConfig {
         preferred_codecs: vec!["PCMU".to_string()],
         port_range: Some((10000, 20000)),
@@ -465,7 +466,7 @@ async fn test_dtmf_volume_control() {
     assert_eq!(session_info.dialog_id, dialog_id);
     
     // Clean up
-    media_engine.stop_media(dialog_id).await.unwrap();
+    media_engine.stop_media(&dialog_id).await.unwrap();
 }
 
 /// Test concurrent DTMF handling in multiparty scenarios
@@ -478,7 +479,7 @@ async fn test_concurrent_dtmf_multiparty() {
     let mut session_ids = Vec::new();
     
     for (i, participant) in participants.iter().enumerate() {
-        let dialog_id = format!("dtmf-party-{}-{}", participant, Uuid::new_v4());
+        let dialog_id = DialogId::new(&format!("dtmf-party-{}-{}", participant, Uuid::new_v4()));
         let session_config = rvoip_session_core::media::MediaConfig {
             preferred_codecs: vec!["PCMU".to_string()],
             port_range: Some((10000, 20000)),
@@ -519,6 +520,6 @@ async fn test_concurrent_dtmf_multiparty() {
     
     // Clean up all sessions
     for session_id in session_ids {
-        media_engine.stop_media(session_id).await.unwrap();
+        media_engine.stop_media(&session_id).await.unwrap();
     }
 } 

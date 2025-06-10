@@ -29,7 +29,7 @@ use rvoip_session_core::{
     media::{
         MediaManager, MediaConfig, MediaEngine, MediaSessionInfo, 
         MediaCapabilities, CodecInfo, QualityMetrics, MediaEvent,
-        MediaSessionState, convert_to_media_core_config
+        MediaSessionState, convert_to_media_core_config, DialogId
     },
 };
 
@@ -266,7 +266,8 @@ pub async fn coordinate_sip_session_with_media(
     );
     
     // Start media session using the correct API
-    media_controller.start_media(dialog_id.clone(), media_config).await
+    let dialog_id_type = DialogId::new(&dialog_id);
+    media_controller.start_media(dialog_id_type, media_config).await
         .map_err(|e| SessionError::Other(format!("Media session creation failed: {:?}", e)))?;
     
     // Create a test MediaSessionInfo for integration testing
@@ -321,7 +322,7 @@ pub async fn validate_media_session_setup(
     expected_codec: u8,
 ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
     // Validate that media session is properly configured
-    if media_session.session_id.is_empty() {
+    if media_session.session_id.as_str().is_empty() {
         return Ok(false);
     }
     
@@ -636,7 +637,7 @@ impl CallHandler for TestCallHandler {
 /// Creates test media session info for integration testing
 pub fn create_test_media_session_info(session_id: &str, codec: &str) -> MediaSessionInfo {
     MediaSessionInfo {
-        session_id: session_id.to_string(),
+        session_id: DialogId::new(session_id),
         local_sdp: Some(format!("v=0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 {}/8000\r\n", codec)),
         remote_sdp: None,
         local_rtp_port: Some(5004),

@@ -35,7 +35,7 @@ async fn test_session_manager_builder_configuration() {
     let result = time::timeout(Duration::from_secs(5), async {
         println!("Starting test_session_manager_builder_configuration");
         
-        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         // Test fluent API configuration
         let builder = SessionManagerBuilder::new()
@@ -187,7 +187,7 @@ async fn test_builder_with_different_handlers() {
         let auto_handler = Arc::new(AutoAnswerHandler::default());
         let queue_handler = Arc::new(QueueHandler::new(10));
         let routing_handler = Arc::new(RoutingHandler::new());
-        let test_handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let test_handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         let handlers: Vec<Arc<dyn CallHandler>> = vec![
             auto_handler,
@@ -363,7 +363,7 @@ async fn test_builder_method_chaining() {
     let result = time::timeout(Duration::from_secs(5), async {
         println!("Starting test_builder_method_chaining");
         
-        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+        let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
         
         // Test that all methods can be chained
         let builder = SessionManagerBuilder::new()
@@ -406,7 +406,7 @@ async fn test_builder_performance() {
         // Create many builders quickly
         let mut builders = Vec::new();
         for i in 0..builder_count {
-            let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+            let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
             
             let builder = SessionManagerBuilder::new()
                 .with_sip_port(5060 + (i % 100) as u16)
@@ -448,7 +448,7 @@ async fn test_concurrent_builder_creation() {
         // Create builders concurrently
         for i in 0..concurrent_count {
             let handle = tokio::spawn(async move {
-                let handler = Arc::new(TestCallHandler::new(CallDecision::Accept));
+                let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
                 
                 SessionManagerBuilder::new()
                     .with_sip_port(5060 + i as u16)
