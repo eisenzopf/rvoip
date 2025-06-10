@@ -42,6 +42,12 @@ impl PerformanceMetrics {
         }
     }
     
+    /// Create disabled metrics collector (no-op for performance)
+    pub fn disabled() -> Self {
+        // Same as new() for now - could be optimized to be a no-op struct
+        Self::new()
+    }
+    
     /// Add a timing measurement
     pub fn add_timing(&mut self, duration: Duration) {
         self.total_time += duration;

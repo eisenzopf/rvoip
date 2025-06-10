@@ -6,6 +6,11 @@
 use std::time::Duration;
 use crate::types::{PayloadType, SampleRate};
 
+// NEW: Import advanced processor configs
+use crate::processing::audio::{
+    AdvancedVadConfig, AdvancedAgcConfig, AdvancedAecConfig
+};
+
 /// Configuration for the MediaEngine
 #[derive(Debug, Clone)]
 pub struct MediaEngineConfig {
@@ -19,6 +24,8 @@ pub struct MediaEngineConfig {
     pub buffers: BufferConfig,
     /// Performance configuration
     pub performance: PerformanceConfig,
+    /// Advanced processing configuration
+    pub advanced_processing: AdvancedProcessingConfig,
 }
 
 impl Default for MediaEngineConfig {
@@ -29,6 +36,7 @@ impl Default for MediaEngineConfig {
             quality: QualityConfig::default(),
             buffers: BufferConfig::default(),
             performance: PerformanceConfig::default(),
+            advanced_processing: AdvancedProcessingConfig::default(),
         }
     }
 }
@@ -169,6 +177,20 @@ pub struct PerformanceConfig {
     pub max_sessions: usize,
     /// Enable performance profiling
     pub enable_profiling: bool,
+    
+    // NEW: Enhanced performance settings
+    /// Enable zero-copy audio frame processing
+    pub enable_zero_copy: bool,
+    /// Enable SIMD optimizations globally
+    pub enable_simd_optimizations: bool,
+    /// Enable frame pooling for memory efficiency
+    pub enable_frame_pooling: bool,
+    /// Default frame pool size for sessions
+    pub frame_pool_size: usize,
+    /// Enable comprehensive performance metrics collection
+    pub enable_performance_metrics: bool,
+    /// Metrics collection interval in milliseconds
+    pub metrics_collection_interval_ms: u64,
 }
 
 impl Default for PerformanceConfig {
@@ -177,6 +199,41 @@ impl Default for PerformanceConfig {
             worker_threads: num_cpus::get().max(2), // Use available CPUs, min 2
             max_sessions: 1000,                     // Support up to 1000 sessions
             enable_profiling: false,                // Disabled by default
+            
+            // NEW: Enhanced performance defaults
+            enable_zero_copy: true,                 // Enable zero-copy by default
+            enable_simd_optimizations: true,        // Enable SIMD by default
+            enable_frame_pooling: true,             // Enable pooling by default
+            frame_pool_size: 32,                    // 32 frames per pool
+            enable_performance_metrics: true,       // Enable metrics by default  
+            metrics_collection_interval_ms: 1000,   // Collect metrics every second
+        }
+    }
+}
+
+/// Advanced processing configuration
+#[derive(Debug, Clone)]
+pub struct AdvancedProcessingConfig {
+    /// Use advanced processors instead of v1 processors
+    pub use_advanced_processors: bool,
+    /// Advanced AEC configuration
+    pub advanced_aec_config: AdvancedAecConfig,
+    /// Advanced AGC configuration
+    pub advanced_agc_config: AdvancedAgcConfig,
+    /// Advanced VAD configuration
+    pub advanced_vad_config: AdvancedVadConfig,
+    /// Fallback to v1 processors on error
+    pub fallback_to_v1_on_error: bool,
+}
+
+impl Default for AdvancedProcessingConfig {
+    fn default() -> Self {
+        Self {
+            use_advanced_processors: true,          // Use advanced processors by default
+            advanced_aec_config: AdvancedAecConfig::default(),
+            advanced_agc_config: AdvancedAgcConfig::default(),
+            advanced_vad_config: AdvancedVadConfig::default(),
+            fallback_to_v1_on_error: true,         // Safe fallback by default
         }
     }
 }

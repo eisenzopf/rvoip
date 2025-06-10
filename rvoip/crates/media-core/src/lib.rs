@@ -68,6 +68,12 @@ pub use engine::{
     EngineState,
 };
 
+// NEW: Enhanced configuration exports from media_engine
+pub use engine::media_engine::{
+    PerformanceLevel,
+    AdvancedProcessorFactory,
+};
+
 // Re-export session components
 pub use session::{
     MediaSession,
@@ -96,6 +102,16 @@ pub use relay::{
     MediaSessionInfo,
     G711PcmuCodec,
     G711PcmaCodec,
+};
+
+// NEW: Enhanced configuration re-exports
+pub use engine::config::{
+    PerformanceConfig,
+    AdvancedProcessingConfig,
+    AudioConfig,
+    CodecConfig,
+    QualityConfig,
+    BufferConfig,
 };
 
 /// Media sample type (raw audio data)
@@ -201,6 +217,12 @@ pub mod prelude {
         MediaSessionParams,
         MediaSessionHandle,
         EngineState,
+    };
+    
+    // NEW: Enhanced configuration and factory from media_engine
+    pub use crate::engine::media_engine::{
+        PerformanceLevel,
+        AdvancedProcessorFactory,
     };
     
     // Session components
@@ -337,4 +359,14 @@ pub mod prelude {
     
     // Legacy types (temporary)
     pub use crate::codec::{Codec, CodecRegistry};
+    
+    // NEW: Enhanced configuration types
+    pub use crate::engine::config::{
+        PerformanceConfig,
+        AdvancedProcessingConfig,
+        AudioConfig,
+        CodecConfig,
+        QualityConfig,
+        BufferConfig,
+    };
 } 

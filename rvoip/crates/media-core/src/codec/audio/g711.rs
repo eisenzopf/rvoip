@@ -444,7 +444,17 @@ const MULAW_CLIP: i16 = 8159;
 /// Convert linear PCM sample to μ-law (scalar implementation for LUT generation)
 fn linear_to_mulaw_scalar(sample: i16) -> u8 {
     let mut sign = if sample < 0 { 0x80 } else { 0x00 };
-    let mut magnitude = if sample < 0 { -sample } else { sample };
+    
+    // Handle i16::MIN overflow safely by using wider arithmetic
+    let mut magnitude = if sample < 0 {
+        if sample == i16::MIN {
+            32767  // Clip to maximum positive value
+        } else {
+            -sample
+        }
+    } else {
+        sample
+    };
     
     // Clip to maximum value
     if magnitude > MULAW_CLIP {
@@ -506,7 +516,17 @@ const ALAW_CLIP: i16 = 8159;
 /// Convert linear PCM sample to A-law (scalar implementation for LUT generation)
 fn linear_to_alaw_scalar(sample: i16) -> u8 {
     let sign = if sample < 0 { 0x80 } else { 0x00 };
-    let mut magnitude = if sample < 0 { -sample } else { sample };
+    
+    // Handle i16::MIN overflow safely
+    let mut magnitude = if sample < 0 {
+        if sample == i16::MIN {
+            32767  // Clip to maximum positive value
+        } else {
+            -sample
+        }
+    } else {
+        sample
+    };
     
     // Clip to maximum value
     if magnitude > ALAW_CLIP {

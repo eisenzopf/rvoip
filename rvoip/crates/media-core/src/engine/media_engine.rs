@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
 use crate::error::{Result, Error};
-use crate::types::{DialogId, MediaSessionId, PayloadType};
+use crate::types::{DialogId, MediaSessionId, PayloadType, SampleRate};
 use super::config::{MediaEngineConfig, EngineCapabilities, AudioCodecCapability};
 use super::lifecycle::{LifecycleManager, EngineState};
 
@@ -158,6 +158,8 @@ impl MediaSessionParams {
 pub struct AdvancedProcessorFactory {
     /// Default performance configuration
     default_performance_config: PerformanceMetrics,
+    /// Advanced processing configuration
+    advanced_config: Option<super::config::AdvancedProcessingConfig>,
 }
 
 impl AdvancedProcessorFactory {
@@ -165,6 +167,15 @@ impl AdvancedProcessorFactory {
     pub fn new() -> Self {
         Self {
             default_performance_config: PerformanceMetrics::new(),
+            advanced_config: None,
+        }
+    }
+    
+    /// Create a new processor factory with advanced configuration
+    pub fn new_with_config(config: super::config::AdvancedProcessingConfig) -> Self {
+        Self {
+            default_performance_config: PerformanceMetrics::new(),
+            advanced_config: Some(config),
         }
     }
     
@@ -174,28 +185,102 @@ impl AdvancedProcessorFactory {
         config: AudioProcessingConfig,
         sample_rate: f32,
     ) -> Result<AdvancedProcessorSet> {
+        // Use factory config if available, otherwise use passed config
+        let use_advanced = if let Some(factory_config) = &self.advanced_config {
+            factory_config.use_advanced_processors
+        } else {
+            config.use_advanced_vad || config.use_advanced_agc || config.use_advanced_aec
+        };
+
+        if !use_advanced {
+            // Return empty processor set if advanced processing is disabled
+            return Ok(AdvancedProcessorSet { vad: None, agc: None, aec: None });
+        }
+        
         let vad = if config.use_advanced_vad && config.enable_vad {
-            let detector = AdvancedVoiceActivityDetector::new(config.advanced_vad_config, sample_rate)?;
-            Some(Arc::new(RwLock::new(detector)))
+            let vad_config = if let Some(factory_config) = &self.advanced_config {
+                factory_config.advanced_vad_config.clone()
+            } else {
+                config.advanced_vad_config.clone()
+            };
+            
+            match AdvancedVoiceActivityDetector::new(vad_config, sample_rate) {
+                Ok(detector) => Some(Arc::new(RwLock::new(detector))),
+                Err(e) => {
+                    if let Some(factory_config) = &self.advanced_config {
+                        if factory_config.fallback_to_v1_on_error {
+                            warn!("Advanced VAD failed to initialize, fallback enabled but v1 VAD not implemented in factory: {}", e);
+                            None
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         } else {
             None
         };
         
         let agc = if config.use_advanced_agc && config.enable_agc {
-            let processor = AdvancedAutomaticGainControl::new(config.advanced_agc_config, sample_rate)?;
-            Some(Arc::new(RwLock::new(processor)))
+            let agc_config = if let Some(factory_config) = &self.advanced_config {
+                factory_config.advanced_agc_config.clone()
+            } else {
+                config.advanced_agc_config.clone()
+            };
+            
+            match AdvancedAutomaticGainControl::new(agc_config, sample_rate) {
+                Ok(processor) => Some(Arc::new(RwLock::new(processor))),
+                Err(e) => {
+                    if let Some(factory_config) = &self.advanced_config {
+                        if factory_config.fallback_to_v1_on_error {
+                            warn!("Advanced AGC failed to initialize, fallback enabled but v1 AGC not implemented in factory: {}", e);
+                            None
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         } else {
             None
         };
         
         let aec = if config.use_advanced_aec && config.enable_aec {
-            let processor = AdvancedAcousticEchoCanceller::new(config.advanced_aec_config)?;
-            Some(Arc::new(RwLock::new(processor)))
+            let aec_config = if let Some(factory_config) = &self.advanced_config {
+                factory_config.advanced_aec_config.clone()
+            } else {
+                config.advanced_aec_config.clone()
+            };
+            
+            match AdvancedAcousticEchoCanceller::new(aec_config) {
+                Ok(processor) => Some(Arc::new(RwLock::new(processor))),
+                Err(e) => {
+                    if let Some(factory_config) = &self.advanced_config {
+                        if factory_config.fallback_to_v1_on_error {
+                            warn!("Advanced AEC failed to initialize, fallback enabled but v1 AEC not implemented in factory: {}", e);
+                            None
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         } else {
             None
         };
         
         Ok(AdvancedProcessorSet { vad, agc, aec })
+    }
+    
+    /// Get the advanced processing configuration
+    pub fn get_advanced_config(&self) -> Option<&super::config::AdvancedProcessingConfig> {
+        self.advanced_config.as_ref()
     }
 }
 
@@ -337,25 +422,51 @@ pub struct MediaEngine {
 impl MediaEngine {
     /// Create a new MediaEngine with the given configuration
     pub async fn new(config: MediaEngineConfig) -> Result<Arc<Self>> {
-        info!("Creating new MediaEngine");
+        info!("Creating new MediaEngine with enhanced configuration");
         
         // Create engine capabilities based on config
         let capabilities = Self::build_capabilities(&config);
         
-        // Initialize global frame pool
+        // Initialize global frame pool based on performance config
         let global_pool_config = PoolConfig {
-            initial_size: 64, // Larger global pool
-            max_size: 256,    // Allow significant growth
-            sample_rate: 8000, // Default to 8kHz
+            initial_size: if config.performance.enable_frame_pooling { 
+                config.performance.frame_pool_size 
+            } else { 
+                8 // Minimal pool if pooling disabled
+            },
+            max_size: if config.performance.enable_frame_pooling {
+                config.performance.frame_pool_size * 4 // Allow 4x growth
+            } else {
+                16 // Minimal max if pooling disabled
+            },
+            sample_rate: match config.audio.default_sample_rate {
+                SampleRate::Rate8000 => 8000,
+                SampleRate::Rate16000 => 16000,
+                SampleRate::Rate32000 => 32000,
+                SampleRate::Rate48000 => 48000,
+            },
             channels: 1,
-            samples_per_frame: 160, // 20ms at 8kHz
+            samples_per_frame: match config.audio.default_sample_rate {
+                SampleRate::Rate8000 => 160,  // 20ms at 8kHz
+                SampleRate::Rate16000 => 320, // 20ms at 16kHz
+                SampleRate::Rate32000 => 640, // 20ms at 32kHz
+                SampleRate::Rate48000 => 960, // 20ms at 48kHz
+            },
         };
         let global_frame_pool = AudioFramePool::new(global_pool_config);
         
-        // Initialize performance infrastructure
-        let performance_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        // Initialize performance infrastructure based on config
+        let performance_metrics = Arc::new(RwLock::new(
+            if config.performance.enable_performance_metrics {
+                PerformanceMetrics::new()
+            } else {
+                PerformanceMetrics::disabled() // Create disabled metrics collector
+            }
+        ));
         let session_pools = RwLock::new(HashMap::new());
-        let advanced_processor_factory = Arc::new(AdvancedProcessorFactory::new());
+        let advanced_processor_factory = Arc::new(AdvancedProcessorFactory::new_with_config(
+            config.advanced_processing.clone()
+        ));
         
         let engine = Arc::new(Self {
             config,
@@ -369,7 +480,12 @@ impl MediaEngine {
             advanced_processor_factory,
         });
         
-        debug!("MediaEngine created successfully with performance optimizations");
+        debug!("MediaEngine created with performance optimizations: zero_copy={}, simd={}, pooling={}, advanced_processors={}",
+               engine.config.performance.enable_zero_copy,
+               engine.config.performance.enable_simd_optimizations,
+               engine.config.performance.enable_frame_pooling,
+               engine.config.advanced_processing.use_advanced_processors);
+        
         Ok(engine)
     }
     
