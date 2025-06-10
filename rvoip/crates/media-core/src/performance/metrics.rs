@@ -298,10 +298,10 @@ impl AudioFrameBenchmark {
         
         // Account for pool misses in memory calculation
         let pool_stats = self.pool.get_stats();
-        let missed_allocations = pool_stats.pool_misses * 
-            (self.config.frame_size * self.config.channels as usize * std::mem::size_of::<i16>()) as u64;
+        let missed_allocations = (pool_stats.pool_misses as u64) * 
+            (self.config.frame_size as u64 * self.config.channels as u64 * std::mem::size_of::<i16>() as u64);
         metrics.memory_allocated = missed_allocations;
-        metrics.allocation_count = pool_stats.pool_misses;
+        metrics.allocation_count = pool_stats.pool_misses as u64;
         
         metrics
     }
@@ -408,9 +408,10 @@ impl AudioFrameBenchmark {
         
         // Account for pool allocations
         let pool_stats = self.pool.get_stats();
-        metrics.allocation_count = pool_stats.pool_misses;
-        metrics.memory_allocated = pool_stats.pool_misses * 
-            (self.config.frame_size * self.config.channels as usize * std::mem::size_of::<i16>()) as u64;
+        metrics.allocation_count = pool_stats.pool_misses as u64;
+        let missed_allocations = (pool_stats.pool_misses as u64) * 
+            (self.config.frame_size as u64 * self.config.channels as u64 * std::mem::size_of::<i16>() as u64);
+        metrics.memory_allocated = missed_allocations;
         
         metrics
     }
