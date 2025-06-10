@@ -17,7 +17,7 @@ pub mod bridge;
 pub mod types;
 
 // Re-exports for convenience
-pub use manager::MediaManager;
+pub use manager::{MediaManager, ZeroCopyConfig, RtpProcessingMetrics};
 pub use coordinator::SessionMediaCoordinator;
 pub use config::MediaConfigConverter;
 pub use bridge::MediaBridge;
@@ -49,6 +49,16 @@ pub enum MediaError {
     
     #[error("Session coordination error: {message}")]
     Coordination { message: String },
+    
+    // NEW: Zero-copy RTP processing errors (Phase 16.1)
+    #[error("Zero-copy RTP processing error: {message}")]
+    ZeroCopyProcessing { message: String },
+    
+    #[error("RTP buffer pool error: {message}")]
+    RtpBufferPool { message: String },
+    
+    #[error("RTP processing fallback failed: {message}")]
+    RtpProcessingFallback { message: String },
 }
 
 impl From<MediaError> for crate::errors::SessionError {

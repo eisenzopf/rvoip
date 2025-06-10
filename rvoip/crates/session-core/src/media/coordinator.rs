@@ -190,6 +190,30 @@ impl MediaEventHandler for LoggingMediaEventHandler {
             MediaEvent::Error { session_id, error } => {
                 tracing::error!("Media error in {}: {}", session_id, error);
             }
+            
+            // NEW: Handle zero-copy RTP processing events (Phase 16.2)
+            MediaEvent::RtpPacketProcessed { session_id, processing_type, performance_metrics } => {
+                tracing::debug!("RTP packet processed for {}: {:?} ({}% allocation reduction)", 
+                               session_id, processing_type, performance_metrics.allocation_reduction_percentage);
+            }
+            
+            MediaEvent::RtpProcessingModeChanged { session_id, old_mode, new_mode } => {
+                tracing::info!("RTP processing mode changed for {}: {:?} → {:?}", 
+                              session_id, old_mode, new_mode);
+            }
+            
+            MediaEvent::RtpProcessingError { session_id, error, fallback_applied } => {
+                if fallback_applied {
+                    tracing::warn!("RTP processing error for {} with fallback: {}", session_id, error);
+                } else {
+                    tracing::error!("RTP processing error for {}: {}", session_id, error);
+                }
+            }
+            
+            MediaEvent::RtpBufferPoolUpdate { stats } => {
+                tracing::debug!("RTP buffer pool update: {}% efficiency ({}/{} buffers)",
+                               stats.efficiency_percentage, stats.in_use_buffers, stats.total_buffers);
+            }
         }
         Ok(())
     }
